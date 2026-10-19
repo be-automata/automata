@@ -189,8 +189,12 @@ async function main() {
   // that cannot take the lock would admit runs with no box-wide budget at all.
   try {
     const { file } = await assertBoxLockHelperAvailable();
+    const lockCfg = loadWorkerConfig();
     console.log(
-      `[worker-boot] box lock helper OK: ${file}; lock file ${boxLockPath(loadWorkerConfig().runNamespaceRoot)}`,
+      `[worker-boot] box lock helper OK: ${file}; lock file ${boxLockPath(lockCfg.runNamespaceRoot)}` +
+        (lockCfg.boxSlots > 1
+          ? ` (+ ${lockCfg.boxSlots - 1} slot file(s) box.lock.<i>, #205)`
+          : ""),
     );
   } catch (err) {
     console.error(

@@ -1064,8 +1064,12 @@ async function runAgentInner(
       batteries: { log: admissionLog },
     });
   } catch (err) {
-    await boxLock?.release();
+    // Cleanup BEFORE the slot release (ADR-007 I2, same order as the finally):
+    // at N > 1 a parked waiter takes the slot the instant it frees, and its
+    // admission reap as this slot's account would kill a hand-back still in
+    // flight here.
     await cleanupWorkdir(run.runDir, workdirCleanup);
+    await boxLock?.release();
     throw err;
   }
   // #209 item 1: capture WHICH credential path this run took, once, here —
@@ -1133,6 +1137,16 @@ async function runAgentInner(
         policy: input.egressPolicy ?? { level: "none", allowlist: [] },
         mode: egressMode,
         onEvent: (e) => batcher.add(e),
+        // #205: at N > 1 a sibling slot could otherwise use this run's loopback
+        // proxy (its allowlist, its audit trail). N = 1 stays credential-less.
+        ...(config.boxSlots > 1
+          ? {
+              credential: {
+                user: "run",
+                secret: randomBytes(24).toString("hex"),
+              },
+            }
+          : {}),
       });
       // A2, BLOCKING: a proxy that does not answer turns the run into a silent
       // 90s hang with no output that the agent cannot report. Prove the
@@ -1142,8 +1156,9 @@ async function runAgentInner(
       await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
-      await boxLock?.release();
+      // Cleanup before the slot release (ADR-007 I2) — see the admission catch.
       await cleanupWorkdir(run.runDir, workdirCleanup);
+      await boxLock?.release();
       throw err;
     }
     step(
@@ -1200,8 +1215,9 @@ async function runAgentInner(
       await closeQuietly(egressProxy);
       await closeQuietly(egressEvents);
       await materialised.cleanup();
-      await boxLock?.release();
+      // Cleanup before the slot release (ADR-007 I2) — see the admission catch.
       await cleanupWorkdir(run.runDir, workdirCleanup);
+      await boxLock?.release();
       throw err;
     }
     step(

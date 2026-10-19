@@ -206,8 +206,15 @@ write_files:
       for i in $(seq 1 $((AGENT_SLOTS - 1))); do
         SLOT_USER="${AGENT_USER}-${i}"
         SLOT_UID=$((AGENT_SLOT_UID_BASE + i))
-        id -u "$SLOT_USER" >/dev/null 2>&1 || useradd --uid "$SLOT_UID" --create-home \
-          --home-dir "/home/$SLOT_USER" --shell /usr/sbin/nologin "$SLOT_USER"
+        if ! id -u "$SLOT_USER" >/dev/null 2>&1; then
+          # Name the collision instead of dying inside useradd under set -e.
+          if getent passwd "$SLOT_UID" >/dev/null; then
+            echo "FATAL: uid $SLOT_UID for $SLOT_USER is taken by $(getent passwd "$SLOT_UID" | cut -d: -f1)" >&2
+            exit 1
+          fi
+          useradd --uid "$SLOT_UID" --create-home \
+            --home-dir "/home/$SLOT_USER" --shell /usr/sbin/nologin "$SLOT_USER"
+        fi
         chmod 750 "/home/$SLOT_USER"
       done
 

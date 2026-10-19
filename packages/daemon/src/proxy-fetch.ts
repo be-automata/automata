@@ -161,9 +161,7 @@ export type PostJsonOptions = {
  * Errors never carry request headers: `X-Daemon-Token` must not reach a log or
  * a persisted failure reason.
  */
-export async function postJson(
-  opts: PostJsonOptions,
-): Promise<PostJsonResult> {
+export async function postJson(opts: PostJsonOptions): Promise<PostJsonResult> {
   const { url, headers, body } = opts;
   const env = opts.env ?? process.env;
   const timeoutMs = opts.timeoutMs ?? 30_000;
@@ -174,11 +172,18 @@ export async function postJson(
   }
   const target = new URL(url);
   const proxyUrl = new URL(proxy);
-  const proxyPort = Number(proxyUrl.port || (proxyUrl.protocol === "https:" ? 443 : 80));
+  const proxyPort = Number(
+    proxyUrl.port || (proxyUrl.protocol === "https:" ? 443 : 80),
+  );
+  // #205: a proxy URL with userinfo (`http://run:<secret>@127.0.0.1:<port>`) is
+  // the worker's per-run proxy credential; it travels as Proxy-Authorization
+  // on the CONNECT / absolute-form request to the PROXY, never to the origin.
+  const proxyAuth = proxyAuthorizationFor(proxyUrl);
   if (target.protocol === "https:") {
     const socket = await connectTunnel({
       proxyHost: proxyUrl.hostname,
       proxyPort,
+      proxyAuth,
       host: target.hostname,
       port: Number(target.port || 443),
       timeoutMs,
@@ -188,6 +193,7 @@ export async function postJson(
   return await sendAbsoluteForm({
     proxyHost: proxyUrl.hostname,
     proxyPort,
+    proxyAuth,
     target,
     headers,
     body,
@@ -195,15 +201,26 @@ export async function postJson(
   });
 }
 
+/** `Basic <base64(user:password)>` from a proxy URL's userinfo, or null without one. */
+export function proxyAuthorizationFor(proxyUrl: URL): string | null {
+  if (!proxyUrl.username && !proxyUrl.password) {
+    return null;
+  }
+  const user = decodeURIComponent(proxyUrl.username);
+  const password = decodeURIComponent(proxyUrl.password);
+  return `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`;
+}
+
 /** Open an HTTP CONNECT tunnel through `proxyHost:proxyPort` to `host:port`. */
 function connectTunnel(args: {
   proxyHost: string;
   proxyPort: number;
+  proxyAuth: string | null;
   host: string;
   port: number;
   timeoutMs: number;
 }): Promise<Socket> {
-  const { proxyHost, proxyPort, host, port, timeoutMs } = args;
+  const { proxyHost, proxyPort, proxyAuth, host, port, timeoutMs } = args;
   return new Promise<Socket>((resolve, reject) => {
     const authority = `${host}:${port}`;
     const req = httpRequest({
@@ -213,7 +230,10 @@ function connectTunnel(args: {
       path: authority,
       // `setHost:false` + explicit Host keeps the origin authority in the frame
       // the proxy matches on.
-      headers: { host: authority },
+      headers: {
+        host: authority,
+        ...(proxyAuth ? { "proxy-authorization": proxyAuth } : {}),
+      },
       timeout: timeoutMs,
     });
     let settled = false;
@@ -242,9 +262,17 @@ function connectTunnel(args: {
       settled = true;
       resolve(socket);
     });
-    req.on("timeout", () => fail(new Error(`egress proxy CONNECT ${authority} timed out after ${timeoutMs}ms`)));
+    req.on("timeout", () =>
+      fail(
+        new Error(
+          `egress proxy CONNECT ${authority} timed out after ${timeoutMs}ms`,
+        ),
+      ),
+    );
     req.on("error", (err) =>
-      fail(new Error(`egress proxy CONNECT ${authority} failed: ${err.message}`)),
+      fail(
+        new Error(`egress proxy CONNECT ${authority} failed: ${err.message}`),
+      ),
     );
     req.end();
   });
@@ -323,19 +351,25 @@ function sendOverSocket(args: {
 function sendAbsoluteForm(args: {
   proxyHost: string;
   proxyPort: number;
+  proxyAuth: string | null;
   target: URL;
   headers: Record<string, string>;
   body: string;
   timeoutMs: number;
 }): Promise<PostJsonResult> {
-  const { proxyHost, proxyPort, target, headers, body, timeoutMs } = args;
+  const { proxyHost, proxyPort, proxyAuth, target, headers, body, timeoutMs } =
+    args;
   return new Promise<PostJsonResult>((resolve, reject) => {
     const req = httpRequest({
       host: proxyHost,
       port: proxyPort,
       method: "POST",
       path: target.toString(),
-      headers: { ...headers, host: target.host },
+      headers: {
+        ...headers,
+        host: target.host,
+        ...(proxyAuth ? { "proxy-authorization": proxyAuth } : {}),
+      },
       timeout: timeoutMs,
     });
     wireResponse(req, resolve, reject, timeoutMs, null);

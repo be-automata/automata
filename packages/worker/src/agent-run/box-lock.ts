@@ -465,6 +465,13 @@ export async function acquireBoxLock({
  * tries and inside the wait, exactly as the exclusive path does. A full budget
  * therefore DELAYS admission; it never fails a run and never cancels one
  * (ADR-007 Decision 5).
+ *
+ * KNOWN TRADE-OFF: a parked waiter waits on its rotated slot ONLY. If another
+ * slot frees first it keeps waiting while that slot idles, and a later arrival
+ * whose rotation names the free slot takes it. Polling every slot would fix
+ * that and would be the polling loop I1 forbids; in practice the engine's
+ * `slots = N` keeps in-process concurrency at N, so the park only ever happens
+ * in the crash-relaunch overlap window, where a short idle beats a poll.
  */
 export async function acquireBoxSlot({
   root,
@@ -542,15 +549,31 @@ export async function tryAcquireAllBoxSlots({
         slotLabel: slotLabelFor(slot, slots),
       });
       if (!lock) {
-        for (const h of held) await h.release();
+        await releaseAll(held, log);
         return null;
       }
       held.push(lock);
     }
     return held;
   } catch (e) {
-    for (const h of held) await h.release();
+    await releaseAll(held, log);
     throw e;
+  }
+}
+
+/** Release every lock, each in its own try: one failed release never skips the rest or masks the caller's error. */
+async function releaseAll(
+  held: BoxLock[],
+  log?: (line: string) => void,
+): Promise<void> {
+  for (const h of held) {
+    try {
+      await h.release();
+    } catch (e) {
+      log?.(
+        `box lock release failed for slot ${h.slot}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 }
 

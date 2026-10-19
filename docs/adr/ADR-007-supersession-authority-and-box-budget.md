@@ -131,7 +131,12 @@ socket authenticates no caller, so a shared dir would have let slot i inject a m
 slot j's run; the shared dir hands slot accounts traverse only. Each run's account is
 recorded beside its pidfile (`<threadId>.user`) so the Stage A reclaimers kill a dead group
 as the right account. The slot is acquired BEFORE the clone (the clone's grant needs the
-slot's account). N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
+slot's account). Loopback TCP is not uid-fenced, so at N > 1 the per-run egress proxy
+carries a per-run credential (`Proxy-Authorization`, 407 otherwise; `egress-proxy.ts`) —
+a sibling slot can see the port but cannot use the allowlist or the audit trail behind
+it; the git and gh brokers already fence by a per-run bearer. The three early admission
+catches clean the workdir BEFORE releasing the slot, same as the finally (I2), because a
+parked waiter takes a freed slot immediately. N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
 `slots` equals N; its per-variant caps are #372's. `box-budget.json` and
 `escapeesSinceBoot` are box-wide aggregates across slots (last reap writes the snapshot).
 

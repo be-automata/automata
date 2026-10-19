@@ -228,7 +228,8 @@ order, with **no run in flight**:
 ```bash
 # 1. One more role account per extra slot — explicit uid from 2000 up, never
 #    --system (its range descends from 999, the engine-Postgres collision, #210).
-sudo useradd --uid 2001 --create-home --home-dir /home/automata-agent-1   --shell /usr/sbin/nologin automata-agent-1
+sudo useradd --uid 2001 --create-home --home-dir /home/automata-agent-1 \
+  --shell /usr/sbin/nologin automata-agent-1
 sudo chmod 750 /home/automata-agent-1
 
 # 2. sudoers: the Runas list names every slot account (validate on a copy first).

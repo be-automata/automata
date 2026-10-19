@@ -112,9 +112,16 @@ const ensureRunNamespace = vi.fn(async (_opts: unknown) => {
   admissionOrder.push("ensure-ns");
   return "/tmp/automata-agent-run/test";
 });
+// #205: the slot subdir grant is a real mkdir + setfacl/chmod +a on the box's
+// namespace root — mocked for the same reason, and recorded in order.
+const ensureSlotNamespace = vi.fn(async (_opts: unknown) => {
+  admissionOrder.push("slot-ns");
+  return "/tmp/automata-agent-run/test/s1";
+});
 vi.mock("./run-namespace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./run-namespace")>()),
   ensureRunNamespace: (opts: unknown) => ensureRunNamespace(opts),
+  ensureSlotNamespace: (opts: unknown) => ensureSlotNamespace(opts),
 }));
 // #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
 // `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
@@ -142,7 +149,12 @@ vi.mock("./uid-reaper", () => ({
     reapAgentUidEscapees(...(args as [any])),
 }));
 vi.mock("./provision", () => ({
-  provisionWorkdir: (...args: unknown[]) => provisionWorkdir(...args),
+  // #205: recorded in the module wrapper (not the vi.fn, which cases reset)
+  // so lock-before-clone is pinned by order, not inferred.
+  provisionWorkdir: (...args: unknown[]) => {
+    admissionOrder.push("clone");
+    return provisionWorkdir(...args);
+  },
   cleanupWorkdir: (...args: unknown[]) => {
     finallyOrder.push("cleanupWorkdir");
     return cleanupWorkdir(...args);
@@ -1127,9 +1139,11 @@ describe("#152 Stage A: admission wiring order", () => {
     // order (either order yields the same end state — see reclaim.ts docs).
     expect(admissionOrder.slice(1, 3).sort()).toEqual(["reap", "reclaim"]);
     expect(admissionOrder[3]).toBe("lock");
+    // #205: the clone runs UNDER the slot (its ACL grant needs the slot's account).
+    expect(admissionOrder[4]).toBe("clone");
     // #184 AC11: the uid-scan runs UNDER the lock, before the credential pull
     // (which rejects here and stops the run right after).
-    expect(admissionOrder[4]).toBe("uid-reap:admission");
+    expect(admissionOrder[5]).toBe("uid-reap:admission");
     expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: INPUT.threadId }),
     );
@@ -1162,6 +1176,7 @@ describe("#152 Stage A: admission wiring order", () => {
     // The mock records BOTH phases here, so the teardown scan closes the list.
     expect(admissionOrder.slice(3)).toEqual([
       "lock",
+      "clone",
       "uid-reap:admission",
       "daemon-start",
       "uid-reap:teardown",
@@ -1964,5 +1979,90 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     expect(pinFixBaseSha).not.toHaveBeenCalled();
     expect(runFixCheck).not.toHaveBeenCalled();
     expect(postSelfHealFixCheck).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * #205 (AC5 at the workflow level): once a slot is held, EVERYTHING per run —
+ * the clone grant, the daemon, the admission and teardown reaps, the cleanup —
+ * runs as that slot's own account, so a kill issued by this run reaches only
+ * this slot's uid.
+ */
+describe("#205: a run on slot 1 executes as the slot-1 account end to end", () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    process.env.WORKER_AGENT_USER = "_automata-agent";
+    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
+    process.env.WORKER_BOX_SLOTS = "2";
+    process.env.WORKER_RUN_MEMORY_MAX = "1500M";
+    admissionOrder.length = 0;
+    daemonCtorArgs.length = 0;
+    ensureSlotNamespace.mockClear();
+    reapAgentUidEscapees.mockClear();
+    cleanupWorkdir.mockClear();
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return { release: releaseMock, lost: false, slot: 1 };
+    });
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    // agent-uid mode starts the egress proxy (observe mode) on every run.
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41998",
+      port: 41998,
+      close: vi.fn(async () => {}),
+    });
+  });
+  afterEach(() => {
+    for (const k of Object.keys(process.env)) {
+      if (!(k in saved)) delete process.env[k];
+    }
+    Object.assign(process.env, saved);
+  });
+
+  it("grants the slot subdir, clones, spawns, reaps and cleans up as `_automata-agent-1`, never as the base account", async () => {
+    await runFn(INPUT, { cancelled: false, log: vi.fn() });
+    // ensure-ns (all accounts) → Stage A → lock → slot grant → clone → uid-reap → daemon.
+    expect(admissionOrder.slice(3, 7)).toEqual([
+      "lock",
+      "slot-ns",
+      "clone",
+      "uid-reap:admission",
+    ]);
+    expect(ensureSlotNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({ slot: 1, agentUser: "_automata-agent-1" }),
+    );
+    expect(ensureRunNamespace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentUsers: ["_automata-agent", "_automata-agent-1"],
+      }),
+    );
+    expect(provisionWorkdir).toHaveBeenCalledWith(
+      expect.objectContaining({ agentUser: "_automata-agent-1" }),
+    );
+    const daemonConfig = daemonCtorArgs[0]?.[0] as {
+      agentUser: string;
+      boxSlot?: number;
+      boxSlots: number;
+    };
+    expect(daemonConfig).toMatchObject({
+      agentUser: "_automata-agent-1",
+      boxSlot: 1,
+      boxSlots: 2,
+    });
+    const reapUsers = reapAgentUidEscapees.mock.calls.map(
+      (c) => (c[0] as { agentUser: string; phase: string }).agentUser,
+    );
+    expect(reapUsers.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(reapUsers)).toEqual(new Set(["_automata-agent-1"]));
+    expect(cleanupWorkdir).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ agentUser: "_automata-agent-1" }),
+    );
   });
 });

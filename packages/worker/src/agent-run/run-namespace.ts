@@ -280,7 +280,9 @@ export async function ensureSlotNamespace(opts: {
   platform?: NodeJS.Platform;
 }): Promise<string> {
   const dir = slotRunDir(opts.root, opts.workerId, opts.slot);
-  fs.mkdirSync(dir, { recursive: true });
+  // 0750: a sibling slot (another account) may not even LIST this slot's
+  // pidfiles and records; the grant below opens it to exactly two accounts.
+  fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
   await applySlotDirAces({
     dir,
     agentUser: opts.agentUser,

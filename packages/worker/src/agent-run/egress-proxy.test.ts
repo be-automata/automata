@@ -12,6 +12,7 @@ import {
   type EgressDecisionEvent,
   type EgressPolicyShape,
   type EgressProxy,
+  EGRESS_HEALTH_PATH,
 } from "./egress-proxy";
 
 const domainPolicy = (allowlist: string[]): EgressPolicyShape => ({
@@ -344,6 +345,146 @@ describe("startEgressProxy (real loopback servers)", () => {
         mode: "enforce",
       },
     ]);
+  });
+
+  describe("#205: per-run credential (one slot cannot use a sibling's proxy)", () => {
+    const credential = { user: "run", secret: "s3cr=t/+x" };
+    const basic = `Basic ${Buffer.from("run:s3cr=t/+x").toString("base64")}`;
+
+    async function bootWithCredential(policy: EgressPolicyShape) {
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        policy,
+        credential,
+        onEvent: (e) => events.push(e),
+      });
+      return { p: proxy, events };
+    }
+
+    function viaProxyWithHeaders(
+      proxyPort: number,
+      absoluteUrl: string,
+      headers: Record<string, string>,
+    ): Promise<{ status: number; body: string }> {
+      return new Promise((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: proxyPort,
+            method: "GET",
+            path: absoluteUrl,
+            headers,
+          },
+          (res) => {
+            let body = "";
+            res.on("data", (d) => (body += d));
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+    }
+
+    it("the returned url embeds the credential URL-encoded; the health probe needs none", async () => {
+      const { p } = await bootWithCredential({ level: "none", allowlist: [] });
+      expect(p.url).toBe(`http://run:s3cr%3Dt%2F%2Bx@127.0.0.1:${p.port}`);
+      const u = new URL(p.url);
+      expect(decodeURIComponent(u.password)).toBe(credential.secret);
+      // assertEgressProxyReachable reads host/port off this url and GETs the
+      // health path unauthenticated — the probe must keep working.
+      const { status } = await viaProxyWithHeaders(
+        p.port,
+        EGRESS_HEALTH_PATH,
+        {},
+      );
+      expect(status).toBe(200);
+    });
+
+    it("an absolute-form request without the credential is refused with 407 and never decided or forwarded", async () => {
+      const upstreamPort = await startUpstreamHttp();
+      const { p, events } = await bootWithCredential({
+        level: "ip_port",
+        allowlist: [`127.0.0.1:${upstreamPort}`],
+      });
+      const { status } = await viaProxyWithHeaders(
+        p.port,
+        `http://127.0.0.1:${upstreamPort}/x`,
+        {},
+      );
+      expect(status).toBe(407);
+      const wrong = await viaProxyWithHeaders(
+        p.port,
+        `http://127.0.0.1:${upstreamPort}/x`,
+        {
+          "proxy-authorization": `Basic ${Buffer.from("run:nope").toString("base64")}`,
+        },
+      );
+      expect(wrong.status).toBe(407);
+      expect(events).toEqual([]);
+    });
+
+    it("with the credential the request is proxied and the credential is STRIPPED before the origin", async () => {
+      let seenAtOrigin: string | string[] | undefined;
+      const port = await new Promise<number>((resolve) => {
+        const server = createHttpServer((req, res) => {
+          seenAtOrigin = req.headers["proxy-authorization"];
+          res.writeHead(200).end("ok");
+        });
+        closers.push(() => server.close());
+        server.listen(0, "127.0.0.1", () =>
+          resolve((server.address() as AddressInfo).port),
+        );
+      });
+      const { p, events } = await bootWithCredential({
+        level: "ip_port",
+        allowlist: [`127.0.0.1:${port}`],
+      });
+      const { status, body } = await viaProxyWithHeaders(
+        p.port,
+        `http://127.0.0.1:${port}/x`,
+        {
+          "proxy-authorization": basic,
+        },
+      );
+      expect(status).toBe(200);
+      expect(body).toBe("ok");
+      expect(seenAtOrigin).toBeUndefined();
+      expect(events).toHaveLength(1);
+      expect(events[0]?.action).toBe("allow");
+    });
+
+    it("CONNECT without the credential gets 407 and no tunnel; with it the tunnel opens", async () => {
+      const tcpPort = await startUpstreamTcp();
+      const { p, events } = await bootWithCredential({
+        level: "ip_port",
+        allowlist: [`127.0.0.1:${tcpPort}`],
+      });
+      const connectStatus = (headers: Record<string, string>) =>
+        new Promise<number>((resolve, reject) => {
+          const req = httpRequest({
+            host: "127.0.0.1",
+            port: p.port,
+            method: "CONNECT",
+            path: `127.0.0.1:${tcpPort}`,
+            headers,
+          });
+          req.on("connect", (res, socket) => {
+            socket.end();
+            resolve(res.statusCode ?? 0);
+          });
+          req.on("response", (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          });
+          req.on("error", reject);
+          req.end();
+        });
+      expect(await connectStatus({})).toBe(407);
+      expect(events).toEqual([]);
+      expect(await connectStatus({ "proxy-authorization": basic })).toBe(200);
+      expect(events).toHaveLength(1);
+    });
   });
 
   it("close() severs BOTH ends of an in-flight CONNECT tunnel (no upstream socket leak)", async () => {

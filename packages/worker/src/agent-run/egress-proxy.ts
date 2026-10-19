@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import {
   createServer,
   request as httpRequest,
@@ -104,8 +105,22 @@ export type EgressProxy = {
  */
 export const EGRESS_HEALTH_PATH = "/__automata/egress-health";
 
+/**
+ * #205: the per-run proxy credential. Loopback TCP is not fenced by uid, and
+ * `ss -ltn` is readable by any account, so at N > 1 a sibling slot's agent could
+ * point HTTPS_PROXY at THIS run's port and egress under this run's allowlist
+ * with this run's audit trail. With a credential every request and every
+ * CONNECT must carry `Proxy-Authorization: Basic <user:secret>` (timing-safe
+ * compare) or get 407 — and the returned `url` embeds it, which is how every
+ * proxy-aware client (undici / Node env proxy, curl, libcurl/git, Go/gh, bun)
+ * sends it. Absent (N = 1), the proxy is exactly what it was.
+ */
+export type EgressProxyCredential = { user: string; secret: string };
+
 export type StartEgressProxyOptions = {
   policy: EgressPolicyShape;
+  /** See {@link EgressProxyCredential}. */
+  credential?: EgressProxyCredential;
   /**
    * Sync callback fired for EVERY decision — allow and deny both (AC3). The
    * caller owns batching/posting; a throwing callback is swallowed so audit
@@ -283,6 +298,22 @@ export async function startEgressProxy(
   }
 
   /** Absolute-form plain-HTTP proxying (`GET http://host/...`). */
+  // #205: the expected `Proxy-Authorization` value, or null when no credential
+  // was configured (N = 1). Compared timing-safe; never logged.
+  const expectedAuth = opts.credential
+    ? `Basic ${Buffer.from(
+        `${opts.credential.user}:${opts.credential.secret}`,
+      ).toString("base64")}`
+    : null;
+  function authorized(req: IncomingMessage): boolean {
+    if (expectedAuth === null) return true;
+    const got = req.headers["proxy-authorization"];
+    if (typeof got !== "string") return false;
+    const a = Buffer.from(got);
+    const b = Buffer.from(expectedAuth);
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // #108 A2: the worker's own liveness probe. Answered before any decision, so
     // it neither reaches an origin nor pollutes the audit trail. A dead proxy is
@@ -292,6 +323,13 @@ export async function startEgressProxy(
     if (req.url === EGRESS_HEALTH_PATH) {
       req.resume();
       res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+      return;
+    }
+    if (!authorized(req)) {
+      req.resume();
+      res
+        .writeHead(407, { "proxy-authenticate": 'Basic realm="automata-run"' })
+        .end();
       return;
     }
     let target: URL;
@@ -318,6 +356,8 @@ export async function startEgressProxy(
     const fwdHeaders = { ...req.headers };
     delete fwdHeaders["proxy-connection"];
     delete fwdHeaders["connection"];
+    // Hop-by-hop AND a secret: the run's proxy credential never reaches an origin.
+    delete fwdHeaders["proxy-authorization"];
     const upstream = httpRequest(
       {
         host,
@@ -346,6 +386,14 @@ export async function startEgressProxy(
     clientSocket: Duplex,
     head: Buffer,
   ): void {
+    if (!authorized(req)) {
+      clientSocket.write(
+        "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+          'Proxy-Authenticate: Basic realm="automata-run"\r\n\r\n',
+      );
+      clientSocket.end();
+      return;
+    }
     const m = HOST_PORT_RE.exec(req.url ?? "");
     if (!m) {
       decide(UNPARSEABLE, null);
@@ -398,8 +446,14 @@ export async function startEgressProxy(
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
+  // The credential rides in the URL's userinfo — the form every proxy-aware
+  // client turns into Proxy-Authorization. URL-encoded, so a secret with
+  // reserved characters cannot change the authority.
+  const userinfo = opts.credential
+    ? `${encodeURIComponent(opts.credential.user)}:${encodeURIComponent(opts.credential.secret)}@`
+    : "";
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://${userinfo}127.0.0.1:${port}`,
     port,
     mode,
     observedHosts: () => new Map(observed),

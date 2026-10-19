@@ -336,6 +336,12 @@ export class DaemonProcess {
     // own stale socket/pid (a prior crashed run of the SAME threadId under this
     // worker). Cross-worker orphans are handled by boot-reclaim (reclaim.ts), never
     // here — this method must never touch another run's or worker's resources.
+    // `recursive` so the flat layout's worker dir is made if missing. At N > 1
+    // the slot subdir was created and GRANTED by ensureSlotNamespace moments
+    // ago (workflow.ts, right after the slot acquire); recreating a removed one
+    // here would give the daemon a dir with no grant and an EACCES at the
+    // pidfile write — the same class as the /tmp-reap failure that motivated
+    // ensureRunNamespace — so this mkdir is a backstop, not the grant.
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
     // #205: record which agent account this run executes as, BEFORE the spawn,
@@ -662,6 +668,12 @@ export class DaemonProcess {
   private cleanOwnStaleFiles(): void {
     try {
       fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+    try {
+      // #205: the account record travels with the pidfile, both ways.
+      fs.rmSync(runUserPath(this.pidFilePath), { force: true });
     } catch {
       // ignore
     }
