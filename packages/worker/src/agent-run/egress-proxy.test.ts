@@ -4,7 +4,9 @@ import {
 } from "node:http";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
+import { lookup as dnsLookup } from "node:dns";
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertEgressProxyReachable,
@@ -17,6 +19,7 @@ import {
   PROXY_AUTH_AUDIT_CAP,
   PROXY_AUTH_HOST,
   isHostLocalAddress,
+  localInterfaceAddresses,
   makeGuardedLookup,
 } from "./egress-proxy";
 
@@ -1005,6 +1008,147 @@ describe("#367: the run's proxy is not a tunnel through the box's loopback fence
         }
       },
     );
+    it("a NON-LOOPBACK address of this host's own interfaces is host-local (CONNECT <public-ip>:22 must not reach sshd past the cloud firewall)", async () => {
+      const candidates = [...localInterfaceAddresses()].filter(
+        (a) => !isHostLocalAddress(a),
+      );
+      // Every local address that the range rules alone would NOT catch must be
+      // caught by the interface set; a host with only private addresses has
+      // nothing to prove here beyond the set being consulted.
+      const local = localInterfaceAddresses();
+      for (const a of candidates) {
+        expect(isHostLocalAddress(a, local), a).toBe(true);
+      }
+      expect(isHostLocalAddress("93.184.216.34", local)).toBe(false);
+      const port = await upstream();
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        mode: "observe",
+        policy: { level: "none", allowlist: [] },
+        onEvent: (e) => events.push(e),
+      });
+      const target = candidates[0] ?? "127.0.0.1";
+      const dest = target.includes(":")
+        ? `[${target}]:${port}`
+        : `${target}:${port}`;
+      expect(await connectVia(proxy.port, dest)).toBe("403");
+      expect(events.map((e) => [e.action, e.reason])).toEqual([
+        ["deny", "host-local"],
+      ]);
+    });
+
+    it("a NAME that resolves to a local address is refused on the real CONNECT and GET paths (the lookup option is honoured), the upstream never sees a connection, and a host-local deny is audited", async () => {
+      let upstreamConnections = 0;
+      const port = await new Promise<number>((resolve) => {
+        const server = createTcpServer((socket) => {
+          upstreamConnections += 1;
+          socket.end();
+        });
+        closers.push(() => server.close());
+        server.listen(0, "127.0.0.1", () =>
+          resolve((server.address() as AddressInfo).port),
+        );
+      });
+      const events: EgressDecisionEvent[] = [];
+      proxy = await startEgressProxy({
+        mode: "observe",
+        policy: { level: "none", allowlist: [] },
+        onEvent: (e) => events.push(e),
+      });
+      // `127.1` and `2130706433` are not IP literals to isIP(), so they reach
+      // getaddrinfo — which resolves both to 127.0.0.1.
+      const tunnel = await new Promise<string>((resolve) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: proxy!.port,
+          method: "CONNECT",
+          path: `127.1:${port}`,
+        });
+        req.on("connect", () => resolve("tunnel-opened"));
+        req.on("response", (res) => {
+          res.resume();
+          resolve(`status ${res.statusCode}`);
+        });
+        req.on("error", (e) => resolve(`error ${e.message}`));
+        req.on("close", () => resolve("closed"));
+        req.end();
+      });
+      expect(tunnel).not.toBe("tunnel-opened");
+      const get = await new Promise<string>((resolve) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: proxy!.port,
+            method: "GET",
+            path: `http://2130706433:${port}/`,
+          },
+          (res) => {
+            res.resume();
+            resolve(`status ${res.statusCode}`);
+          },
+        );
+        req.on("error", (e) => resolve(`error ${e.message}`));
+        req.end();
+      });
+      // The WHATWG parser canonicalizes every numeric IPv4 form, so on the GET
+      // path `2130706433` arrives as the literal 127.0.0.1 and the literal check
+      // refuses it before any lookup.
+      expect(get).toBe("status 403");
+      await new Promise((r) => setTimeout(r, 50));
+      expect(upstreamConnections).toBe(0);
+      // Observe mode allowed the CONNECT literal (it is a name), then the lookup
+      // refused it: an allow row followed by a host-local deny row.
+      expect(
+        events.map((e) => [e.destinationHost, e.action, e.reason]),
+      ).toEqual([
+        ["127.1", "allow", undefined],
+        ["127.1", "deny", "host-local"],
+        ["127.0.0.1", "deny", "host-local"],
+      ]);
+      // The GET path reaches getaddrinfo only for a genuine name. This host's
+      // own hostname resolves to one of its interface addresses on every CI
+      // runner and dev box we use; when it does not resolve at all the dial
+      // fails the same way (502, no upstream connection) with no deny row.
+      const name = hostname();
+      const resolved = await new Promise<boolean>((resolve) =>
+        dnsLookup(name, { all: true }, (err, addrs) =>
+          resolve(
+            !err &&
+              addrs.some((x) =>
+                isHostLocalAddress(x.address, localInterfaceAddresses()),
+              ),
+          ),
+        ),
+      );
+      events.length = 0;
+      const getName = await new Promise<string>((resolve) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: proxy!.port,
+            method: "GET",
+            path: `http://${name}:${port}/`,
+          },
+          (res) => {
+            res.resume();
+            resolve(`status ${res.statusCode}`);
+          },
+        );
+        req.on("error", (e) => resolve(`error ${e.message}`));
+        req.end();
+      });
+      expect(getName).toBe("status 502");
+      await new Promise((r) => setTimeout(r, 50));
+      expect(upstreamConnections).toBe(0);
+      if (resolved) {
+        expect(
+          events.map((e) => [e.destinationHost, e.action, e.reason]),
+        ).toEqual([
+          [name.toLowerCase(), "allow", undefined],
+          [name.toLowerCase(), "deny", "host-local"],
+        ]);
+      }
+    });
   });
 
   it("the worker's call site never opts into the test seam", () => {

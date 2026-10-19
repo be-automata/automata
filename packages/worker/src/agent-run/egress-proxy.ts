@@ -16,6 +16,7 @@ import {
   type LookupFunction,
   type Socket,
 } from "node:net";
+import { networkInterfaces } from "node:os";
 import type { Duplex } from "node:stream";
 
 /**
@@ -292,6 +293,8 @@ export function matchEgress(
   return false;
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 /** Dotted-quad → true when the address is not globally routable. */
 function isPrivateV4(ip: string): boolean {
   const o = ip.split(".").map(Number);
@@ -338,18 +341,39 @@ function expandV6(ip: string): number[] | null {
 }
 
 /**
+ * Every address bound to one of this host's interfaces (#367), zone ids
+ * stripped, lower-cased. The box's own public IPv4/IPv6 are reachable over the
+ * local route — `CONNECT <public-ip>:22` would reach sshd past the cloud
+ * firewall — so they count as host-local too.
+ */
+export function localInterfaceAddresses(): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const addrs of Object.values(networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      out.add(a.address.toLowerCase().replace(/%.*$/, ""));
+    }
+  }
+  return out;
+}
+
+/**
  * Is `host` a host-local or otherwise non-public destination (#367)?
  * `localhost`, loopback, unspecified, link-local, RFC 1918 and CGNAT, Docker's
- * bridge ranges, multicast, IPv6 ULA, and IPv4-mapped forms of any of them.
+ * bridge ranges, multicast, IPv6 ULA, IPv4-mapped forms of any of them, and
+ * (when given) the addresses bound to this host's own interfaces.
  * A literal only: names are judged after resolution by {@link makeGuardedLookup}.
  */
-export function isHostLocalAddress(host: string): boolean {
+export function isHostLocalAddress(
+  host: string,
+  local: ReadonlySet<string> = EMPTY_SET,
+): boolean {
   const h = host
     .trim()
     .toLowerCase()
     .replace(/\.$/, "")
     .replace(/^\[|\]$/g, "");
   if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (local.has(h)) return true;
   const family = isIP(h);
   if (family === 4) return isPrivateV4(h);
   if (family === 6) {
@@ -389,6 +413,8 @@ export function isHostLocalAddress(host: string): boolean {
  */
 export function makeGuardedLookup(
   base: typeof dnsLookup = dnsLookup,
+  local: ReadonlySet<string> = EMPTY_SET,
+  onRefuse: (hostname: string, address: string) => void = () => {},
 ): LookupFunction {
   const guarded = (
     hostname: string,
@@ -405,12 +431,13 @@ export function makeGuardedLookup(
         return;
       }
       const list = addresses as LookupAddress[];
-      const local = list.find((a) => isHostLocalAddress(a.address));
-      if (local !== undefined || list.length === 0) {
+      const hit = list.find((a) => isHostLocalAddress(a.address, local));
+      if (hit !== undefined || list.length === 0) {
         const e: NodeJS.ErrnoException = new Error(
-          `egress: ${hostname} resolves to host-local ${local?.address ?? "nothing"}`,
+          `egress: ${hostname} resolves to host-local ${hit?.address ?? "nothing"}`,
         );
         e.code = "EHOSTLOCAL";
+        onRefuse(hostname, hit?.address ?? "");
         callback(e, "", undefined);
         return;
       }
@@ -452,6 +479,10 @@ export async function startEgressProxy(
   const compiled = compileEgressPolicy(policy);
 
   const observed = new Map<string, number>();
+  // #367: the box's own interface addresses, read once per proxy (per run).
+  const localAddrs = opts.allowHostLocalUpstreams
+    ? EMPTY_SET
+    : localInterfaceAddresses();
 
   function decide(host: string, port: number | null): boolean {
     // Observe allows everything — but it is still a DECISION, and it is still
@@ -467,7 +498,7 @@ export async function startEgressProxy(
     const hostLocal =
       host !== UNPARSEABLE &&
       !opts.allowHostLocalUpstreams &&
-      isHostLocalAddress(host);
+      isHostLocalAddress(host, localAddrs);
     const allowed =
       host === UNPARSEABLE || hostLocal
         ? false
@@ -499,10 +530,26 @@ export async function startEgressProxy(
         ).toString("base64")}`,
       )
     : null;
-  // #367: names are judged after resolution, in every mode (see the seam).
+  // #367: names are judged after resolution, in every mode (see the seam). A
+  // refused name already produced an `allow` row in decide() (the literal was
+  // not local); the refusal adds its own `deny` row with reason host-local so
+  // the trail records what actually happened.
   const lookup: LookupFunction | undefined = opts.allowHostLocalUpstreams
     ? undefined
-    : makeGuardedLookup();
+    : makeGuardedLookup(dnsLookup, localAddrs, (hostname) => {
+        try {
+          onEvent({
+            destinationHost: hostname,
+            destinationPort: null,
+            action: "deny",
+            policyLevel: policy.level,
+            mode,
+            reason: "host-local",
+          });
+        } catch {
+          // Audit plumbing must never break (or leak into) enforcement.
+        }
+      });
   function authorized(req: IncomingMessage): boolean {
     if (expectedAuth === null) return true;
     const got = req.headers["proxy-authorization"];
