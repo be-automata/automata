@@ -1215,6 +1215,15 @@ export async function dispatchAgentRun({
     // transitions the thread to a terminal error — the remote path's equivalent of
     // in-process sandbox-creation-failed handling. Without this the thread would
     // sit in `booting` forever with no surfaced error (zombie thread).
+    // #380 strict: a missing plane key fails EVERY remote dispatch, not just
+    // this one — a deploy/config defect, not a run failure. One distinct,
+    // alertable line (no secret in it: the key is public, and absent here).
+    if (error instanceof PlaneKeyMissingError) {
+      console.error(
+        "[hatchet] CONFIG: HATCHET_PAYLOAD_SEAL_KEY is empty — every remote dispatch fails closed (#380 strict); set the plane public key printed by gen-payload-seal-key.ts",
+        { threadId, threadChatId },
+      );
+    }
     console.error(
       "[hatchet] dispatch failed after retries — revoking token + failing thread",
       {

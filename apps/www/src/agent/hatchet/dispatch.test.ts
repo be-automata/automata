@@ -1315,8 +1315,9 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
   describe("#380: run secrets sealed to the plane key", () => {
     afterEach(() => plane.reinstall());
 
-    it("AC 9: an empty key fails the dispatch closed — no trigger, no live daemon token, typed cause", async () => {
+    it("AC 9: an empty key fails the dispatch closed — no trigger, no live daemon token, typed cause, one alertable CONFIG line", async () => {
       setKey("");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const t = await orgTaskThread();
       const f = routedHatchetFetch("never");
       vi.stubGlobal("fetch", f.mock);
@@ -1347,6 +1348,13 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       expect(
         await hasActiveDaemonToken({ userId: user.id, name: daemonRunKey(t) }),
       ).toBe(false);
+      const configLines = errorSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) =>
+          l.startsWith("[hatchet] CONFIG: HATCHET_PAYLOAD_SEAL_KEY is empty"),
+        );
+      expect(configLines).toHaveLength(1);
+      errorSpy.mockRestore();
     });
 
     it("a key pasted with a trailing newline (wrangler secret put) still seals", async () => {
