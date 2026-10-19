@@ -1,8 +1,5 @@
 import { hello } from "./hello/workflow";
-import {
-  agentRunWorkflows,
-  buildAgentRunWorkflows,
-} from "./agent-run/workflow";
+import { buildAgentRunWorkflows } from "./agent-run/workflow";
 import type { EngineCaps } from "./agent-run/definition";
 
 /**
@@ -19,6 +16,3 @@ import type { EngineCaps } from "./agent-run/definition";
 export function buildWorkflows(caps: EngineCaps) {
   return [hello, ...buildAgentRunWorkflows(caps)];
 }
-
-/** The default-caps (1/1) set — the shipped shape for tests and legacy callers. */
-export const workflows = [hello, ...agentRunWorkflows];

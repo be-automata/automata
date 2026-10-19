@@ -506,75 +506,81 @@ describe("warnIfSlotsExceedMemory (#205 boot)", () => {
   });
 });
 
-describe("assertSlotsFitCommitLimit (#372 boot, Linux, ceiling on)", () => {
-  // The pilot box: CommitLimit 12 357 216 kB (8 GB swap + 50 % of 7.6 GB RAM).
-  const meminfo = `MemTotal:        7937228 kB
+describe("assertSlotsFitCommitLimit (#372 boot, Linux, ceiling on) — in the headroom check's own terms", () => {
+  const meminfo = (commitLimitKb: number) => `MemTotal:        7937228 kB
 MemAvailable:    6000000 kB
 SwapTotal:       8388604 kB
-CommitLimit:    12357216 kB
+CommitLimit:    ${commitLimitKb} kB
 Committed_AS:    2600000 kB
 `;
-  const commitLimit = 12357216 * 1024;
+  // The pilot cx33: CommitLimit 12 357 216 kB (8 GB swap + 50 % of 7.6 GB RAM).
+  const CX33 = meminfo(12357216);
+  // cx43 at vm.overcommit_ratio=80: 8 GB swap + 80 % of 16 GB ≈ 20.8 GB.
+  const CX43_R80 = meminfo(20311244);
   const fiveG = 5000 * 1024 ** 2;
+  const tuple = (boxSlots: number, fraction = 0.9) => ({
+    boxSlots,
+    memoryMaxBytes: fiveG,
+    headroomRunCommitBytes: fiveG,
+    headroomCommitFraction: fraction,
+  });
+  const linux = (text: string) => ({
+    platform: "linux" as const,
+    readMeminfo: () => text,
+  });
 
-  it("N = 2 at 5000M + the 2 GiB base fits the pilot's CommitLimit; N = 3 does not — refused naming BOTH knobs", () => {
+  it("the pilot's own numbers: ONE 5000M run fits 0.9 × CommitLimit beside the base, TWO do not — refused naming the knobs (what #371's drill observed as 'every second run deferred')", () => {
     expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 2, memoryMaxBytes: fiveG },
-        { platform: "linux", readMeminfo: () => meminfo },
-      ),
+      assertSlotsFitCommitLimit(tuple(1), linux(CX33)),
     ).not.toThrow();
-    expect(2 * fiveG + BOX_BASE_COMMIT_BYTES).toBeLessThanOrEqual(commitLimit);
-    expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 3, memoryMaxBytes: fiveG },
-        { platform: "linux", readMeminfo: () => meminfo },
-      ),
-    ).toThrow(
-      /WORKER_BOX_SLOTS=3 × WORKER_RUN_MEMORY_MAX=5242880000 .* exceeds the kernel CommitLimit 12653789184/,
+    expect(() => assertSlotsFitCommitLimit(tuple(2), linux(CX33))).toThrow(
+      /WORKER_BOX_SLOTS=2 × run commit 5242880000 .* exceeds 0\.9 × CommitLimit 12653789184 .*WORKER_GLOBAL_MAX_RUNS/,
     );
   });
 
-  it("is exact at the boundary: need == CommitLimit passes, one byte more refuses", () => {
-    const base = 0;
-    const exact = Math.floor(commitLimit / 2);
+  it("the chosen production tuple: three 5000M runs fit cx43 at overcommit_ratio 80 under 0.9 × CommitLimit; four do not", () => {
     expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 2, memoryMaxBytes: exact },
-        { platform: "linux", readMeminfo: () => meminfo, baseBytes: base },
-      ),
+      assertSlotsFitCommitLimit(tuple(3), linux(CX43_R80)),
     ).not.toThrow();
-    expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 2, memoryMaxBytes: exact + 1 },
-        { platform: "linux", readMeminfo: () => meminfo, baseBytes: base },
-      ),
-    ).toThrow(/exceeds the kernel CommitLimit/);
+    expect(() => assertSlotsFitCommitLimit(tuple(4), linux(CX43_R80))).toThrow(
+      /WORKER_BOX_SLOTS=4/,
+    );
   });
 
-  it("is not its business without the ceiling or off Linux; an unreadable meminfo with the ceiling on refuses (never a silent pass)", () => {
+  it("an inert fraction (≥ 1) budgets the whole CommitLimit; the boundary is exact", () => {
+    const commitLimit = 12357216 * 1024;
+    const exact = Math.floor((commitLimit - BOX_BASE_COMMIT_BYTES) / 2);
+    const t = (runCommit: number) => ({
+      boxSlots: 2,
+      memoryMaxBytes: fiveG,
+      headroomRunCommitBytes: runCommit,
+      headroomCommitFraction: 1,
+    });
+    expect(() =>
+      assertSlotsFitCommitLimit(t(exact), linux(CX33)),
+    ).not.toThrow();
+    expect(() => assertSlotsFitCommitLimit(t(exact + 1), linux(CX33))).toThrow(
+      /exceeds 1 × CommitLimit/,
+    );
+  });
+
+  it("is not its business without the ceiling or off Linux; an unreadable meminfo with the ceiling on refuses (parseMeminfo's own error, never a silent pass)", () => {
     expect(() =>
       assertSlotsFitCommitLimit(
-        { boxSlots: 4, memoryMaxBytes: 0 },
-        { platform: "linux", readMeminfo: () => "garbage" },
+        { ...tuple(4), memoryMaxBytes: 0 },
+        linux("garbage"),
       ),
     ).not.toThrow();
     expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 4, memoryMaxBytes: fiveG },
-        {
-          platform: "darwin",
-          readMeminfo: () => {
-            throw new Error("must not be called");
-          },
+      assertSlotsFitCommitLimit(tuple(4), {
+        platform: "darwin",
+        readMeminfo: () => {
+          throw new Error("must not be called");
         },
-      ),
+      }),
     ).not.toThrow();
-    expect(() =>
-      assertSlotsFitCommitLimit(
-        { boxSlots: 1, memoryMaxBytes: fiveG },
-        { platform: "linux", readMeminfo: () => "garbage" },
-      ),
-    ).toThrow(/cannot read CommitLimit/);
+    expect(() => assertSlotsFitCommitLimit(tuple(1), linux("garbage"))).toThrow(
+      /\/proc\/meminfo: missing or malformed/,
+    );
   });
 });

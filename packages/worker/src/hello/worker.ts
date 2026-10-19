@@ -165,8 +165,9 @@ async function main() {
   // WORKER_PER_ORG_MAX_RUNS, the #204/#205 pairings, the #371 knobs) and
   // throws naming the knobs; a box with an inconsistent tuple must refuse to
   // start with THAT message, not one borrowed from the next probe's try block.
+  let bootCfg: ReturnType<typeof loadWorkerConfig>;
   try {
-    loadWorkerConfig();
+    bootCfg = loadWorkerConfig();
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: worker configuration is invalid — refusing to start",
@@ -180,7 +181,7 @@ async function main() {
   // run into a silent 90s stall with zero output rather than an error. Probe the
   // configured node ONCE at boot and refuse to start below the floor.
   try {
-    const cfg = loadWorkerConfig();
+    const cfg = bootCfg;
     if (cfg.agentUser) {
       await assertNodeBinSupportsEnvProxy({
         nodeBin: cfg.nodeBin,
@@ -388,7 +389,6 @@ async function main() {
   // every run past the first until it fails (#371).
   try {
     assertSlotsFitCommitLimit(registrationConfig);
-    warnIfSlotsExceedMemory(registrationConfig);
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: the box slots do not fit this box's CommitLimit — refusing to start",
@@ -396,6 +396,7 @@ async function main() {
     );
     process.exit(1);
   }
+  warnIfSlotsExceedMemory(registrationConfig);
   const worker = await hatchet.worker(workerName, {
     // #372: the engine caps registered on every variant come from the SAME
     // validated config as `slots` below — loadWorkerConfig refused any tuple

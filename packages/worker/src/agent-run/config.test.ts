@@ -13,8 +13,7 @@ import {
   parseMemoryMax,
   parseTasksMax,
   resolveBoxId,
-  parseEngineCap,
-  ENGINE_CAP_MAX,
+  parseSlotCount,
 } from "./config";
 import { slotAgentUsers } from "./spawn-as-user";
 
@@ -653,8 +652,8 @@ describe("#372: WORKER_GLOBAL_MAX_RUNS / WORKER_PER_ORG_MAX_RUNS — the engine 
   };
 
   it("defaults to 1/1 — today's compile-time caps, and a stray explicit 1 never trips anything", () => {
-    expect(parseEngineCap("WORKER_GLOBAL_MAX_RUNS", undefined)).toBe(1);
-    expect(parseEngineCap("WORKER_GLOBAL_MAX_RUNS", " ")).toBe(1);
+    expect(parseSlotCount("WORKER_GLOBAL_MAX_RUNS", undefined)).toBe(1);
+    expect(parseSlotCount("WORKER_GLOBAL_MAX_RUNS", " ")).toBe(1);
     const cfg = loadWorkerConfig({});
     expect(cfg.globalMaxRuns).toBe(1);
     expect(cfg.perOrgMaxRuns).toBe(1);
@@ -666,20 +665,17 @@ describe("#372: WORKER_GLOBAL_MAX_RUNS / WORKER_PER_ORG_MAX_RUNS — the engine 
     ).toBe(1);
   });
 
-  it("accepts an integer in [1, ENGINE_CAP_MAX] and refuses everything else, naming the knob", () => {
-    // The cap bound is a literal (suites that mock ./box-lock import config.ts);
-    // it must stay equal to the slot bound, or a tuple could pass one and fail the other.
-    expect(ENGINE_CAP_MAX).toBe(BOX_SLOTS_MAX);
-    expect(parseEngineCap("WORKER_PER_ORG_MAX_RUNS", "3")).toBe(3);
+  it("accepts an integer in [1, BOX_SLOTS_MAX] and refuses everything else, naming the knob", () => {
+    expect(parseSlotCount("WORKER_PER_ORG_MAX_RUNS", "3")).toBe(3);
     for (const bad of [
       "0",
       "-1",
       "1.5",
       "two",
       "1e1",
-      String(ENGINE_CAP_MAX + 1),
+      String(BOX_SLOTS_MAX + 1),
     ]) {
-      expect(() => parseEngineCap("WORKER_PER_ORG_MAX_RUNS", bad), bad).toThrow(
+      expect(() => parseSlotCount("WORKER_PER_ORG_MAX_RUNS", bad), bad).toThrow(
         /WORKER_PER_ORG_MAX_RUNS/,
       );
     }

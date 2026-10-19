@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, open, stat } from "node:fs/promises";
 import path from "node:path";
+import { BOX_SLOTS_MAX } from "./slot-limits";
+export { BOX_SLOTS_MAX };
 
 /**
  * The box's ONE agent-run lock, enforced on the worker plane (#152 Stage B1,
@@ -171,12 +173,6 @@ export function boxLockPath(root: string, slot = 0): string {
   assertSlotIndex(slot, "boxLockPath");
   return path.join(root, slot === 0 ? "box.lock" : `box.lock.${slot}`);
 }
-
-/**
- * The most slots one box may run (#205). Bounds WORKER_BOX_SLOTS and the slot
- * dir names a reclaim will trust.
- */
-export const BOX_SLOTS_MAX = 16;
 
 /** A slot index is a non-negative integer; shared by every slot-addressed builder. */
 export function assertSlotIndex(slot: number, where: string): void {

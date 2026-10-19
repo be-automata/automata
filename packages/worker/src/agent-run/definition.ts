@@ -40,11 +40,9 @@ export interface EngineCaps {
  * whole-tuple move (#372): WORKER_GLOBAL_MAX_RUNS = WORKER_BOX_SLOTS ≥
  * WORKER_PER_ORG_MAX_RUNS, with WORKER_RUN_MEMORY_MAX and the swap sized for it.
  */
-export const DEFAULT_GLOBAL_MAX_RUNS = 1;
-export const DEFAULT_PER_ORG_MAX_RUNS = 1;
 export const DEFAULT_ENGINE_CAPS: EngineCaps = {
-  globalMaxRuns: DEFAULT_GLOBAL_MAX_RUNS,
-  perOrgMaxRuns: DEFAULT_PER_ORG_MAX_RUNS,
+  globalMaxRuns: 1,
+  perOrgMaxRuns: 1,
 };
 
 /**

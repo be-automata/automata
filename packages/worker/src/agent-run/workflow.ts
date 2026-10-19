@@ -127,15 +127,16 @@ export type { AgentRunInput, AgentRunOutput } from "./types";
  * drop queued work during a brief outage (ADR-002 §Worker availability).
  *
  * Concurrency is a STACKED array of two GROUP_ROUND_ROBIN keys (shapes in
- * definition.ts). Both cap at 1 today:
- *   1. per-ORG key (`input.orgId`): serializes runs WITHIN an org. orgId is
+ * definition.ts). Both caps come from `EngineCaps` — `WORKER_PER_ORG_MAX_RUNS`
+ * and `WORKER_GLOBAL_MAX_RUNS`, validated by loadWorkerConfig (#372; 1/1 by
+ * default):
+ *   1. per-ORG key (`input.orgId`): bounds runs WITHIN an org. orgId is
  *      guaranteed non-empty by dispatch (the `u:${userId}` fallback) so the CEL
  *      key never dereferences null.
- *   2. global constant key: the single-box daemon memory budget — only ONE
- *      agent-run executes at a time across ALL orgs and BOTH workers. It is a
- *      single group, so ordering across orgs under it is FIFO (observed, #128
- *      E2E — docs/uat/hatchet-lite-v0.94.10-observed.md §1); cross-org fairness
- *      needs global>1 (#3b, memory-gated).
+ *   2. global constant key: the per-variant engine cap. At 1 it is a single
+ *      group, so ordering across orgs under it is FIFO (observed, #128 E2E —
+ *      docs/uat/hatchet-lite-v0.94.10-observed.md §1); the BOX budget is the
+ *      worker's slots plus the kernel box lock, never this key.
  * On the LEGACY `agent-run` workflow later runs QUEUE rather than cancel — an
  * in-flight agent turn is never killed by the engine there (flag-off contract,
  * #125 AC7). The three POLICY VARIANTS (#125 C1, `makeAgentRunWorkflow`) stack a

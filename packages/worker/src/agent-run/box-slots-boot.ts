@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
-import { parseMeminfo } from "./headroom";
+import { parseMeminfo, readProcMeminfo } from "./headroom";
 import { KILL_BIN, SH_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
 
@@ -476,19 +476,27 @@ export function warnIfSlotsExceedMemory(
 export const BOX_BASE_COMMIT_BYTES = 2 * 1024 ** 3;
 
 /**
- * #372: the operator's typo guard for the memory side of the tuple. With the
- * ceiling on, `WORKER_BOX_SLOTS × WORKER_RUN_MEMORY_MAX + base` must fit the
- * kernel's `CommitLimit` (swap + overcommit_ratio × RAM) or N full runs could
- * never be admitted together — the #371 headroom check would defer every run
- * past the first forever, each dispatched run failing final after its budget.
- * Refuses (throws, naming both knobs) on Linux with the ceiling on; a box
- * without the ceiling or /proc/meminfo is not this check's business (N > 1
- * already requires both). `warnIfSlotsExceedMemory` stays the softer RAM
- * warning next to it: swap can absorb N × ceiling > MemTotal, nothing absorbs
- * the commit budget.
+ * #372: the operator's typo guard for the memory side of the tuple, in the
+ * SAME terms the #371 headroom check admits by: N runs' expected commit
+ * (`WORKER_HEADROOM_RUN_COMMIT`, = the ceiling by default) plus the box's base
+ * load must fit `WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` (swap +
+ * overcommit_ratio × RAM), or N full runs could never be admitted together —
+ * the headroom check would defer every run past the first until it failed
+ * (observed: #371's drill on the cx33 deferred every second 5000M run). With
+ * the fraction inert (≥ 1) the whole `CommitLimit` is the budget. Refuses
+ * (throws, naming the knobs) on Linux with the ceiling on; a box without the
+ * ceiling or /proc/meminfo is not this check's business (N > 1 already
+ * requires both). `warnIfSlotsExceedMemory` stays the softer RAM warning
+ * beside it: swap can absorb N × ceiling > MemTotal, nothing absorbs the
+ * commit budget.
  */
 export function assertSlotsFitCommitLimit(
-  cfg: { boxSlots: number; memoryMaxBytes: number },
+  cfg: {
+    boxSlots: number;
+    memoryMaxBytes: number;
+    headroomRunCommitBytes: number;
+    headroomCommitFraction: number;
+  },
   opts: {
     platform?: NodeJS.Platform;
     readMeminfo?: () => string;
@@ -497,22 +505,17 @@ export function assertSlotsFitCommitLimit(
 ): void {
   const {
     platform = process.platform,
-    readMeminfo = () => readFileSync("/proc/meminfo", "utf8"),
+    readMeminfo = readProcMeminfo,
     baseBytes = BOX_BASE_COMMIT_BYTES,
   } = opts;
   if (platform !== "linux" || cfg.memoryMaxBytes <= 0) return;
-  let commitLimit: number;
-  try {
-    commitLimit = parseMeminfo(readMeminfo()).commitLimit;
-  } catch (e) {
+  const { commitLimit } = parseMeminfo(readMeminfo());
+  const fraction = Math.min(cfg.headroomCommitFraction, 1);
+  const budget = fraction * commitLimit;
+  const need = cfg.boxSlots * cfg.headroomRunCommitBytes + baseBytes;
+  if (need > budget) {
     throw new Error(
-      `cannot read CommitLimit from /proc/meminfo (${e instanceof Error ? e.message : String(e)}); the WORKER_BOX_SLOTS × WORKER_RUN_MEMORY_MAX tuple cannot be checked against the box`,
-    );
-  }
-  const need = cfg.boxSlots * cfg.memoryMaxBytes + baseBytes;
-  if (need > commitLimit) {
-    throw new Error(
-      `WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} + ${baseBytes} base = ${need} bytes exceeds the kernel CommitLimit ${commitLimit} (swap + overcommit_ratio × RAM): ${cfg.boxSlots} full runs could never be admitted together (the headroom check would defer every run past the first until it failed). Lower WORKER_BOX_SLOTS (and WORKER_GLOBAL_MAX_RUNS with it) or WORKER_RUN_MEMORY_MAX, add swap, or resize the box.`,
+      `WORKER_BOX_SLOTS=${cfg.boxSlots} × run commit ${cfg.headroomRunCommitBytes} (WORKER_HEADROOM_RUN_COMMIT, = WORKER_RUN_MEMORY_MAX by default) + ${baseBytes} base = ${need} bytes exceeds ${fraction} × CommitLimit ${commitLimit} = ${Math.floor(budget)} (the memory-headroom budget; CommitLimit = swap + overcommit_ratio × RAM): ${cfg.boxSlots} full runs could never be admitted together — the headroom check would defer every run past the first until it failed. Lower WORKER_BOX_SLOTS (and WORKER_GLOBAL_MAX_RUNS with it) or the run commit, raise vm.overcommit_ratio or add swap, or resize the box.`,
     );
   }
 }

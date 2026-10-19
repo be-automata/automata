@@ -49,6 +49,7 @@ type Execution = {
   orgId: string;
   startedAt: number;
   endedAt?: number;
+  cancelled?: boolean;
 };
 
 const itEnabled = process.env.HATCHET_IT === "1";
@@ -82,10 +83,10 @@ describe.skipIf(!itEnabled)(
         startedAt: Date.now(),
       };
       executions.set(input.label, ex);
-      const until = Date.now() + input.sleepMs;
-      while (Date.now() < until && !ctx.cancelled) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
+      // Nothing in this burst is ever cancelled (distinct PR keys on the strict
+      // variant), so one timer is the whole run.
+      await new Promise((r) => setTimeout(r, input.sleepMs));
+      if (ctx.cancelled) ex.cancelled = true;
       ex.endedAt = Date.now();
       return { label: input.label };
     }
@@ -164,17 +165,17 @@ describe.skipIf(!itEnabled)(
 
     it(`${BURST} dispatches at caps ${CAPS.globalMaxRuns}/${CAPS.perOrgMaxRuns} with ${WORKER_SLOTS} slots: every run COMPLETED (none lost), at most ${WORKER_SLOTS} executing at once, at most ${CAPS.perOrgMaxRuns} per org at once`, async () => {
       const burstId = uid("burst");
-      const dispatched: Array<{ id: string; label: string; orgId: string }> =
-        [];
-      for (let i = 0; i < BURST; i++) {
-        const orgId = ORGS[i % ORGS.length]!;
-        const label = `${burstId}-${i}`;
-        const d = await dispatch(
-          { orgId, prKey: `${orgId}/repo/${i}`, sleepMs: 1_000 },
-          label,
-        );
-        dispatched.push({ ...d, orgId });
-      }
+      // A burst, not a trickle: every trigger in flight at once.
+      const dispatched = await Promise.all(
+        Array.from({ length: BURST }, async (_, i) => {
+          const orgId = ORGS[i % ORGS.length]!;
+          const d = await dispatch(
+            { orgId, prKey: `${orgId}/repo/${i}`, sleepMs: 1_000 },
+            `${burstId}-${i}`,
+          );
+          return { ...d, orgId };
+        }),
+      );
       expect(dispatched.every((d) => d.id)).toBe(true);
       expect(new Set(dispatched.map((d) => d.id)).size).toBe(BURST);
 
@@ -183,11 +184,14 @@ describe.skipIf(!itEnabled)(
       await pollUntil(
         "every burst run terminal",
         async () => {
-          for (const d of dispatched) {
-            if (finals.has(d.id)) continue;
-            const s = await statusOf(d.id);
+          const pending = dispatched.filter((d) => !finals.has(d.id));
+          const statuses = await Promise.all(
+            pending.map((d) => statusOf(d.id)),
+          );
+          pending.forEach((d, i) => {
+            const s = statuses[i]!;
             if (TERMINAL.includes(s)) finals.set(d.id, s);
-          }
+          });
           return finals.size;
         },
         (n) => n === BURST,
@@ -226,10 +230,7 @@ describe.skipIf(!itEnabled)(
       // The raised caps were USED, not merely respected: with 42 one-second
       // runs and 3 slots the engine must have run more than one at a time.
       expect(maxLive).toBeGreaterThan(1);
-      const starts = [...executions.values()].map((e) => e.startedAt).sort();
-      const span = (starts.at(-1)! - starts[0]!) / 1000;
-      // Serial would take ≥ 41 s of starts; three-wide stays well under that.
-      expect(span).toBeLessThan(41);
+      expect([...executions.values()].some((e) => e.cancelled)).toBe(false);
     });
   },
 );

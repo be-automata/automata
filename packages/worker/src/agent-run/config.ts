@@ -1,8 +1,8 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BOX_SLOTS_MAX } from "./box-lock";
 import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
+import { BOX_SLOTS_MAX } from "./slot-limits";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
   ADMISSION_BACKOFF,
@@ -350,39 +350,14 @@ export function parseMemoryMax(raw: string | undefined): number {
 export { BOX_SLOTS_MAX };
 
 /**
- * Upper bound on either engine cap: a typo like `30` must not register 30 engine
- * slots. A LITERAL equal to box-lock's BOX_SLOTS_MAX (pinned by config.test)
- * rather than a read of it: test suites that mock ./box-lock import this module
- * too, and a module-load read of a mocked export is undefined.
+ * Parse a slot-count knob — `WORKER_BOX_SLOTS` (#205), `WORKER_GLOBAL_MAX_RUNS`
+ * and `WORKER_PER_ORG_MAX_RUNS` (#372). Unset or empty = 1 = today's exclusive
+ * lock and compile-time caps. Anything present but not an integer in
+ * [1, BOX_SLOTS_MAX] THROWS, naming the knob: a box told to run N must never
+ * quietly run a different N (the engine caps are bounded by the slot bound
+ * because the tuple must agree).
  */
-export const ENGINE_CAP_MAX = 16;
-
-/**
- * Parse `WORKER_GLOBAL_MAX_RUNS` / `WORKER_PER_ORG_MAX_RUNS` (#372). Unset or
- * empty = 1 = today's compile-time caps. Anything present but not an integer in
- * [1, ENGINE_CAP_MAX] THROWS, naming the knob: a box told to admit N must never
- * quietly admit a different N.
- */
-export function parseEngineCap(name: string, raw: string | undefined): number {
-  const v = (raw ?? "").trim();
-  if (!v) {
-    return 1;
-  }
-  const n = Number(v);
-  if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > ENGINE_CAP_MAX) {
-    throw new Error(
-      `${name} must be an integer between 1 and ${ENGINE_CAP_MAX}, got ${JSON.stringify(v)}`,
-    );
-  }
-  return n;
-}
-
-/**
- * Parse `WORKER_BOX_SLOTS` (#205). Unset or empty = 1 = today's exclusive lock.
- * Anything present but not an integer in [1, BOX_SLOTS_MAX] THROWS: a box told
- * to run N slots must never quietly run a different N.
- */
-export function parseBoxSlots(raw: string | undefined): number {
+export function parseSlotCount(name: string, raw: string | undefined): number {
   const v = (raw ?? "").trim();
   if (!v) {
     return 1;
@@ -390,10 +365,15 @@ export function parseBoxSlots(raw: string | undefined): number {
   const n = Number(v);
   if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > BOX_SLOTS_MAX) {
     throw new Error(
-      `WORKER_BOX_SLOTS must be an integer between 1 and ${BOX_SLOTS_MAX}, got ${JSON.stringify(v)}`,
+      `${name} must be an integer between 1 and ${BOX_SLOTS_MAX}, got ${JSON.stringify(v)}`,
     );
   }
   return n;
+}
+
+/** `WORKER_BOX_SLOTS` (#205); see parseSlotCount. */
+export function parseBoxSlots(raw: string | undefined): number {
+  return parseSlotCount("WORKER_BOX_SLOTS", raw);
 }
 
 /** Parse `WORKER_RUN_TASKS_MAX`; unset ⇒ a generous default, since it is a runaway guard, not a budget. */
@@ -644,11 +624,11 @@ export function loadWorkerConfig(
   // box paid for (global < slots). The per-org fairness cap must not exceed the
   // global cap (a cap no run can reach is a lie in the registration). Refused
   // here, at boot AND at every run, like the #205 pairings above.
-  const globalMaxRuns = parseEngineCap(
+  const globalMaxRuns = parseSlotCount(
     "WORKER_GLOBAL_MAX_RUNS",
     env.WORKER_GLOBAL_MAX_RUNS,
   );
-  const perOrgMaxRuns = parseEngineCap(
+  const perOrgMaxRuns = parseSlotCount(
     "WORKER_PER_ORG_MAX_RUNS",
     env.WORKER_PER_ORG_MAX_RUNS,
   );
