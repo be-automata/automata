@@ -317,8 +317,10 @@ type RunCtx = {
 /**
  * #371: the worker-wide admission gate — one per process, decided once from
  * the boot config on first use (a run's admission, or the boot line). null
- * where the check cannot run (`assessHeadroomSupport`: no /proc/meminfo, an
- * inert policy) — then admission is byte-for-byte today's.
+ * where the check cannot run (`assessHeadroomSupport`: a platform without
+ * /proc/meminfo, an inert policy) — then admission is byte-for-byte today's.
+ * On Linux with a live policy an unreadable /proc/meminfo THROWS, and the boot
+ * refuses to start (worker.ts) rather than caching "off" for the process life.
  */
 type AdmissionGate = { controller: AdmissionController | null; reason: string };
 let admissionGate: AdmissionGate | undefined;

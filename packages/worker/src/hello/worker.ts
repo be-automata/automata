@@ -312,8 +312,19 @@ async function main() {
     process.exit(1);
   }
   // #371: decide the memory-headroom gate once and say so — armed with its
-  // thresholds, or OFF and why (inert rollback values, no /proc/meminfo).
-  console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+  // thresholds, or OFF and why (inert rollback values, a platform without
+  // /proc/meminfo). FAIL-CLOSED like the ceiling: a configured check whose
+  // /proc/meminfo cannot be read at boot refuses to start instead of running
+  // every job unguarded while the log says "OFF".
+  try {
+    console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: the memory headroom check is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
   // ONE source for the name the engine knows this worker by: the #215 watchdog
   // probes for a row with exactly this name (namespaced), so a second literal
   // here could drift from it and leave the box silently unguarded.

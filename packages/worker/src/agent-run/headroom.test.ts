@@ -324,7 +324,7 @@ describe("assessHeadroomSupport (boot)", () => {
     });
   });
 
-  it("linux with a readable meminfo ⇒ on; unreadable ⇒ off with the error", () => {
+  it("linux with a readable meminfo ⇒ on; unreadable or unparseable ⇒ THROWS (the boot refuses, never a silent OFF for the process life)", () => {
     expect(
       assessHeadroomSupport({
         policy: POLICY,
@@ -332,15 +332,23 @@ describe("assessHeadroomSupport (boot)", () => {
         readMeminfo: () => MEMINFO,
       }),
     ).toEqual({ enabled: true });
-    expect(
+    expect(() =>
       assessHeadroomSupport({
         policy: POLICY,
         platform: "linux",
         readMeminfo: () => "garbage",
       }),
-    ).toMatchObject({
-      enabled: false,
-      reason: expect.stringMatching(/MemAvailable/),
-    });
+    ).toThrow(
+      /cannot be read or parsed: .*MemAvailable.*WORKER_HEADROOM_FLOOR=0/,
+    );
+    expect(() =>
+      assessHeadroomSupport({
+        policy: POLICY,
+        platform: "linux",
+        readMeminfo: () => {
+          throw new Error("EACCES");
+        },
+      }),
+    ).toThrow(/EACCES/);
   });
 });

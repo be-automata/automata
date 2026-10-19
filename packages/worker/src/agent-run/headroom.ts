@@ -15,10 +15,11 @@ import { sumBackoffSeconds } from "./admission-retry";
  * Postgres down together — not a tidy per-run OOM. So admission asks the kernel
  * two questions before a run is allowed to spend memory:
  *
- *   1. is `MemAvailable` (minus what admitted-but-not-yet-spawned runs will take)
- *      still above a floor; and
- *   2. would `Committed_AS` plus those reservations plus THIS run's expected
- *      commit stay under a fraction of `CommitLimit`.
+ *   1. is `MemAvailable` minus what each live admitted run is still expected
+ *      to add (its `runCommit` less the anon + shmem its cgroup is already
+ *      charged — `Reservation.observe`) still above a floor; and
+ *   2. would `Committed_AS` plus those outstanding reservations plus THIS run's
+ *      expected commit stay under a fraction of `CommitLimit`.
  *
  * Either answer "no" DEFERS the run: it gives its box slot back, waits an
  * exponential backoff IN PROCESS (admission-retry.ts; abortable by the engine's
@@ -345,13 +346,20 @@ export function assessHeadroomSupport(opts: {
       reason: `platform ${opts.platform ?? process.platform} has no /proc/meminfo`,
     };
   }
+  // Linux with a live policy: the file MUST be readable, or the boot is refused
+  // (worker.ts). Returning "off" here would silently disable a configured
+  // check for the life of the process on one transient read; the documented way
+  // to run without it is the inert rollback (floor 0, fraction 1.0). The
+  // per-admission fail-open in `admit` covers only a transient read AFTER boot
+  // proved the file readable.
   try {
     parseMeminfo((opts.readMeminfo ?? readProcMeminfo)());
   } catch (e) {
-    return {
-      enabled: false,
-      reason: `cannot read /proc/meminfo: ${e instanceof Error ? e.message : String(e)}`,
-    };
+    throw new Error(
+      `the memory headroom check is configured but /proc/meminfo cannot be read or parsed: ${
+        e instanceof Error ? e.message : String(e)
+      } — set WORKER_HEADROOM_FLOOR=0 and WORKER_HEADROOM_COMMIT_FRACTION=1.0 to run without it`,
+    );
   }
   return { enabled: true };
 }
