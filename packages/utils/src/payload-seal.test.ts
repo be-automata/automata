@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PayloadSealError,
   RUN_SECRET_FIELDS,
+  canonicalJson,
   formatPlanePublicKey,
   generatePlaneKeyPair,
   isPlanePrivateKey,
@@ -71,6 +72,15 @@ async function expectSealError(
   }
 }
 
+describe("canonicalJson", () => {
+  it("sorts keys recursively, keeps array order, drops undefined like JSON.stringify (protects=www and the worker digest the same input identically; fails_when=key order or an undefined member changes the digest; no_claim=none beyond protects)", () => {
+    expect(
+      canonicalJson({ b: [{ z: 1, a: undefined, y: [2, undefined] }], a: "x" }),
+    ).toBe('{"a":"x","b":[{"y":[2,null],"z":1}]}');
+    expect(canonicalJson({ a: 1, b: 2 })).toBe(canonicalJson({ b: 2, a: 1 }));
+  });
+});
+
 describe("payload-seal (#380)", () => {
   it("round-trips the three secrets through a fresh envelope each time (protects=secrets survive seal→unseal; fails_when=any field is lost or altered; no_claim=nothing about the wire shape under workerd)", async () => {
     const { publicKey, privateKey } = await generatePlaneKeyPair("plane-a");
@@ -134,6 +144,11 @@ describe("payload-seal (#380)", () => {
       { daemonCallbackUrl: "https://attacker.example" },
       { repoFullName: "o/other" },
       { orgId: "org-2" },
+      // Any OTHER plain-text field is bound too (the self-heal plan fences
+      // what the installation token may push; branches steer the clone).
+      { branch: "attacker-branch" },
+      { selfHeal: { kind: "fix", branch: "automata/fix-evil" } },
+      { taskAgent: { batteries: ["evil-pack"] } },
     ]) {
       await expectSealError(
         unsealRunSecrets([a.privateKey], sealed, { ...BINDING, ...changed }),
@@ -141,12 +156,16 @@ describe("payload-seal (#380)", () => {
         "plane-a",
       );
     }
-    // Extra properties on the binding object never change the AAD.
+    // The envelope itself and the plain-text secret fields are never part of
+    // the binding (the worker strips them before it can compare), and key
+    // order does not matter.
     expect(
       await unsealRunSecrets([a.privateKey], sealed, {
-        ...BINDING,
-        extra: "ignored",
-      } as typeof BINDING),
+        sealedSecrets: sealed,
+        installationToken: "ghs_legacy-leak",
+        repoEnv: { A: "b" },
+        ...Object.fromEntries(Object.entries(BINDING).reverse()),
+      }),
     ).toEqual(SECRETS);
   });
 

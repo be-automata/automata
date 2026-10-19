@@ -8,6 +8,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gt,
   gte,
   inArray,
   isNotNull,
@@ -1788,6 +1789,7 @@ export async function findUnreportedRemoteThreads({
   now = new Date(),
   remoteProviderOnly = true,
   limit = 50,
+  maxAgeMs,
 }: {
   db: DB;
   olderThanMs: number;
@@ -1795,6 +1797,13 @@ export async function findUnreportedRemoteThreads({
   /** Same gate as findOrphanRemoteThreads. */
   remoteProviderOnly?: boolean;
   limit?: number;
+  /**
+   * Upper age bound: a thread last written before `now - maxAgeMs` is the
+   * stalled watchdog's, not this rule's — without it a thread whose engine
+   * runs were pruned, or that is still QUEUED, would be re-listed every tick
+   * forever.
+   */
+  maxAgeMs?: number;
 }): Promise<{ id: string; userId: string; dispatchedAt: Date }[]> {
   return db
     .select({
@@ -1814,6 +1823,9 @@ export async function findUnreportedRemoteThreads({
       and(
         remoteBootingWithoutRun({ remoteProviderOnly }),
         lt(schema.thread.updatedAt, new Date(now.getTime() - olderThanMs)),
+        maxAgeMs !== undefined
+          ? gt(schema.thread.updatedAt, new Date(now.getTime() - maxAgeMs))
+          : undefined,
       ),
     )
     .orderBy(sql`random()`)

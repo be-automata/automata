@@ -15,11 +15,11 @@
  *   eph        = X25519 ephemeral key pair, fresh per envelope
  *   shared     = X25519(eph.sk, plane.pk)
  *   key        = HKDF-SHA256(ikm=shared, salt=eph.pk || plane.pk, info=INFO), 256 bit
- *   ct         = AES-256-GCM(key, iv=random 12 B, aad=INFO|kid|binding, pt=JSON)
- * The AAD binds the envelope to its key id and to the input's routing fields
- * (thread, thread chat, callback URL, repo, org): an envelope lifted from one
- * run cannot be replayed into another input, nor re-pointed at another
- * callback.
+ *   ct         = AES-256-GCM(key, iv=random 12 B, aad=INFO|kid|sha256(input), pt=JSON)
+ * The AAD binds the envelope to its key id and to the WHOLE persisted input
+ * it travels in (canonical JSON, minus the envelope): an envelope lifted from
+ * one run cannot be replayed into another input, nor re-pointed at another
+ * callback, branch, self-heal plan or task pack.
  *
  * `PayloadSealError.message` never carries key or plaintext bytes — only the
  * (charset-restricted, truncated) `kid` and a failure class — so it is safe
@@ -139,43 +139,65 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
 }
 
 /**
- * The routing fields an envelope is bound to (the AAD). The worker trusts
- * the plain-text input around the envelope — above all `daemonCallbackUrl`,
- * where the unsealed daemon token is sent — so a sealed input copied into a
- * NEW trigger with a different callback (anyone holding the engine API token
- * can do that) must fail the tag, not hand the tokens to that callback.
- * Canonical JSON array encoding, so no field can smuggle a separator.
+ * What an envelope is bound to (the AAD): the WHOLE persisted input it
+ * travels in, minus the envelope itself and any plain-text secret field.
+ * The worker trusts every plain-text field around the envelope — the
+ * callback URL the unsealed daemon token is sent to, the self-heal plan that
+ * fences what the installation token may push, the branches, the task packs
+ * — so a sealed input copied into a NEW trigger with ANY of them changed
+ * (anyone holding the engine API token can do that) must fail the tag, not
+ * act on the forged field. Bound as SHA-256 over canonical JSON (keys sorted
+ * recursively, `undefined` dropped exactly as JSON.stringify drops it on the
+ * wire), so www's object and the worker's parsed copy digest identically.
  */
-export type SealBinding = {
-  threadId: string;
-  threadChatId: string;
-  daemonCallbackUrl: string;
-  repoFullName: string;
-  orgId: string;
-};
+export type SealBinding = object;
 
-/** Exactly the five binding fields of an input (never a spread of the rest). */
-export function sealBindingOf(input: SealBinding): SealBinding {
-  return {
-    threadId: input.threadId,
-    threadChatId: input.threadChatId,
-    daemonCallbackUrl: input.daemonCallbackUrl,
-    repoFullName: input.repoFullName,
-    orgId: input.orgId,
-  };
+/** The fields JSON-serialised secrets or the envelope live under: never part of the binding. */
+const UNBOUND_FIELDS = new Set([
+  "sealedSecrets",
+  "installationToken",
+  "githubReadToken",
+  "daemonToken",
+  "repoEnv",
+]);
+
+/** The input as bound: everything but the envelope and the plain-text secret fields. */
+export function sealBindingOf(input: SealBinding): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (!UNBOUND_FIELDS.has(k) && v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
-function aadFor(kid: string, binding: SealBinding): Uint8Array {
-  const b = sealBindingOf(binding);
-  return utf8.encode(
-    `${INFO}|${kid}|${JSON.stringify([
-      b.threadId,
-      b.threadChatId,
-      b.daemonCallbackUrl,
-      b.repoFullName,
-      b.orgId,
-    ])}`,
+/** JSON with object keys sorted recursively; `undefined` members dropped. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => canonicalJson(v === undefined ? null : v)).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function aadFor(kid: string, binding: SealBinding): Promise<Uint8Array> {
+  const digest = await subtle().digest(
+    "SHA-256",
+    utf8.encode(canonicalJson(sealBindingOf(binding))),
   );
+  return utf8.encode(`${INFO}|${kid}|${toHex(new Uint8Array(digest))}`);
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }
 
 /**
@@ -419,7 +441,7 @@ export async function sealRunSecrets(
     {
       name: "AES-GCM",
       iv,
-      additionalData: aadFor(pk.kid, binding),
+      additionalData: await aadFor(pk.kid, binding),
       tagLength: GCM_TAG_BYTES * 8,
     },
     key,
@@ -511,7 +533,7 @@ export async function unsealRunSecrets(
       {
         name: "AES-GCM",
         iv,
-        additionalData: aadFor(sealed.kid, binding),
+        additionalData: await aadFor(sealed.kid, binding),
         tagLength: GCM_TAG_BYTES * 8,
       },
       aesKey,

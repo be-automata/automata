@@ -123,9 +123,9 @@ export type AgentRunInput = {
    * fix check), the optional Phase-7 READ-ONLY task token (07-07 env gate:
    * GITHUB_TOKEN for brokered non-review runs with a seeded requiring pack)
    * and the daemon token (events + next-message auth) — sealed to the plane
-   * key, AAD-bound to the input's routing fields (threadId, threadChatId,
-   * daemonCallbackUrl, repoFullName, orgId); the owner's `repoEnv` and the
-   * self-heal token ride inside it too. Unsealed ONCE at run start
+   * key, AAD-bound to the whole persisted input (SHA-256 of its canonical
+   * JSON, minus the envelope); the owner's `repoEnv` and the self-heal token
+   * ride inside it too. Unsealed ONCE at run start
    * (run-secrets.ts) into a `RunSecrets` passed explicitly to every consumer;
    * never read from the input anywhere else, never logged. The envelope type
    * is the one shared crypto contract (`@terragon/utils/payload-seal`).

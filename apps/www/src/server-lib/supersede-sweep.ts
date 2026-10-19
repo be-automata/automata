@@ -436,6 +436,8 @@ export async function runSupersedeSweep(
       olderThanMs: orphanAfterMs,
       now,
       remoteProviderOnly,
+      // Older than the listing window ⇒ the stalled watchdog's, not ours.
+      maxAgeMs: RULE_III_LOOKUP_WINDOW_MS,
     }),
   ]);
   // Rule (ii)

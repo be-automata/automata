@@ -328,8 +328,8 @@ export interface AgentRunInput {
    * non-review org dispatch whose taskAgent packs require `github-read-token`;
    * the worker puts it in the agent's GITHUB_TOKEN, 07-07 gate) and the daemon
    * token, the owner's `repoEnv` and the self-heal token — sealed to the
-   * plane key, AAD-bound to the input's routing fields (threadId,
-   * threadChatId, daemonCallbackUrl, repoFullName, orgId).
+   * plane key, AAD-bound to the whole persisted input (SHA-256 of its
+   * canonical JSON, minus the envelope).
    * Optional only during the PR-1 rollout (absent ⇒ the legacy shape carries
    * them in plain text); PR 2 makes it required.
    */
@@ -407,15 +407,13 @@ export interface AgentRunInput {
   /** #125/#127 review runs only: the other half of the snapshot (discard recheck). */
   recheckOnComplete?: boolean;
   /**
-   * Phase 8, NON-review runs only: the platform-defined checks the worker runs
-   * on a pristine checkout before the audit agent starts, plus the per-run
-   * check token that authenticates the report (FORGE-01). SECRET: checkToken
-   * is never logged and never reaches the daemon or agent environment. Absent
-   * for every other dispatch (byte-identical payload); old workers ignore it.
-   */
-  /**
-   * #380: the plan WITHOUT its single-use token — the token is sealed
-   * (`RunSecrets.selfHealToken`) and the worker re-attaches it after unseal.
+   * Phase 8/9, NON-review runs only: the self-heal plan — the platform-defined
+   * checks the worker runs on a pristine checkout before the audit agent
+   * starts (audit), or the fix attempt's branch and gate (fix). Absent for
+   * every other dispatch (byte-identical payload); old workers ignore it.
+   * #380: the plan WITHOUT its single-use check/gate token — the token is
+   * sealed (`RunSecrets.selfHealToken`) and the worker re-attaches it after
+   * unseal.
    */
   selfHeal?: SelfHealRunWire;
   /**
@@ -715,7 +713,7 @@ function scrubRunSecrets(secrets: RunSecrets): (text: string) => string {
 
 /**
  * #380: the one place a secret meets the wire. With a plane key configured
- * the three run secrets are sealed to it (AAD = the input's routing fields) and the input
+ * the three run secrets are sealed to it (AAD = the whole input) and the input
  * gains `sealedSecrets`; the `kid` is logged so an operator can match it
  * against the kid list the worker logs at boot (rollout step 3). With no key
  * (the PR-1 rollout window) the legacy plain-text shape is returned and the
@@ -746,8 +744,9 @@ async function sealWireInput({
     return legacy;
   }
   const planeKey = parsePlanePublicKey(planeKeyText);
-  // Bound to the routing fields the worker will trust (callback URL above
-  // all): a copied envelope re-triggered with another callback fails its tag.
+  // Bound to the whole input the worker will trust (callback URL, branches,
+  // self-heal plan, task packs …): a copied envelope re-triggered with ANY
+  // of them changed fails its tag.
   const sealedSecrets = await sealRunSecrets(
     planeKey,
     secrets,

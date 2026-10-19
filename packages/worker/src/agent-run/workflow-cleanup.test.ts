@@ -2209,12 +2209,24 @@ describe("#380: sealed run secrets through the run fn", () => {
 
   it("stale-skip (an early return before the clone) still revokes, exactly once", async () => {
     checkRunStaleness.mockResolvedValue(true);
+    // The AAD binds the WHOLE input: a queued-policy input is sealed as such.
+    const { installationToken, daemonToken, ...rest } = INPUT;
+    void installationToken;
+    void daemonToken;
+    const queuedInput = {
+      ...rest,
+      supersedePolicy: "complete-run-queue",
+      prKey: "org-1/o/r/7",
+    };
     await expect(
       runFn(
         {
-          ...sealedInput,
-          supersedePolicy: "complete-run-queue",
-          prKey: "org-1/o/r/7",
+          ...queuedInput,
+          sealedSecrets: await sealRunSecrets(
+            plane.publicKey,
+            SECRETS,
+            sealBindingOf(queuedInput),
+          ),
         },
         sealedCtx(),
       ),

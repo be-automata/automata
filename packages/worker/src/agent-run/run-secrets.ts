@@ -77,9 +77,20 @@ export async function resolveRunSecrets({
     const secrets = await unsealRunSecrets(
       keys,
       rest.sealedSecrets,
-      // The AAD covers the routing fields the worker is about to trust.
-      sealBindingOf(rest),
+      // The AAD covers the WHOLE input the worker is about to trust — the
+      // self-heal plan included (as it travelled: without its token).
+      sealBindingOf({
+        ...rest,
+        ...(selfHeal !== undefined ? { selfHeal } : {}),
+      }),
     );
+    // Defence in depth: a token without a plan (or the reverse, caught in
+    // withSelfHealToken) is a forged input, never a run.
+    if (secrets.selfHealToken !== undefined && selfHeal === undefined) {
+      throw new Error(
+        "payload-seal: envelope carries a self-heal token but the input has no self-heal plan",
+      );
+    }
     const input: AgentRunInput = {
       ...rest,
       ...(selfHeal !== undefined
