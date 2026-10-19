@@ -54,18 +54,25 @@ describe.skipIf(!itEnabled)(
     let worker: Worker;
     /** label → the retryCount the engine handed each attempt, in order. */
     const attempts = new Map<string, number[]>();
+    /** label → the workflow run id each attempt saw (the guard's key). */
+    const runIds = new Map<string, string[]>();
     const WORKFLOW = "agent-run";
     const TIMEOUT_WORKFLOW = "agent-run-newest";
 
     async function stubRun(
       input: StubInput,
-      ctx: { retryCount?: () => number },
+      ctx: { retryCount?: () => number; workflowRunId?: () => string },
     ): Promise<{ label: string }> {
       const attempt = ctx.retryCount?.() ?? 0;
+      // The production key: the engine's workflow run id. The whole guard rests
+      // on every retry of a run carrying the SAME id — recorded per attempt and
+      // asserted against the dispatched id below.
+      const runKey = ctx.workflowRunId?.() || input.label;
+      runIds.set(input.label, [...(runIds.get(input.label) ?? []), runKey]);
       // Mirrors runAgent: the guard runs FIRST, before the attempt counts as
       // executed (a refused attempt is recorded as -(attempt + 1)).
       try {
-        assertNotReexecuting(input.label, attempt);
+        assertNotReexecuting(runKey, attempt);
       } catch (e) {
         attempts.set(input.label, [
           ...(attempts.get(input.label) ?? []),
@@ -88,7 +95,7 @@ describe.skipIf(!itEnabled)(
       if (input.mode === "defer-once" && attempt === 0) {
         // Exactly what the headroom check throws: plain Error subclass —
         // recorded like runAgent records it, so attempt 1 passes the guard.
-        recordDeferral(input.label);
+        recordDeferral(runKey);
         throw new AdmissionDeferredError(
           "mem-available-below-floor",
           {
@@ -258,6 +265,10 @@ describe.skipIf(!itEnabled)(
         `QUEUED between the attempts; saw ${JSON.stringify(seen)}`,
       ).toBe(true);
       expect(attempts.get(label)).toEqual([0, 1]);
+      // Both attempts carried the dispatched workflow run id — the assumption
+      // the production guard and the reservations are keyed on.
+      expect(runIds.get(label)).toEqual([id, id]);
+      expect(id).not.toBe("");
     });
 
     it("exactly-once against the ENGINE: an executionTimeout IS retried by hatchet-lite (measured: attempts 0,1,2 without the guard) — the re-execution guard refuses attempt 1 up front, so the agent ran once and the run FAILS final", async () => {

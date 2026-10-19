@@ -213,7 +213,7 @@ describe("AdmissionController (mutex + reservations)", () => {
     expect(c.reservedBytes()).toBe(0);
   });
 
-  it("an unreadable meminfo at admission FAILS OPEN: one box.headroom_unreadable line, no reservation, no throw", async () => {
+  it("an unreadable meminfo at admission FAILS OPEN on the decision — one box.headroom_unreadable line, no throw — but the admitted run is still reserved", async () => {
     let fail = true;
     const lines: string[] = [];
     const c = new AdmissionController(POLICY, () => {
@@ -225,6 +225,7 @@ describe("AdmissionController (mutex + reservations)", () => {
       attempt: 2,
       log: (l) => lines.push(l),
     });
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
     r.release();
     expect(lines).toEqual([
       expect.stringMatching(/^box\.headroom_unreadable \{.*"attempt":2.*EIO/),
