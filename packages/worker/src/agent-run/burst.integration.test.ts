@@ -175,11 +175,11 @@ describe.skipIf(!itEnabled)(
     it(`${BURST} dispatches at caps ${CAPS.globalMaxRuns}/${CAPS.perOrgMaxRuns} with ${WORKER_SLOTS} slots: every run COMPLETED (none lost), at most ${WORKER_SLOTS} executing at once, at most ${CAPS.perOrgMaxRuns} per org at once`, async () => {
       const burstId = uid("burst");
       // Triggered one at a time ON PURPOSE. Observed on hatchet-lite v0.94.10
-      // (2026-10-19): 42 concurrent trigger POSTs left 31 runs COMPLETED on
+      // (2026-10-19): 42 CONCURRENT trigger POSTs left 31 runs COMPLETED on
       // the engine without ever being dispatched to the worker (11 executed,
-      // serially) — the webhook path in production also triggers one run per
-      // delivery, so sequential is the faithful shape and the parallel one is
-      // an engine observation, not a target.
+      // serially) — a silently lost run, tracked as #395 with the skipped
+      // concurrent variant below. This case proves AC 6 for sequential
+      // triggers only.
       const dispatched: Array<{ id: string; label: string; orgId: string }> =
         [];
       for (let i = 0; i < BURST; i++) {
@@ -257,6 +257,43 @@ describe.skipIf(!itEnabled)(
       expect(maxPerOrg.get(ORGS[0]!), shape).toBe(CAPS.perOrgMaxRuns);
       expect(maxLive, shape).toBe(WORKER_SLOTS);
       expect([...executions.values()].some((e) => e.cancelled)).toBe(false);
+    });
+
+    // #395: the same burst with every trigger in flight at once. Fails today
+    // on hatchet-lite v0.94.10 (31 of 42 runs reach COMPLETED without ever
+    // executing). Kept skipped so the regression stays visible and
+    // reproducible; unskip to investigate.
+    it.skip(`#395: ${BURST} CONCURRENT triggers — every run that reaches COMPLETED must have executed`, async () => {
+      const burstId = uid("cburst");
+      const dispatched = await Promise.all(
+        Array.from({ length: BURST }, async (_, i) => {
+          const orgId = orgFor(i);
+          return dispatch(
+            { orgId, prKey: `${orgId}/crepo/${i}`, sleepMs: 1_000 },
+            `${burstId}-${i}`,
+          );
+        }),
+      );
+      expect(new Set(dispatched.map((d) => d.id)).size).toBe(BURST);
+      const finals = new Map<string, Status>();
+      await pollUntil(
+        "every concurrent burst run terminal",
+        async () => {
+          const pending = dispatched.filter((d) => !finals.has(d.id));
+          const statuses = await Promise.all(
+            pending.map((d) => statusOf(d.id)),
+          );
+          pending.forEach((d, i) => {
+            if (TERMINAL.includes(statuses[i]!)) finals.set(d.id, statuses[i]!);
+          });
+          return finals.size;
+        },
+        (c) => c === BURST,
+        200_000,
+        500,
+      );
+      const executed = dispatched.filter((d) => executions.has(d.label)).length;
+      expect(executed, "executed of terminal").toBe(finals.size);
     });
   },
 );
