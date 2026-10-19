@@ -94,6 +94,20 @@ export interface WorkerConfig {
    */
   boxSlots: number;
   /**
+   * #372: the engine's "global" concurrency cap (`'agent-run-global-memory-budget'`
+   * key, PER WORKFLOW VARIANT) as registered by this worker. Must EQUAL
+   * `boxSlots`: the engine's cross-workflow cap is the worker's `slots`
+   * (= boxSlots) and the host cap is the counting box lock, so the three
+   * numbers are one setting — `WORKER_GLOBAL_MAX_RUNS`. Default 1.
+   */
+  globalMaxRuns: number;
+  /**
+   * #372: the per-org fairness cap (`input.orgId` GROUP_ROUND_ROBIN key). Must
+   * stay ≤ `globalMaxRuns`; equal is allowed (a single-org box must be able to
+   * use every slot). `WORKER_PER_ORG_MAX_RUNS`, default 1.
+   */
+  perOrgMaxRuns: number;
+  /**
    * #205: every slot's agent account, slot 0 first — `[agentUser]` at N = 1,
    * `[]` with agent-uid mode off. The one list every box-wide operation (the
    * shared namespace grants, the boot scan, the stale-dir sweep) iterates.
@@ -334,6 +348,29 @@ export function parseMemoryMax(raw: string | undefined): number {
 
 /** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
 export { BOX_SLOTS_MAX };
+
+/** Upper bound on either engine cap: a typo like `30` must not register 30 engine slots. */
+export const ENGINE_CAP_MAX = BOX_SLOTS_MAX;
+
+/**
+ * Parse `WORKER_GLOBAL_MAX_RUNS` / `WORKER_PER_ORG_MAX_RUNS` (#372). Unset or
+ * empty = 1 = today's compile-time caps. Anything present but not an integer in
+ * [1, ENGINE_CAP_MAX] THROWS, naming the knob: a box told to admit N must never
+ * quietly admit a different N.
+ */
+export function parseEngineCap(name: string, raw: string | undefined): number {
+  const v = (raw ?? "").trim();
+  if (!v) {
+    return 1;
+  }
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > ENGINE_CAP_MAX) {
+    throw new Error(
+      `${name} must be an integer between 1 and ${ENGINE_CAP_MAX}, got ${JSON.stringify(v)}`,
+    );
+  }
+  return n;
+}
 
 /**
  * Parse `WORKER_BOX_SLOTS` (#205). Unset or empty = 1 = today's exclusive lock.
@@ -593,6 +630,38 @@ export function loadWorkerConfig(
         "Set WORKER_RUN_MEMORY_MAX, or set WORKER_BOX_SLOTS=1.",
     );
   }
+  // #372. THE TUPLE MOVES TOGETHER. The engine's "global" key is per workflow
+  // variant, the worker's `slots` is the engine-native cross-workflow cap and the
+  // counting box lock is the host cap: `WORKER_GLOBAL_MAX_RUNS` must EQUAL
+  // `WORKER_BOX_SLOTS` (worker.ts registers `slots: boxSlots`), or the engine
+  // would either dispatch runs the box cannot admit (global > slots: they park
+  // on the box lock with their 30-minute clocks running) or starve slots the
+  // box paid for (global < slots). The per-org fairness cap must not exceed the
+  // global cap (a cap no run can reach is a lie in the registration). Refused
+  // here, at boot AND at every run, like the #205 pairings above.
+  const globalMaxRuns = parseEngineCap(
+    "WORKER_GLOBAL_MAX_RUNS",
+    env.WORKER_GLOBAL_MAX_RUNS,
+  );
+  const perOrgMaxRuns = parseEngineCap(
+    "WORKER_PER_ORG_MAX_RUNS",
+    env.WORKER_PER_ORG_MAX_RUNS,
+  );
+  if (globalMaxRuns !== boxSlots) {
+    throw new Error(
+      `WORKER_GLOBAL_MAX_RUNS=${globalMaxRuns} but WORKER_BOX_SLOTS=${boxSlots}: the engine ` +
+        "global cap, the worker's engine slots and the kernel box slots are ONE setting " +
+        "and must agree — set both knobs to the same value (the tuple also needs " +
+        "WORKER_RUN_MEMORY_MAX and the swap sized for it; deploy/README.md).",
+    );
+  }
+  if (perOrgMaxRuns > globalMaxRuns) {
+    throw new Error(
+      `WORKER_PER_ORG_MAX_RUNS=${perOrgMaxRuns} exceeds WORKER_GLOBAL_MAX_RUNS=${globalMaxRuns}: ` +
+        "no org can be admitted past the global cap, so a larger per-org cap is a " +
+        "misconfiguration — set WORKER_PER_ORG_MAX_RUNS at or below the global cap.",
+    );
+  }
   // Every slot's account name must be a valid login NOW, not at the first run
   // of that slot: a base near the 31-character limit plus `-<i>` is refused by
   // assertAgentUser, and that refusal belongs at boot.
@@ -634,6 +703,8 @@ export function loadWorkerConfig(
   return {
     agentUser,
     boxSlots,
+    globalMaxRuns,
+    perOrgMaxRuns,
     agentUsers,
     headroomFloorBytes,
     headroomCommitFraction,

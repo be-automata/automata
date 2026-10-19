@@ -13,6 +13,8 @@ import {
   parseMemoryMax,
   parseTasksMax,
   resolveBoxId,
+  parseEngineCap,
+  ENGINE_CAP_MAX,
 } from "./config";
 import { slotAgentUsers } from "./spawn-as-user";
 
@@ -540,6 +542,8 @@ describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boo
       ...agentUid,
       WORKER_BOX_SLOTS: "3",
       WORKER_RUN_MEMORY_MAX: "1500M",
+      // #372: the engine cap moves with the slots (the tuple is one setting).
+      WORKER_GLOBAL_MAX_RUNS: "3",
     });
     expect(cfg.boxSlots).toBe(3);
     expect(slotAgentUsers(cfg.agentUser, cfg.boxSlots)).toEqual([
@@ -556,6 +560,7 @@ describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boo
         WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
         WORKER_BOX_SLOTS: "2",
         WORKER_RUN_MEMORY_MAX: "1500M",
+        WORKER_GLOBAL_MAX_RUNS: "2",
       }),
     ).toThrow(/WORKER_AGENT_USER/);
   });
@@ -636,5 +641,92 @@ describe("#371: memory-headroom admission knobs are validated at boot", () => {
     expect(() => loadWorkerConfig({ WORKER_HEADROOM_RUN_COMMIT: "0" })).toThrow(
       /WORKER_HEADROOM_RUN_COMMIT must be positive/,
     );
+  });
+});
+
+describe("#372: WORKER_GLOBAL_MAX_RUNS / WORKER_PER_ORG_MAX_RUNS — the engine caps move with the box slots", () => {
+  const twoSlots = {
+    WORKER_AGENT_USER: "automata-agent",
+    WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+    WORKER_RUN_MEMORY_MAX: "5000M",
+    WORKER_BOX_SLOTS: "2",
+  };
+
+  it("defaults to 1/1 — today's compile-time caps, and a stray explicit 1 never trips anything", () => {
+    expect(parseEngineCap("WORKER_GLOBAL_MAX_RUNS", undefined)).toBe(1);
+    expect(parseEngineCap("WORKER_GLOBAL_MAX_RUNS", " ")).toBe(1);
+    const cfg = loadWorkerConfig({});
+    expect(cfg.globalMaxRuns).toBe(1);
+    expect(cfg.perOrgMaxRuns).toBe(1);
+    expect(
+      loadWorkerConfig({
+        WORKER_GLOBAL_MAX_RUNS: "1",
+        WORKER_PER_ORG_MAX_RUNS: "1",
+      }).globalMaxRuns,
+    ).toBe(1);
+  });
+
+  it("accepts an integer in [1, ENGINE_CAP_MAX] and refuses everything else, naming the knob", () => {
+    expect(parseEngineCap("WORKER_PER_ORG_MAX_RUNS", "3")).toBe(3);
+    for (const bad of [
+      "0",
+      "-1",
+      "1.5",
+      "two",
+      "1e1",
+      String(ENGINE_CAP_MAX + 1),
+    ]) {
+      expect(() => parseEngineCap("WORKER_PER_ORG_MAX_RUNS", bad), bad).toThrow(
+        /WORKER_PER_ORG_MAX_RUNS/,
+      );
+    }
+  });
+
+  it("GLOBAL ≠ SLOTS is refused at boot, naming BOTH knobs (epic AC 8) — in either direction", () => {
+    expect(() => loadWorkerConfig({ WORKER_GLOBAL_MAX_RUNS: "3" })).toThrow(
+      /WORKER_GLOBAL_MAX_RUNS=3.*WORKER_BOX_SLOTS=1/s,
+    );
+    expect(() => loadWorkerConfig({ ...twoSlots })).toThrow(
+      /WORKER_GLOBAL_MAX_RUNS=1.*WORKER_BOX_SLOTS=2/s,
+    );
+  });
+
+  it("PER_ORG > GLOBAL is refused, naming both knobs", () => {
+    expect(() =>
+      loadWorkerConfig({
+        ...twoSlots,
+        WORKER_GLOBAL_MAX_RUNS: "2",
+        WORKER_PER_ORG_MAX_RUNS: "3",
+      }),
+    ).toThrow(/WORKER_PER_ORG_MAX_RUNS=3.*WORKER_GLOBAL_MAX_RUNS=2/s);
+  });
+
+  it("the consistent raised tuple loads (2/2/2 + ceiling), and per-org = global is allowed", () => {
+    const cfg = loadWorkerConfig({
+      ...twoSlots,
+      WORKER_GLOBAL_MAX_RUNS: "2",
+      WORKER_PER_ORG_MAX_RUNS: "2",
+    });
+    expect(cfg.boxSlots).toBe(2);
+    expect(cfg.globalMaxRuns).toBe(2);
+    expect(cfg.perOrgMaxRuns).toBe(2);
+    expect(
+      loadWorkerConfig({
+        ...twoSlots,
+        WORKER_GLOBAL_MAX_RUNS: "2",
+        WORKER_PER_ORG_MAX_RUNS: "1",
+      }).perOrgMaxRuns,
+    ).toBe(1);
+  });
+
+  it("the #205 pairings still come first: SLOTS > 1 without the ceiling is refused before the caps are compared", () => {
+    expect(() =>
+      loadWorkerConfig({
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+        WORKER_BOX_SLOTS: "2",
+        WORKER_GLOBAL_MAX_RUNS: "2",
+      }),
+    ).toThrow(/WORKER_BOX_SLOTS=2.*WORKER_RUN_MEMORY_MAX/s);
   });
 });
