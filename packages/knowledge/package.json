@@ -4,6 +4,8 @@
   "description": "Grounded knowledge claims: evidence pinning, drift detection, re-anchoring and reviewable ops",
   "type": "module",
   "exports": {
+    ".": "./src/core.ts",
+    "./node": "./src/node.ts",
     "./claims": "./src/claims.ts",
     "./op-key": "./src/op-key.ts",
     "./reanchor": "./src/reanchor.ts"
