@@ -539,7 +539,18 @@ async function postSuperseded(
  * entry) keeps the pre-#125 REST trigger contract byte-identical.
  */
 // One config read for every variant; the deferral count is a boot constant.
-const bootAdmissionRetries = loadWorkerConfig().admissionMaxDeferrals;
+// Read at import (hello/worker.ts imports this module before main()), so a
+// config the loader rejects must NOT throw here — that would bypass the
+// guarded `[worker-boot] … exit(1)` path; main()'s own loadWorkerConfig()
+// reports it. 0 then registers the pre-#371 shape, and the process never
+// gets to register anyway.
+const bootAdmissionRetries = ((): number => {
+  try {
+    return loadWorkerConfig().admissionMaxDeferrals;
+  } catch {
+    return 0;
+  }
+})();
 export const agentRunWorkflows = (
   Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]
 ).map((name) =>

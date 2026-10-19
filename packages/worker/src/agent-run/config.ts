@@ -414,10 +414,10 @@ export function parseCommitFraction(raw: string | undefined): number {
 }
 
 /**
- * Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8 (the largest count
- * whose Σbackoff fits ADMISSION_DEFERRAL_BUDGET_S); a non-negative integer. The
- * ONE upper bound is the budget check in loadWorkerConfig — a second numeric cap
- * here could only disagree with it.
+ * Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8 (366 s of backoff;
+ * the budget check in loadWorkerConfig accepts up to 10 = 606 s under the 720 s
+ * budget); a non-negative integer. That budget check is the ONE upper bound — a
+ * second numeric cap here could only disagree with it.
  */
 export function parseMaxDeferrals(raw: string | undefined): number {
   const v = (raw ?? "").trim();
