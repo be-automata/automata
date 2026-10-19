@@ -249,8 +249,11 @@ sudo env WORKER_AGENT_USER=automata-agent WORKER_BOX_SLOTS=2 ./linux/nft-preflig
 #    per-run dir is granted to its own slot by the worker at clone time).
 sudo setfacl -m u:automata-agent-1:--x /usr/local/automata/runs
 
-# 5. Worker env, then restart the unit.
+# 5. Worker env, then restart the unit — the whole tuple (#372), never the
+#    slots alone: the worker refuses WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS.
 #    WORKER_BOX_SLOTS=2
+#    WORKER_GLOBAL_MAX_RUNS=2
+#    WORKER_PER_ORG_MAX_RUNS=2
 ```
 
 What the worker then does on its own: takes slot locks `box.lock` and
@@ -264,7 +267,8 @@ boot only once it holds every slot. The boot log shows
 covers every slot uid (/run/automata/egress-fence.uids)` — grep for the
 `box slots: 2 (` prefix.
 
-Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
+Rollback: `WORKER_BOX_SLOTS=1` with `WORKER_GLOBAL_MAX_RUNS=1` and
+`WORKER_PER_ORG_MAX_RUNS=1` (or all three unset), then restart. The extra accounts, sudoers entries
 and nft set may stay; they fence nothing while unused, and the boot uid scan
 still reaps every provisioned slot account above N — each under a non-blocking
 take of its own `box.lock.<i>` (`retired slot account(s) ... scanned too` in

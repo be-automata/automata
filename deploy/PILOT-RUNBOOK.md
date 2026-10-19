@@ -1040,6 +1040,14 @@ The order matters because each step checks the one before it.
 7. **Worker**: install the unit, start it, and check that the boot journal
    shows `memory ceiling armed`, `harness: hash=… ok=gstack,gsd,ruflo` and
    `listening for actions`.
+   The concurrency tuple in `worker-box.env` is ONE setting (#372, detail in
+   `packages/worker/deploy/README.md`): `WORKER_BOX_SLOTS` = `WORKER_GLOBAL_MAX_RUNS`
+   ≥ `WORKER_PER_ORG_MAX_RUNS`, with `WORKER_RUN_MEMORY_MAX` and the swap sized so
+   `slots × ceiling + 2 GiB` fits the box's `CommitLimit`. Move them together; the
+   worker refuses to boot on any inconsistent pairing, naming the knobs
+   (`FATAL: worker configuration is invalid` / `the box slots do not fit this
+box's CommitLimit`). The production tuple and its derivation from the memory
+   sampler live in `deploy/uat/phase2-4.md`.
 8. **Drill**: the drill automation above, then
    `harness-batteries-acceptance.sh box …` → `ACCEPTANCE: PASS`.
 
