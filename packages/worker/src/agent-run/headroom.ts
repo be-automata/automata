@@ -345,7 +345,7 @@ export function assessHeadroomSupport(opts: {
   policy: HeadroomPolicy;
   platform?: NodeJS.Platform;
   readMeminfo?: () => string;
-}): { enabled: true } | { enabled: false; reason: string } {
+}): { enabled: true; warning?: string } | { enabled: false; reason: string } {
   if (isInertPolicy(opts.policy)) {
     return { enabled: false, reason: "policy is inert (floor 0, fraction 1)" };
   }
@@ -376,21 +376,33 @@ export function assessHeadroomSupport(opts: {
       } — set WORKER_HEADROOM_FLOOR=0 and WORKER_HEADROOM_COMMIT_FRACTION=1.0 to run without it`,
     );
   }
-  // The knobs against the BOX, with the commit arm's own inequality at
-  // reserved = 0 (no run is in flight at boot): Committed_AS never drops below
-  // the box's base load, so a run commit that cannot fit beside it would be
-  // refused on EVERY admission — each dispatched run holding its engine slot
-  // for the whole deferral budget and failing final. That is the silent
-  // "every run fails" a boot check exists to refuse up front (an oversized
-  // WORKER_RUN_MEMORY_MAX on a small box, or a typo such as 50G).
+  // The knobs against the BOX. Two bounds on the commit arm:
+  //  - CONFIGURATION ONLY: a run commit above fraction × CommitLimit can never
+  //    pass (Committed_AS ≥ 0) — every dispatched run would hold its engine slot
+  //    for the whole deferral budget and fail final, the silent "every run
+  //    fails" a boot check exists to REFUSE up front (an oversized
+  //    WORKER_RUN_MEMORY_MAX on a small box, or a typo such as 50G).
+  //  - LOAD AT BOOT: Committed_AS + run commit > the ceiling with what the box
+  //    holds right now. The box is not guaranteed idle at boot (the engine's
+  //    Postgres, an operator's build, the UAT's own memory hog, escapees the
+  //    boot scan skipped), and under Restart=always a refusal would crash-loop
+  //    until the load dropped — a transient the deferral loop exists to absorb.
+  //    So this one is a WARNING, with the figure named as observed at boot.
   const commitCeiling = opts.policy.commitFraction * reading.commitLimit;
+  if (
+    opts.policy.commitFraction < 1 &&
+    opts.policy.runCommitBytes > commitCeiling
+  ) {
+    throw new Error(
+      `the memory headroom check can never admit a run on this box: run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
+    );
+  }
+  let warning: string | undefined;
   if (
     opts.policy.commitFraction < 1 &&
     reading.committedAs + opts.policy.runCommitBytes > commitCeiling
   ) {
-    throw new Error(
-      `the memory headroom check can never admit a run on this box: Committed_AS ${mib(reading.committedAs)} (idle, at boot) + run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
-    );
+    warning = `with the load observed at boot the memory headroom check would defer every run: Committed_AS ${mib(reading.committedAs)} (as sampled now, not a guaranteed idle baseline) + run commit ${mib(opts.policy.runCommitBytes)} exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)}; if this is the box's resting load, lower the run commit or raise WORKER_HEADROOM_COMMIT_FRACTION — if it is transient, runs will be admitted once it drops`;
   }
   // Same for the floor arm: a floor at or above the box's memory means
   // `MemAvailable − reserved ≥ floor` can never hold (a typo such as 10G on a
@@ -404,5 +416,5 @@ export function assessHeadroomSupport(opts: {
       `the memory headroom check can never admit a run on this box: floor ${mib(opts.policy.floorBytes)} (WORKER_HEADROOM_FLOOR) is at or above MemTotal ${mib(memTotal)} — lower the floor, or set floor 0 and fraction 1.0 to run without the check`,
     );
   }
-  return { enabled: true };
+  return warning ? { enabled: true, warning } : { enabled: true };
 }

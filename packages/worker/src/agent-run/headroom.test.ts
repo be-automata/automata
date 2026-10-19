@@ -330,33 +330,52 @@ describe("assessHeadroomSupport (boot)", () => {
     });
   });
 
-  it("a run commit that cannot fit beside the box's idle Committed_AS under fraction × CommitLimit can NEVER be admitted: boot refuses at the exact boundary, naming all three values and the rollback", () => {
-    const { committedAs, commitLimit } = parseMeminfo(MEMINFO);
-    const room = Math.floor(0.9 * commitLimit - committedAs); // the largest run commit that fits at boot
+  it("a run commit above fraction × CommitLimit (configuration alone) can NEVER be admitted: boot refuses, naming both values and the rollback", () => {
+    const { commitLimit } = parseMeminfo(MEMINFO);
     expect(() =>
       assessHeadroomSupport({
         policy: {
           ...POLICY,
           commitFraction: 0.9,
-          runCommitBytes: room + 1024 ** 2,
+          runCommitBytes: Math.ceil(0.9 * commitLimit) + 1024 ** 2,
         },
         platform: "linux",
         readMeminfo: () => MEMINFO,
       }),
     ).toThrow(
-      /can never admit a run on this box: Committed_AS \d+M .* \+ run commit \d+M .* exceeds 0\.9 × CommitLimit \d+M = \d+M .*fraction 1\.0/,
+      /can never admit a run on this box: run commit \d+M .* exceeds 0\.9 × CommitLimit \d+M = \d+M .*fraction 1\.0/,
     );
-    expect(
-      assessHeadroomSupport({
-        policy: { ...POLICY, commitFraction: 0.9, runCommitBytes: room },
-        platform: "linux",
-        readMeminfo: () => MEMINFO,
-      }),
-    ).toEqual({ enabled: true });
     // fraction 1.0 makes the commit arm inert, so the box check does not apply.
     expect(
       assessHeadroomSupport({
         policy: { ...POLICY, commitFraction: 1, runCommitBytes: 50 * GIB },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toEqual({ enabled: true });
+  });
+
+  it("a run commit that fits the configuration but not beside the Committed_AS sampled at boot is a WARNING, never a refusal (the box may not be idle at boot — a restart under the UAT hog must not crash-loop)", () => {
+    const { committedAs, commitLimit } = parseMeminfo(MEMINFO);
+    const room = Math.floor(0.9 * commitLimit - committedAs); // the largest run commit that fits beside the boot load
+    const warned = assessHeadroomSupport({
+      policy: {
+        ...POLICY,
+        commitFraction: 0.9,
+        runCommitBytes: room + 1024 ** 2,
+      },
+      platform: "linux",
+      readMeminfo: () => MEMINFO,
+    });
+    expect(warned).toMatchObject({
+      enabled: true,
+      warning: expect.stringMatching(
+        /would defer every run: Committed_AS \d+M \(as sampled now, not a guaranteed idle baseline\) \+ run commit \d+M exceeds 0\.9 × CommitLimit/,
+      ),
+    });
+    expect(
+      assessHeadroomSupport({
+        policy: { ...POLICY, commitFraction: 0.9, runCommitBytes: room },
         platform: "linux",
         readMeminfo: () => MEMINFO,
       }),

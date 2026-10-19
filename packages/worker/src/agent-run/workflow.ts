@@ -322,7 +322,12 @@ type RunCtx = {
  * On Linux with a live policy an unreadable /proc/meminfo THROWS, and the boot
  * refuses to start (worker.ts) rather than caching "off" for the process life.
  */
-type AdmissionGate = { controller: AdmissionController | null; reason: string };
+type AdmissionGate = {
+  controller: AdmissionController | null;
+  reason: string;
+  /** Boot-time load warning from assessHeadroomSupport (the box was not idle). */
+  warning: string | null;
+};
 let admissionGate: AdmissionGate | undefined;
 function admissionGateFor(
   config: ReturnType<typeof loadWorkerConfig>,
@@ -335,8 +340,12 @@ function admissionGateFor(
   };
   const support = assessHeadroomSupport({ policy });
   admissionGate = support.enabled
-    ? { controller: new AdmissionController(policy), reason: "" }
-    : { controller: null, reason: support.reason };
+    ? {
+        controller: new AdmissionController(policy),
+        reason: "",
+        warning: support.warning ?? null,
+      }
+    : { controller: null, reason: support.reason, warning: null };
   return admissionGate;
 }
 /** Boot-cached: the FIRST caller's config decides (the policy is box-wide, never per slot); later arguments are ignored. */
@@ -344,6 +353,13 @@ export function getAdmissionController(
   config: ReturnType<typeof loadWorkerConfig>,
 ): AdmissionController | null {
   return admissionGateFor(config).controller;
+}
+
+/** The boot-time load warning for an armed gate (null when none): the box was not idle when the gate was assessed. */
+export function headroomBootWarning(
+  config: ReturnType<typeof loadWorkerConfig>,
+): string | null {
+  return admissionGateFor(config).warning;
 }
 
 /** The boot log line for the gate: armed with its thresholds, or OFF and why. */
@@ -398,7 +414,7 @@ export function _setAdmissionControllerForTests(
   admissionGate =
     controller === undefined
       ? undefined
-      : { controller, reason: controller ? "" : "test: off" };
+      : { controller, reason: controller ? "" : "test: off", warning: null };
 }
 
 /**

@@ -47,7 +47,7 @@ import {
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
 import { workflows } from "../registry";
-import { headroomBootLine } from "../agent-run/workflow";
+import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
 const execFileAsync = promisify(execFile);
 
@@ -324,6 +324,8 @@ async function main() {
   // every job unguarded while the log says "OFF".
   try {
     console.log(`[worker-boot] ${headroomBootLine(registrationConfig)}`);
+    const loadWarning = headroomBootWarning(registrationConfig);
+    if (loadWarning) console.warn(`[worker-boot] WARNING: ${loadWarning}`);
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: the memory headroom check is configured but cannot be armed — refusing to start",
