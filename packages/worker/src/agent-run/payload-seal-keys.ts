@@ -14,11 +14,10 @@ import { GuardedFileError, readGuardedFile } from "./guarded-file";
  * front, see scripts/gen-payload-seal-key.ts). Owner = the worker service
  * user, mode 0400; never in git, never logged.
  *
- * Rollout step 1 (this PR): the file is OPTIONAL. Absent ⇒ the worker unseals
- * nothing and accepts only the legacy plain-text input. Present ⇒ it must
- * parse and every key must pass the boot probe, or the worker refuses to
- * start — a corrupt or truncated file would otherwise fail every sealed run
- * at its first step. Step 4 (PR 2) makes the file mandatory.
+ * Strict (rollout step 4, PR 2): the file is MANDATORY. It must exist, parse
+ * and every key must pass the boot probe, or the worker refuses to start —
+ * a worker without a usable ring would fail every run at its first step
+ * (every input is sealed and plain-text inputs are refused).
  */
 
 export const DEFAULT_PAYLOAD_SEAL_KEY_FILE = "/etc/automata/payload-seal.key";
@@ -32,7 +31,7 @@ const BOOT_PROBE_BINDING = {
   orgId: "boot-probe",
 };
 
-/** Thrown when the configured file does not exist (ENOENT) — the one tolerated case. */
+/** Thrown when the configured file does not exist (ENOENT). Fatal at boot, a refused run after. */
 export class PlaneKeyFileMissingError extends Error {
   constructor(readonly path: string) {
     super(`payload-seal: key file not found: ${path}`);
@@ -148,16 +147,9 @@ let ring: { path: string; keys: PlanePrivateKey[] } | null = null;
  */
 export function planeKeysForRun(path: string): PlanePrivateKey[] {
   if (ring && ring.path === path) return ring.keys;
-  let keys: PlanePrivateKey[];
-  try {
-    keys = readPlaneKeyFile(path);
-  } catch (err) {
-    if (err instanceof PlaneKeyFileMissingError) {
-      keys = [];
-    } else {
-      throw err;
-    }
-  }
+  // Strict: a missing file throws (PlaneKeyFileMissingError) and the run is
+  // refused, exactly like an unusable one — there is no plain-text fallback.
+  const keys = readPlaneKeyFile(path);
   ring = { path, keys };
   return keys;
 }
@@ -168,29 +160,17 @@ export function resetPlaneKeyRingForTests(): void {
 }
 
 /**
- * Boot: load the ring from `path` and prove every key. Returns the kids
- * (empty when the file is absent and `required` is false). Throws — and the
- * caller refuses to start — when the file is present but unusable, or absent
- * while `required` (strict mode, rollout step 4).
+ * Boot: load the ring from `path` and prove every key. Returns the kids.
+ * Throws — and the caller refuses to start — when the file is missing,
+ * unparseable, or holds a key that fails its own seal→unseal probe.
  */
 export async function loadPlaneKeysAtBoot({
   path,
-  required,
 }: {
   path: string;
-  required: boolean;
-}): Promise<{ kids: string[]; present: boolean }> {
-  let keys: PlanePrivateKey[];
-  try {
-    keys = readPlaneKeyFile(path);
-  } catch (err) {
-    if (err instanceof PlaneKeyFileMissingError && !required) {
-      ring = { path, keys: [] };
-      return { kids: [], present: false };
-    }
-    throw err;
-  }
+}): Promise<{ kids: string[] }> {
+  const keys = readPlaneKeyFile(path);
   const kids = await assertPlaneKeysUsable(keys);
   ring = { path, keys };
-  return { kids, present: true };
+  return { kids };
 }

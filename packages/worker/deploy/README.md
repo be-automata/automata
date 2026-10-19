@@ -187,9 +187,15 @@ wrangler secret put HATCHET_PAYLOAD_SEAL_KEY          # paste the printed line
 ```
 
 The worker refuses to boot when the file is present but unparseable or any key
-fails its own seal→unseal probe. During rollout step 1 an **absent** file is
-tolerated (the worker then reads only the legacy plain-text input); strict mode
-(PR 2) makes it mandatory and refuses plain-text inputs.
+fails its own seal→unseal probe — and, since strict mode (#380 PR 2), also when
+the file is **missing**: every input is sealed and plain-text inputs are refused,
+so a worker without a usable ring cannot run anything. The boot line reads
+`payload seal: N key(s) usable (<kids>) from <path> — strict: sealed inputs only`.
+
+**Rollback order (strict ⇄ dual):** never run a strict www against a worker that
+cannot unseal. To go back to the dual window, deploy the PR-1 www first (it
+accepts an empty key), then the PR-1 worker; unset `HATCHET_PAYLOAD_SEAL_KEY`
+only after the PR-1 www is live.
 
 **Rotation, in this order:** (1) `gen-payload-seal-key.ts --rotate` adds a new
 key at the FRONT of the ring and keeps the old one; (2) restart the worker with

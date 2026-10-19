@@ -26,8 +26,9 @@ import {
  *  - boot probe: protects=a corrupt private scalar is caught before
  *    registration; fails_when=a key that cannot unseal its own probe passes;
  *    no_claim=a mismatch with www's public key (not detectable here).
- *  - memoised ring: protects=one read per process, absent file ⇒ [];
- *    fails_when=a broken file is swallowed as "absent"; no_claim=none.
+ *  - memoised ring: protects=one read per process; strict — a missing file
+ *    throws at run time and at boot; fails_when=a missing or broken file is
+ *    swallowed as an empty ring; no_claim=none.
  */
 
 const dir = () => mkdtempSync(path.join(tmpdir(), "seal-keys-"));
@@ -154,17 +155,20 @@ describe("assertPlaneKeysUsable (boot probe)", () => {
 });
 
 describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
-  it("absent file ⇒ [] (rollout step 1), present ⇒ the ring, read once per path", async () => {
+  it("strict: a missing file throws from the per-run loader (never an empty ring); present ⇒ the ring, read once per path", async () => {
     const d = dir();
     const f = fileIn(d);
-    expect(planeKeysForRun(f)).toEqual([]);
+    expect(() => planeKeysForRun(f)).toThrow(PlaneKeyFileMissingError);
     const a = await generatePlaneKeyPair("plane-a");
     writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }), { mode: 0o600 });
-    // Memoised: the empty read stands until the ring is reset (a rotation
-    // restarts the worker by design).
-    expect(planeKeysForRun(f)).toEqual([]);
-    resetPlaneKeyRingForTests();
     expect(planeKeysForRun(f)).toEqual([a.privateKey]);
+    // Memoised: a later change on disk is not re-read until the ring is
+    // reset (a rotation restarts the worker by design).
+    const b = await generatePlaneKeyPair("plane-b");
+    writeFileSync(f, JSON.stringify({ keys: [b.privateKey] }), { mode: 0o600 });
+    expect(planeKeysForRun(f)).toEqual([a.privateKey]);
+    resetPlaneKeyRingForTests();
+    expect(planeKeysForRun(f)).toEqual([b.privateKey]);
   });
 
   it("a broken file throws from the per-run loader too (never silently 'absent')", () => {
@@ -173,21 +177,18 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
     expect(() => planeKeysForRun(f)).toThrow("not JSON");
   });
 
-  it("boot: absent + not required ⇒ present:false; absent + required ⇒ throws; present ⇒ probed kids", async () => {
+  it("boot (strict): a missing file throws (the caller exits before registering); present ⇒ probed kids", async () => {
     const d = dir();
     const f = fileIn(d);
-    await expect(
-      loadPlaneKeysAtBoot({ path: f, required: false }),
-    ).resolves.toEqual({ kids: [], present: false });
-    await expect(
-      loadPlaneKeysAtBoot({ path: f, required: true }),
-    ).rejects.toThrow(PlaneKeyFileMissingError);
+    await expect(loadPlaneKeysAtBoot({ path: f })).rejects.toThrow(
+      PlaneKeyFileMissingError,
+    );
     const a = await generatePlaneKeyPair("plane-2026-10");
     writeFileSync(f, JSON.stringify({ keys: [a.privateKey] }), { mode: 0o600 });
     resetPlaneKeyRingForTests();
-    await expect(
-      loadPlaneKeysAtBoot({ path: f, required: false }),
-    ).resolves.toEqual({ kids: ["plane-2026-10"], present: true });
+    await expect(loadPlaneKeysAtBoot({ path: f })).resolves.toEqual({
+      kids: ["plane-2026-10"],
+    });
     // …and the run loader now serves the same ring without re-reading.
     expect(planeKeysForRun(f)).toEqual([a.privateKey]);
   });
@@ -211,8 +212,8 @@ describe("planeKeysForRun / loadPlaneKeysAtBoot", () => {
       }),
       { mode: 0o600 },
     );
-    await expect(
-      loadPlaneKeysAtBoot({ path: f, required: false }),
-    ).rejects.toThrow("boot probe failed");
+    await expect(loadPlaneKeysAtBoot({ path: f })).rejects.toThrow(
+      "boot probe failed",
+    );
   });
 });

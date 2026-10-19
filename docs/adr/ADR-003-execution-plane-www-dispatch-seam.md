@@ -148,9 +148,12 @@ Corrected here:
   every consumer, and **revokes both `ghs_` tokens at the end of every run**
   (`DELETE /installation/token`, best effort). A run that fails before posting back (an
   unsealable payload) is reconciled by the supersede sweep's rule (iii)
-  (`run-failed-unreported`, daemon token revoked so a retry is not skipped). Rollout: PR 1 dual
-  (worker reads both shapes; www seals when the key is set), then PR 2 strict. The _prompt_ is
-  never in the input regardless (fork 3).
+  (`run-failed-unreported`, daemon token revoked so a retry is not skipped). Rollout: PR 1 (#393) dual
+  window — worker read both shapes, www sealed once the key was set (cutover 2026-10-19T16:41:12Z,
+  verified live in `docs/uat/UAT-380-2026-10-19/`) — then PR 2 **strict**: www fails closed with
+  no key configured (nothing minted or triggered), the worker refuses any input without
+  `sealedSecrets` or carrying a plain-text secret field, and a missing key file blocks its boot.
+  There is no plain-text path left. The _prompt_ is never in the input regardless (fork 3).
 - **F5 (enumeration key off the wire).** `/api/daemon/next-message` is **POST with `threadChatId`
   in the body**, not a query param, so the enumeration key stays out of URLs and access logs. The
   worker side must likewise not log the pulled body (H2).

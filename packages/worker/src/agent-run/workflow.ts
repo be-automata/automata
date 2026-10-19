@@ -469,17 +469,12 @@ async function runAgent(
   // provisioning. A failure here throws a PayloadSealError naming only the
   // kid and the failure class; the task fails, nothing is posted (the daemon
   // token is inside the envelope), and www's sweep rule (iii) reconciles.
-  const { input, secrets, source, legacyFieldsIgnored } =
-    await resolveRunSecrets({
-      wire,
-      keys: planeKeysForRun(config.payloadSealKeyFile),
-    });
+  const { input, secrets } = await resolveRunSecrets({
+    wire,
+    keys: planeKeysForRun(config.payloadSealKeyFile),
+  });
   ctx.log(
-    `[agent-run ${input.threadId}] run secrets: ${source}` +
-      (source === "sealed" ? ` (kid=${input.sealedSecrets?.kid})` : "") +
-      (legacyFieldsIgnored
-        ? " — plain-text secret fields ALSO present and ignored (control-plane defect: the engine row holds them)"
-        : ""),
+    `[agent-run ${input.threadId}] run secrets: sealed (kid=${input.sealedSecrets?.kid})`,
   );
   // #380: both ghs_ tokens die with the run. runAgentInner revokes them after
   // the fix check and before the box lock release; this outer finally is the
