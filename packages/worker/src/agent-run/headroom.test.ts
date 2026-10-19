@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ADMISSION_BACKOFF,
+  ADMISSION_DEFERRAL_BUDGET_S,
   AdmissionController,
   AdmissionDeferredError,
   assessHeadroomSupport,
+  sumBackoffSeconds,
   evaluateHeadroom,
   isInertPolicy,
   parseMeminfo,
@@ -161,13 +164,13 @@ describe("AdmissionController (mutex + reservations)", () => {
       POLICY.runCommitBytes,
     );
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
-    expect(lines[0]).toMatch(/^admission\.headroom_ok \{/);
+    expect(lines[0]).toMatch(/^box\.headroom_ok \{/);
     expect(lines[1]).toMatch(
-      /^admission\.headroom_rejected \{.*"reason":"commit-over-fraction"/,
+      /^box\.headroom_rejected \{.*"reason":"commit-over-fraction"/,
     );
     // The deferral names the three kernel values the operator needs.
     expect((err as Error).message).toMatch(
-      /MemAvailable=\d+ Committed_AS=\d+ CommitLimit=\d+/,
+      /MemAvailable=\d+M Committed_AS=\d+M\/CommitLimit=\d+M/,
     );
   });
 
@@ -194,16 +197,64 @@ describe("AdmissionController (mutex + reservations)", () => {
     expect(c.reservedBytes()).toBe(0);
   });
 
-  it("a meminfo read failure rejects the admission and does not wedge the mutex", async () => {
+  it("an unreadable meminfo at admission FAILS OPEN: one box.headroom_unreadable line, no reservation, no throw", async () => {
     let fail = true;
+    const lines: string[] = [];
     const c = new AdmissionController(POLICY, true, () => {
       if (fail) throw new Error("EIO");
       return MEMINFO;
     });
-    await expect(c.admit({ threadId: "a", attempt: 0 })).rejects.toThrow(/EIO/);
-    fail = false;
-    const r = await c.admit({ threadId: "b", attempt: 0 });
+    const r = await c.admit({
+      threadId: "a",
+      attempt: 2,
+      log: (l) => lines.push(l),
+    });
     r.release();
+    expect(lines).toEqual([
+      expect.stringMatching(/^box\.headroom_unreadable \{.*"attempt":2.*EIO/),
+    ]);
+    expect(c.reservedBytes()).toBe(0);
+    fail = false;
+    const b = await c.admit({ threadId: "b", attempt: 0 });
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
+    b.release();
+  });
+
+  it("the deferral message is operator-facing and names the three kernel values in MiB", () => {
+    const err = new AdmissionDeferredError(
+      "commit-over-fraction",
+      {
+        memAvailable: 2 * GIB,
+        committedAs: 11 * GIB,
+        commitLimit: 12 * GIB,
+        floor: GIB,
+        fraction: 0.9,
+        runCommit: 5000 * 1024 ** 2,
+        reserved: 0,
+      },
+      1,
+    );
+    expect(err.message).toMatch(
+      /^The box had no memory headroom for this run \(attempt 2, commit-over-fraction\): MemAvailable=2048M Committed_AS=11264M\/CommitLimit=12288M/,
+    );
+    expect(err.name).toBe("AdmissionDeferredError");
+  });
+});
+
+describe("the deferral budget vs the control plane's 75-minute stalled cutoff", () => {
+  it("Σbackoff is 2^n capped at 120 s and the default 8 deferrals stay well inside the budget", () => {
+    expect(ADMISSION_BACKOFF).toEqual({ factor: 2, maxSeconds: 120 });
+    expect(sumBackoffSeconds(0)).toBe(0);
+    expect(sumBackoffSeconds(3)).toBe(2 + 4 + 8);
+    expect(sumBackoffSeconds(8)).toBe(2 + 4 + 8 + 16 + 32 + 64 + 120 + 120);
+    expect(sumBackoffSeconds(8)).toBeLessThanOrEqual(
+      ADMISSION_DEFERRAL_BUDGET_S,
+    );
+    expect(ADMISSION_DEFERRAL_BUDGET_S).toBe(12 * 60);
+    // 30 m initial schedule window + budget + 30 m execution leaves margin under 75 m.
+    expect(30 * 60 + ADMISSION_DEFERRAL_BUDGET_S + 30 * 60).toBeLessThan(
+      75 * 60,
+    );
   });
 });
 

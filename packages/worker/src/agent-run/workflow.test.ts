@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
-import { AGENT_RUN_VARIANTS } from "./definition";
+import { AGENT_RUN_VARIANTS, buildAgentRunDefinition } from "./definition";
+import { loadWorkerConfig } from "./config";
 
 // Defensive: this suite only checks registration shapes and never runs the
 // task fn — but if a future case does, the admission reap and box lock must
@@ -128,20 +129,45 @@ describe("agentRunWorkflow registration shape", () => {
     expect(keys[0].maxRuns).toBeLessThanOrEqual(keys[1].maxRuns);
   });
 
-  it("registers exactly one run task with EXPLICIT retries:0 and the 30m timeouts", () => {
+  it("registers exactly one run task whose retries are the admission-deferral budget (#371) with the 30m timeouts", () => {
     const tasks = workflowDef._tasks as Array<{
       name: string;
       retries?: number;
+      backoff?: { factor: number; maxSeconds: number };
       scheduleTimeout?: string;
       executionTimeout?: string;
     }>;
     expect(tasks).toHaveLength(1);
     const run = tasks[0]!;
     expect(run.name).toBe("run");
-    // Explicit 0 — never undefined (a future edit that drops it must fail here).
-    expect(run.retries).toBe(0);
+    // Explicit, never undefined — and equal to WORKER_ADMISSION_MAX_DEFERRALS
+    // (default 8). These retries are admission deferrals ONLY: every error
+    // after admission is fenced non-retryable (fenceNonRetryable), so a raised
+    // count can never re-execute an agent.
+    // On a Linux box with /proc/meminfo the gate is armed and retries = 8; on
+    // macOS (this suite's host) the gate is OFF and the shipped pre-#371 shape
+    // (retries 0, no backoff) is registered — byte-identical pilot.
+    const armed = wf.getAdmissionController(loadWorkerConfig({})).enabled;
+    expect(run.retries).toBe(
+      armed ? loadWorkerConfig({}).admissionMaxDeferrals : 0,
+    );
+    if (armed) {
+      expect(run.backoff).toEqual({ factor: 2, maxSeconds: 120 });
+    } else {
+      expect(run.backoff).toBeUndefined();
+    }
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
+  });
+
+  it("with admissionRetries 0 the definition is the pre-#371 shape: retries 0 and NO backoff key", () => {
+    const def = buildAgentRunDefinition("agent-run", null, {
+      admissionRetries: 0,
+    });
+    expect(def.task.retries).toBe(0);
+    expect("backoff" in def.task).toBe(false);
+    const legacy = buildAgentRunDefinition("agent-run", null);
+    expect(legacy.task).toEqual(def.task);
   });
 
   it("registers an onFailure handler (no name — SDK amendment 3)", () => {

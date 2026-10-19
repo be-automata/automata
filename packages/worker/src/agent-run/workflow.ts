@@ -35,8 +35,14 @@ import {
 } from "./task-agent";
 import {
   classifyNextMessageError,
+  fenceNonRetryable,
   nonRetryablePreflight,
 } from "./retry-classification";
+import {
+  AdmissionController,
+  assessHeadroomSupport,
+  type Reservation,
+} from "./headroom";
 import {
   pollUntilTerminal,
   postEgressEvents,
@@ -286,7 +292,17 @@ export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
 ) {
-  const def = buildAgentRunDefinition(name, perPrStrategy);
+  // #371: the run task's retries are admission deferrals (headroom check);
+  // every other failure is fenced non-retryable in runAgent. With the check
+  // inert or unavailable (macOS, rollback values) nothing can ever throw the
+  // deferral, so the shipped pre-#371 shape — retries 0, no backoff — is
+  // registered, byte-identical.
+  const bootConfig = loadWorkerConfig();
+  const def = buildAgentRunDefinition(name, perPrStrategy, {
+    admissionRetries: getAdmissionController(bootConfig).enabled
+      ? bootConfig.admissionMaxDeferrals
+      : 0,
+  });
   const wf = hatchet.workflow<AgentRunInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
   wf.onFailure({ fn: onAgentRunFailure });
@@ -299,7 +315,52 @@ type RunCtx = {
   cancelled: boolean;
   log: (message: string) => void;
   workflowRunId?: () => string;
+  /** #371: the engine's attempt counter (0 on the first try) — logged on every deferral. */
+  retryCount?: () => number;
 };
+
+/**
+ * #371: the worker-wide admission gate — one per process, decided once from
+ * the boot config. Lazy so importing this module (tests, the E2E suites) reads
+ * nothing; `assessHeadroomSupport` is what makes macOS and the inert rollback
+ * setting a no-op.
+ */
+let admissionController: AdmissionController | null = null;
+let admissionSupportReason = "";
+export function getAdmissionController(
+  config: ReturnType<typeof loadWorkerConfig>,
+): AdmissionController {
+  if (admissionController) {
+    return admissionController;
+  }
+  const policy = {
+    floorBytes: config.headroomFloorBytes,
+    commitFraction: config.headroomCommitFraction,
+    runCommitBytes: config.headroomRunCommitBytes,
+  };
+  const support = assessHeadroomSupport({ policy });
+  admissionSupportReason = support.enabled ? "" : support.reason;
+  admissionController = new AdmissionController(policy, support.enabled);
+  return admissionController;
+}
+
+/** The boot log line for the gate: armed with its thresholds, or OFF and why. */
+export function headroomBootLine(
+  config: ReturnType<typeof loadWorkerConfig>,
+): string {
+  const c = getAdmissionController(config);
+  return c.enabled
+    ? `memory headroom check armed: floor=${c.policy.floorBytes} fraction=${c.policy.commitFraction} runCommit=${c.policy.runCommitBytes} maxDeferrals=${config.admissionMaxDeferrals}`
+    : `memory headroom check OFF: ${admissionSupportReason}`;
+}
+
+/** Test seam: replace (or reset with null) the process-wide gate. */
+export function _setAdmissionControllerForTests(
+  controller: AdmissionController | null,
+): void {
+  admissionController = controller;
+  admissionSupportReason = "";
+}
 
 /**
  * The www client options for THIS run: ids + the #7 traceparent header on
@@ -362,6 +423,12 @@ async function runAgent(
     }
   }
   try {
+    // #371 EXACTLY-ONCE FENCE. The run task now carries `retries` so the engine
+    // can re-queue an admission deferral; that makes every PLAIN error thrown in
+    // here retryable — and a retried agent run re-executes the agent. So every
+    // error is rethrown non-retryable except the one deferral the engine is
+    // meant to retry (fenceNonRetryable). `finally` below still posts the
+    // superseded terminal on a cancel, unchanged.
     const output = await runAgentInner(
       input,
       ctx,
@@ -393,6 +460,13 @@ async function runAgent(
       }
     }
     return output;
+  } catch (err) {
+    // An engine cancel ends the task whatever we throw; let its abort error
+    // through untouched so the journal names it. Everything else is fenced.
+    if (ctx.cancelled || ctx.abortController?.signal.aborted) {
+      throw err;
+    }
+    throw fenceNonRetryable(err);
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);
@@ -848,8 +922,13 @@ async function runAgentInner(
     // Any OOM kill in the run's cgroup fails the run, even when only a child
     // died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
+    // #371: the agent child is alive and counted by the kernel — drop this
+    // run's headroom reservation (idempotent; the finally drops it too).
+    onFirstProgress: () => reservation?.release(),
   };
   let daemonForPoll: DaemonProcess | null = null;
+  // #371: this run's headroom reservation (set under the slot, below).
+  let reservation: Reservation | null = null;
 
   // UAT #229 F2: say which lane this run is (and its PR) before anything can
   // fail, so the journal can be matched to a GitHub review without timestamps.
@@ -926,6 +1005,18 @@ async function runAgentInner(
     // — clone grants, credential HOME, brokers, daemon, reaps, cleanup — means
     // the slot's config.
     config = configForSlot(config, boxLock.slot);
+    // #371: the memory-headroom check, under the slot and BEFORE the clone, so
+    // a deferral costs no clone. Refusal throws AdmissionDeferredError — the one
+    // error the engine retries (definition.ts) — after the slot is given back
+    // in the catch below; nothing of this run is on disk yet. The reservation
+    // it returns is released at the first thread-status past `booting` (the
+    // agent child is alive and in the kernel's Committed_AS by then — the
+    // daemon alone is small), and in the finally.
+    reservation = await getAdmissionController(config).admit({
+      threadId: input.threadId,
+      attempt: ctx.retryCount?.() ?? 0,
+      log: admissionLog,
+    });
     if (config.boxSlots > 1) {
       await ensureSlotNamespace({
         root: config.runNamespaceRoot,
@@ -955,6 +1046,7 @@ async function runAgentInner(
       agentUser: config.agentUser,
     });
   } catch (err) {
+    reservation?.release();
     await boxLock?.release();
     throw err;
   }
@@ -979,6 +1071,8 @@ async function runAgentInner(
       // Cleanup BEFORE the release (I2), but the release ALWAYS happens: a
       // cleanup step that threw must not leave the slot held (and occupied)
       // until the worker restarts — the box would quietly run with N − 1.
+      // #371: the headroom reservation goes with it (idempotent).
+      reservation?.release();
       await boxLock?.release();
     }
   };
@@ -1397,6 +1491,9 @@ async function runAgentInner(
     // group so no orphan survives, then remove the workdir. Runs on normal return,
     // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
     daemon.teardown();
+    // #371: idempotent — a run that never reached its first progress poll still
+    // frees its headroom reservation here.
+    reservation?.release();
     // #184 (#152 Stage B2): the teardown uid-scan runs right after the
     // daemon's group is SIGKILLed and BEFORE the proxy/brokers close —
     // escapees are child traffic, so they must be dead before those closes

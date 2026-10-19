@@ -2,6 +2,7 @@ import {
   ConcurrencyLimitStrategy,
   type Duration,
 } from "@hatchet-dev/typescript-sdk";
+import { ADMISSION_BACKOFF } from "./headroom";
 
 /**
  * The PURE registration shape of the agent-run workflows (#125 C1): the
@@ -93,9 +94,6 @@ export interface AgentRunDefinitionOpts {
    */
   admissionRetries?: number;
 }
-
-/** Backoff between deferred admissions: 2^n s, capped. See config.ts admissionMaxDeferrals. */
-export const ADMISSION_BACKOFF = { factor: 2, maxSeconds: 120 } as const;
 
 export function buildAgentRunDefinition(
   name: string,

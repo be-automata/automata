@@ -46,6 +46,7 @@ import {
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
 import { workflows } from "../registry";
+import { headroomBootLine } from "../agent-run/workflow";
 
 const execFileAsync = promisify(execFile);
 
@@ -310,6 +311,9 @@ async function main() {
     );
     process.exit(1);
   }
+  // #371: decide the memory-headroom gate once and say so — armed with its
+  // thresholds, or OFF and why (inert rollback values, no /proc/meminfo).
+  console.log(`[worker-boot] ${headroomBootLine(loadWorkerConfig())}`);
   // ONE source for the name the engine knows this worker by: the #215 watchdog
   // probes for a row with exactly this name (namespaced), so a second literal
   // here could drift from it and leave the box silently unguarded.

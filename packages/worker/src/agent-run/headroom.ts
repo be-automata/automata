@@ -33,6 +33,35 @@ import fs from "node:fs";
  * construction (the pilot Mac runs N = 1 and never had this guard).
  */
 
+/**
+ * Backoff between deferred admissions: 2^n seconds capped at 120 (the engine's
+ * `backoff.factor` / `backoff.maxSeconds`). Shared by the task registration
+ * (definition.ts) and the config budget check so the two can never disagree.
+ */
+export const ADMISSION_BACKOFF = { factor: 2, maxSeconds: 120 } as const;
+
+/**
+ * The most a run may spend deferred, in seconds, over all its retries. The
+ * control plane reaps a thread still `booting` after 75 minutes
+ * (apps/www/src/server-lib/cron.ts STALLED_CUTOFF_SECS) and nothing in a
+ * deferral touches the thread, so the budget must satisfy
+ *   initial queue wait (≤ 30 m scheduleTimeout) + Σbackoff + 30 m execution + margin ≤ 75 m
+ * — 12 minutes is the Σbackoff that leaves that inequality true with a 3-minute margin.
+ */
+export const ADMISSION_DEFERRAL_BUDGET_S = 12 * 60;
+
+/** Σ min(factor^n, maxSeconds) for n in 1..retries — the worst-case total wait. */
+export function sumBackoffSeconds(retries: number): number {
+  let total = 0;
+  for (let n = 1; n <= retries; n++) {
+    total += Math.min(
+      ADMISSION_BACKOFF.factor ** n,
+      ADMISSION_BACKOFF.maxSeconds,
+    );
+  }
+  return total;
+}
+
 /** The `/proc/meminfo` fields the check reads, in BYTES. */
 export interface MeminfoReading {
   memTotal: number;
@@ -147,12 +176,20 @@ export class AdmissionDeferredError extends Error {
     readonly observed: HeadroomObserved,
     readonly attempt: number,
   ) {
+    // Operator-facing: when the deferrals run out this becomes the thread's
+    // error banner (onFailure), so it must read as a cause, not a dump.
     super(
-      `admission deferred (${reason}): MemAvailable=${observed.memAvailable} Committed_AS=${observed.committedAs} ` +
-        `CommitLimit=${observed.commitLimit} floor=${observed.floor} fraction=${observed.fraction} ` +
-        `runCommit=${observed.runCommit} reserved=${observed.reserved} attempt=${attempt}`,
+      `The box had no memory headroom for this run (attempt ${attempt + 1}, ${reason}): ` +
+        `MemAvailable=${mib(observed.memAvailable)} Committed_AS=${mib(observed.committedAs)}/` +
+        `CommitLimit=${mib(observed.commitLimit)} floor=${mib(observed.floor)} ` +
+        `fraction=${observed.fraction} runCommit=${mib(observed.runCommit)} reserved=${mib(observed.reserved)}`,
     );
   }
+}
+
+/** `1234M` for log lines and the error banner. */
+function mib(bytes: number): string {
+  return `${Math.round(bytes / 1024 ** 2)}M`;
 }
 
 export interface Reservation {
@@ -222,7 +259,23 @@ export class AdmissionController {
     log?: (line: string) => void;
   }): Reservation {
     {
-      const reading = parseMeminfo(this.readMeminfo());
+      // FAIL-OPEN on an unreadable kernel: a check that cannot read
+      // /proc/meminfo at this instant admits with one loud line rather than
+      // failing the run (the fence would make that failure final). Boot already
+      // proved the file readable; this covers a transient error only.
+      let reading: MeminfoReading;
+      try {
+        reading = parseMeminfo(this.readMeminfo());
+      } catch (e) {
+        opts.log?.(
+          `box.headroom_unreadable ${JSON.stringify({
+            threadId: opts.threadId,
+            attempt: opts.attempt,
+            error: e instanceof Error ? e.message : String(e),
+          })}`,
+        );
+        return NO_RESERVATION;
+      }
       // A redelivered attempt of the same thread must not count its own stale
       // reservation (a crashed worker never releases; the map dies with it, but
       // an in-process retry of the same threadId could).
@@ -239,14 +292,14 @@ export class AdmissionController {
         ...(verdict.ok ? {} : { reason: verdict.reason }),
       });
       if (!verdict.ok) {
-        opts.log?.(`admission.headroom_rejected ${fields}`);
+        opts.log?.(`box.headroom_rejected ${fields}`);
         throw new AdmissionDeferredError(
           verdict.reason,
           verdict.observed,
           opts.attempt,
         );
       }
-      opts.log?.(`admission.headroom_ok ${fields}`);
+      opts.log?.(`box.headroom_ok ${fields}`);
       this.reserved.set(opts.threadId, this.policy.runCommitBytes);
       let released = false;
       return {

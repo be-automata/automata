@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 import { BOX_SLOTS_MAX } from "./box-lock";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
+  ADMISSION_BACKOFF,
+  ADMISSION_DEFERRAL_BUDGET_S,
+  sumBackoffSeconds,
+} from "./headroom";
+import {
   agentUserForSlot,
   assertAgentUser,
   slotAgentUsers,
@@ -619,6 +624,19 @@ export function loadWorkerConfig(
   const admissionMaxDeferrals = parseMaxDeferrals(
     env.WORKER_ADMISSION_MAX_DEFERRALS,
   );
+  // THE DEFERRAL BUDGET IS BOUNDED BY THE CONTROL PLANE'S REAPER. A deferral
+  // writes nothing to www, so a thread that is deferred too long is reaped as
+  // stalled (75 min) while the engine still has it QUEUED — the admitted run
+  // then completes into a void. Refuse a count whose worst-case wait breaks
+  // the inequality documented on ADMISSION_DEFERRAL_BUDGET_S.
+  const worstCaseS = sumBackoffSeconds(admissionMaxDeferrals);
+  if (worstCaseS > ADMISSION_DEFERRAL_BUDGET_S) {
+    throw new Error(
+      `WORKER_ADMISSION_MAX_DEFERRALS=${admissionMaxDeferrals} waits up to ${worstCaseS}s ` +
+        `(2^n s capped at ${ADMISSION_BACKOFF.maxSeconds}s), over the ${ADMISSION_DEFERRAL_BUDGET_S}s budget ` +
+        `that keeps a deferred run inside the control plane's 75-minute stalled-thread cutoff`,
+    );
+  }
   return {
     agentUser,
     boxSlots,

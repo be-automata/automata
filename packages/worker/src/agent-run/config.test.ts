@@ -561,6 +561,19 @@ describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boo
     ).toThrow(/WORKER_AGENT_USER/);
   });
 
+  it("refuses a deferral count whose worst-case wait breaks the stalled-cutoff budget, naming both numbers", () => {
+    // 2+4+8+16+32+64 = 126 s, then 120 s per extra retry: 11 retries = 726 s > 720 s.
+    expect(() =>
+      loadWorkerConfig({ WORKER_ADMISSION_MAX_DEFERRALS: "11" }),
+    ).toThrow(
+      /WORKER_ADMISSION_MAX_DEFERRALS=11 waits up to 726s.*720s budget.*75-minute/,
+    );
+    expect(
+      loadWorkerConfig({ WORKER_ADMISSION_MAX_DEFERRALS: "10" })
+        .admissionMaxDeferrals,
+    ).toBe(10);
+  });
+
   it("a stray WORKER_BOX_SLOTS=1 never trips the N > 1 requirements (default-off promise)", () => {
     expect(loadWorkerConfig({ WORKER_BOX_SLOTS: "1" }).boxSlots).toBe(1);
   });
