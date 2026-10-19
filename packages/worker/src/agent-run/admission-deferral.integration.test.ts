@@ -213,17 +213,42 @@ describe.skipIf(!itEnabled)(
       // reads as QUEUED, so the re-queue proof is QUEUED observed AFTER attempt 0
       // ran and BEFORE attempt 1 did — the backoff window.
       const seen: Array<[Status, number]> = [];
+      // #69 slot-reclaim interplay: is the per-PR concurrency slot still
+      // FILLED while the deferred attempt waits out its backoff? (If it were,
+      // the orphan reclaim could take it from a long-queued run.) Sampled
+      // alongside the status; see the assertion below.
+      const slotsDuringBackoff = new Set<string>();
       const final = await pollUntil(
         `${label} terminal`,
         async () => {
           const s = await statusOf(id);
-          seen.push([s, attempts.get(label)?.length ?? 0]);
+          const n = attempts.get(label)?.length ?? 0;
+          seen.push([s, n]);
+          if (n === 1 && s === Status.QUEUED) {
+            const r = await pg.query<{ is_filled: boolean }>(
+              "select is_filled from v1_concurrency_slot where workflow_run_id = $1",
+              [id],
+            );
+            slotsDuringBackoff.add(
+              r.rows.length === 0
+                ? "no-row"
+                : r.rows.map((x) => String(x.is_filled)).join(","),
+            );
+          }
           return s;
         },
         (s) => TERMINAL.includes(s),
         90_000,
         100,
       );
+      // Measured: the slot reads filled only for the instant the failure is
+      // processed, then "no-row"/false for the rest of the backoff — a deferred
+      // run does NOT hold its per-PR slot while it waits, so the #69 orphan
+      // reclaim (filled slot, no runtime row, > 600 s old) cannot take it.
+      expect(
+        [...slotsDuringBackoff].some((v) => v === "no-row" || v === "false"),
+        `slot state during backoff: ${JSON.stringify([...slotsDuringBackoff])}`,
+      ).toBe(true);
       expect(final).toBe(Status.COMPLETED);
       const statuses = seen.map(([s]) => s);
       expect(statuses).not.toContain(Status.FAILED);

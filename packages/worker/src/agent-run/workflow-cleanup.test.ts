@@ -1,4 +1,5 @@
 import {
+  afterAll,
   afterEach,
   beforeAll,
   beforeEach,
@@ -7,6 +8,19 @@ import {
   it,
   vi,
 } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// #371: the deferral ledger is durable under WORKER_RUN_NAMESPACE_ROOT. This
+// suite must never touch the host's real root (/tmp/automata-agent-run — a
+// live worker's ledger), so it gets its own, set BEFORE workflow.ts is imported
+// (that module reads the config at import).
+const TEST_NAMESPACE_ROOT = fs.mkdtempSync(
+  path.join(os.tmpdir(), "workflow-cleanup-ns-"),
+);
+process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
+
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { runPaths } from "./run-owned-paths";
 
@@ -289,6 +303,10 @@ beforeAll(async () => {
   mod._setAdmissionControllerForTests(null);
 });
 
+afterAll(() => {
+  fs.rmSync(TEST_NAMESPACE_ROOT, { recursive: true, force: true });
+});
+
 beforeEach(() => {
   // "owner" is the only mode that pulls a credential at all.
   process.env.WORKER_BOX_TRUST = "owner";
@@ -561,7 +579,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       expect(ensureRunNamespace).toHaveBeenCalledWith(
         expect.objectContaining({
           agentUser: "_automata-agent",
-          root: "/tmp/automata-agent-run",
+          root: TEST_NAMESPACE_ROOT,
         }),
       );
     } finally {
