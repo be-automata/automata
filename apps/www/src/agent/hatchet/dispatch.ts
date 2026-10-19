@@ -1192,10 +1192,14 @@ export async function dispatchAgentRun({
     await revokeDaemonTokensForSandbox({ userId, sandboxId: runKey }).catch(
       () => {},
     );
+    // The cause is logged again upstream (withThreadChat serialises it):
+    // carry a SCRUBBED copy, never the raw engine reply.
     throw new ThreadError(
       "sandbox-creation-failed",
       "Failed to dispatch the remote agent run.",
-      error instanceof Error ? error : null,
+      new Error(
+        scrubForCatch(error instanceof Error ? error.message : String(error)),
+      ),
     );
   }
 }

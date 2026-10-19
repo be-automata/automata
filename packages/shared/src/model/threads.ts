@@ -1543,10 +1543,20 @@ export async function markThreadsTerminal({
   cause,
   supersededByThreadId,
   errorMessage,
+  unchangedSince,
 }: {
   db: DB;
   threadIds: string[];
   cause: TerminalCause;
+  /**
+   * #380: apply ONLY if the thread row has not been written since this
+   * timestamp (the caller's read of `thread.updatedAt`). A sweep decision is
+   * made from a read; a thread re-dispatched between that read and this write
+   * is booting again under a NEW run, and a terminal here would end that run
+   * (and, in the sweep, revoke its token). 2 ms of tolerance absorbs the
+   * microsecond truncation between Postgres and the JS Date it was read into.
+   */
+  unchangedSince?: Date;
   /** #125 C5: the newer run's thread when `cause === "superseded"` (chip link). */
   supersededByThreadId?: string | null;
   /**
@@ -1583,6 +1593,10 @@ export async function markThreadsTerminal({
   //
   // Broadcasts stay OUTSIDE the transaction: network I/O must never hold it
   // open, and a failed publish must not roll back a committed terminal.
+  const unchanged =
+    unchangedSince !== undefined
+      ? lt(schema.thread.updatedAt, new Date(unchangedSince.getTime() + 2))
+      : undefined;
   const { threadRows, chatRows } = await db.transaction(async (tx) => {
     const [threadRows, chatRows] = await Promise.all([
       tx
@@ -1596,6 +1610,7 @@ export async function markThreadsTerminal({
           and(
             inArray(schema.thread.id, threadIds),
             inArray(schema.thread.status, reapableThreadStatuses),
+            unchanged,
           ),
         )
         .returning({ id: schema.thread.id, userId: schema.thread.userId }),
@@ -1608,6 +1623,17 @@ export async function markThreadsTerminal({
           and(
             inArray(schema.threadChat.threadId, threadIds),
             inArray(schema.threadChat.status, reapableThreadStatuses),
+            unchanged !== undefined
+              ? inArray(
+                  schema.threadChat.threadId,
+                  tx
+                    .select({ id: schema.thread.id })
+                    .from(schema.thread)
+                    .where(
+                      and(inArray(schema.thread.id, threadIds), unchanged),
+                    ),
+                )
+              : undefined,
           ),
         )
         .returning({
@@ -1661,11 +1687,14 @@ export async function markThreadTerminal({
   threadId,
   cause,
   supersededByThreadId,
+  unchangedSince,
 }: {
   db: DB;
   threadId: string;
   cause: TerminalCause;
   supersededByThreadId?: string | null;
+  /** See markThreadsTerminal. */
+  unchangedSince?: Date;
 }): Promise<boolean> {
   return (
     (
@@ -1674,6 +1703,7 @@ export async function markThreadTerminal({
         threadIds: [threadId],
         cause,
         supersededByThreadId,
+        unchangedSince,
       })
     ).length > 0
   );

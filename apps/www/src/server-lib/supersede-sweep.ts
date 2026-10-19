@@ -140,29 +140,34 @@ async function decide(
   status: AgentRunStatus,
   run: SweepCandidate,
 ): Promise<Decision> {
-  // #380 generation guard, BEFORE any status is read: a row that belongs to
-  // an OLDER attempt of a thread that moved on — the thread's stamped active
-  // run is a different run (a newer review dispatch restamped it, whatever
-  // the thread's status now), or the thread is booting again after a write
+  // #380 generation guard: a row that belongs to an OLDER attempt of a
+  // thread that moved on — the thread's stamped active run is a different
+  // run (a newer review dispatch restamped it, whatever the thread's status
+  // now), or, for an UNSTAMPED thread, it is booting again after a write
   // well past this row's dispatch (a non-review resume, which does not
   // restamp; dispatch and its bookkeeping writes land within seconds of the
   // row's createdAt) — is stale evidence whatever the engine says about it
   // (FAILED, CANCELLED by a user stop, pruned). The terminal CAS checks only
-  // that the thread is reapable, not WHICH attempt is live, so the row is
-  // retired here without a terminal and the live attempt, and its daemon
-  // token, are left alone.
-  if (
+  // that the thread is reapable, not WHICH attempt is live, so such a row is
+  // retired without a terminal and the live attempt, and its daemon token,
+  // are left alone. A thread whose stamp IS this run is this run's: the
+  // updatedAt heuristic never applies to it.
+  // The guard decides ONLY the branches that write a terminal (and revoke
+  // tokens). A QUEUED/RUNNING row is left live and a COMPLETED one retired
+  // regardless: neither writes a terminal, and a CURRENT-generation run that
+  // waited behind the box slot while its thread was written again must not
+  // be mistaken for a stale one.
+  const staleRow =
     (run.threadActiveRunExternalId !== null &&
       run.threadActiveRunExternalId !== run.externalId) ||
-    (run.threadBooting &&
+    (run.threadActiveRunExternalId === null &&
+      run.threadBooting &&
       run.threadUpdatedAt.getTime() >
-        run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS)
-  ) {
-    return { kind: "stale-row" };
-  }
+        run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS);
   switch (status) {
     case "CANCELLED":
     case "NOT_FOUND": {
+      if (staleRow) return { kind: "stale-row" };
       const newer = await newerSibling(run);
       // Under complete-run-discard the engine CANCELs the NEWEST run
       // (CANCEL_NEWEST) while an OLDER one stays live; the worker never sees
@@ -198,6 +203,7 @@ async function decide(
       };
     }
     case "FAILED":
+      if (staleRow) return { kind: "stale-row" };
       // #380: FAILED while the thread never left `booting` = the run died
       // before it could post back (an unsealable payload, a clone failure,
       // an admission throw): the same reconcile class as rule (iii), with
@@ -482,10 +488,14 @@ export async function runSupersedeSweep(
       return;
     }
     try {
+      // Fenced on the candidate's own anchor: a thread re-dispatched between
+      // the read and this write (booting again, a fresh token, a run the
+      // listing did not see) is left for the next tick.
       const applied = await sweepTerminal({
         threadId: t.id,
         userId: t.userId,
         cause: "run-failed-unreported",
+        unchangedSince: t.dispatchedAt,
       });
       if (applied) {
         report.unreported.push(t.id);
@@ -527,17 +537,21 @@ async function sweepTerminal({
   userId,
   cause,
   supersededByThreadId,
+  unchangedSince,
 }: {
   threadId: string;
   userId: string;
   cause: TerminalCause;
   supersededByThreadId?: string;
+  /** The thread's updatedAt at candidate-read time: a write since then wins (markThreadsTerminal). */
+  unchangedSince?: Date;
 }): Promise<boolean> {
   const applied = await markThreadTerminal({
     db,
     threadId,
     cause,
     supersededByThreadId,
+    unchangedSince,
   });
   if (!applied) return false;
   try {

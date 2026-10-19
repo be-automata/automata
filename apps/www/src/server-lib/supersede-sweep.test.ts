@@ -531,6 +531,49 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     expect(row?.status).toBe("terminal");
   });
 
+  it("the guard never touches a LIVE current-generation row: QUEUED behind the box slot, thread booting with a late write, stamp == this run ⇒ stays in_flight, lease pushed", async () => {
+    const { setThreadActiveRun } = await import(
+      "@terragon/shared/model/threads"
+    );
+    const queued = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 46,
+      externalId: "r-queued-current",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    await setThreadActiveRun({
+      db,
+      threadId: queued.threadId,
+      externalId: "r-queued-current",
+    });
+    // A bookkeeping write long after dispatch (the stamp above just did one).
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, queued.threadId));
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-queued-current": "QUEUED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(queued.threadId)).status).toBe("booting");
+    const [row] = await db
+      .select({
+        status: hatchetRunTable.status,
+        lease: hatchetRunTable.sweepLeaseUntil,
+      })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-queued-current"));
+    expect(row?.status).toBe("in_flight");
+    expect(row?.lease?.getTime()).toBeGreaterThan(Date.now() + 10 * 60 * 1000);
+  });
+
   it("a thread WITH a run row is rule (i)'s: never listed by rule (iii), and rule (i)'s FAILED terminal revokes its daemon token too", async () => {
     const { threadId, threadChatId } = await createTestRemoteRun({
       db,
@@ -602,6 +645,31 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
       "run-failed-unreported",
     );
     expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(false);
+  });
+
+  it("rule (iii) race: a thread re-dispatched between the listing and the write (a later updatedAt) is left alone — no terminal, new token kept", async () => {
+    const t = await bootingTaskThread(N + 60_000);
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint) => {
+        if (hint.threadId === t.threadId) {
+          // The resume lands while the engine is being asked.
+          await db
+            .update(threadTable)
+            .set({ updatedAt: new Date() })
+            .where(eq(threadTable.id, t.threadId));
+          return [{ externalId: "r-before-resume", status: "FAILED" as const }];
+        }
+        return [];
+      },
+    });
+    expect(report.unreported).not.toContain(t.threadId);
+    expect((await threadRow(t.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name: t.name })).toBe(
+      true,
+    );
   });
 
   it("a listing failure leaves the thread for the next tick (no terminal, token kept)", async () => {
