@@ -1,0 +1,12 @@
+## engine secret scan, bound 2026-10-19T16:41:12Z (the cutover) — run 2026-10-19T16:47:30Z, INTERIM (2 runs so far)
+## columns: table | column | rows after bound | rows with a secret; zero/zero rows omitted — every post-cutover row is secret-free
+v1_dags_olap | input | 1 | 0
+v1_dags_olap_20261019 | input | 1 | 0
+v1_payload | inline_content | 5 | 0
+v1_payload_20261019 | inline_content | 5 | 0
+v1_payloads_olap | inline_content | 9 | 0
+v1_payloads_olap_20261019 | inline_content | 9 | 0
+v1_task | input | 2 | 0
+v1_task_20261019 | input | 2 | 0
+v1_tasks_olap | input | 2 | 0
+v1_tasks_olap_20261019 | input | 2 | 0

@@ -1,9 +1,11 @@
--- #380 AC 2: engine rows written after :cutover must hold no run secret.
--- Scans every table with a payload-bearing column the catalog knows
--- (v1_task*.input, v1_payload*.inline_content, v1_payloads_olap*,
--- v1_tasks_olap*.input, v1_dags_olap*.input) — same discovery the hatchet IT uses.
--- Usage: psql -c "SET app.cutover = '2026-10-19T16:30:00Z'" -f engine-secret-scan.sql   (one session: use -c then -f, or set it inside)
--- Simplest: sed "s/__CUTOVER__/2026-10-19T16:30:00Z/" engine-secret-scan.sql | psql ...
+-- #380 AC 2: engine rows written after the cutover must hold no run secret.
+-- Scans every payload-bearing column the catalog knows (v1_task*.input,
+-- v1_payload*.inline_content, v1_payloads_olap*, v1_tasks_olap*.input,
+-- v1_dags_olap*.input) — the same discovery the hatchet IT uses.
+-- Usage (the only form): substitute the bound, then run the file —
+--   sed "s/__CUTOVER__/2026-10-19T16:41:12Z/" scan.sql > /tmp/scan.sql
+--   docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -q -f /tmp/scan.sql
+-- A parent partition and its day partition both report (the parent repeats the child).
 \set ON_ERROR_STOP on
 DO $$
 DECLARE
@@ -38,7 +40,7 @@ BEGIN
       CONTINUE;
     END IF;
     q := format('SELECT count(*), count(*) FILTER (WHERE %I::text LIKE %L OR %I::text LIKE %L OR %I::text LIKE %L OR %I::text LIKE %L) FROM %I WHERE %I > %L::timestamptz',
-                r.column_name, '%ghs_%', r.column_name, '%installationToken%', r.column_name, '%daemonToken%', r.column_name, '%githubReadToken%',
+                r.column_name, '%ghs\\_%', r.column_name, '%installationToken%', r.column_name, '%daemonToken%', r.column_name, '%githubReadToken%',
                 r.table_name, tcol, '__CUTOVER__');
     EXECUTE q INTO n_total, n_secret;
     RAISE NOTICE '% | % | % | %', r.table_name, r.column_name, n_total, n_secret;
