@@ -18,6 +18,7 @@ import {
   EGRESS_HEALTH_PATH,
   PROXY_AUTH_AUDIT_CAP,
   PROXY_AUTH_HOST,
+  canonicalAddress,
   isHostLocalAddress,
   localInterfaceAddresses,
   makeGuardedLookup,
@@ -1151,11 +1152,102 @@ describe("#367: the run's proxy is not a tunnel through the box's loopback fence
     });
   });
 
-  it("the worker's call site never opts into the test seam", () => {
+  it("the worker's call site never opts into either test seam", () => {
     const workflow = readFileSync(
       new URL("./workflow.ts", import.meta.url),
       "utf8",
     );
     expect(workflow).not.toContain("allowHostLocalUpstreams");
+    expect(workflow).not.toContain("localAddresses");
+  });
+
+  it.each([
+    ["203.0.113.7", true],
+    ["::ffff:203.0.113.7", true],
+    ["[::ffff:cb00:7107]", true],
+    ["2a01:4f8:c014:3bf7::1", true],
+    ["2a01:4f8:c014:3bf7:0:0:0:1", true],
+    ["2a01:04f8:c014:3bf7::0001", true],
+    ["[2a01:4f8:c014:3bf7::1%eth0]", true],
+    ["2A01:4F8:C014:3BF7::1", true],
+    ["203.0.113.8", false],
+    ["2a01:4f8:c014:3bf7::2", false],
+  ])(
+    "every spelling of the box's own address is host-local: %s → %s (synthetic interface set)",
+    (host, expected) => {
+      const local = new Set(
+        ["203.0.113.7", "2a01:4f8:c014:3bf7::1%eth0"].map(canonicalAddress),
+      );
+      expect(isHostLocalAddress(host, local)).toBe(expected);
+    },
+  );
+
+  it("with a synthetic public interface address, a real proxy refuses its literal, mapped, expanded and zone-suffixed spellings on CONNECT and GET, in observe mode", async () => {
+    const closers: Array<() => void> = [];
+    const port = await new Promise<number>((resolve) => {
+      const server = createTcpServer((socket) => socket.end());
+      closers.push(() => server.close());
+      server.listen(0, "127.0.0.1", () =>
+        resolve((server.address() as AddressInfo).port),
+      );
+    });
+    const events: EgressDecisionEvent[] = [];
+    const proxy = await startEgressProxy({
+      mode: "observe",
+      policy: { level: "none", allowlist: [] },
+      onEvent: (e) => events.push(e),
+      localAddresses: new Set(["203.0.113.7", "2a01:4f8:c014:3bf7::1"]),
+    });
+    try {
+      const connect = (target: string) =>
+        new Promise<string>((resolve, reject) => {
+          const req = httpRequest({
+            host: "127.0.0.1",
+            port: proxy.port,
+            method: "CONNECT",
+            path: target,
+          });
+          req.on("connect", (res, socket) => {
+            socket.destroy();
+            resolve(`${res.statusCode}`);
+          });
+          req.on("response", (res) => {
+            res.resume();
+            resolve(`${res.statusCode}`);
+          });
+          req.on("error", reject);
+          req.end();
+        });
+      const get = (url: string) =>
+        new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            { host: "127.0.0.1", port: proxy.port, method: "GET", path: url },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        });
+      expect(await connect(`203.0.113.7:${port}`)).toBe("403");
+      expect(await connect(`[::ffff:203.0.113.7]:22`)).toBe("403");
+      expect(await connect(`[::ffff:cb00:7107]:22`)).toBe("403");
+      expect(await connect(`[2a01:4f8:c014:3bf7:0:0:0:1]:22`)).toBe("403");
+      expect(await connect(`[2a01:04f8:c014:3bf7::0001]:22`)).toBe("403");
+      expect(await connect(`[2a01:4f8:c014:3bf7::1%eth0]:22`)).toBe("403");
+      expect(await get(`http://[::ffff:203.0.113.7]:${port}/`)).toBe(403);
+      expect(await get(`http://[2a01:4f8:c014:3bf7:0:0:0:1]:${port}/`)).toBe(
+        403,
+      );
+      expect(events).toHaveLength(8);
+      for (const e of events) {
+        expect(e.action).toBe("deny");
+        expect(e.reason).toBe("host-local");
+      }
+    } finally {
+      await proxy.close();
+      for (const close of closers) close();
+    }
   });
 });

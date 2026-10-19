@@ -50,8 +50,11 @@ import type { Duplex } from "node:stream";
  *   - level "ip_port": exact IPv4 entry (any port) or IPv4:port entry (pinned).
  *   - level "none": allowlist entries only — the shape's allowlist already
  *     carries the system hosts, resolved control-plane-side; matched with the
- *     domain rules. The proxy adds NOTHING itself except the implicit loopback
- *     allow (the broker + this proxy live there).
+ *     domain rules. The proxy adds NOTHING itself.
+ *   - #367: host-local targets (loopback, the box's own addresses, private
+ *     ranges, and names resolving to them) are refused BEFORE the matcher
+ *     runs, in every mode — see isHostLocalAddress. Proxy-honouring clients
+ *     reach loopback directly (NO_PROXY), never through here.
  *   - Fail closed: an unparseable target is a deny, audited with host
  *     "unparseable" so onEvent always gets a string.
  */
@@ -171,6 +174,13 @@ export type StartEgressProxyOptions = {
    * call site never does — a test pins that.
    */
   allowHostLocalUpstreams?: boolean;
+  /**
+   * TEST SEAM ONLY (#367). The set of this host's own addresses, normally read
+   * from os.networkInterfaces(); tests inject a synthetic public address so
+   * the interface-address path is exercised on a runner that has none. The
+   * worker's call site never sets it — the same test pins that.
+   */
+  localAddresses?: ReadonlySet<string>;
 };
 
 const LEVELS = new Set(["none", "ip_port", "domain"]);
@@ -250,8 +260,8 @@ export function compileEgressPolicy(
 
 /**
  * Pure allow/deny decision for one destination. See the module doc for the
- * per-level rules. Loopback (`127.0.0.1`, `localhost`, `::1`) is implicitly
- * allowed at every level — the git broker and this proxy itself live there.
+ * per-level rules. There is NO implicit loopback allow (#367): host-local
+ * targets are refused by decide() before this matcher is consulted.
  * Accepts the raw shape (compiled on the fly — table tests) or the
  * startup-compiled form (the proxy's per-connection hot path).
  */
@@ -341,16 +351,44 @@ function expandV6(ip: string): number[] | null {
 }
 
 /**
- * Every address bound to one of this host's interfaces (#367), zone ids
- * stripped, lower-cased. The box's own public IPv4/IPv6 are reachable over the
- * local route — `CONNECT <public-ip>:22` would reach sshd past the cloud
- * firewall — so they count as host-local too.
+ * One spelling per address (#367): zone id stripped, lower-cased, IPv6
+ * expanded to its eight groups with no leading zeros, IPv4-mapped IPv6
+ * reduced to the embedded dotted quad. Two strings naming the same address
+ * compare equal only through this.
+ */
+export function canonicalAddress(address: string): string {
+  const a = address
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/%.*$/, "");
+  if (isIP(a) !== 6) return a;
+  const g = expandV6(a);
+  if (g === null) return a;
+  if (
+    g[0] === 0 &&
+    g[1] === 0 &&
+    g[2] === 0 &&
+    g[3] === 0 &&
+    g[4] === 0 &&
+    g[5] === 0xffff
+  ) {
+    return `${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`;
+  }
+  return g.map((x) => x.toString(16)).join(":");
+}
+
+/**
+ * Every address bound to one of this host's interfaces (#367), canonical.
+ * The box's own public IPv4/IPv6 are reachable over the local route —
+ * `CONNECT <public-ip>:22` would reach sshd past the cloud firewall — so they
+ * count as host-local too.
  */
 export function localInterfaceAddresses(): ReadonlySet<string> {
   const out = new Set<string>();
   for (const addrs of Object.values(networkInterfaces())) {
     for (const a of addrs ?? []) {
-      out.add(a.address.toLowerCase().replace(/%.*$/, ""));
+      out.add(canonicalAddress(a.address));
     }
   }
   return out;
@@ -371,9 +409,13 @@ export function isHostLocalAddress(
     .trim()
     .toLowerCase()
     .replace(/\.$/, "")
-    .replace(/^\[|\]$/g, "");
+    .replace(/^\[|\]$/g, "")
+    .replace(/%.*$/, ""); // a zone id never changes the destination
   if (h === "localhost" || h.endsWith(".localhost")) return true;
-  if (local.has(h)) return true;
+  // `local` holds canonical spellings; compare canonical to canonical, so a
+  // mapped, expanded, leading-zero or zone-suffixed form of the box's own
+  // address is the same key.
+  if (local.has(canonicalAddress(h))) return true;
   const family = isIP(h);
   if (family === 4) return isPrivateV4(h);
   if (family === 6) {
@@ -482,7 +524,9 @@ export async function startEgressProxy(
   // #367: the box's own interface addresses, read once per proxy (per run).
   const localAddrs = opts.allowHostLocalUpstreams
     ? EMPTY_SET
-    : localInterfaceAddresses();
+    : opts.localAddresses !== undefined
+      ? new Set([...opts.localAddresses].map(canonicalAddress))
+      : localInterfaceAddresses();
 
   function decide(host: string, port: number | null): boolean {
     // Observe allows everything — but it is still a DECISION, and it is still
