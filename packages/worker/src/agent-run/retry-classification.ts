@@ -5,10 +5,10 @@ import { NextMessageHttpError } from "./www-client";
  * Non-retryable error classification (#6). Mark KNOWN-TERMINAL errors
  * `NonRetryableError` so they route straight to the on-failure handler instead of
  * burning agent-minutes on backoff. This is correct to apply now even though the run
- * task is `retries: 0` today (no auto-retry) — it keeps the classification right if
- * retries are ever raised, and documents intent.
+ * task is `retries: 0` (no auto-retry, and #371 keeps it so) — it keeps the
+ * classification right if retries are ever raised, and documents intent.
  *
- * TRANSIENT (5xx / network) stays a plain Error (retryable); a 4xx from next-message
+ * TRANSIENT (5xx / network) stays a plain Error here; a 4xx from next-message
  * (PR gone / permission revoked / bad token) is terminal → NonRetryableError.
  */
 export function classifyNextMessageError(err: unknown): unknown {

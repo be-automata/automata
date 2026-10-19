@@ -1,4 +1,5 @@
 import {
+  afterAll,
   afterEach,
   beforeAll,
   beforeEach,
@@ -7,6 +8,20 @@ import {
   it,
   vi,
 } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// The runs this suite drives create per-run namespace dirs (and the box lock
+// files) under WORKER_RUN_NAMESPACE_ROOT. It must never touch the host's real
+// root (/tmp/automata-agent-run — a live worker's), so it gets its own, set
+// before anything reads the config.
+const TEST_NAMESPACE_ROOT = fs.mkdtempSync(
+  path.join(os.tmpdir(), "workflow-cleanup-ns-"),
+);
+process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
+
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { runPaths } from "./run-owned-paths";
 
 /**
@@ -229,6 +244,15 @@ vi.mock("./gh-broker", () => ({
   startGhBroker: (...args: unknown[]) => startGhBroker(...args),
 }));
 
+let fakeRunCgroupDir: string | null = null;
+const readMemoryAnon = vi.fn(
+  (_opts: { cgroupDir: string }): number | null => null,
+);
+vi.mock("./run-cgroup", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./run-cgroup")>()),
+  readMemoryAnon: (opts: { cgroupDir: string }) => readMemoryAnon(opts),
+}));
+
 vi.mock("./daemon-process", () => ({
   DaemonProcess: class {
     constructor(...args: unknown[]) {
@@ -246,6 +270,8 @@ vi.mock("./daemon-process", () => ({
     teardown = vi.fn(() => {
       finallyOrder.push("teardown");
     });
+    // #371: a test sets fakeRunCgroupDir to stand in for the ceiling's cgroup.
+    runCgroupDir = () => fakeRunCgroupDir;
   },
 }));
 
@@ -270,6 +296,15 @@ beforeAll(async () => {
   const def = (mod.agentRunWorkflow as any).definition;
   runFn = def._tasks[0].fn;
   createEgressEventBatcher = mod.createEgressEventBatcher;
+  // #371: the headroom gate is OFF for this file unless a describe installs a
+  // controller — on a Linux runner the lazy boot decision would otherwise read
+  // the runner's live /proc/meminfo and a loaded CI box could defer unrelated
+  // admissions.
+  mod._setAdmissionControllerForTests(null);
+});
+
+afterAll(() => {
+  fs.rmSync(TEST_NAMESPACE_ROOT, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -538,7 +573,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
       expect(ensureRunNamespace).toHaveBeenCalledWith(
         expect.objectContaining({
           agentUser: "_automata-agent",
-          root: "/tmp/automata-agent-run",
+          root: TEST_NAMESPACE_ROOT,
         }),
       );
     } finally {
@@ -1023,7 +1058,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     ).toBe(true);
   });
 
-  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: abort error propagates unwrapped, ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
+  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: the abort propagates untouched, ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
     const { ctx, abortIn } = makeCtx("run-ext-lockwait");
     const { postRunFailed } = await import("./www-client");
     vi.mocked(postRunFailed).mockClear();
@@ -1032,9 +1067,16 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     // the AbortError shape (box-lock.ts) — the workflow must not wrap it.
     abortIn(acquireBoxSlotMock, "box lock wait aborted");
     try {
-      await expect(
-        runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
-      ).rejects.toThrow(/aborted/);
+      // A cancel is the engine's own act and must reach it as the SDK's own
+      // error shape: the workflow never wraps it (the NonRetryableError check
+      // forbids a future wrapper).
+      const abortErr: unknown = await runFn(
+        { ...PR_INPUT, supersedePolicy: "newest-wins" },
+        ctx,
+      ).catch((e: unknown) => e);
+      expect(abortErr).toBeInstanceOf(Error);
+      expect((abortErr as Error).message).toMatch(/aborted/);
+      expect(abortErr).not.toBeInstanceOf(NonRetryableError);
       expect(postRunTerminal).toHaveBeenCalledTimes(1);
       expect(postRunTerminal.mock.calls[0]![1]).toEqual(
         expect.objectContaining({
@@ -2097,5 +2139,370 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
       expect.anything(),
       expect.objectContaining({ agentUser: "_automata-agent-1" }),
     );
+  });
+});
+
+/**
+ * #371: the memory-headroom check sits under the slot and before the clone. A
+ * deferral gives the slot back, touches nothing on disk, and is waited out IN
+ * PROCESS (an abortable backoff sleep) before admission is tried again; after
+ * the last allowed deferral the run fails final. The engine sees a RUNNING
+ * task throughout — never a retry.
+ */
+describe("#371: headroom deferral is an in-process wait; the budget ends the run final", () => {
+  const STARVED = `MemTotal:        7937228 kB
+MemAvailable:     200000 kB
+SwapTotal:       8388604 kB
+SwapFree:        8289020 kB
+CommitLimit:    12357216 kB
+Committed_AS:   12000000 kB
+`;
+  const ROOMY = STARVED.replace(
+    "MemAvailable:     200000 kB",
+    "MemAvailable:    6000000 kB",
+  ).replace("Committed_AS:   12000000 kB", "Committed_AS:    2600000 kB");
+  const POLICY = {
+    floorBytes: 1024 ** 3,
+    commitFraction: 0.9,
+    runCommitBytes: 1300 * 1024 ** 2,
+  };
+  /** The recorded deferral waits (ms) — the sleep is replaced, never real. */
+  let waits: number[] = [];
+
+  beforeEach(async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    releaseMock.mockClear();
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    waits = [];
+    const { _setAdmissionSleepForTests } = await import("./workflow");
+    _setAdmissionSleepForTests(async (ms, signal) => {
+      waits.push(ms);
+      if (signal?.aborted) {
+        const e = new Error("admission wait aborted");
+        e.name = "AbortError";
+        throw e;
+      }
+    });
+  });
+  afterEach(async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    // Back to OFF for the rest of the file (see the top-level beforeAll).
+    _setAdmissionControllerForTests(null);
+    _setAdmissionSleepForTests(undefined);
+    releaseMock.mockClear();
+  });
+
+  it("a deferral gives the slot back, clones nothing, waits the backoff IN PROCESS (2 s, 4 s, …) and is admitted when headroom returns — one engine attempt", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    let meminfo = STARVED;
+    let reads = 0;
+    const controller = new AdmissionController(POLICY, () => {
+      reads += 1;
+      if (reads >= 3) meminfo = ROOMY; // headroom returns on the third look
+      return meminfo;
+    });
+    _setAdmissionControllerForTests(controller);
+    const ctx = { cancelled: false, log: vi.fn() };
+    await runFn(INPUT, ctx);
+    // Two deferrals (2 s, then 4 s), then admitted.
+    expect(waits).toEqual([2_000, 4_000]);
+    // The slot was released for each wait and once more in the finally.
+    expect(releaseMock).toHaveBeenCalledTimes(3);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    const logs = ctx.log.mock.calls.map((c) => String(c[0]));
+    expect(
+      logs.filter((l) => l.includes("box.headroom_rejected")),
+    ).toHaveLength(2);
+    expect(
+      logs.filter((l) => l.includes("box.headroom_deferred_wait")),
+    ).toHaveLength(2);
+    expect(logs.some((l) => l.includes("box.headroom_ok"))).toBe(true);
+    // The reservation lives until the finally.
+    expect(controller.reservedBytes()).toBe(0);
+  });
+
+  it("after the last allowed deferral the run fails FINAL (AdmissionBudgetExhaustedError, non-retryable) with the slot released and nothing on disk", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
+    );
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    const { loadWorkerConfig } = await import("./config");
+    const max = loadWorkerConfig().admissionMaxDeferrals;
+    const ctx = { cancelled: false, log: vi.fn() };
+    let caught: unknown;
+    try {
+      await runFn(INPUT, ctx);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+    expect(caught).toBeInstanceOf(NonRetryableError);
+    expect((caught as Error).message).toMatch(
+      new RegExp(`after ${max} deferral\\(s\\)`),
+    );
+    expect(waits).toHaveLength(max);
+    // Every refusal gave the slot back; nothing was ever cloned, pulled or spawned.
+    expect(releaseMock).toHaveBeenCalledTimes(max + 1);
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(cleanupWorkdir).not.toHaveBeenCalled();
+    expect(pullAgentCredentials).not.toHaveBeenCalled();
+    expect(materialiseAgentCredentials).not.toHaveBeenCalled();
+    expect(daemonCtorArgs).toHaveLength(0);
+  });
+
+  it("slot re-acquire waits count against the budget: when the wall clock since the first refusal would pass ADMISSION_DEFERRAL_BUDGET_S the run fails final after FEWER than the max deferrals", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
+    );
+    const { ADMISSION_DEFERRAL_BUDGET_S } = await import("./admission-retry");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    // Each "sleep" also stands for a long wait on the box lock: the clock
+    // advances by 10 minutes per deferral while the backoff sum stays tiny.
+    _setAdmissionSleepForTests(async (ms) => {
+      waits.push(ms);
+      vi.setSystemTime(Date.now() + ms + 10 * 60 * 1000);
+    });
+    const ctx = { cancelled: false, log: vi.fn() };
+    try {
+      let caught: unknown;
+      try {
+        await runFn(INPUT, ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+      // Refusal 1 (0 s elapsed) and 2 (≈ 600 s) are waited; refusal 3 at
+      // ≈ 1200 s elapsed is past the 720 s budget → final after 2 deferrals.
+      expect(waits).toEqual([2_000, 4_000]);
+      expect((caught as Error).message).toMatch(/after 2 deferral\(s\)/);
+      expect(
+        (caught as InstanceType<typeof AdmissionBudgetExhaustedError>).elapsedS,
+      ).toBeGreaterThan(ADMISSION_DEFERRAL_BUDGET_S);
+      const logs = ctx.log.mock.calls.map((c) => String(c[0]));
+      expect(
+        logs.filter((l) => l.includes("box.headroom_deferred_wait")),
+      ).toHaveLength(2);
+      expect(provisionWorkdir).not.toHaveBeenCalled();
+      expect(releaseMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a cancel during the deferral wait ends the run like any other cancel (AbortError through, slot already released)", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    const ac = new AbortController();
+    _setAdmissionSleepForTests(async () => {
+      ac.abort();
+      const e = new Error("admission wait aborted");
+      e.name = "AbortError";
+      throw e;
+    });
+    const ctx = { cancelled: false, log: vi.fn(), abortController: ac };
+    await expect(runFn(INPUT, ctx)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+  });
+
+  it("REAL sleep: the engine's abort signal reaches the deferral wait — a cancel 30 ms into a 2 s backoff ends the run promptly with an AbortError", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    _setAdmissionSleepForTests(undefined); // the real sleepAbortable
+    const ac = new AbortController();
+    const ctx = { cancelled: false, log: vi.fn(), abortController: ac };
+    const t0 = Date.now();
+    const timer = setTimeout(() => ac.abort(), 30);
+    try {
+      await expect(runFn(INPUT, ctx)).rejects.toMatchObject({
+        name: "AbortError",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    // Far short of the 2 s first backoff: the signal was wired through.
+    expect(Date.now() - t0).toBeLessThan(1_500);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+  });
+
+  it("a slot re-acquire that blocks past the budget (an out-of-process holder) fails final on re-acquire: slot given back, no admission, nothing on disk", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
+    );
+    const { ADMISSION_DEFERRAL_BUDGET_S } = await import("./admission-retry");
+    const controller = new AdmissionController(POLICY, () => STARVED);
+    _setAdmissionControllerForTests(controller);
+    // 1st acquire: immediate (default). 2nd acquire (after the first refusal):
+    // the lock was held for 20 minutes by someone outside this process.
+    acquireBoxSlotMock.mockImplementationOnce(async () => ({
+      release: releaseMock,
+      lost: false,
+      slot: 0,
+    }));
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(Date.now() + 20 * 60 * 1000);
+      return { release: releaseMock, lost: false, slot: 0 };
+    });
+    const ctx = { cancelled: false, log: vi.fn() };
+    try {
+      let caught: unknown;
+      try {
+        await runFn(INPUT, ctx);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+      expect((caught as Error).message).toMatch(/after 1 deferral\(s\)/);
+      expect(
+        (caught as InstanceType<typeof AdmissionBudgetExhaustedError>).elapsedS,
+      ).toBeGreaterThan(ADMISSION_DEFERRAL_BUDGET_S);
+      expect(waits).toEqual([2_000]);
+      // Released after the refusal AND after the late re-acquire.
+      expect(releaseMock).toHaveBeenCalledTimes(2);
+      expect(provisionWorkdir).not.toHaveBeenCalled();
+      expect(controller.reservedBytes()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("complete-run·queue: staleness is asked AGAIN after a deferral wait — a newer run recorded during the wait ends this one as stale-skipped before the clone, reservation and slot given back", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    let meminfo = STARVED;
+    const controller = new AdmissionController(POLICY, () => meminfo);
+    _setAdmissionControllerForTests(controller);
+    // Not stale before admission; stale once the (fake) wait has passed.
+    checkRunStaleness
+      .mockReset()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    const { _setAdmissionSleepForTests } = await import("./workflow");
+    _setAdmissionSleepForTests(async (ms) => {
+      waits.push(ms);
+      meminfo = ROOMY; // headroom returns while a newer commit landed
+    });
+    const ctx = {
+      abortController: new AbortController(),
+      cancelled: false,
+      log: vi.fn(),
+      workflowRunId: () => "run-ext-defer-q",
+    };
+    const out = await runFn(
+      {
+        ...INPUT,
+        prKey: "org-1/o/r/9",
+        deliveryId: "gh-9",
+        supersedePolicy: "complete-run-queue" as const,
+      },
+      ctx,
+    );
+    expect(out.outcome).toBe("stale-skipped");
+    expect(waits).toEqual([2_000]);
+    expect(checkRunStaleness).toHaveBeenCalledTimes(2);
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-defer-q",
+      cause: "stale-skipped",
+      policy: "complete-run-queue",
+    });
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    // Released after the refusal and again by the finally after the skip.
+    expect(releaseMock).toHaveBeenCalledTimes(2);
+    expect(controller.reservedBytes()).toBe(0);
+    checkRunStaleness.mockReset().mockResolvedValue(false);
+  });
+
+  it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone; the reservation lives until the finally", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const controller = new AdmissionController(POLICY, () => ROOMY);
+    const admitSpy = vi.spyOn(controller, "admit");
+    _setAdmissionControllerForTests(controller);
+    const ctx = { cancelled: false, log: vi.fn() };
+    await runFn(INPUT, ctx);
+    await runFn(INPUT, { cancelled: false, log: vi.fn() });
+    expect(waits).toEqual([]);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(2);
+    // No workflowRunId on this ctx: the reservation key is still unique per
+    // invocation (never the bare threadId, which two runs of one thread share).
+    const keys = admitSpy.mock.calls.map((c) => c[0].runId);
+    expect(keys).toHaveLength(2);
+    for (const k of keys) {
+      expect(k).toMatch(new RegExp(`^${INPUT.threadId}:[0-9a-f-]{36}$`));
+    }
+    expect(new Set(keys).size).toBe(2);
+    expect(
+      ctx.log.mock.calls.some((c) => String(c[0]).includes("box.headroom_ok")),
+    ).toBe(true);
+    expect(controller.reservedBytes()).toBe(0);
+    admitSpy.mockRestore();
+  });
+
+  it("once the daemon is up the reservation shrinks by the run cgroup's anonymous memory and is whole again when the probe reads nothing; teardown frees it", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const controller = new AdmissionController(POLICY, () => ROOMY);
+    _setAdmissionControllerForTests(controller);
+    fakeRunCgroupDir =
+      "/sys/fs/cgroup/system.slice/automata-worker.service/run-x";
+    const anon = 300 * 1024 ** 2;
+    readMemoryAnon.mockImplementation(() => anon);
+    const seen: Array<number | null> = [];
+    pollUntilTerminal.mockReset().mockImplementation(async () => {
+      seen.push(controller.reservedBytes());
+      readMemoryAnon.mockImplementation(() => null);
+      seen.push(controller.reservedBytes());
+      return { outcome: "completed", finalStatus: "complete" };
+    });
+    try {
+      await runFn(INPUT, { cancelled: false, log: vi.fn() });
+      expect(readMemoryAnon).toHaveBeenCalledWith({
+        cgroupDir: "/sys/fs/cgroup/system.slice/automata-worker.service/run-x",
+      });
+      expect(seen).toEqual([
+        POLICY.runCommitBytes - anon,
+        POLICY.runCommitBytes,
+      ]);
+      expect(controller.reservedBytes()).toBe(0);
+    } finally {
+      fakeRunCgroupDir = null;
+      readMemoryAnon.mockReset().mockImplementation(() => null);
+    }
+  });
+
+  it("a plain error after admission is final by registration (retries 0): it reaches the engine as-is, message intact, slot released", async () => {
+    provisionWorkdir.mockRejectedValueOnce(
+      new Error("clone failed: ECONNRESET"),
+    );
+    const ctx = { cancelled: false, log: vi.fn() };
+    await expect(runFn(INPUT, ctx)).rejects.toThrow(/clone failed: ECONNRESET/);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 });

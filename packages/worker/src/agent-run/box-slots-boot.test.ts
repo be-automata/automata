@@ -7,6 +7,7 @@ import {
   assertSlotAccountsOutsideGroup,
   assertSlotSudoGrants,
   assertSlotWorkdirTraverse,
+  hidepidDropinLeftAtOneSlot,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
@@ -187,6 +188,89 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     const readMountinfo = vi.fn(() => "");
     assertProcHidepid({ platform: "darwin", readMountinfo });
     expect(readMountinfo).not.toHaveBeenCalled();
+  });
+});
+
+describe("hidepidDropinLeftAtOneSlot (#205 boot, Linux N = 1)", () => {
+  const line = (opts: string, superOpts: string) =>
+    `25 30 0:23 / /proc ${opts} shared:14 - proc proc ${superOpts}\n` +
+    "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n";
+  const PLAIN = () => line("rw,nosuid,nodev,noexec,relatime", "rw");
+
+  it("the drop-in file at its installed path is the DIRECT trigger — even when the host remount was reverted and /proc shows no hidepid", () => {
+    const w = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: PLAIN,
+      dropinExists: () => true,
+    });
+    expect(w).toMatch(/20-hidepid\.conf/);
+    expect(w).toMatch(/20-hidepid\.conf exists/);
+    expect(w).toMatch(/daemon-reload/);
+    expect(w).not.toMatch(/inside the worker unit/);
+  });
+
+  it("a hidepid /proc seen inside the unit is the second trigger (the base unit's private /proc has none); both are named when both hold", () => {
+    const only = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: () => line("rw,nosuid", "rw,hidepid=invisible,gid=986"),
+      dropinExists: () => false,
+    });
+    expect(only).toMatch(/hidepid=invisible inside the worker unit/);
+    const both = hidepidDropinLeftAtOneSlot({
+      platform: "linux",
+      readMountinfo: () => line("rw", "rw,hidepid=2,gid=986"),
+      dropinExists: () => true,
+    });
+    expect(both).toMatch(/exists; \/proc is mounted with hidepid=2/);
+  });
+
+  it("the expected N = 1 state is silent: no drop-in and no hidepid (hidepid=0/1 hide nothing and do not count)", () => {
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: PLAIN,
+        dropinExists: () => false,
+      }),
+    ).toBeNull();
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () => line("rw", "rw,hidepid=0"),
+        dropinExists: () => false,
+      }),
+    ).toBeNull();
+  });
+
+  it("never fails a one-slot boot: not Linux ⇒ null without probing; no /proc line, an unreadable mountinfo or a throwing stat ⇒ null", () => {
+    const boom = () => {
+      throw new Error("must not be called");
+    };
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "darwin",
+        readMountinfo: boom,
+        dropinExists: boom,
+      }),
+    ).toBeNull();
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () =>
+          "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n",
+        dropinExists: () => false,
+      }),
+    ).toBeNull();
+    expect(
+      hidepidDropinLeftAtOneSlot({
+        platform: "linux",
+        readMountinfo: () => {
+          throw new Error("EACCES");
+        },
+        dropinExists: () => {
+          throw new Error("EACCES");
+        },
+      }),
+    ).toBeNull();
   });
 });
 

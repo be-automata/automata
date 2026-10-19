@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
@@ -115,6 +115,80 @@ async function sudoListProbe(user: string): Promise<void> {
 const HIDEPID_OK = new Set(["invisible", "2", "ptraceable", "4"]);
 
 /**
+ * The mount options of the /proc mount in effect for this process, from a
+ * `/proc/self/mountinfo` text: per-mount AND superblock options (hidepid is a
+ * superblock option). The LAST /proc entry wins — a later overmount is the one
+ * in effect. null when there is no /proc mount.
+ */
+export function procMountOptions(mountinfo: string): string[] | null {
+  const procLine = mountinfo
+    .split("\n")
+    .map((l) => l.split(" "))
+    .filter((f) => f[4] === "/proc")
+    .at(-1);
+  if (!procLine) return null;
+  const sep = procLine.indexOf("-");
+  return [procLine[5] ?? "", procLine[sep + 3] ?? ""].join(",").split(",");
+}
+
+function hidepidOf(options: readonly string[]): string | undefined {
+  return options
+    .find((o) => o.startsWith("hidepid="))
+    ?.slice("hidepid=".length);
+}
+
+/** Where the N > 1 drop-in lives on a box (the unit is installed system-wide). */
+export const HIDEPID_DROPIN_PATH =
+  "/etc/systemd/system/automata-worker.service.d/20-hidepid.conf";
+
+/**
+ * #205, the OTHER direction of the hidepid check: at N = 1 the unit should run
+ * under the base unit's `ProtectSystem=full` / `ProtectKernelTunables=yes`. The
+ * N > 1 drop-in (`20-hidepid.conf`) relaxes both, and nothing else notices it
+ * left behind after a rollback. Two triggers: the drop-in file itself at its
+ * installed path (direct — catches a rollback that also reverted the host
+ * remount), and a hidepid /proc seen INSIDE the unit (the base unit's private
+ * /proc has none, so seeing the host's means the relaxation is in effect).
+ * A warning, never a refusal: the fence is intact either way. Returns the
+ * warning text, or null (not Linux, neither trigger, or an unreadable probe —
+ * a one-slot box never fails its boot on this).
+ */
+export function hidepidDropinLeftAtOneSlot(
+  opts: {
+    platform?: NodeJS.Platform;
+    readMountinfo?: () => string;
+    /** stat of the installed drop-in; injectable for tests. */
+    dropinExists?: () => boolean;
+  } = {},
+): string | null {
+  const {
+    platform = process.platform,
+    readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
+    dropinExists = () => existsSync(HIDEPID_DROPIN_PATH),
+  } = opts;
+  if (platform !== "linux") return null;
+  const triggers: string[] = [];
+  try {
+    if (dropinExists()) triggers.push(`${HIDEPID_DROPIN_PATH} exists`);
+  } catch {
+    // unreadable path: fall through to the mount probe
+  }
+  try {
+    const options = procMountOptions(readMountinfo());
+    const hidepid = options ? hidepidOf(options) : undefined;
+    if (hidepid !== undefined && HIDEPID_OK.has(hidepid)) {
+      triggers.push(
+        `/proc is mounted with hidepid=${hidepid} inside the worker unit`,
+      );
+    }
+  } catch {
+    // unreadable mountinfo: the file probe above is the only signal
+  }
+  if (triggers.length === 0) return null;
+  return `the N > 1 drop-in automata-worker.service.d/20-hidepid.conf (ProtectSystem=no, ProtectKernelTunables=no) is still in effect at WORKER_BOX_SLOTS=1 (${triggers.join("; ")}) — remove it and \`systemctl daemon-reload && systemctl restart automata-worker\` when nothing is in flight (deploy/AGENT-UID-PROVISIONING.md §6)`;
+}
+
+/**
  * #205: at N > 1 on Linux, /proc must be mounted with `hidepid` (invisible or
  * ptraceable) — the run's proxy credential rides in the agent children's
  * HTTPS_PROXY, the worker keeps it out of every argv it writes, but a tool the
@@ -150,24 +224,13 @@ export function assertProcHidepid(
       `cannot read /proc/self/mountinfo (${e instanceof Error ? e.message : String(e)}); at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)`,
     );
   }
-  // The LAST /proc entry: a later overmount is the one in effect.
-  const procLine = text
-    .split("\n")
-    .map((l) => l.split(" "))
-    .filter((f) => f[4] === "/proc")
-    .at(-1);
-  if (!procLine) {
+  const options = procMountOptions(text);
+  if (!options) {
     throw new Error(
       "no /proc mount in /proc/self/mountinfo; at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)",
     );
   }
-  const sep = procLine.indexOf("-");
-  const options = [procLine[5] ?? "", procLine[sep + 3] ?? ""]
-    .join(",")
-    .split(",");
-  const hidepid = options
-    .find((o) => o.startsWith("hidepid="))
-    ?.slice("hidepid=".length);
+  const hidepid = hidepidOf(options);
   if (hidepid === undefined || !HIDEPID_OK.has(hidepid)) {
     throw new Error(
       `/proc is mounted ${hidepid === undefined ? "without hidepid" : `with hidepid=${hidepid}`}; at WORKER_BOX_SLOTS > 1 another slot's account could read a run's argv (and a copied proxy credential) — remount with hidepid=invisible and the worker group exempt (deploy/AGENT-UID-PROVISIONING.md §6)`,
@@ -399,7 +462,7 @@ export function warnIfSlotsExceedMemory(
   const need = cfg.boxSlots * cfg.memoryMaxBytes;
   if (need > memTotalBytes) {
     log(
-      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0), so concurrent runs can hit ENOMEM under load until the admission headroom check (#371) lands`,
+      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0). With the memory-headroom check armed (#371) a second concurrent run is DEFERRED — expect box.headroom_rejected / box.headroom_deferred_wait lines and, past the budget, budget-exhausted failures; with the check OFF (inert rollback) concurrent runs can hit ENOMEM under load`,
     );
   }
 }

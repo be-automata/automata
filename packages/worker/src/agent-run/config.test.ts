@@ -5,6 +5,9 @@ import {
   BOX_SLOTS_MAX,
   loadWorkerConfig,
   parseBoxSlots,
+  parseBytesEnv,
+  parseCommitFraction,
+  parseMaxDeferrals,
   parseLivenessPollS,
   parseLivenessStaleAfterS,
   parseMemoryMax,
@@ -557,7 +560,81 @@ describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boo
     ).toThrow(/WORKER_AGENT_USER/);
   });
 
+  it("refuses a deferral count whose worst-case wait breaks the stalled-cutoff budget, naming both numbers", () => {
+    // 2+4+8+16+32+64 = 126 s, then 120 s per extra retry: 11 retries = 726 s > 720 s.
+    expect(() =>
+      loadWorkerConfig({ WORKER_ADMISSION_MAX_DEFERRALS: "11" }),
+    ).toThrow(
+      /WORKER_ADMISSION_MAX_DEFERRALS=11 waits up to 726s.*720s budget.*75-minute/,
+    );
+    expect(
+      loadWorkerConfig({ WORKER_ADMISSION_MAX_DEFERRALS: "10" })
+        .admissionMaxDeferrals,
+    ).toBe(10);
+  });
+
   it("a stray WORKER_BOX_SLOTS=1 never trips the N > 1 requirements (default-off promise)", () => {
     expect(loadWorkerConfig({ WORKER_BOX_SLOTS: "1" }).boxSlots).toBe(1);
+  });
+});
+
+describe("#371: memory-headroom admission knobs are validated at boot", () => {
+  it("defaults: floor 1G, fraction 0.9, run commit 1300M without a ceiling, 8 deferrals", () => {
+    const cfg = loadWorkerConfig({});
+    expect(cfg.headroomFloorBytes).toBe(1024 ** 3);
+    expect(cfg.headroomCommitFraction).toBe(0.9);
+    expect(cfg.headroomRunCommitBytes).toBe(1300 * 1024 ** 2);
+    expect(cfg.admissionMaxDeferrals).toBe(8);
+  });
+
+  it("the run commit defaults to the run's own ceiling when the ceiling is on", () => {
+    const cfg = loadWorkerConfig({
+      WORKER_AGENT_USER: "automata-agent",
+      WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+      WORKER_RUN_MEMORY_MAX: "5000M",
+    });
+    expect(cfg.headroomRunCommitBytes).toBe(5000 * 1024 ** 2);
+    expect(
+      loadWorkerConfig({
+        WORKER_AGENT_USER: "automata-agent",
+        WORKER_WORKDIR_ROOT: "/usr/local/automata/runs",
+        WORKER_RUN_MEMORY_MAX: "5000M",
+        WORKER_HEADROOM_RUN_COMMIT: "2G",
+      }).headroomRunCommitBytes,
+    ).toBe(2 * 1024 ** 3);
+  });
+
+  it("the documented rollback values (floor 0, fraction 1.0) load and make the check inert", () => {
+    const cfg = loadWorkerConfig({
+      WORKER_HEADROOM_FLOOR: "0",
+      WORKER_HEADROOM_COMMIT_FRACTION: "1.0",
+    });
+    expect(cfg.headroomFloorBytes).toBe(0);
+    expect(cfg.headroomCommitFraction).toBe(1);
+  });
+
+  it("refuses nonsense, naming the knob", () => {
+    for (const bad of ["1.5G", "lots", "-1", "1 G"]) {
+      expect(() => parseBytesEnv("WORKER_HEADROOM_FLOOR", bad, 1), bad).toThrow(
+        /WORKER_HEADROOM_FLOOR/,
+      );
+    }
+    for (const bad of ["0", "1.5", "abc", "-0.5"]) {
+      expect(() => parseCommitFraction(bad), bad).toThrow(
+        /WORKER_HEADROOM_COMMIT_FRACTION/,
+      );
+    }
+    for (const bad of ["-1", "1.5", "x"]) {
+      expect(() => parseMaxDeferrals(bad), bad).toThrow(
+        /WORKER_ADMISSION_MAX_DEFERRALS/,
+      );
+    }
+    expect(parseMaxDeferrals("0")).toBe(0);
+    // The parser has no numeric cap of its own: the budget check in
+    // loadWorkerConfig is the one upper bound (tested above).
+    expect(parseMaxDeferrals("20")).toBe(20);
+    expect(() => loadWorkerConfig({ WORKER_HEADROOM_RUN_COMMIT: "0" })).toThrow(
+      /WORKER_HEADROOM_RUN_COMMIT must be positive/,
+    );
   });
 });
