@@ -1,4 +1,5 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { AdmissionDeferredError } from "./headroom";
 import { NextMessageHttpError } from "./www-client";
 
 /**
@@ -103,4 +104,30 @@ export function classifyAgentExit(opts: {
     return resourceLimitFailure(opts.memoryMaxBytes, opts.oomKills);
   }
   return opts.fallback;
+}
+
+/**
+ * #371: the exactly-once fence around the run task. The engine retries PLAIN
+ * errors (`retries` > 0 since the headroom check), so everything thrown AFTER
+ * admission must reach it non-retryable — an agent run must never re-execute.
+ * Only two shapes pass through untouched: `NonRetryableError` (already final)
+ * and `AdmissionDeferredError` (thrown before any side effect; the one error
+ * the engine is meant to retry). Non-Error throwables are wrapped too.
+ */
+export function fenceNonRetryable(err: unknown): unknown {
+  if (
+    err instanceof NonRetryableError ||
+    err instanceof AdmissionDeferredError
+  ) {
+    return err;
+  }
+  const message =
+    err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  const wrapped = new NonRetryableError(
+    `post-admission failure — non-retryable (an agent run never re-executes): ${message}`,
+  );
+  if (err instanceof Error && err.stack) {
+    wrapped.stack = `${wrapped.stack ?? ""}\nCaused by: ${err.stack}`;
+  }
+  return wrapped;
 }

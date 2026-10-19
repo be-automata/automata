@@ -6,7 +6,9 @@ import {
   nonRetryablePreflight,
   ResourceLimitError,
   resourceLimitFailure,
+  fenceNonRetryable,
 } from "./retry-classification";
+import { AdmissionDeferredError } from "./headroom";
 import { NextMessageHttpError } from "./www-client";
 
 describe("classifyNextMessageError (#6)", () => {
@@ -124,5 +126,40 @@ describe("resourceLimitFailure", () => {
     const out = resourceLimitFailure(1500 * 1024 ** 2, 3);
     expect(out).toBeInstanceOf(NonRetryableError);
     expect(out.message).toMatch(/Out of memory: 3 process\(es\)/);
+  });
+});
+
+describe("fenceNonRetryable (#371 exactly-once fence)", () => {
+  const observed = {
+    memAvailable: 1,
+    committedAs: 2,
+    commitLimit: 3,
+    floor: 4,
+    fraction: 0.9,
+    runCommit: 5,
+    reserved: 0,
+  };
+
+  it("lets AdmissionDeferredError through retryable and NonRetryableError through unchanged", () => {
+    const deferred = new AdmissionDeferredError(
+      "commit-over-fraction",
+      observed,
+      2,
+    );
+    expect(fenceNonRetryable(deferred)).toBe(deferred);
+    const final = new NonRetryableError("done");
+    expect(fenceNonRetryable(final)).toBe(final);
+  });
+
+  it("wraps every other throwable as NonRetryableError, keeping the cause's name and message", () => {
+    const wrapped = fenceNonRetryable(new TypeError("boom"));
+    expect(wrapped).toBeInstanceOf(NonRetryableError);
+    expect((wrapped as Error).message).toMatch(
+      /post-admission failure.*TypeError: boom/,
+    );
+    const abort = new Error("box lock wait aborted");
+    abort.name = "AbortError";
+    expect(fenceNonRetryable(abort)).toBeInstanceOf(NonRetryableError);
+    expect(fenceNonRetryable("string throw")).toBeInstanceOf(NonRetryableError);
   });
 });

@@ -84,9 +84,23 @@ const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
  * the shapes under test are the shipped ones, never a hand-copied lookalike.
  * Unknown strategy → throws (fail-loud, never a silently mis-strategied group).
  */
+export interface AgentRunDefinitionOpts {
+  /**
+   * #371: how many times the engine may re-queue the run task after an
+   * `AdmissionDeferredError` (= `WORKER_ADMISSION_MAX_DEFERRALS`). 0 (the
+   * default here, so every E2E import keeps the shipped pre-#371 shape) = no
+   * retries and no backoff — byte-identical registration.
+   */
+  admissionRetries?: number;
+}
+
+/** Backoff between deferred admissions: 2^n s, capped. See config.ts admissionMaxDeferrals. */
+export const ADMISSION_BACKOFF = { factor: 2, maxSeconds: 120 } as const;
+
 export function buildAgentRunDefinition(
   name: string,
   perPrStrategy: PerPrStrategy,
+  opts: AgentRunDefinitionOpts = {},
 ): {
   workflow: {
     name: string;
@@ -110,6 +124,7 @@ export function buildAgentRunDefinition(
     scheduleTimeout: Duration;
     executionTimeout: Duration;
     retries: number;
+    backoff?: { factor: number; maxSeconds: number };
   };
 } {
   if (
@@ -178,14 +193,21 @@ export function buildAgentRunDefinition(
       name: "run",
       scheduleTimeout: "30m",
       executionTimeout: "30m",
-      // EXPLICIT retries: 0 (the SDK default is already 0). A single agent-run is a
+      // RETRIES ARE ADMISSION DEFERRALS ONLY (#371). A single agent-run is a
       // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
-      // agent, and posts a GitHub review) — auto-retrying it would re-execute the
-      // agent and risk a double side-effect. Keep this explicit so a future edit
-      // can't silently enable retries. This is Phase 1.4 mechanism #1 (exactly-once):
-      // at retries:0 + workflow maxRuns:1 the only at-least-once window is engine
-      // redelivery, which the www single-writer (HEAD+verdict idempotency) absorbs.
-      retries: 0,
+      // agent, and posts a GitHub review) — re-executing it would risk a double
+      // side-effect. The engine retries only PLAIN errors, and the run task lets
+      // exactly one escape plain: `AdmissionDeferredError`, thrown by the headroom
+      // check before any side effect (no credential on disk, no daemon, no
+      // GitHub write). Every error after admission is rethrown as
+      // `NonRetryableError` by runAgent (workflow.ts), so exactly-once holds by
+      // construction whatever `retries` is. With `admissionRetries` 0 this is the
+      // pre-#371 shape: retries 0, no backoff. Engine redelivery after a worker
+      // death is a separate mechanism, absorbed by the www single-writer.
+      retries: opts.admissionRetries ?? 0,
+      ...((opts.admissionRetries ?? 0) > 0
+        ? { backoff: ADMISSION_BACKOFF }
+        : {}),
       // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
       // it stays unset until #3b raises the global cap — at which point set slotCost to
       // model each agent-run's memory weight so a worker's physical slots reflect real
