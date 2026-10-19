@@ -66,6 +66,17 @@ describe("resolveRunSecrets", () => {
     expect(out.source).toBe("sealed");
     expect(out.legacyFieldsIgnored).toBe(true);
     expect(out.secrets).toEqual(SECRETS);
+    // A leak of only the read token is a defect too.
+    const readOnlyLeak = await resolveRunSecrets({
+      wire: { ...BASE, sealedSecrets, githubReadToken: "ghs_LEAKED" },
+      keys: [plane.privateKey],
+    });
+    expect(readOnlyLeak.legacyFieldsIgnored).toBe(true);
+    const clean = await resolveRunSecrets({
+      wire: { ...BASE, sealedSecrets },
+      keys: [plane.privateKey],
+    });
+    expect(clean.legacyFieldsIgnored).toBe(false);
     expect(out.input).toEqual({ ...BASE, sealedSecrets });
     expect(JSON.stringify(out.input)).not.toContain("SHOULD_BE_IGNORED");
     expect(containsRunSecret(JSON.stringify(out.input), SECRETS)).toBe(false);

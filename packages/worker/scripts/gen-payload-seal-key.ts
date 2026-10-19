@@ -17,11 +17,14 @@
  *
  * Rotation: the script refuses to overwrite an existing file unless --rotate
  * is passed, which ADDS the new key at the FRONT of `keys[]` and keeps the
- * old ones, so in-flight runs sealed to the old key still unseal. Retire an
- * old entry by hand only when BOTH hold: ≥24h have passed since www switched
- * to the new key, and no hatchetRun row dispatched before that switch belongs
- * to a thread that is not terminal. Then remove the entry and restart the
- * worker (the ring is read once per process).
+ * old ones, so in-flight runs sealed to the old key still unseal. ORDER:
+ * the worker reads the ring ONCE per process, so (1) rotate, (2) restart the
+ * worker and confirm the boot line lists the new kid, (3) ONLY THEN set the
+ * new line on www — a dispatch sealed to a kid the running worker has not
+ * loaded fails with `unknown-kid`. Retire an old entry by hand only when
+ * BOTH hold: ≥24h have passed since www switched to the new key, and no
+ * hatchetRun row dispatched before that switch belongs to a thread that is
+ * not terminal. Then remove the entry and restart the worker again.
  *
  * Dev: --dev writes to `.automata/payload-seal.dev.json` under the package
  * (gitignored), chowns nothing, and is a no-op when the file exists. Each
@@ -36,6 +39,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -144,18 +148,26 @@ async function main() {
   // Write beside, chmod, then rename: the file is never world-readable, not
   // even for an instant, and a crash mid-write leaves the old ring intact.
   const tmp = `${opts.file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ keys: ring }, null, 2) + "\n", {
-    mode: 0o400,
-  });
-  chmodSync(tmp, 0o400);
   const owner = opts.dev ? "" : opts.owner || serviceUser();
-  if (owner) {
-    execFileSync("chown", [`${owner}:${owner}`, tmp], { stdio: "inherit" });
+  try {
+    writeFileSync(tmp, JSON.stringify({ keys: ring }, null, 2) + "\n", {
+      mode: 0o400,
+    });
+    chmodSync(tmp, 0o400);
+    if (owner) {
+      // Owner only — the group is left as-is (the service user's primary
+      // group need not share its name), and the file is 0400 anyway.
+      execFileSync("chown", [owner, tmp], { stdio: "inherit" });
+    }
+    renameSync(tmp, opts.file);
+  } catch (err) {
+    // Never leave a temp file holding the private scalar behind.
+    rmSync(tmp, { force: true });
+    throw err;
   }
-  renameSync(tmp, opts.file);
   process.stderr.write(
     `[gen-payload-seal-key] wrote ${opts.file} (${ring.length} key(s): ${ring.map((k) => k.kid).join(", ")}; owner ${owner || "unchanged"}; mode 0400)\n` +
-      "[gen-payload-seal-key] set the line below as HATCHET_PAYLOAD_SEAL_KEY on automata-www, then restart the worker (no run in flight)\n",
+      "[gen-payload-seal-key] FIRST restart the worker (no run in flight) and confirm its boot line lists this kid; ONLY THEN set the line below as HATCHET_PAYLOAD_SEAL_KEY on automata-www\n",
   );
   process.stdout.write(`${formatPlanePublicKey(publicKey)}\n`);
 }

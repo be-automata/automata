@@ -140,14 +140,17 @@ fails its own seal→unseal probe. During rollout step 1 an **absent** file is
 tolerated (the worker then reads only the legacy plain-text input); strict mode
 (PR 2) makes it mandatory and refuses plain-text inputs.
 
-**Rotation:** `gen-payload-seal-key.ts --rotate` adds a new key at the FRONT of
-the ring and keeps the old one; switch www to the new line, and retire the old
-entry only when ≥24h have passed since the switch and no `hatchetRun` row
-dispatched before it belongs to a non-terminal thread. Then edit the file and
-restart the worker (the ring is read once per process). Compare the `kid` www
-logs at dispatch (`run secrets sealed`) with the kid list in the boot line: a
-mismatch shows up as `unseal failed (reason=unknown-kid|tag)` on the first run
-and is reconciled by the sweep (`run-failed-unreported`). Every run also
+**Rotation, in this order:** (1) `gen-payload-seal-key.ts --rotate` adds a new
+key at the FRONT of the ring and keeps the old one; (2) restart the worker with
+no run in flight — the ring is read ONCE per process — and confirm the boot
+line lists the new kid; (3) only then switch www's `HATCHET_PAYLOAD_SEAL_KEY`
+to the printed line (a dispatch sealed to a kid the running worker has not
+loaded fails `unknown-kid`); (4) retire the old entry only when ≥24h have
+passed since the switch and no `hatchetRun` row dispatched before it belongs
+to a non-terminal thread — edit the file and restart again. Compare the `kid`
+www logs at dispatch (`run secrets sealed`) with the kid list in the boot line:
+a mismatch shows up as `unseal failed (reason=unknown-kid|tag)` on the first
+run and is reconciled by the sweep (`run-failed-unreported`). Every run also
 journals `token.revoke {"kind":"installation"|"read","status":204}` at its end.
 
 ## Install

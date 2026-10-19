@@ -56,7 +56,9 @@ export async function resolveRunSecrets({
       secrets,
       source: "sealed",
       legacyFieldsIgnored:
-        installationToken !== undefined || daemonToken !== undefined,
+        installationToken !== undefined ||
+        githubReadToken !== undefined ||
+        daemonToken !== undefined,
     };
   }
   if (strict) {
