@@ -3484,6 +3484,68 @@ describe("harness batteries (PR3): lockfiles, installer stages, doctor", () => {
     expect(wrapper).toContain("PATH=%s; export PATH");
     expect(wrapper).toContain("lib/mcp-filter.mjs");
     expect(wrapper).toContain("etc/tool-allowlist.json");
+    // mcpServe.env keys land in shell code: identifier-checked, never a
+    // reserved name, and listed for the filter's exhaustive allowlist.
+    expect(wrapper).toMatch(/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*\$/);
+    expect(wrapper).toContain("mcpServe.env may not set");
+    expect(wrapper).toContain(
+      "AUTOMATA_MCP_ENV_KEYS='%s'; export AUTOMATA_MCP_ENV_KEYS",
+    );
+  });
+
+  it("the filter builds the server's env from the allowlist alone: a secret, an ambient variable and a non-identifier name never reach the server; a declared pack key does", () => {
+    const server =
+      "process.stdin.resume(); process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { env: Object.keys(process.env).sort() } }) + '\\n');";
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-filter-env-"));
+    const allowlist = path.join(tmp, "allow.json");
+    fs.writeFileSync(allowlist, JSON.stringify([]));
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(workerRoot, "deploy", "linux", "harness-mcp-filter.mjs"),
+        allowlist,
+        "--",
+        process.execPath,
+        "-e",
+        server,
+      ],
+      {
+        input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }) + "\n",
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: "/h",
+          HTTPS_PROXY: "http://run:s3cret@127.0.0.1:1",
+          NODE_USE_ENV_PROXY: "1",
+          AUTOMATA_MCP_ENV_KEYS: "CLAUDE_FLOW_MODE, not-an-identifier",
+          CLAUDE_FLOW_MODE: "online",
+          GITHUB_TOKEN: "ghs_secret",
+          "BASH_FUNC_x%%": "() { :; }",
+          "not-an-identifier": "1",
+        },
+        timeout: 20_000,
+      },
+    );
+    fs.rmSync(tmp, { recursive: true, force: true });
+    const reply = result.stdout
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as { id: number; result?: { env: string[] } })
+      .find((m) => m.id === 1);
+    // macOS's libSystem injects __CF_USER_TEXT_ENCODING into every child; it
+    // is not ours and carries nothing.
+    const received = (reply?.result?.env ?? []).filter(
+      (k) => k !== "__CF_USER_TEXT_ENCODING",
+    );
+    expect(received).toEqual(
+      [
+        "CLAUDE_FLOW_MODE",
+        "HOME",
+        "HTTPS_PROXY",
+        "NODE_USE_ENV_PROXY",
+        "PATH",
+      ].sort(),
+    );
   });
 
   it("the filter proxy drops non-allowlisted tools from tools/list and refuses their calls", () => {

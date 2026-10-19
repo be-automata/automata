@@ -2862,13 +2862,31 @@ write_mcp_wrapper() {
     printf 'unset __v\n'
     printf 'PATH=%s; export PATH\n' "'$BUILD_PATH'"
     printf 'LANG=C.UTF-8; export LANG\n'
+    local env_keys=""
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
       case "$entry" in
         *"'"*) STEP_ERROR="mcpServe.env entry contains a single quote"; return 1 ;;
       esac
-      printf "%s='%s'; export %s\n" "${entry%%=*}" "${entry#*=}" "${entry%%=*}"
+      local key="${entry%%=*}"
+      # The key is written into shell code unquoted: it must be a shell
+      # identifier, and never one of the names the wrapper or the filter own.
+      [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+        STEP_ERROR="mcpServe.env key is not a shell identifier: $key"
+        return 1
+      }
+      case "$key" in
+        PATH|HOME|LANG|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|https_proxy|http_proxy|no_proxy|NODE_USE_ENV_PROXY|AUTOMATA_MCP_ENV_KEYS)
+          STEP_ERROR="mcpServe.env may not set $key"
+          return 1
+          ;;
+      esac
+      printf "%s='%s'; export %s\n" "$key" "${entry#*=}" "$key"
+      env_keys="${env_keys:+$env_keys,}$key"
     done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
+    # The filter builds the server's env from this list (plus PATH/HOME/LANG and
+    # the proxy names) — the exhaustive allowlist; the scrub above is belt and braces.
+    printf "AUTOMATA_MCP_ENV_KEYS='%s'; export AUTOMATA_MCP_ENV_KEYS\n" "$env_keys"
     printf "exec '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
     printf "  '%s' '%s'" "$NODE_BIN" "$target/$(hfield "$i" .mcpServe.entrypoint)"
     while IFS= read -r entry; do
