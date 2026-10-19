@@ -171,8 +171,9 @@ async function main() {
       // otherwise surface as the first run on that slot dying in sudo, while the
       // box reports N slots of capacity it does not have.
       const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
-      // ...and sudo must let the worker run as each of them (the Runas list).
-      await assertSlotSudoGrants(cfg.agentUsers);
+      // ...and at N > 1 sudo must let the worker run as each of them (a Runas
+      // list not re-rendered for the new slots). N = 1 boots as it always has.
+      if (cfg.boxSlots > 1) await assertSlotSudoGrants(cfg.agentUsers);
       console.log(
         `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")})`,
       );

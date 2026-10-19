@@ -24,8 +24,24 @@ echo "$RULES" | grep -qE "$SKUID tcp dport" \
 echo "$RULES" | grep -qE "$SKUID udp dport" \
   || fail "no udp skuid rule — QUIC/HTTP-3 would bypass the fence over udp/443"
 
-FENCED="$(echo "$RULES" | grep -oE "$SKUID" | head -1 \
-  | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g; s/^ +//; s/ +$//')"
+# Every `meta skuid` set in the text on stdin — one uid (`999`) or an anonymous
+# set (`{ 999, 2001 }`, #205) — normalized (sorted, space-separated), one line
+# per DISTINCT set. The tcp and the udp rule must fence the same uids: a conf
+# whose udp set misses a slot would otherwise pass on the tcp set alone and
+# leave that slot's QUIC/udp-443 egress with no kernel backstop.
+skuid_sets() {
+  grep -oE 'meta skuid (\{ ?[0-9, ]+ ?\}|[0-9]+)' \
+    | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g' \
+    | while IFS= read -r set; do
+        printf '%s\n' "$set" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ' | sed 's/ $//'
+        printf '\n'
+      done | grep . | sort -u
+}
+
+SETS="$(printf '%s\n' "$RULES" | skuid_sets)"
+[ "$(printf '%s\n' "$SETS" | grep -c .)" = 1 ] \
+  || fail "the skuid sets differ between rules (tcp vs udp): $(printf '%s' "$SETS" | tr '\n' ';')"
+FENCED="$SETS"
 for u in $FENCED; do
   [ "$u" = "0" ] && fail "uid 0 is fenced"
 done

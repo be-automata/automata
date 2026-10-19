@@ -2663,20 +2663,21 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
       );
     });
 
-    it("the nft preflight parses a skuid SET and checks every uid in it", () => {
+    it("both nft scripts read EVERY skuid rule's set (scalar or set, tcp AND udp), refuse sets that differ between rules, and check every uid", () => {
+      for (const name of ["nft-preflight.sh", "nft-verify.sh"]) {
+        const sh = deployFile("linux", name);
+        // One extractor for every rule; `head -1` (tcp only) is gone.
+        expect(sh).toMatch(/skuid_sets\(\)/);
+        expect(sh).toMatch(
+          /meta skuid \(\\\{ \?\[0-9, \]\+ \?\\\}\|\[0-9\]\+\)/,
+        );
+        expect(sh).not.toMatch(/meta skuid[^\n]*head -1/);
+        expect(sh).toMatch(/differ between rules/);
+      }
       const pre = deployFile("linux", "nft-preflight.sh");
-      // Set-or-scalar extraction, then a per-uid loop — a set with the worker's
-      // uid hidden in second place must still be refused.
-      expect(pre).toMatch(/meta skuid \(\\\{\[0-9, \]\+\\\}\|\[0-9\]\+\)/);
       expect(pre).toMatch(/for UID_IN_CONF in \$UIDS_IN_CONF/);
       expect(pre).toMatch(/fencing uid\(s\)/);
-    });
-
-    it("the nft verify accepts the scalar nft prints for one uid AND the set it prints for several", () => {
       const verify = deployFile("linux", "nft-verify.sh");
-      expect(verify).toMatch(
-        /SKUID='meta skuid \(\\\{ \?\[0-9, \]\+ \?\\\}\|\[0-9\]\+\)'/,
-      );
       expect(verify).toMatch(/for u in \$FENCED/);
     });
 
@@ -3467,17 +3468,20 @@ describe("harness batteries (PR3): lockfiles, installer stages, doctor", () => {
     expect(doctor).toContain("TEST CONTAINER ONLY: --no-sandbox");
   });
 
-  it("the MCP wrapper clears the env and passes only proxy settings through", () => {
+  it("the MCP wrapper scrubs the env in place (unset) and lets only PATH/HOME/LANG and the proxy settings through — never an `env -i NAME=value` argv (#205: HTTPS_PROXY carries the run credential)", () => {
     const wrapper = body("write_mcp_wrapper");
-    expect(wrapper).toContain("exec /usr/bin/env -i PATH=");
+    expect(wrapper).not.toContain("exec /usr/bin/env -i");
+    expect(wrapper).not.toMatch(/"HTTPS_PROXY=\$HTTPS_PROXY"/);
+    expect(wrapper).toMatch(/unset "\$__v"/);
     for (const name of [
       "HTTPS_PROXY",
       "HTTP_PROXY",
       "NO_PROXY",
       "NODE_USE_ENV_PROXY",
     ]) {
-      expect(wrapper, name).toContain(name);
+      expect(wrapper, name).toMatch(new RegExp(`\\|${name}[|)]`));
     }
+    expect(wrapper).toContain("PATH=%s; export PATH");
     expect(wrapper).toContain("lib/mcp-filter.mjs");
     expect(wrapper).toContain("etc/tool-allowlist.json");
   });

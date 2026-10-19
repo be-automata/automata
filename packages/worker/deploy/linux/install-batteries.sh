@@ -2850,14 +2850,26 @@ write_mcp_wrapper() {
     printf '# Written by install-batteries.sh (harness MCP wrapper). Do not edit.\n'
     printf '# Only PATH, HOME, LANG and the proxy settings reach the server; the\n'
     printf '# filter proxy enforces etc/tool-allowlist.json on tools/list and tools/call.\n'
-    printf 'exec /usr/bin/env -i PATH=%s HOME="$HOME" LANG=C.UTF-8 \\\n' "'$BUILD_PATH'"
-    for entry in HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy NODE_USE_ENV_PROXY; do
-      printf '  ${%s+"%s=$%s"} \\\n' "$entry" "$entry" "$entry"
-    done
+    printf '# The environment is scrubbed IN PLACE (unset), never rebuilt through\n'
+    printf '# `env -i NAME=value`: at WORKER_BOX_SLOTS > 1 HTTPS_PROXY carries the run'"'"'s\n'
+    printf '# proxy credential, and an argv is world-readable in /proc (#205).\n'
+    printf 'for __v in $(env | sed -n '"'"'s/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'"'"'); do\n'
+    printf '  case "$__v" in\n'
+    printf '    PATH|HOME|HTTPS_PROXY|HTTP_PROXY|NO_PROXY|https_proxy|http_proxy|no_proxy|NODE_USE_ENV_PROXY) ;;\n'
+    printf '    *) unset "$__v" 2>/dev/null ;;\n'
+    printf '  esac\n'
+    printf 'done\n'
+    printf 'unset __v\n'
+    printf 'PATH=%s; export PATH\n' "'$BUILD_PATH'"
+    printf 'LANG=C.UTF-8; export LANG\n'
     while IFS= read -r entry; do
-      [ -n "$entry" ] && printf "  '%s' \\\\\n" "$entry"
+      [ -n "$entry" ] || continue
+      case "$entry" in
+        *"'"*) STEP_ERROR="mcpServe.env entry contains a single quote"; return 1 ;;
+      esac
+      printf "%s='%s'; export %s\n" "${entry%%=*}" "${entry#*=}" "${entry%%=*}"
     done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
-    printf "  '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
+    printf "exec '%s' '%s' '%s' -- \\\\\n" "$NODE_BIN" "$target/lib/mcp-filter.mjs" "$target/etc/tool-allowlist.json"
     printf "  '%s' '%s'" "$NODE_BIN" "$target/$(hfield "$i" .mcpServe.entrypoint)"
     while IFS= read -r entry; do
       printf " '%s'" "$entry"

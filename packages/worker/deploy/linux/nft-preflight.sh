@@ -31,11 +31,25 @@ rm -f "$FENCE_UIDS_FILE"
 
 grep -q '__AGENT_UID__' "$CONF" && fail "placeholder __AGENT_UID__ is unrendered"
 
-# One uid (`meta skuid 999`) or an anonymous set (`meta skuid { 999, 2001 }`,
-# #205: one slot account per box slot). Every uid in it is checked.
-UIDS_IN_CONF="$(grep -oE 'meta skuid (\{[0-9, ]+\}|[0-9]+)' "$CONF" | head -1 \
-  | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g')"
-[ -n "${UIDS_IN_CONF// /}" ] || fail "no 'meta skuid <uid>' rule found — refusing to load a fence that fences nobody"
+# Every `meta skuid` set in the text on stdin — one uid (`999`) or an anonymous
+# set (`{ 999, 2001 }`, #205) — normalized (sorted, space-separated), one line
+# per DISTINCT set. The tcp and the udp rule must fence the same uids: a conf
+# whose udp set misses a slot would otherwise pass on the tcp set alone and
+# leave that slot's QUIC/udp-443 egress with no kernel backstop.
+skuid_sets() {
+  grep -oE 'meta skuid (\{ ?[0-9, ]+ ?\}|[0-9]+)' \
+    | sed -E 's/meta skuid //; s/[{}]//g; s/,/ /g' \
+    | while IFS= read -r set; do
+        printf '%s\n' "$set" | tr ' ' '\n' | grep . | sort -n | tr '\n' ' ' | sed 's/ $//'
+        printf '\n'
+      done | grep . | sort -u
+}
+
+SETS="$(skuid_sets <"$CONF")"
+[ -n "$SETS" ] || fail "no 'meta skuid <uid>' rule found — refusing to load a fence that fences nobody"
+[ "$(printf '%s\n' "$SETS" | grep -c .)" = 1 ] \
+  || fail "the skuid sets differ between rules (tcp vs udp): $(printf '%s' "$SETS" | tr '\n' ';') — every rule must fence the same uids"
+UIDS_IN_CONF="$SETS"
 
 WORKER_UID=""
 if id -u "$WORKER_USER" >/dev/null 2>&1; then

@@ -71,13 +71,17 @@ export async function assertSlotAccountsExist(
 
 /**
  * #205: every slot account must be a permitted Runas target for the worker's
- * sudo grant — probed with `sudo -n -l -u <slot> <kill>`, which asks sudoers
- * whether that exact command would be allowed (exit 0) WITHOUT running it, and
- * never prompts (-n). A box whose sudoers Runas list was not re-rendered for a
- * new slot otherwise boots clean, registers N engine slots, and every run that
- * lands on the new slot dies at `sudo -u <slot>` with "a password is required"
- * — the failure the account check exists to move to boot. Probes run in
- * parallel; every refused account is named.
+ * sudo grant — probed by EXERCISING the rule the runs use: `sudo -n -u <slot>
+ * kill -l` (lists signal names; harmless; matches the AUTOMATA_KILL Cmnd) and
+ * never prompts (-n). Not `sudo -l`: that obeys `listpw`, so an unrelated
+ * password-requiring entry for the worker login (the macOS pilot's admin
+ * login) would fail it although the NOPASSWD kill grant is fine. A box whose
+ * Runas list was not re-rendered for a new slot otherwise boots clean,
+ * registers N engine slots, and every run that lands on the new slot dies at
+ * `sudo -u <slot>` with "a password is required" — the failure the account
+ * check exists to move to boot. Called at N > 1 only (only there can a Runas
+ * entry be missing on a box that booted before). Probes run in parallel; every
+ * refused account is named.
  */
 export async function assertSlotSudoGrants(
   users: readonly string[],
@@ -101,7 +105,7 @@ export async function assertSlotSudoGrants(
 }
 
 async function sudoListProbe(user: string): Promise<void> {
-  await execFileAsync(SUDO_BIN, ["-n", "-l", "-u", user, "--", KILL_BIN], {
+  await execFileAsync(SUDO_BIN, ["-n", "-u", user, "--", KILL_BIN, "-l"], {
     timeout: SUDO_PROBE_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
