@@ -19,6 +19,12 @@ WORKER_USER="${WORKER_USER:-automata}"
 
 fail() { echo "[nft-preflight] FAIL: $*" >&2; exit 1; }
 
+# #205: the worker's fail-closed proof (see the end of this script). Removed
+# FIRST, so a preflight that refuses or a load that fails leaves no marker
+# from an earlier boot vouching for a fence that is not loaded.
+FENCE_UIDS_FILE="${FENCE_UIDS_FILE:-/run/automata/egress-fence.uids}"
+rm -f "$FENCE_UIDS_FILE"
+
 [ -n "$CONF" ] || fail "usage: nft-preflight.sh <rendered-egress-nft.conf>"
 [ -r "$CONF" ] || fail "cannot read $CONF"
 [ "$(id -u)" = "0" ] || fail "must run as root"
@@ -92,7 +98,6 @@ fi
 # WORKER_BOX_SLOTS > 1 the worker refuses to boot unless every slot uid is in
 # this file — written ONLY after a successful load, on tmpfs so a boot where
 # this unit never ran has no file to show.
-FENCE_UIDS_FILE="${FENCE_UIDS_FILE:-/run/automata/egress-fence.uids}"
 install -d -m 755 "$(dirname "$FENCE_UIDS_FILE")" || fail "cannot create $(dirname "$FENCE_UIDS_FILE")"
 printf '%s\n' "$UIDS_IN_CONF" > "$FENCE_UIDS_FILE" || fail "cannot write $FENCE_UIDS_FILE"
 chmod 644 "$FENCE_UIDS_FILE"

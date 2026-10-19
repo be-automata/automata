@@ -312,7 +312,6 @@ export async function startEgressProxy(
     return allowed;
   }
 
-  /** Absolute-form plain-HTTP proxying (`GET http://host/...`). */
   // #205: the expected `Proxy-Authorization` value, or null when no credential
   // was configured (N = 1). Compared timing-safe; never logged.
   const expectedAuth = opts.credential
@@ -353,6 +352,7 @@ export async function startEgressProxy(
     }
   }
 
+  /** Absolute-form plain-HTTP proxying (`GET http://host/...`). */
   function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // #108 A2: the worker's own liveness probe. Answered before any decision, so
     // it neither reaches an origin nor pollutes the audit trail. A dead proxy is

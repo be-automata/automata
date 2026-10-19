@@ -37,8 +37,11 @@ RemainAfterExit=yes
 EnvironmentFile=-/etc/automata/egress.env
 ExecStart=/usr/local/sbin/nft-preflight.sh /etc/automata/egress-nft.conf
 # Scoped teardown: drops OUR table and leaves Docker's chains untouched. Failing
-# open here is deliberate — the table may already be absent.
-ExecStop=/bin/sh -c 'nft delete table inet automata_egress 2>/dev/null || true'
+# open here is deliberate — the table may already be absent. The coverage
+# marker goes FIRST (#205): a stopped fence must never leave a file that lets
+# the worker boot N > 1 unfenced; ExecStopPost repeats it for a failed start.
+ExecStop=/bin/sh -c 'rm -f /run/automata/egress-fence.uids; nft delete table inet automata_egress 2>/dev/null || true'
+ExecStopPost=/bin/rm -f /run/automata/egress-fence.uids
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=automata-egress

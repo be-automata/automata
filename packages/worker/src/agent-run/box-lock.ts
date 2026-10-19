@@ -313,6 +313,8 @@ interface HelperSession {
   /** Stderr accumulated so far; keeps filling until the helper exits. */
   stderr: () => string;
   file: string;
+  /** Whether the helper ever printed its ack (the lock WAS granted), even if an abort won the race. */
+  acked: () => boolean;
 }
 
 /**
@@ -395,7 +397,14 @@ async function spawnHelperAndAwaitAck(
     }
   }
 
-  return { child, exited, outcome, stderr: () => stderr, file };
+  return {
+    child,
+    exited,
+    outcome,
+    stderr: () => stderr,
+    acked: () => stdout.startsWith("ok"),
+    file,
+  };
 }
 
 /**
@@ -424,13 +433,6 @@ async function lockFilePrivacyProblem(
   }
 }
 
-/**
- * Turn an acked helper into the caller's `BoxLock`: the LOST observer (a
- * helper that dies after the ack drops the lock while the run still believes
- * it holds it — nothing can recover that mid-run; make it loud instead of
- * silent) and the memoised release closure (EOF on stdin ends `read`, with a
- * SIGKILL fallback after RELEASE_EXIT_BOUND_MS).
- */
 /**
  * #205: in-process "a slot was released" wake-ups, per lock root. One worker
  * process runs a box, so every holder of a root is in-process and a parked
@@ -467,6 +469,13 @@ function isAbortError(e: unknown): boolean {
   return e instanceof Error && e.name === "AbortError";
 }
 
+/**
+ * Turn an acked helper into the caller's `BoxLock`: the LOST observer (a
+ * helper that dies after the ack drops the lock while the run still believes
+ * it holds it — nothing can recover that mid-run; make it loud instead of
+ * silent) and the memoised release closure (EOF on stdin ends `read`, with a
+ * SIGKILL fallback after RELEASE_EXIT_BOUND_MS).
+ */
 function heldLock(
   session: HelperSession,
   holder: string,
@@ -551,10 +560,12 @@ export async function acquireBoxLock({
     child.kill("SIGKILL");
     child.stdin.destroy();
     await exited;
-    // The helper may have been granted the lock in the instant before the
-    // kill; a parked sibling must not idle beside that freed slot. A spurious
-    // wake-up costs one sweep (#205).
-    notifySlotReleased(root);
+    // Only when the helper was granted the lock in the instant before the
+    // kill (its ack lost the race to the abort) was a slot just freed that a
+    // parked sibling must not idle beside. A helper still blocked in flock(2)
+    // held nothing — notifying then would wake every parked waiter into a
+    // sweep against a still-full budget, each wake-up re-notifying (#205).
+    if (session.acked()) notifySlotReleased(root);
     throw abortError();
   }
 

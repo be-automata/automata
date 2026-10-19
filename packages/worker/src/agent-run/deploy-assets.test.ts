@@ -2650,6 +2650,17 @@ describe("packages/worker/deploy/linux — egress fence + sudoers (#192 P7/P9)",
       expect(pre.indexOf("nft -f ")).toBeLessThan(
         pre.indexOf('> "$FENCE_UIDS_FILE"'),
       );
+      // ...and a stale marker never vouches: removed before any check, and by
+      // the unit when the fence is dropped or a start fails.
+      expect(pre.indexOf('rm -f "$FENCE_UIDS_FILE"')).toBeLessThan(
+        pre.indexOf("nft -c -f"),
+      );
+      expect(unit).toMatch(
+        /^ExecStop=.*rm -f \/run\/automata\/egress-fence\.uids;.*nft delete table/m,
+      );
+      expect(unit).toMatch(
+        /^ExecStopPost=\/bin\/rm -f \/run\/automata\/egress-fence\.uids$/m,
+      );
     });
 
     it("the nft preflight parses a skuid SET and checks every uid in it", () => {
