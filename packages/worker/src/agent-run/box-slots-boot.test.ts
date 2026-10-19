@@ -518,10 +518,9 @@ Committed_AS:    2600000 kB
   // cx43 at vm.overcommit_ratio=80: 8 GB swap + 80 % of 16 GB ≈ 20.8 GB.
   const CX43_R80 = meminfo(20311244);
   const fiveG = 5000 * 1024 ** 2;
-  const tuple = (boxSlots: number, fraction = 0.9, floor = 1024 ** 3) => ({
+  const tuple = (boxSlots: number, fraction = 0.9) => ({
     boxSlots,
     memoryMaxBytes: fiveG,
-    headroomFloorBytes: floor,
     headroomRunCommitBytes: fiveG,
     headroomCommitFraction: fraction,
   });
@@ -548,27 +547,30 @@ Committed_AS:    2600000 kB
     );
   });
 
-  it("the documented rollback (floor 0 AND fraction 1.0 — the headroom check OFF) skips the guard: an oversized tuple boots", () => {
+  it("an inert commit arm (fraction ≥ 1 — the rollback, or the arm alone) skips the guard under evaluateHeadroom's own condition: an oversized tuple boots", () => {
     expect(() =>
-      assertSlotsFitCommitLimit(tuple(8, 1, 0), linux(CX33)),
+      assertSlotsFitCommitLimit(tuple(8, 1), linux(CX33)),
+    ).not.toThrow();
+    expect(() =>
+      assertSlotsFitCommitLimit(tuple(8, 1.5), linux("garbage")),
     ).not.toThrow();
   });
 
-  it("an inert commit arm alone (fraction ≥ 1, floor still set) budgets the whole CommitLimit; the boundary is exact", () => {
+  it("the boundary is exact at the budget", () => {
     const commitLimit = 12357216 * 1024;
-    const exact = Math.floor((commitLimit - BOX_BASE_COMMIT_BYTES) / 2);
+    const budget = 0.5 * commitLimit;
+    const exact = Math.floor((budget - BOX_BASE_COMMIT_BYTES) / 2);
     const t = (runCommit: number) => ({
       boxSlots: 2,
       memoryMaxBytes: fiveG,
-      headroomFloorBytes: 1024 ** 3,
       headroomRunCommitBytes: runCommit,
-      headroomCommitFraction: 1,
+      headroomCommitFraction: 0.5,
     });
     expect(() =>
       assertSlotsFitCommitLimit(t(exact), linux(CX33)),
     ).not.toThrow();
-    expect(() => assertSlotsFitCommitLimit(t(exact + 1), linux(CX33))).toThrow(
-      /exceeds 1 × CommitLimit/,
+    expect(() => assertSlotsFitCommitLimit(t(exact + 2), linux(CX33))).toThrow(
+      /exceeds 0\.5 × CommitLimit/,
     );
   });
 

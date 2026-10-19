@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
-import { isInertPolicy, parseMeminfo, readProcMeminfo } from "./headroom";
+import { parseMeminfo, readProcMeminfo } from "./headroom";
 import { KILL_BIN, SH_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
 
@@ -485,9 +485,9 @@ export const BOX_BASE_COMMIT_BYTES = 2 * 1024 ** 3;
  * overcommit_ratio × RAM), or N full runs could never be admitted together —
  * the headroom check would defer every run past the first until it failed
  * (observed: #371's drill on the cx33 deferred every second 5000M run). With
- * the whole headroom policy inert (the documented rollback: floor 0 AND
- * fraction 1.0) the check is skipped — nothing would defer; with only the
- * commit arm inert (fraction ≥ 1) the whole `CommitLimit` is the budget. Refuses
+ * the commit arm inert (fraction ≥ 1 — the documented rollback, or the arm
+ * alone) the guard is skipped under the SAME condition evaluateHeadroom skips
+ * the arm: nothing would defer, and the kernel does not enforce CommitLimit. Refuses
  * (throws, naming the knobs) on Linux with the ceiling on; a box without the
  * ceiling or /proc/meminfo is not this check's business (N > 1 already
  * requires both). `warnIfSlotsExceedMemory` stays the softer RAM warning
@@ -498,7 +498,6 @@ export function assertSlotsFitCommitLimit(
   cfg: {
     boxSlots: number;
     memoryMaxBytes: number;
-    headroomFloorBytes: number;
     headroomRunCommitBytes: number;
     headroomCommitFraction: number;
   },
@@ -518,20 +517,13 @@ export function assertSlotsFitCommitLimit(
   if (platform !== "linux" || cfg.memoryMaxBytes <= 0 || cfg.boxSlots <= 1) {
     return;
   }
-  // The documented rollback (floor 0, fraction 1.0) turns the headroom check
-  // OFF — then nothing defers, CommitLimit is not kernel-enforced
-  // (vm.overcommit_memory 0), and this guard has nothing to guard.
-  if (
-    isInertPolicy({
-      floorBytes: cfg.headroomFloorBytes,
-      commitFraction: cfg.headroomCommitFraction,
-      runCommitBytes: cfg.headroomRunCommitBytes,
-    })
-  ) {
-    return;
-  }
+  // With the commit arm inert (fraction ≥ 1 — evaluateHeadroom skips it, and
+  // the documented rollback sets it so) nothing defers on commit and the
+  // kernel does not enforce CommitLimit either (vm.overcommit_memory 0): this
+  // guard has nothing to guard. Same condition as the runtime arm, exactly.
+  if (cfg.headroomCommitFraction >= 1) return;
   const { commitLimit } = parseMeminfo(readMeminfo());
-  const fraction = Math.min(cfg.headroomCommitFraction, 1);
+  const fraction = cfg.headroomCommitFraction;
   const budget = fraction * commitLimit;
   const need = cfg.boxSlots * cfg.headroomRunCommitBytes + baseBytes;
   if (need > budget) {

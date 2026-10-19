@@ -59,6 +59,15 @@ vi.setConfig({ testTimeout: 240_000 });
 
 const BURST = 42;
 const ORGS = ["org-a", "org-b", "org-c"];
+/**
+ * SKEWED, not round-robin: three orgs served fairly by GROUP_ROUND_ROBIN on
+ * three slots would never put more than one run of any org live at once, and
+ * the per-org cap would be untested. Most of the burst comes from org-a, so it
+ * alone could fill all three slots — the cap must hold it to 2 while the other
+ * orgs take the third slot (maxLive still reaches 3).
+ */
+const orgFor = (i: number): string =>
+  i % 7 < 5 ? ORGS[0]! : ORGS[1 + (i % 2)]!;
 const CAPS = { globalMaxRuns: 3, perOrgMaxRuns: 2 };
 const WORKER_SLOTS = 3;
 const WORKFLOW = "agent-run-strict" as const;
@@ -165,17 +174,25 @@ describe.skipIf(!itEnabled)(
 
     it(`${BURST} dispatches at caps ${CAPS.globalMaxRuns}/${CAPS.perOrgMaxRuns} with ${WORKER_SLOTS} slots: every run COMPLETED (none lost), at most ${WORKER_SLOTS} executing at once, at most ${CAPS.perOrgMaxRuns} per org at once`, async () => {
       const burstId = uid("burst");
-      // A burst, not a trickle: every trigger in flight at once.
-      const dispatched = await Promise.all(
-        Array.from({ length: BURST }, async (_, i) => {
-          const orgId = ORGS[i % ORGS.length]!;
-          const d = await dispatch(
-            { orgId, prKey: `${orgId}/repo/${i}`, sleepMs: 1_000 },
-            `${burstId}-${i}`,
-          );
-          return { ...d, orgId };
-        }),
-      );
+      // Triggered one at a time ON PURPOSE. Observed on hatchet-lite v0.94.10
+      // (2026-10-19): 42 concurrent trigger POSTs left 31 runs COMPLETED on
+      // the engine without ever being dispatched to the worker (11 executed,
+      // serially) — the webhook path in production also triggers one run per
+      // delivery, so sequential is the faithful shape and the parallel one is
+      // an engine observation, not a target.
+      const dispatched: Array<{ id: string; label: string; orgId: string }> =
+        [];
+      for (let i = 0; i < BURST; i++) {
+        const orgId = orgFor(i);
+        // org-a runs are short so its backlog churns through its 2-run cap;
+        // the other orgs' runs are long so the third slot is visibly theirs.
+        const sleepMs = orgId === ORGS[0] ? 1_000 : 3_000;
+        const d = await dispatch(
+          { orgId, prKey: `${orgId}/repo/${i}`, sleepMs },
+          `${burstId}-${i}`,
+        );
+        dispatched.push({ ...d, orgId });
+      }
       expect(dispatched.every((d) => d.id)).toBe(true);
       expect(new Set(dispatched.map((d) => d.id)).size).toBe(BURST);
 
@@ -203,7 +220,11 @@ describe.skipIf(!itEnabled)(
       expect(tally, JSON.stringify(tally)).toEqual({
         [Status.COMPLETED]: BURST,
       });
-      expect(executions.size).toBe(BURST);
+      // Every engine-terminal run must ALSO have executed: a COMPLETED row
+      // that never reached the stub is an engine fault, not a pass.
+      expect(executions.size, `executed ${executions.size} of ${BURST}`).toBe(
+        BURST,
+      );
 
       // Overlap from the stub's own clock: sweep every start/end edge.
       const edges: Array<{ t: number; d: 1 | -1; orgId: string }> = [];
@@ -217,19 +238,24 @@ describe.skipIf(!itEnabled)(
       let live = 0;
       let maxLive = 0;
       const perOrg = new Map<string, number>();
-      let maxPerOrg = 0;
+      const maxPerOrg = new Map<string, number>();
       for (const e of edges) {
         live += e.d;
         maxLive = Math.max(maxLive, live);
         const o = (perOrg.get(e.orgId) ?? 0) + e.d;
         perOrg.set(e.orgId, o);
-        maxPerOrg = Math.max(maxPerOrg, o);
+        maxPerOrg.set(e.orgId, Math.max(maxPerOrg.get(e.orgId) ?? 0, o));
       }
       expect(maxLive).toBeLessThanOrEqual(WORKER_SLOTS);
-      expect(maxPerOrg).toBeLessThanOrEqual(CAPS.perOrgMaxRuns);
-      // The raised caps were USED, not merely respected: with 42 one-second
-      // runs and 3 slots the engine must have run more than one at a time.
-      expect(maxLive).toBeGreaterThan(1);
+      for (const [org, m] of maxPerOrg) {
+        expect(m, org).toBeLessThanOrEqual(CAPS.perOrgMaxRuns);
+      }
+      // The caps were USED, not merely respected: org-a (30 of 42 runs) must
+      // have reached the per-org cap exactly — it could have filled all three
+      // slots and was held to 2 — while the other orgs took the third slot.
+      const shape = JSON.stringify({ maxLive, maxPerOrg: [...maxPerOrg] });
+      expect(maxPerOrg.get(ORGS[0]!), shape).toBe(CAPS.perOrgMaxRuns);
+      expect(maxLive, shape).toBe(WORKER_SLOTS);
       expect([...executions.values()].some((e) => e.cancelled)).toBe(false);
     });
   },
