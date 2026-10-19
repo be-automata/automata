@@ -163,29 +163,24 @@ admitted run **reserves** `runCommit` for its whole life, shrunk by the anonymou
 already charges its cgroup (`memory.stat` anon + shmem — what `Committed_AS` counts; never
 `memory.current`, which includes page cache) once it exists, so two concurrent admissions cannot both
 pass on the same headroom and a live run's later growth stays counted. A refusal
-releases the slot (nothing of the run is on disk) and throws `AdmissionDeferredError` — the
-ONE plain error the run task lets escape: the engine re-queues the attempt (QUEUED, never
-FAILED or CANCELLED) with `retries` = `WORKER_ADMISSION_MAX_DEFERRALS` and exponential
-backoff, and the whole deferral budget must fit the www stalled cutoff (boot refuses a
-budget that does not). **Exactly-once is preserved by construction**, on two sides: every error thrown
-after admission is rethrown as `NonRetryableError` (`fenceNonRetryable`), and — because the
-engine ALSO retries failures it decides itself (measured on hatchet-lite v0.94.10: an
-`executionTimeout` is retried under the task's policy) — a **re-execution guard** runs first
-in every attempt: the worker counts the deferrals it threw per run, and an attempt number
-above that count is refused as `NonRetryableError` before any side effect. A retry can only
-ever re-run the admission, never the agent; the ledger is durable under the run-namespace root, so a
-restart or deploy during a deferral's backoff still admits its retry; a retry that lands on a
-DIFFERENT worker process (not this box's one worker, I3) is refused (fail-closed). An
-engine-retried timeout reaches FAILED seconds after the timeout (2 s backoff, priority-4
-re-queue), with the guard's message as the thread's failure reason. A cancel during backoff is the engine's
-cancel of a QUEUED attempt — no worker code runs. The check is inert (`floor 0` and
-`fraction 1.0`, or no `/proc/meminfo`) without a deploy; the retries stay registered on every
-host, and with the check inert nothing ever throws the deferral, so they are never used. An
-unreadable `/proc/meminfo` at admission (boot proved it readable) fails OPEN with one
-`box.headroom_unreadable` line — a transient kernel read must not idle the box; the deferral
-budget assumes a priority-4 retry is scheduled promptly (admission-retry.ts states the risk:
-a retry that waits a full scheduleTimeout is reaped by www as stalled). Decision 5 stands: nothing here signals a
-lock-holding run.
+releases the slot (nothing of the run is on disk) and the run **waits IN PROCESS** — an
+abortable exponential backoff (2 s, 4 s, … capped at 120 s) — then re-acquires a slot and asks
+again, up to `WORKER_ADMISSION_MAX_DEFERRALS` times; the whole deferral budget must fit the
+www stalled cutoff (boot refuses a budget that does not), and after the last allowed deferral
+the run fails FINAL (`AdmissionBudgetExhaustedError`, non-retryable). The task keeps
+`retries: 0`, so the engine sees a RUNNING task throughout and never re-executes anything —
+exactly-once holds by registration, with no fence and no ledger. Deferrals are deliberately
+NOT engine retries, on two facts measured against hatchet-lite v0.94.10
+(`admission-deferral.integration.test.ts`): a retried attempt re-enters a CANCEL_IN_PROGRESS
+group as the NEWEST item and cancels the genuinely newer run of the same PR (inverting
+newest-wins), and an `executionTimeout` is retried under the task's policy (re-running a
+non-idempotent agent). With retries 0 the same test shows a timeout fails once, and a newer run
+cancels the older one that is still waiting in process. A cancel during the wait aborts the
+sleep (`AbortError`), ending the run like any other cancel. The check is inert (`floor 0` and
+`fraction 1.0`, or no `/proc/meminfo`) without a deploy. An unreadable `/proc/meminfo` at
+admission (boot proved it readable) fails OPEN with one `box.headroom_unreadable` line — a
+transient kernel read must not idle the box. Decision 5 stands: a waiting run holds NO slot and
+nothing here signals a lock-holding run.
 
 ## Anti-deviation invariants
 
@@ -194,7 +189,7 @@ lock-holding run.
 - **I2** The slot is acquired at admission after both Stage A reaps and released last in
   the run's finally, after `daemon.teardown()` and the teardown uid-scan. The headroom
   check (#371) runs under the slot and before the clone; its refusal releases the slot and
-  is the only retryable error the run task throws.
+  is waited out in process — the run task registers `retries: 0` and throws nothing retryable.
 - **I3** One worker unit per box; engine `slots` = `WORKER_BOX_SLOTS` = the number of kernel
   slot locks; the `definition.ts` global key is documented as per-workflow, never as the
   box cap.

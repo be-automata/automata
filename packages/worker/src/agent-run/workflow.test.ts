@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
-import { AGENT_RUN_VARIANTS, buildAgentRunDefinition } from "./definition";
-import { loadWorkerConfig } from "./config";
+import { AGENT_RUN_VARIANTS } from "./definition";
 
 // Defensive: this suite only checks registration shapes and never runs the
 // task fn — but if a future case does, the admission reap and box lock must
@@ -129,41 +128,26 @@ describe("agentRunWorkflow registration shape", () => {
     expect(keys[0].maxRuns).toBeLessThanOrEqual(keys[1].maxRuns);
   });
 
-  it("registers exactly one run task whose retries are the admission-deferral budget (#371) with the 30m timeouts", () => {
+  it("registers exactly one run task with EXPLICIT retries: 0, no backoff, and the 30m timeouts — and #371 keeps it so", () => {
     const tasks = workflowDef._tasks as Array<{
       name: string;
       retries?: number;
-      backoff?: { factor: number; maxSeconds: number };
+      backoff?: unknown;
       scheduleTimeout?: string;
       executionTimeout?: string;
     }>;
     expect(tasks).toHaveLength(1);
     const run = tasks[0]!;
     expect(run.name).toBe("run");
-    // Explicit, never undefined — and equal to WORKER_ADMISSION_MAX_DEFERRALS
-    // (default 8). These retries are admission deferrals ONLY: every error
-    // after admission is fenced non-retryable (fenceNonRetryable), so a raised
-    // count can never re-execute an agent.
-    // Registered the same on every host: where the gate is OFF (macOS, inert
-    // values) nothing ever throws the deferral, so the retries are never used.
-    // The same source the module reads at import: process.env.
-    const deferrals = loadWorkerConfig().admissionMaxDeferrals;
-    expect(run.retries).toBe(deferrals);
-    expect(run.backoff).toEqual(
-      deferrals > 0 ? { factor: 2, maxSeconds: 120 } : undefined,
-    );
+    // Explicit, never undefined: an agent run is NON-idempotent and the engine
+    // retries its own failures (an executionTimeout) under this policy — and a
+    // retried attempt re-enters CANCEL_IN_PROGRESS as the newest item. The
+    // memory-headroom deferral (#371) waits IN PROCESS instead, so nothing
+    // ever needs an engine retry.
+    expect(run.retries).toBe(0);
+    expect("backoff" in run).toBe(false);
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
-  });
-
-  it("with admissionRetries 0 the definition is the pre-#371 shape: retries 0 and NO backoff key", () => {
-    const def = buildAgentRunDefinition("agent-run", null, {
-      admissionRetries: 0,
-    });
-    expect(def.task.retries).toBe(0);
-    expect("backoff" in def.task).toBe(false);
-    const legacy = buildAgentRunDefinition("agent-run", null);
-    expect(legacy.task).toEqual(def.task);
   });
 
   it("registers an onFailure handler (no name — SDK amendment 3)", () => {

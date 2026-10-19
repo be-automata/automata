@@ -2,7 +2,6 @@ import {
   ConcurrencyLimitStrategy,
   type Duration,
 } from "@hatchet-dev/typescript-sdk";
-import { ADMISSION_BACKOFF } from "./admission-retry";
 
 /**
  * The PURE registration shape of the agent-run workflows (#125 C1): the
@@ -85,20 +84,9 @@ const DELIVERY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
  * the shapes under test are the shipped ones, never a hand-copied lookalike.
  * Unknown strategy → throws (fail-loud, never a silently mis-strategied group).
  */
-export interface AgentRunDefinitionOpts {
-  /**
-   * #371: how many times the engine may re-queue the run task after an
-   * `AdmissionDeferredError` (= `WORKER_ADMISSION_MAX_DEFERRALS`). 0 (the
-   * default here, so every E2E import keeps the shipped pre-#371 shape) = no
-   * retries and no backoff — byte-identical registration.
-   */
-  admissionRetries?: number;
-}
-
 export function buildAgentRunDefinition(
   name: string,
   perPrStrategy: PerPrStrategy,
-  opts: AgentRunDefinitionOpts = {},
 ): {
   workflow: {
     name: string;
@@ -122,7 +110,6 @@ export function buildAgentRunDefinition(
     scheduleTimeout: Duration;
     executionTimeout: Duration;
     retries: number;
-    backoff?: { factor: number; maxSeconds: number };
   };
 } {
   if (
@@ -133,7 +120,6 @@ export function buildAgentRunDefinition(
       `buildAgentRunDefinition(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
     );
   }
-  const retries = opts.admissionRetries ?? 0;
   return {
     workflow: {
       name,
@@ -192,19 +178,17 @@ export function buildAgentRunDefinition(
       name: "run",
       scheduleTimeout: "30m",
       executionTimeout: "30m",
-      // RETRIES ARE ADMISSION DEFERRALS ONLY (#371). A single agent-run is a
-      // minutes-long, NON-idempotent side-effecting operation (it clones, runs the
-      // agent, and posts a GitHub review) — re-executing it would risk a double
-      // side-effect. The engine retries only PLAIN errors, and the run task lets
-      // exactly one escape plain: `AdmissionDeferredError`, thrown by the headroom
-      // check before any side effect (no credential on disk, no daemon, no
-      // GitHub write). Every error after admission is rethrown as
-      // `NonRetryableError` by runAgent (workflow.ts), so exactly-once holds by
-      // construction whatever `retries` is. With `admissionRetries` 0 this is the
-      // pre-#371 shape: retries 0, no backoff. Engine redelivery after a worker
-      // death is a separate mechanism, absorbed by the www single-writer.
-      retries,
-      ...(retries > 0 ? { backoff: ADMISSION_BACKOFF } : {}),
+      // EXPLICIT retries: 0 — and it stays 0 (#371 measured why). A single
+      // agent-run is a minutes-long, NON-idempotent side-effecting operation (it
+      // clones, runs the agent, posts a GitHub review); the engine retries its
+      // OWN failures too (an executionTimeout re-executes the task under the
+      // retry policy — hatchet-lite v0.94.10, admission-deferral IT), and a
+      // retried attempt re-enters a CANCEL_IN_PROGRESS group as the newest item,
+      // cancelling the genuinely newer run. So the memory-headroom deferral
+      // (#371) is waited out IN PROCESS (workflow.ts), never as an engine
+      // retry. Engine redelivery after a worker death is a separate mechanism,
+      // absorbed by the www single-writer.
+      retries: 0,
       // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
       // it stays unset until #3b raises the global cap — at which point set slotCost to
       // model each agent-run's memory weight so a worker's physical slots reflect real

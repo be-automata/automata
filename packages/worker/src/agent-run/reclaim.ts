@@ -8,7 +8,6 @@ import {
   slotIndexOfDir,
   workerRunDir,
 } from "./run-namespace";
-import { LEDGER_DIRNAME } from "./reexecution-guard";
 import { buildKillInvocation, type Invocation } from "./spawn-as-user";
 
 /**
@@ -120,13 +119,9 @@ function listPidFiles(dir: string): string[] {
 /** readdir the namespace root, [] when it does not exist — shared by both reapers. */
 function listWorkerDirs(root: string): fs.Dirent[] {
   try {
-    return (
-      fs
-        .readdirSync(root, { withFileTypes: true })
-        // The root also holds the #371 deferral ledger dir, which is nobody's
-        // run and must not be "reclaimed" or logged as skipped.
-        .filter((e) => e.isDirectory() && e.name !== LEDGER_DIRNAME)
-    );
+    return fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory());
   } catch {
     return [];
   }

@@ -119,8 +119,8 @@ export interface WorkerConfig {
    * #371: memory-headroom admission check (ADR-007 Decision 5). `MemAvailable`
    * must stay at or above `headroomFloorBytes` and `Committed_AS` plus the
    * expected commit of every admitted run must stay at or below
-   * `headroomCommitFraction × CommitLimit`, or admission is DEFERRED (a
-   * retryable error the engine re-queues with backoff). Defaults 1G / 0.9 —
+   * `headroomCommitFraction × CommitLimit`, or admission is DEFERRED (the run
+   * gives its slot back and waits IN PROCESS with backoff). Defaults 1G / 0.9 —
    * ON wherever `/proc/meminfo` exists; `0` and `1.0` are the documented
    * rollback that makes the check inert without a deploy. One run's expected
    * commit is its own ceiling when the ceiling is on, else `1300M`.
@@ -129,8 +129,8 @@ export interface WorkerConfig {
   headroomCommitFraction: number;
   headroomRunCommitBytes: number;
   /**
-   * #371: how many times one run may be deferred before the engine fails it
-   * (= the run task's `retries`). Backoff is 2^n s capped at 120 s, so the
+   * #371: how many times one run may be deferred (waited out in process) before
+   * it fails final. Backoff is 2^n s capped at 120 s, so the
    * default 8 bounds total deferral at 366 s (≈ 6 minutes) — deliberately under
    * the control plane's 75-minute stalled-thread cutoff once the 30 m schedule
    * and 30 m execution windows are added (`apps/www/src/server-lib/cron.ts`).
@@ -610,17 +610,16 @@ export function loadWorkerConfig(
   const admissionMaxDeferrals = parseMaxDeferrals(
     env.WORKER_ADMISSION_MAX_DEFERRALS,
   );
-  // THE DEFERRAL BUDGET IS BOUNDED BY THE CONTROL PLANE'S REAPER. A deferral
-  // writes nothing to www, so a thread that is deferred too long is reaped as
-  // stalled (75 min) while the engine still has it QUEUED — the admitted run
-  // then completes into a void. Refuse a count whose worst-case wait breaks
-  // the inequality documented on ADMISSION_DEFERRAL_BUDGET_S.
+  // #371: the deferral wait is spent IN PROCESS inside the run's 30-minute
+  // executionTimeout, so the worst case must leave the agent a usable window
+  // and keep the run inside www's 75-minute stalled cutoff — the inequality
+  // documented on ADMISSION_DEFERRAL_BUDGET_S.
   const worstCaseS = sumBackoffSeconds(admissionMaxDeferrals);
   if (worstCaseS > ADMISSION_DEFERRAL_BUDGET_S) {
     throw new Error(
       `WORKER_ADMISSION_MAX_DEFERRALS=${admissionMaxDeferrals} waits up to ${worstCaseS}s ` +
         `(2^n s capped at ${ADMISSION_BACKOFF.maxSeconds}s), over the ${ADMISSION_DEFERRAL_BUDGET_S}s budget ` +
-        `that keeps a deferred run inside the control plane's 75-minute stalled-thread cutoff`,
+        `that leaves a deferred run its execution window (and www's 75-minute stalled cutoff)`,
     );
   }
   return {

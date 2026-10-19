@@ -6,7 +6,6 @@ import {
   type AgentRunVariantName,
   type PerPrStrategy,
 } from "./definition";
-import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { configForSlot, loadWorkerConfig } from "./config";
 import { readMemoryAnon } from "./run-cgroup";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
@@ -37,24 +36,20 @@ import {
 } from "./task-agent";
 import {
   classifyNextMessageError,
-  fenceNonRetryable,
   nonRetryablePreflight,
 } from "./retry-classification";
 import {
   ADMISSION_DEFERRAL_BUDGET_S,
+  backoffSeconds,
   sumBackoffSeconds,
 } from "./admission-retry";
 import {
+  AdmissionBudgetExhaustedError,
   AdmissionController,
   AdmissionDeferredError,
   assessHeadroomSupport,
   type Reservation,
 } from "./headroom";
-import {
-  assertNotReexecuting,
-  forgetRun,
-  recordDeferral,
-} from "./reexecution-guard";
 import {
   pollUntilTerminal,
   postEgressEvents,
@@ -303,16 +298,8 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
-  admissionRetries: number,
 ) {
-  // #371: the run task's retries are admission deferrals (headroom check);
-  // every other failure is fenced non-retryable in runAgent, so the count is
-  // registered the same on every host — where the check is inert or absent
-  // (macOS, rollback values) nothing ever throws the deferral and the retries
-  // are never used.
-  const def = buildAgentRunDefinition(name, perPrStrategy, {
-    admissionRetries,
-  });
+  const def = buildAgentRunDefinition(name, perPrStrategy);
   const wf = hatchet.workflow<AgentRunInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
   wf.onFailure({ fn: onAgentRunFailure });
@@ -325,8 +312,6 @@ type RunCtx = {
   cancelled: boolean;
   log: (message: string) => void;
   workflowRunId?: () => string;
-  /** #371: the engine's attempt counter (0 on the first try) — logged on every deferral. */
-  retryCount?: () => number;
 };
 
 /**
@@ -367,6 +352,37 @@ export function headroomBootLine(
   return gate.controller
     ? `memory headroom check armed: floor=${gate.controller.policy.floorBytes} fraction=${gate.controller.policy.commitFraction} runCommit=${gate.controller.policy.runCommitBytes} maxDeferrals=${config.admissionMaxDeferrals} budgetS=${sumBackoffSeconds(config.admissionMaxDeferrals)}/${ADMISSION_DEFERRAL_BUDGET_S}`
     : `memory headroom check OFF: ${gate.reason}`;
+}
+
+/** Abortable sleep for the deferral wait: resolves after `ms`, rejects with AbortError on the run's cancel. */
+export function sleepAbortable(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      const err = new Error("admission wait aborted");
+      err.name = "AbortError";
+      reject(err);
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+let admissionSleep: typeof sleepAbortable = sleepAbortable;
+/** Test seam: replace the deferral wait (undefined restores the real sleep). */
+export function _setAdmissionSleepForTests(
+  fn: typeof sleepAbortable | undefined,
+): void {
+  admissionSleep = fn ?? sleepAbortable;
 }
 
 /** Test seam: install a gate (a controller, or null = the check is off), or reset with undefined. */
@@ -411,76 +427,38 @@ async function runAgent(
   // TMO-01: the 30-minute execution timeout counts from here; the post-agent
   // fix check must finish inside it.
   const runStartedAt = Date.now();
-  // Inside the fence's reach: a config or option error here is side-effect
-  // free but must not be the one plain Error the engine retries 8× (#371).
-  let config: ReturnType<typeof loadWorkerConfig>;
-  let wwwOpts: WwwClientOpts;
-  // #371: the ledger and the headroom reservation are keyed by the WORKFLOW
-  // RUN, which is stable across its retries and distinct for every run of the
-  // same thread (supersede siblings, re-reviews) — a thread key would let one
-  // run's leftover deferral count admit a sibling's engine-retried timeout.
-  const workflowRunId = ctx.workflowRunId?.() || null;
-  const runKey = workflowRunId ?? input.threadId;
-  const attempt = ctx.retryCount?.() ?? 0;
-  let ledger: { root: string; log: (line: string) => void } | undefined;
-  try {
-    config = loadWorkerConfig();
-    ledger = {
-      root: config.runNamespaceRoot,
-      log: (m) => ctx.log(`[agent-run ${input.threadId}] ${m}`),
-    };
-    // #371 RE-EXECUTION GUARD, before anything with a side effect: an attempt
-    // the box's deferral ledger does not account for came from an engine-side
-    // failure (an execution timeout is retried by the engine) — never re-run
-    // the agent. Without a workflow run id nothing can prove a retry is a
-    // deferral's (a thread-keyed count could be another run's): fail closed.
-    if (!workflowRunId && attempt > 0) {
-      throw new NonRetryableError(
-        `attempt ${attempt + 1} of this run cannot be proven to be an admission-deferral retry (no workflow run id in the task context); an agent run never re-executes`,
-      );
-    }
-    assertNotReexecuting(runKey, attempt, ledger);
-    wwwOpts = wwwOptsFor(input, ctx);
-  } catch (err) {
-    forgetRun(runKey, ledger);
-    throw fenceNonRetryable(err);
-  }
+  const config = loadWorkerConfig();
+  const wwwOpts = wwwOptsFor(input, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
-  let deferred = false;
-  try {
-    // Under complete-run·queue a run may have waited behind an older one while
-    // newer commits landed. Ask www FIRST; if a newer run is already recorded,
-    // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
-    // Inside the try so the finally drops this run's ledger entry too.
-    if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
-      const stale = await checkRunStaleness(
-        wwwOpts,
-        { runExternalId },
-        ctx.abortController?.signal,
+  // #371: the headroom reservation is keyed by the WORKFLOW RUN — distinct for
+  // every run of a thread (supersede siblings, re-reviews).
+  const runKey = ctx.workflowRunId?.() || input.threadId;
+  // Under complete-run·queue a run may have waited behind an older one while
+  // newer commits landed. Ask www FIRST; if a newer run is already recorded,
+  // skip with a typed terminal — no clone, no daemon, no credits. Fails open.
+  if (input.supersedePolicy === "complete-run-queue" && runExternalId) {
+    const stale = await checkRunStaleness(
+      wwwOpts,
+      { runExternalId },
+      ctx.abortController?.signal,
+    );
+    if (stale) {
+      const result = await postRunTerminal(wwwOpts, {
+        runExternalId,
+        cause: "stale-skipped",
+        policy: input.supersedePolicy,
+      });
+      ctx.log(
+        `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
       );
-      if (stale) {
-        const result = await postRunTerminal(wwwOpts, {
-          runExternalId,
-          cause: "stale-skipped",
-          policy: input.supersedePolicy,
-        });
-        ctx.log(
-          `[agent-run ${input.threadId}] stale-skipped (newer run queued for this PR) → terminal: ${result}`,
-        );
-        return {
-          threadId: input.threadId,
-          threadChatId: input.threadChatId,
-          outcome: "stale-skipped",
-        };
-      }
+      return {
+        threadId: input.threadId,
+        threadChatId: input.threadChatId,
+        outcome: "stale-skipped",
+      };
     }
-    // #371 EXACTLY-ONCE FENCE. The run task now carries `retries` so the engine
-    // can re-queue an admission deferral; that makes every PLAIN error thrown in
-    // here retryable — and a retried agent run re-executes the agent. So every
-    // error is rethrown non-retryable except the one deferral the engine is
-    // meant to retry (fenceNonRetryable); the deferral is recorded so the
-    // guard above lets exactly its retry through. `finally` below still posts
-    // the superseded terminal on a cancel, unchanged.
+  }
+  try {
     const output = await runAgentInner(
       input,
       ctx,
@@ -513,30 +491,7 @@ async function runAgent(
       }
     }
     return output;
-  } catch (err) {
-    if (err instanceof AdmissionDeferredError) {
-      // The engine retries this one — unless it was the last attempt allowed,
-      // or the run was cancelled meanwhile (then no retry returns here, and the
-      // entry would only age out). Keep the ledger exact in both cases.
-      const retryWillCome =
-        workflowRunId !== null &&
-        attempt < config.admissionMaxDeferrals &&
-        !(ctx.cancelled || ctx.abortController?.signal.aborted);
-      if (retryWillCome) {
-        deferred = true;
-        recordDeferral(runKey, ledger);
-      }
-      throw err;
-    }
-    // An engine cancel ends the task whatever we throw; let its abort error
-    // through untouched so the journal names it. Everything else is fenced.
-    if (ctx.cancelled || ctx.abortController?.signal.aborted) {
-      throw err;
-    }
-    throw fenceNonRetryable(err);
   } finally {
-    // Any end but a deferral is the run's last word on this worker.
-    if (!deferred) forgetRun(runKey, ledger);
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts);
     }
@@ -590,24 +545,9 @@ async function postSuperseded(
  * Registered variants, in the table's order. `agent-run` (legacy, no per-PR
  * entry) keeps the pre-#125 REST trigger contract byte-identical.
  */
-// One config read for every variant; the deferral count is a boot constant.
-// Read at import (hello/worker.ts imports this module before main()), so a
-// config the loader rejects must NOT throw here — that would bypass the
-// guarded `[worker-boot] … exit(1)` path; main()'s own loadWorkerConfig()
-// reports it. 0 then registers the pre-#371 shape, and the process never
-// gets to register anyway.
-const bootAdmissionRetries = ((): number => {
-  try {
-    return loadWorkerConfig().admissionMaxDeferrals;
-  } catch {
-    return 0;
-  }
-})();
 export const agentRunWorkflows = (
   Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]
-).map((name) =>
-  makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name], bootAdmissionRetries),
-);
+).map((name) => makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name]));
 
 /** The legacy workflow, exported by name for existing callers/tests. */
 export const agentRunWorkflow = agentRunWorkflows.find(
@@ -1074,34 +1014,63 @@ async function runAgentInner(
       agentUser: config.agentUser,
       log: admissionLog,
     });
-    boxLock = await acquireBoxSlot({
-      root: config.runNamespaceRoot,
-      slots: config.boxSlots,
-      holder: input.threadId,
-      signal,
-      log: admissionLog,
-    });
-    step("box lock acquired");
-    // #205: from here on this run IS slot `boxLock.slot`, running as that
-    // slot's account (configForSlot); its per-run artefacts live in the slot's
-    // own subdir. Parameters are rebindable, and every later read of `config`
-    // — clone grants, credential HOME, brokers, daemon, reaps, cleanup — means
-    // the slot's config.
-    config = configForSlot(config, boxLock.slot);
-    // #371: the memory-headroom check, under the slot and BEFORE the clone, so
-    // a deferral costs no clone. Refusal throws AdmissionDeferredError — the one
-    // error the engine retries (definition.ts) — after the slot is given back
-    // in the catch below; nothing of this run is on disk yet. The reservation
-    // it returns lives as long as the run (released in the finally and in
-    // every pre-daemon unwind); once the run's cgroup exists it shrinks by
-    // the anonymous memory the kernel already charges the run (daemon.start() below).
-    reservation =
-      getAdmissionController(config)?.admit({
-        runId: runKey,
-        threadId: input.threadId,
-        attempt: ctx.retryCount?.() ?? 0,
+    // #371: admission under the slot and BEFORE the clone, with the deferral
+    // waited out IN PROCESS: a refusal gives the slot back (a parked sibling
+    // takes it at once), sleeps the backoff — abortable by the engine's cancel
+    // — and tries again, up to WORKER_ADMISSION_MAX_DEFERRALS; then the run
+    // fails final. Nothing of the run is on disk while it waits. The
+    // reservation lives as long as the run (released in the finally and in
+    // every pre-daemon unwind); once the run's cgroup exists it shrinks by the
+    // anonymous memory the kernel already charges the run (daemon.start()).
+    const baseConfig = config;
+    const admission = getAdmissionController(config);
+    for (let deferrals = 0; ; ) {
+      boxLock = await acquireBoxSlot({
+        root: baseConfig.runNamespaceRoot,
+        slots: baseConfig.boxSlots,
+        holder: input.threadId,
+        signal,
         log: admissionLog,
-      }) ?? null;
+      });
+      step("box lock acquired");
+      // #205: from here on this run IS slot `boxLock.slot`, running as that
+      // slot's account (configForSlot); its per-run artefacts live in the
+      // slot's own subdir. Every later read of `config` — clone grants,
+      // credential HOME, brokers, daemon, reaps, cleanup — means the slot's.
+      config = configForSlot(baseConfig, boxLock.slot);
+      try {
+        reservation =
+          admission?.admit({
+            runId: runKey,
+            threadId: input.threadId,
+            attempt: deferrals,
+            log: admissionLog,
+          }) ?? null;
+        break;
+      } catch (err) {
+        if (!(err instanceof AdmissionDeferredError)) throw err;
+        await boxLock.release();
+        boxLock = null;
+        config = baseConfig;
+        if (deferrals >= baseConfig.admissionMaxDeferrals) {
+          throw new AdmissionBudgetExhaustedError(deferrals, err);
+        }
+        deferrals += 1;
+        const waitS = backoffSeconds(deferrals);
+        admissionLog(
+          `box.headroom_deferred_wait ${JSON.stringify({
+            threadId: input.threadId,
+            deferral: deferrals,
+            of: baseConfig.admissionMaxDeferrals,
+            waitS,
+          })}`,
+        );
+        step(
+          `admission deferred (${deferrals}/${baseConfig.admissionMaxDeferrals}): no memory headroom — waiting ${waitS}s`,
+        );
+        await admissionSleep(waitS * 1000, signal);
+      }
+    }
     if (config.boxSlots > 1) {
       await ensureSlotNamespace({
         root: config.runNamespaceRoot,

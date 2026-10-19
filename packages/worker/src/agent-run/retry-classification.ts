@@ -1,22 +1,16 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import { AdmissionDeferredError } from "./headroom";
 import { NextMessageHttpError } from "./www-client";
 
 /**
  * Non-retryable error classification (#6). Mark KNOWN-TERMINAL errors
  * `NonRetryableError` so they route straight to the on-failure handler instead of
- * burning agent-minutes on backoff. The run task registers `retries` for
- * admission deferrals (#371), so the classification matters: it decides which
- * failures are final.
+ * burning agent-minutes on backoff. This is correct to apply now even though the run
+ * task is `retries: 0` (no auto-retry, and #371 keeps it so) — it keeps the
+ * classification right if retries are ever raised, and documents intent.
  *
  * TRANSIENT (5xx / network) stays a plain Error here; a 4xx from next-message
  * (PR gone / permission revoked / bad token) is terminal → NonRetryableError.
  *
- * #371 NOTE: since the run task carries `retries` (admission deferrals), a plain
- * Error no longer means "the engine may retry". `fenceNonRetryable` (below) wraps
- * EVERY post-admission error at the task boundary, so the only retryable class
- * reaching the engine is `AdmissionDeferredError`. This classifier's plain-Error
- * arm therefore only shapes the message now; the fence decides retryability.
  */
 export function classifyNextMessageError(err: unknown): unknown {
   if (
@@ -110,37 +104,4 @@ export function classifyAgentExit(opts: {
     return resourceLimitFailure(opts.memoryMaxBytes, opts.oomKills);
   }
   return opts.fallback;
-}
-
-/**
- * #371: the exactly-once fence around the run task. The engine retries PLAIN
- * errors (`retries` > 0 since the headroom check), so everything thrown AFTER
- * admission must reach it non-retryable — an agent run must never re-execute.
- * Only two shapes pass through untouched: `NonRetryableError` (already final)
- * and `AdmissionDeferredError` (thrown before any side effect; the one error
- * the engine is meant to retry). Non-Error throwables are wrapped too.
- */
-export function fenceNonRetryable(err: unknown): unknown {
-  if (
-    err instanceof NonRetryableError ||
-    err instanceof AdmissionDeferredError
-  ) {
-    return err;
-  }
-  // The SDK sends only `message` and `stack` to the engine, and the user sees
-  // the message as the thread's failure reason (onFailure →
-  // summarizeHatchetErrors): it stays EXACTLY today's text — the message
-  // verbatim, no name, no prefix. The non-retryable-ness is the TYPE.
-  const wrapped = new NonRetryableError(
-    err instanceof Error ? err.message : String(err),
-  );
-  // The original stays reachable as `cause` for callers that classify or
-  // assert on it, and its stack is carried in ours: Node's `.stack` does not
-  // include `cause`, and the journal/engine payload would otherwise point at
-  // this fence instead of where the error was thrown.
-  wrapped.cause = err;
-  if (err instanceof Error && err.stack) {
-    wrapped.stack = `${wrapped.name}: ${wrapped.message}\n[cause] ${err.stack}`;
-  }
-  return wrapped;
 }

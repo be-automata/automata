@@ -86,14 +86,15 @@ WORKER_HEADROOM_FLOOR` (default `1G`; `0` = inert) AND `Committed_AS +
 reserved + WORKER_HEADROOM_RUN_COMMIT ≤ WORKER_HEADROOM_COMMIT_FRACTION ×
 CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`). A refusal gives the slot
-  back and throws `AdmissionDeferredError`, the ONE error the engine retries
-  (`retries` = `WORKER_ADMISSION_MAX_DEFERRALS`, default 8, backoff ×2 capped
-  at 120 s; the whole budget must fit the deferral window — boot refuses
-  otherwise); the run shows QUEUED between attempts, never FAILED. Every other
-  error after admission is non-retryable, and an attempt the worker's deferral
-  ledger does not account for (the engine retries its own execution timeouts)
-  is refused before any side effect — exactly-once on both sides. Journal lines
-  `box.headroom_rejected` / `box.headroom_ok` carry the three memory values.
+  back and the run WAITS IN PROCESS (backoff ×2 from 2 s, capped at 120 s), then
+  takes a slot and asks again, up to `WORKER_ADMISSION_MAX_DEFERRALS` times
+  (default 8 = 366 s; the whole budget must fit the 12-minute deferral window —
+  boot refuses otherwise); past the budget the run fails final. The task keeps
+  `retries: 0`: the engine sees RUNNING throughout, never a retry (an engine
+  retry would re-enter the per-PR supersede group as the newest item and cancel
+  the genuinely newer run — measured). Journal lines `box.headroom_rejected` /
+  `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
+  three memory values.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 

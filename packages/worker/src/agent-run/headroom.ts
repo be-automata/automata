@@ -1,8 +1,12 @@
 import fs from "node:fs";
 
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+
+import { sumBackoffSeconds } from "./admission-retry";
+
 /**
  * Memory-headroom admission check (#371, epic #193 ticket 3; ADR-007 Decision 5).
- * The engine-retry constants live in admission-retry.ts (import-free).
+ * The backoff constants live in admission-retry.ts.
  *
  * WHY. The per-run ceiling (#204) bounds ONE run and the slot locks (#205) bound
  * HOW MANY run; neither bounds the SUM. N runs each under their `memory.max` can
@@ -16,11 +20,12 @@ import fs from "node:fs";
  *   2. would `Committed_AS` plus those reservations plus THIS run's expected
  *      commit stay under a fraction of `CommitLimit`.
  *
- * Either answer "no" DEFERS the run: `AdmissionDeferredError` is a plain Error,
- * so the engine (task `retries` + exponential `backoff`, definition.ts) frees the
- * worker slot and re-queues the attempt — the run shows QUEUED, never FAILED, and
- * is never cancelled by the host (Decision 5: the budget may delay or reject
- * admission, terminating a running review stays the engine's act).
+ * Either answer "no" DEFERS the run: it gives its box slot back, waits an
+ * exponential backoff IN PROCESS (admission-retry.ts; abortable by the engine's
+ * cancel) and asks again, up to WORKER_ADMISSION_MAX_DEFERRALS times — the run
+ * stays RUNNING on the engine, is never FAILED by the host for a transient
+ * shortage and never cancelled by it (Decision 5: the budget may delay or
+ * reject admission, terminating a running review stays the engine's act).
  *
  * WHY A RESERVATION. With N slots two admissions can run at once. Both would
  * read the same `/proc/meminfo`, both would see headroom for ONE more run, and
@@ -143,12 +148,10 @@ export function evaluateHeadroom(
 }
 
 /**
- * The retryable admission error (ADR-007 Decision 5). A PLAIN Error subclass
- * on purpose: the engine retries plain errors (task `retries` + `backoff`) and
- * refuses to retry `NonRetryableError`, so this is the one error the run task
- * may let escape retryable — everything thrown AFTER admission is wrapped
- * non-retryable by `runAgent` (workflow.ts), because an agent run must never
- * re-execute.
+ * One refused admission (ADR-007 Decision 5). INTERNAL to the worker: the run
+ * catches it, gives its box slot back, waits the backoff and tries again
+ * (workflow.ts) — it never reaches the engine. After the last allowed
+ * deferral the run ends with `AdmissionBudgetExhaustedError` instead.
  */
 export class AdmissionDeferredError extends Error {
   override readonly name = "AdmissionDeferredError";
@@ -165,6 +168,24 @@ export class AdmissionDeferredError extends Error {
         `CommitLimit=${mib(observed.commitLimit)} floor=${mib(observed.floor)} ` +
         `fraction=${observed.fraction} runCommit=${mib(observed.runCommit)} reserved=${mib(observed.reserved)}`,
     );
+  }
+}
+
+/**
+ * The run's final word when every allowed deferral was refused: non-retryable
+ * (the task registers no retries anyway), operator-facing (it becomes the
+ * thread's failure banner via onFailure), carrying the last refusal.
+ */
+export class AdmissionBudgetExhaustedError extends NonRetryableError {
+  constructor(
+    readonly deferrals: number,
+    readonly last: AdmissionDeferredError,
+  ) {
+    super(
+      `The box had no memory headroom for this run after ${deferrals} deferral(s) ` +
+        `(${sumBackoffSeconds(deferrals)}s of waiting); last check: ${last.message}`,
+    );
+    this.name = "AdmissionBudgetExhaustedError";
   }
 }
 

@@ -409,9 +409,7 @@ describe("agent-run run task — workdir is never leaked by a failed credential 
     const original = new Error("connect ECONNREFUSED");
     pullAgentCredentials.mockRejectedValue(original);
 
-    await expect(runFn(INPUT, ctx())).rejects.toSatisfy(
-      (e: Error) => e.cause === original,
-    );
+    await expect(runFn(INPUT, ctx())).rejects.toBe(original);
   });
 
   it("cleans up exactly once — the guard does not double-clean a run that got past it", async () => {
@@ -455,9 +453,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     const original = new Error("listen EADDRINUSE");
     startEgressProxy.mockRejectedValue(original);
 
-    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toSatisfy(
-      (e: Error) => e.cause === original,
-    );
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(original);
 
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
     expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
@@ -510,9 +506,7 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
 
     // Without this the run would hang for 90s producing NO output and no
     // stderr — the agent cannot report a proxy it cannot reach.
-    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toSatisfy(
-      (e: Error) => e.cause === dead,
-    );
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(dead);
     expect(daemonCtorArgs).toHaveLength(0);
     expect(close).toHaveBeenCalledTimes(1);
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
@@ -689,9 +683,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     const original = new Error("listen EADDRINUSE");
     startGitBroker.mockRejectedValue(original);
 
-    await expect(runFn(INPUT, ctx())).rejects.toSatisfy(
-      (e: Error) => e.cause === original,
-    );
+    await expect(runFn(INPUT, ctx())).rejects.toBe(original);
 
     expect(startGhBroker).not.toHaveBeenCalled();
     expect(credentialCleanup).toHaveBeenCalledTimes(1);
@@ -717,9 +709,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     const original = new Error("sun_path limit");
     startGhBroker.mockRejectedValue(original);
 
-    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toSatisfy(
-      (e: Error) => e.cause === original,
-    );
+    await expect(runFn(EGRESS_INPUT, ctx())).rejects.toBe(original);
 
     expect(gitClose).toHaveBeenCalledTimes(1);
     expect(egressClose).toHaveBeenCalledTimes(1);
@@ -2153,12 +2143,12 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
 
 /**
  * #371: the memory-headroom check sits under the slot and before the clone. A
- * deferral gives the slot back, touches nothing on disk and reaches the engine
- * as the ONE plain (retryable) error; every post-admission failure reaches it
- * fenced as NonRetryableError, so the raised `retries` can never re-execute an
- * agent.
+ * deferral gives the slot back, touches nothing on disk, and is waited out IN
+ * PROCESS (an abortable backoff sleep) before admission is tried again; after
+ * the last allowed deferral the run fails final. The engine sees a RUNNING
+ * task throughout — never a retry.
  */
-describe("#371: headroom deferral and the non-retryable fence", () => {
+describe("#371: headroom deferral is an in-process wait; the budget ends the run final", () => {
   const STARVED = `MemTotal:        7937228 kB
 MemAvailable:     200000 kB
 SwapTotal:       8388604 kB
@@ -2175,8 +2165,10 @@ Committed_AS:   12000000 kB
     commitFraction: 0.9,
     runCommitBytes: 1300 * 1024 ** 2,
   };
+  /** The recorded deferral waits (ms) — the sleep is replaced, never real. */
+  let waits: number[] = [];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.WORKER_BOX_TRUST = "shared";
     releaseMock.mockClear();
     materialiseAgentCredentials.mockResolvedValue({
@@ -2184,190 +2176,108 @@ Committed_AS:   12000000 kB
       env: {},
       cleanup: vi.fn(async () => {}),
     });
+    waits = [];
+    const { _setAdmissionSleepForTests } = await import("./workflow");
+    _setAdmissionSleepForTests(async (ms, signal) => {
+      waits.push(ms);
+      if (signal?.aborted) {
+        const e = new Error("admission wait aborted");
+        e.name = "AbortError";
+        throw e;
+      }
+    });
   });
   afterEach(async () => {
-    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
     // Back to OFF for the rest of the file (see the top-level beforeAll).
     _setAdmissionControllerForTests(null);
+    _setAdmissionSleepForTests(undefined);
     releaseMock.mockClear();
   });
 
-  it("re-execution guard: an attempt above the recorded deferrals (an engine-retried timeout) is refused FIRST — final, nothing touched", async () => {
-    const { _resetReexecutionGuardForTests } = await import(
-      "./reexecution-guard"
-    );
-    _resetReexecutionGuardForTests(
-      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
-    );
-    const ctx = {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => 1,
-      workflowRunId: () => "wfr-timeout",
-    };
-    let caught: unknown;
-    try {
-      await runFn(INPUT, ctx);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(NonRetryableError);
-    expect((caught as Error).message).toMatch(/never re-executes/);
-    // And without a workflow run id a retry cannot be proven legitimate: refused.
-    await expect(
-      runFn(INPUT, { cancelled: false, log: vi.fn(), retryCount: () => 1 }),
-    ).rejects.toSatisfy(
-      (e: Error) =>
-        e instanceof NonRetryableError && /no workflow run id/.test(e.message),
-    );
-    expect(ensureRunNamespace).not.toHaveBeenCalled();
-    expect(releaseMock).not.toHaveBeenCalled();
-    expect(provisionWorkdir).not.toHaveBeenCalled();
-    expect(daemonCtorArgs).toHaveLength(0);
-  });
-
-  it("re-execution guard: the LAST allowed deferral records nothing (no retry comes back), so the ledger stays exact", async () => {
+  it("a deferral gives the slot back, clones nothing, waits the backoff IN PROCESS (2 s, 4 s, …) and is admitted when headroom returns — one engine attempt", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
-    const {
-      _resetReexecutionGuardForTests,
-      deferralsRecorded,
-      recordDeferral,
-    } = await import("./reexecution-guard");
-    _resetReexecutionGuardForTests(
-      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
+    let meminfo = STARVED;
+    let reads = 0;
+    const controller = new AdmissionController(POLICY, () => {
+      reads += 1;
+      if (reads >= 3) meminfo = ROOMY; // headroom returns on the third look
+      return meminfo;
+    });
+    _setAdmissionControllerForTests(controller);
+    const ctx = { cancelled: false, log: vi.fn() };
+    await runFn(INPUT, ctx);
+    // Two deferrals (2 s, then 4 s), then admitted.
+    expect(waits).toEqual([2_000, 4_000]);
+    // The slot was released for each wait and once more in the finally.
+    expect(releaseMock).toHaveBeenCalledTimes(3);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    const logs = ctx.log.mock.calls.map((c) => String(c[0]));
+    expect(
+      logs.filter((l) => l.includes("box.headroom_rejected")),
+    ).toHaveLength(2);
+    expect(
+      logs.filter((l) => l.includes("box.headroom_deferred_wait")),
+    ).toHaveLength(2);
+    expect(logs.some((l) => l.includes("box.headroom_ok"))).toBe(true);
+    // The reservation lives until the finally.
+    expect(controller.reservedBytes()).toBe(0);
+  });
+
+  it("after the last allowed deferral the run fails FINAL (AdmissionBudgetExhaustedError, non-retryable) with the slot released and nothing on disk", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController, AdmissionBudgetExhaustedError } = await import(
+      "./headroom"
     );
     _setAdmissionControllerForTests(
       new AdmissionController(POLICY, () => STARVED),
     );
     const { loadWorkerConfig } = await import("./config");
     const max = loadWorkerConfig().admissionMaxDeferrals;
-    for (let i = 0; i < max; i++) recordDeferral("wfr-last");
-    const ctx = {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => max,
-      workflowRunId: () => "wfr-last",
-    };
-    await expect(runFn(INPUT, ctx)).rejects.toSatisfy(
-      (e: Error) => e.name === "AdmissionDeferredError",
-    );
-    expect(deferralsRecorded("wfr-last")).toBe(0);
-  });
-
-  it("re-execution guard: the ledger is keyed by the workflow run — a sibling run of the same thread starts clean, and a run keeps its own count across the retry", async () => {
-    const { _setAdmissionControllerForTests } = await import("./workflow");
-    const { AdmissionController } = await import("./headroom");
-    const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
-      "./reexecution-guard"
-    );
-    _resetReexecutionGuardForTests(
-      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
-    );
-    _setAdmissionControllerForTests(
-      new AdmissionController(POLICY, () => STARVED),
-    );
-    const runA = {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => 0,
-      workflowRunId: () => "wfr-A",
-    };
-    await expect(runFn(INPUT, runA)).rejects.toSatisfy(
-      (e: Error) => e.name === "AdmissionDeferredError",
-    );
-    expect(deferralsRecorded("wfr-A")).toBe(1);
-    expect(deferralsRecorded("wfr-B")).toBe(0);
-    // Sibling run B of the same thread at attempt 1 with no deferral of its
-    // own: refused (that attempt came from an engine-side failure).
-    const runB = {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => 1,
-      workflowRunId: () => "wfr-B",
-    };
-    await expect(runFn(INPUT, runB)).rejects.toBeInstanceOf(NonRetryableError);
-    // A's own retry is still accounted for.
-    expect(deferralsRecorded("wfr-A")).toBe(1);
-  });
-
-  it("re-execution guard: the retry of a recorded deferral is admitted (deferred once as attempt 0, admitted as attempt 1), and the ledger is dropped when the run ends", async () => {
-    const { _setAdmissionControllerForTests } = await import("./workflow");
-    const { AdmissionController } = await import("./headroom");
-    const { _resetReexecutionGuardForTests, deferralsRecorded } = await import(
-      "./reexecution-guard"
-    );
-    _resetReexecutionGuardForTests(
-      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
-    );
-    let meminfo = STARVED;
-    _setAdmissionControllerForTests(
-      new AdmissionController(POLICY, () => meminfo),
-    );
-    const wfr = () => "wfr-retry";
-    await expect(
-      runFn(INPUT, {
-        cancelled: false,
-        log: vi.fn(),
-        retryCount: () => 0,
-        workflowRunId: wfr,
-      }),
-    ).rejects.toSatisfy((e: Error) => e.name === "AdmissionDeferredError");
-    expect(deferralsRecorded("wfr-retry")).toBe(1);
-    meminfo = ROOMY;
-    await runFn(INPUT, {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => 1,
-      workflowRunId: wfr,
-    });
-    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
-    expect(deferralsRecorded("wfr-retry")).toBe(0);
-  });
-
-  it("a deferral releases the slot, clones nothing, and escapes as AdmissionDeferredError (plain, retryable)", async () => {
-    const { _setAdmissionControllerForTests } = await import("./workflow");
-    const { AdmissionController, AdmissionDeferredError } = await import(
-      "./headroom"
-    );
-    _setAdmissionControllerForTests(
-      new AdmissionController(POLICY, () => STARVED),
-    );
-    // Attempt 4 is legitimate only after three recorded deferrals.
-    const { _resetReexecutionGuardForTests, recordDeferral } = await import(
-      "./reexecution-guard"
-    );
-    _resetReexecutionGuardForTests(
-      (await import("./config")).loadWorkerConfig().runNamespaceRoot,
-    );
-    for (let i = 0; i < 3; i++) recordDeferral("wfr-d3");
-    const ctx = {
-      cancelled: false,
-      log: vi.fn(),
-      retryCount: () => 3,
-      workflowRunId: () => "wfr-d3",
-    };
+    const ctx = { cancelled: false, log: vi.fn() };
     let caught: unknown;
     try {
       await runFn(INPUT, ctx);
     } catch (e) {
       caught = e;
     }
-    expect(caught).toBeInstanceOf(AdmissionDeferredError);
-    expect(caught).not.toBeInstanceOf(NonRetryableError);
-    expect((caught as Error).message).toMatch(/attempt 4,/);
-    expect(releaseMock).toHaveBeenCalledTimes(1);
-    // AC 3: nothing else was touched — no clone, no credential, no daemon.
+    expect(caught).toBeInstanceOf(AdmissionBudgetExhaustedError);
+    expect(caught).toBeInstanceOf(NonRetryableError);
+    expect((caught as Error).message).toMatch(
+      new RegExp(`after ${max} deferral\\(s\\)`),
+    );
+    expect(waits).toHaveLength(max);
+    // Every refusal gave the slot back; nothing was ever cloned, pulled or spawned.
+    expect(releaseMock).toHaveBeenCalledTimes(max + 1);
     expect(provisionWorkdir).not.toHaveBeenCalled();
     expect(cleanupWorkdir).not.toHaveBeenCalled();
     expect(pullAgentCredentials).not.toHaveBeenCalled();
     expect(materialiseAgentCredentials).not.toHaveBeenCalled();
     expect(daemonCtorArgs).toHaveLength(0);
-    expect(
-      ctx.log.mock.calls.some((c) =>
-        String(c[0]).includes("box.headroom_rejected"),
-      ),
-    ).toBe(true);
+  });
+
+  it("a cancel during the deferral wait ends the run like any other cancel (AbortError through, slot already released)", async () => {
+    const { _setAdmissionControllerForTests, _setAdmissionSleepForTests } =
+      await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    _setAdmissionControllerForTests(
+      new AdmissionController(POLICY, () => STARVED),
+    );
+    const ac = new AbortController();
+    _setAdmissionSleepForTests(async () => {
+      ac.abort();
+      const e = new Error("admission wait aborted");
+      e.name = "AbortError";
+      throw e;
+    });
+    const ctx = { cancelled: false, log: vi.fn(), abortController: ac };
+    await expect(runFn(INPUT, ctx)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    expect(provisionWorkdir).not.toHaveBeenCalled();
   });
 
   it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone; the reservation lives until the finally", async () => {
@@ -2377,11 +2287,11 @@ Committed_AS:   12000000 kB
     _setAdmissionControllerForTests(controller);
     const ctx = { cancelled: false, log: vi.fn() };
     await runFn(INPUT, ctx);
+    expect(waits).toEqual([]);
     expect(provisionWorkdir).toHaveBeenCalledTimes(1);
     expect(
       ctx.log.mock.calls.some((c) => String(c[0]).includes("box.headroom_ok")),
     ).toBe(true);
-    // Released in the finally, not before.
     expect(controller.reservedBytes()).toBe(0);
   });
 
@@ -2396,7 +2306,6 @@ Committed_AS:   12000000 kB
     readMemoryAnon.mockImplementation(() => anon);
     const seen: Array<number | null> = [];
     pollUntilTerminal.mockReset().mockImplementation(async () => {
-      // Mid-run: the daemon started, the probe is attached.
       seen.push(controller.reservedBytes());
       readMemoryAnon.mockImplementation(() => null);
       seen.push(controller.reservedBytes());
@@ -2418,19 +2327,12 @@ Committed_AS:   12000000 kB
     }
   });
 
-  it("a plain post-admission failure reaches the engine as NonRetryableError with its message intact", async () => {
+  it("a plain error after admission is final by registration (retries 0): it reaches the engine as-is, message intact, slot released", async () => {
     provisionWorkdir.mockRejectedValueOnce(
       new Error("clone failed: ECONNRESET"),
     );
     const ctx = { cancelled: false, log: vi.fn() };
-    let caught: unknown;
-    try {
-      await runFn(INPUT, ctx);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(NonRetryableError);
-    expect((caught as Error).message).toMatch(/clone failed: ECONNRESET/);
+    await expect(runFn(INPUT, ctx)).rejects.toThrow(/clone failed: ECONNRESET/);
     expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 });

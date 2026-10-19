@@ -6,9 +6,6 @@ import {
   type Worker,
 } from "@hatchet-dev/typescript-sdk";
 import { AGENT_RUN_VARIANTS, buildAgentRunDefinition } from "./definition";
-import { AdmissionDeferredError } from "./headroom";
-import { assertNotReexecuting, recordDeferral } from "./reexecution-guard";
-import { fenceNonRetryable } from "./retry-classification";
 import {
   REST,
   bootstrapTenant,
@@ -19,15 +16,21 @@ import {
 } from "./hatchet-it-harness";
 
 /**
- * #371 AC 6 — the engine re-queue proof, against a REAL dockerized hatchet-lite
- * (HATCHET_IT=1; skipped otherwise, like its siblings). The unit tests prove the
- * worker throws `AdmissionDeferredError` before any side effect and fences every
- * later error non-retryable; what only the engine can prove is the other half of
- * ADR-007 Decision 5: a deferral is a DELAY. The run must read QUEUED between
- * attempts — never FAILED, never CANCELLED — and COMPLETE on the attempt that
- * admits, with `ctx.retryCount()` = 1 on that attempt. And the fence must hold
- * on the same registration: a plain error after admission fails ONCE, with no
- * second execution, whatever `retries` says.
+ * #371 against a REAL dockerized hatchet-lite (HATCHET_IT=1; skipped
+ * otherwise, like its siblings). These are the ENGINE facts the design rests
+ * on — the worker-side deferral loop itself is unit-tested in
+ * workflow-cleanup.test.ts:
+ *
+ *  1. An in-process deferral wait is invisible to the engine: the task stays
+ *     RUNNING, one attempt, completes.
+ *  2. With `retries: 0` (the shipped shape) an executionTimeout is NOT retried:
+ *     exactly one attempt, the run FAILS final. (Measured with retries > 0 the
+ *     engine re-executed attempts 0, 1, 2 — the reason deferrals are not
+ *     engine retries.)
+ *  3. A newer run of the same PR under CANCEL_IN_PROGRESS cancels the older one
+ *     that is waiting in process — newest-wins holds through a deferral.
+ *     (Measured with engine retries the retry re-entered as the "newest" item
+ *     and cancelled the newer run instead.)
  *
  * SAFETY: the harness runs the isolated compose project `automata-hatchet-it`,
  * never the pilot's `automata-hatchet` (see hatchet-it-harness.ts).
@@ -38,81 +41,50 @@ const TERMINAL: Status[] = [Status.COMPLETED, Status.CANCELLED, Status.FAILED];
 
 type StubInput = {
   label: string;
-  mode: "defer-once" | "fail-after-admission" | "timeout";
+  mode: "wait-then-complete" | "sleep" | "outlive-timeout";
+  /** Same prKey ⇒ same per-PR concurrency group (supersede policies). */
+  prKey?: string;
 };
 
 const itEnabled = process.env.HATCHET_IT === "1";
 vi.setConfig({ testTimeout: 120_000 });
 
 describe.skipIf(!itEnabled)(
-  "#371 admission deferral E2E (dockerized hatchet-lite, HATCHET_IT=1)",
+  "#371 admission deferral — engine facts (dockerized hatchet-lite, HATCHET_IT=1)",
   () => {
     let pg: Client;
     let tenantId: string;
     let token: string;
     let hatchet: Hatchet;
     let worker: Worker;
-    /** label → the retryCount the engine handed each attempt, in order. */
+    /** label → retryCount of each attempt that EXECUTED, in order. */
     const attempts = new Map<string, number[]>();
-    /** label → the workflow run id each attempt saw (the guard's key). */
-    const runIds = new Map<string, string[]>();
     const WORKFLOW = "agent-run";
-    const TIMEOUT_WORKFLOW = "agent-run-newest";
+    const NEWEST_WORKFLOW = "agent-run-newest";
+    /** CANCEL_NEWEST is irrelevant for one run; it carries the 3 s timeout. */
+    const TIMEOUT_WORKFLOW = "agent-run-discard";
 
     async function stubRun(
       input: StubInput,
-      ctx: { retryCount?: () => number; workflowRunId?: () => string },
+      ctx: { retryCount?: () => number; cancelled: boolean },
     ): Promise<{ label: string }> {
-      const attempt = ctx.retryCount?.() ?? 0;
-      // The production key: the engine's workflow run id. The whole guard rests
-      // on every retry of a run carrying the SAME id — recorded per attempt and
-      // asserted against the dispatched id below.
-      const runKey = ctx.workflowRunId?.() || input.label;
-      runIds.set(input.label, [...(runIds.get(input.label) ?? []), runKey]);
-      // Mirrors runAgent: the guard runs FIRST, before the attempt counts as
-      // executed (a refused attempt is recorded as -(attempt + 1)).
-      try {
-        assertNotReexecuting(runKey, attempt);
-      } catch (e) {
-        attempts.set(input.label, [
-          ...(attempts.get(input.label) ?? []),
-          -(attempt + 1),
-        ]);
-        throw e;
-      }
       attempts.set(input.label, [
         ...(attempts.get(input.label) ?? []),
-        attempt,
+        ctx.retryCount?.() ?? 0,
       ]);
-      if (input.mode === "timeout") {
-        // Outlive the 3 s executionTimeout of the timeout workflow.
-        const c = ctx as { cancelled?: boolean };
-        for (let i = 0; i < 100 && !c.cancelled; i++) {
+      const sleepTicks = async (ticks: number) => {
+        for (let i = 0; i < ticks && !ctx.cancelled; i++) {
           await new Promise((r) => setTimeout(r, 200));
         }
-        return { label: input.label };
-      }
-      if (input.mode === "defer-once" && attempt === 0) {
-        // Exactly what the headroom check throws: plain Error subclass —
-        // recorded like runAgent records it, so attempt 1 passes the guard.
-        recordDeferral(runKey);
-        throw new AdmissionDeferredError(
-          "mem-available-below-floor",
-          {
-            memAvailable: 1,
-            committedAs: 2,
-            commitLimit: 3,
-            reserved: 0,
-            floor: 5,
-            fraction: 0.9,
-            runCommit: 6,
-          },
-          attempt,
-        );
-      }
-      if (input.mode === "fail-after-admission") {
-        // The run's own fence: a plain error after admission must not retry.
-        throw fenceNonRetryable(new Error("agent exploded after admission"));
+      };
+      if (input.mode === "wait-then-complete") {
+        // The worker's deferral wait, as the engine sees it: a running task
+        // that does nothing for a while, then proceeds.
+        await sleepTicks(15);
+      } else if (input.mode === "sleep") {
+        await sleepTicks(40);
+      } else {
+        await sleepTicks(100); // outlives the 3 s executionTimeout
       }
       return { label: input.label };
     }
@@ -140,7 +112,7 @@ describe.skipIf(!itEnabled)(
               label,
               orgId: "org-a",
               deliveryId: uid("d"),
-              prKey: uid("pr"),
+              prKey: o.prKey ?? uid("pr"),
             },
             additionalMetadata: { label },
           }),
@@ -162,6 +134,14 @@ describe.skipIf(!itEnabled)(
         throw e;
       }
     };
+    const waitTerminal = (id: string, label: string) =>
+      pollUntil(
+        `${label} terminal`,
+        () => statusOf(id),
+        (s) => TERMINAL.includes(s),
+        110_000,
+        250,
+      );
 
     beforeAll(async () => {
       await composeUp();
@@ -171,34 +151,30 @@ describe.skipIf(!itEnabled)(
       process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
       const sdk = await import("@hatchet-dev/typescript-sdk");
       hatchet = sdk.Hatchet.init();
-      // The SHIPPED `agent-run` shape with the #371 registration: retries = the
-      // deferral budget, exponential backoff.
-      const def = buildAgentRunDefinition(
-        WORKFLOW,
-        AGENT_RUN_VARIANTS[WORKFLOW],
-        {
-          admissionRetries: 2,
-        },
-      );
-      expect(def.task.retries).toBe(2);
-      expect(def.task.backoff).toBeDefined();
-      const wf = hatchet.workflow<StubInput>(def.workflow);
-      wf.task({ ...def.task, fn: stubRun });
-      // A second shipped variant with a 3 s executionTimeout: the engine-side
-      // failure the worker's fence never sees.
-      const timeoutDef = buildAgentRunDefinition(
-        TIMEOUT_WORKFLOW,
-        AGENT_RUN_VARIANTS[TIMEOUT_WORKFLOW],
-        { admissionRetries: 2 },
-      );
-      const timeoutWf = hatchet.workflow<StubInput>(timeoutDef.workflow);
-      timeoutWf.task({
-        ...timeoutDef.task,
-        executionTimeout: "3s",
-        fn: stubRun,
-      });
+      const make = (
+        name: keyof typeof AGENT_RUN_VARIANTS,
+        timeout?: string,
+      ) => {
+        const def = buildAgentRunDefinition(name, AGENT_RUN_VARIANTS[name]);
+        expect(def.task.retries).toBe(0);
+        const wf = hatchet.workflow<StubInput>(def.workflow);
+        wf.task({
+          ...def.task,
+          ...(timeout
+            ? {
+                executionTimeout: timeout as typeof def.task.executionTimeout,
+              }
+            : {}),
+          fn: stubRun,
+        });
+        return wf;
+      };
       worker = await hatchet.worker("it-admission-worker", {
-        workflows: [wf, timeoutWf],
+        workflows: [
+          make(WORKFLOW),
+          make(NEWEST_WORKFLOW),
+          make(TIMEOUT_WORKFLOW, "3s"),
+        ],
         slots: 4,
       });
       void worker.start();
@@ -211,102 +187,66 @@ describe.skipIf(!itEnabled)(
       await composeDownV();
     }, 90_000);
 
-    it("a deferral is a DELAY: the attempt that throws AdmissionDeferredError is re-queued (QUEUED, never FAILED/CANCELLED) and the next attempt runs with retryCount 1 and completes", async () => {
+    it("an in-process deferral wait is invisible to the engine: RUNNING throughout, one attempt, COMPLETED", async () => {
       const { id, label } = await dispatch({
-        label: "defer",
-        mode: "defer-once",
+        label: "wait",
+        mode: "wait-then-complete",
       });
-      // Sample (status, attempts so far) until terminal. The pre-start 404 also
-      // reads as QUEUED, so the re-queue proof is QUEUED observed AFTER attempt 0
-      // ran and BEFORE attempt 1 did — the backoff window.
-      const seen: Array<[Status, number]> = [];
-      // #69 slot-reclaim interplay: is the per-PR concurrency slot still
-      // FILLED while the deferred attempt waits out its backoff? (If it were,
-      // the orphan reclaim could take it from a long-queued run.) Sampled
-      // alongside the status; see the assertion below.
-      const slotsDuringBackoff = new Set<string>();
+      const seen = new Set<Status>();
       const final = await pollUntil(
         `${label} terminal`,
         async () => {
           const s = await statusOf(id);
-          const n = attempts.get(label)?.length ?? 0;
-          seen.push([s, n]);
-          if (n === 1 && s === Status.QUEUED) {
-            const r = await pg.query<{ is_filled: boolean }>(
-              "select is_filled from v1_concurrency_slot where workflow_run_id = $1",
-              [id],
-            );
-            slotsDuringBackoff.add(
-              r.rows.length === 0
-                ? "no-row"
-                : r.rows.map((x) => String(x.is_filled)).join(","),
-            );
-          }
+          if ((attempts.get(label)?.length ?? 0) > 0) seen.add(s);
           return s;
         },
         (s) => TERMINAL.includes(s),
         90_000,
         100,
       );
-      // Measured: the slot reads filled only for the instant the failure is
-      // processed, then "no-row"/false for the rest of the backoff — a deferred
-      // run does NOT hold its per-PR slot while it waits, so the #69 orphan
-      // reclaim (filled slot, no runtime row, > 600 s old) cannot take it.
-      expect(
-        [...slotsDuringBackoff].some((v) => v === "no-row" || v === "false"),
-        `slot state during backoff: ${JSON.stringify([...slotsDuringBackoff])}`,
-      ).toBe(true);
       expect(final).toBe(Status.COMPLETED);
-      const statuses = seen.map(([s]) => s);
-      expect(statuses).not.toContain(Status.FAILED);
-      expect(statuses).not.toContain(Status.CANCELLED);
-      expect(
-        seen.some(([s, n]) => s === Status.QUEUED && n === 1),
-        `QUEUED between the attempts; saw ${JSON.stringify(seen)}`,
-      ).toBe(true);
-      expect(attempts.get(label)).toEqual([0, 1]);
-      // Both attempts carried the dispatched workflow run id — the assumption
-      // the production guard and the reservations are keyed on.
-      expect(runIds.get(label)).toEqual([id, id]);
-      expect(id).not.toBe("");
+      expect(attempts.get(label)).toEqual([0]);
+      // After the attempt started, the engine never saw it leave RUNNING until
+      // it completed — no QUEUED, no FAILED.
+      expect([...seen].filter((s) => s !== Status.RUNNING)).toEqual([
+        Status.COMPLETED,
+      ]);
     });
 
-    it("exactly-once against the ENGINE: an executionTimeout IS retried by hatchet-lite (measured: attempts 0,1,2 without the guard) — the re-execution guard refuses attempt 1 up front, so the agent ran once and the run FAILS final", async () => {
+    it("retries 0 on the shipped shape: an executionTimeout is NOT re-executed — one attempt, FAILED final", async () => {
       const { id, label } = await dispatch(
-        { label: "timeout", mode: "timeout" },
+        { label: "timeout", mode: "outlive-timeout" },
         TIMEOUT_WORKFLOW,
       );
-      const final = await pollUntil(
-        `${label} terminal`,
-        () => statusOf(id),
-        (s) => TERMINAL.includes(s),
-        110_000,
-        250,
-      );
-      // The engine dispatched a second attempt (its retry policy covers its
-      // own timeout) and the guard refused it before it executed: -2 marks a
-      // refused attempt 1. No third attempt follows a NonRetryableError.
+      const final = await waitTerminal(id, label);
       await new Promise((r) => setTimeout(r, 6_000));
-      expect(attempts.get(label)).toEqual([0, -2]);
+      expect(attempts.get(label)).toEqual([0]);
       expect(final).toBe(Status.FAILED);
     });
 
-    it("exactly-once: a plain error after admission is fenced non-retryable — the run FAILS once and never re-executes, even with retries registered", async () => {
-      const { id, label } = await dispatch({
-        label: "fence",
-        mode: "fail-after-admission",
-      });
-      const final = await pollUntil(
-        `${label} terminal`,
-        () => statusOf(id),
-        (s) => TERMINAL.includes(s),
-        90_000,
-        100,
+    it("newest-wins holds through a deferral: a newer run of the same PR cancels the older one waiting in process, and itself completes", async () => {
+      const prKey = uid("pr-nw");
+      const a = await dispatch(
+        { label: "nw-A", mode: "sleep", prKey },
+        NEWEST_WORKFLOW,
       );
-      expect(final).toBe(Status.FAILED);
-      // Give a would-be retry well over its 2 s backoff; it must not come.
-      await new Promise((r) => setTimeout(r, 6_000));
-      expect(attempts.get(label)).toEqual([0]);
+      await pollUntil(
+        `${a.label} started`,
+        async () => attempts.get(a.label)?.length ?? 0,
+        (n) => n >= 1,
+        30_000,
+        50,
+      );
+      const b = await dispatch(
+        { label: "nw-B", mode: "wait-then-complete", prKey },
+        NEWEST_WORKFLOW,
+      );
+      const fa = await waitTerminal(a.id, a.label);
+      const fb = await waitTerminal(b.id, b.label);
+      expect(fa).toBe(Status.CANCELLED);
+      expect(fb).toBe(Status.COMPLETED);
+      expect(attempts.get(a.label)).toEqual([0]);
+      expect(attempts.get(b.label)).toEqual([0]);
     });
   },
 );
