@@ -1217,3 +1217,125 @@ describe("bootUidScan (AC14, unit level)", () => {
     expect(lines.some((l) => l.startsWith("boot uid scan failed:"))).toBe(true);
   });
 });
+
+type TryAcquireAllFn = NonNullable<BootUidScanOpts["tryAcquireAll"]>;
+
+describe("bootUidScan over N slots (#205)", () => {
+  const zero = {
+    skipped: false,
+    scanned: 0,
+    groups: 0,
+    helpers: 0,
+    killed: 0,
+    residual: 0,
+    failed: 0,
+    durationMs: 1,
+  };
+  const lockFor = (slot: number, order: string[]): BoxLock => ({
+    release: vi.fn(async () => {
+      order.push(`release:${slot}`);
+    }),
+    lost: false,
+    slot,
+  });
+
+  it("slots = 1 takes the single exclusive lock and never calls the all-slots take (byte-identical path)", async () => {
+    const order: string[] = [];
+    const tryAcquire = vi.fn<TryAcquireFn>(async () => lockFor(0, order));
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => null);
+    const reap = vi.fn<ReapFn>(async () => zero);
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 1,
+      log: () => {},
+      tryAcquire,
+      tryAcquireAll,
+      reap,
+    });
+    expect(out.outcome).toBe("scanned");
+    expect(tryAcquire).toHaveBeenCalledTimes(1);
+    expect(tryAcquireAll).not.toHaveBeenCalled();
+    expect(reap).toHaveBeenCalledTimes(1);
+    expect(reap.mock.calls[0]?.[0]).toMatchObject({
+      agentUser: AGENT,
+      phase: "boot",
+    });
+  });
+
+  it("slots = 3: every slot is taken, each slot's OWN account is reaped in order, results are summed, every lock is released", async () => {
+    const order: string[] = [];
+    const tryAcquire = vi.fn<TryAcquireFn>(async () => null);
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () =>
+      [0, 1, 2].map((s) => lockFor(s, order)),
+    );
+    const reap = vi.fn(async (opts: { agentUser: string }) => {
+      order.push(`reap:${opts.agentUser}`);
+      return { ...zero, scanned: 1, killed: 1 };
+    });
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 3,
+      log: () => {},
+      tryAcquire,
+      tryAcquireAll,
+      reap,
+    });
+    expect(tryAcquire).not.toHaveBeenCalled();
+    expect(tryAcquireAll.mock.calls[0]?.[0]).toMatchObject({
+      slots: 3,
+      holder: expect.stringContaining("boot"),
+    });
+    expect(order).toEqual([
+      `reap:${AGENT}`,
+      `reap:${AGENT}-1`,
+      `reap:${AGENT}-2`,
+      "release:0",
+      "release:1",
+      "release:2",
+    ]);
+    expect(out.outcome).toBe("scanned");
+    expect(out.result).toMatchObject({ scanned: 3, killed: 3 });
+  });
+
+  it("slots = 3 with any slot busy ⇒ skipped-busy, nothing reaped (a live run owns part of the box)", async () => {
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () => null);
+    const reap = vi.fn(async () => zero);
+    const lines: string[] = [];
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 3,
+      log: (l) => lines.push(l),
+      tryAcquire: vi.fn<TryAcquireFn>(async () => null),
+      tryAcquireAll,
+      reap,
+    });
+    expect(out).toEqual({ outcome: "skipped-busy" });
+    expect(reap).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.includes("boot uid scan skipped"))).toBe(true);
+  });
+
+  it("a per-slot reap error surfaces as the scan's error and still releases every lock", async () => {
+    const order: string[] = [];
+    const tryAcquireAll = vi.fn<TryAcquireAllFn>(async () =>
+      [0, 1].map((s) => lockFor(s, order)),
+    );
+    const reap = vi.fn(async (opts: { agentUser: string }) =>
+      opts.agentUser.endsWith("-1") ? { ...zero, error: "ps exploded" } : zero,
+    );
+    const out = await bootUidScan({
+      root: "/nonexistent/never-used",
+      agentUser: AGENT,
+      slots: 2,
+      log: () => {},
+      tryAcquire: vi.fn<TryAcquireFn>(async () => null),
+      tryAcquireAll,
+      reap,
+    });
+    expect(out.outcome).toBe("error");
+    expect(out.error).toBe("ps exploded");
+    expect(order).toEqual(["release:0", "release:1"]);
+  });
+});

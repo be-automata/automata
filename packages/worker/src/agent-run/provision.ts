@@ -443,6 +443,14 @@ const runAsAgentViaSudo: RunAsAgent = async (inv) => {
 export interface CleanupWorkdirOpts {
   /** #108: the agent account. Empty (the default) ⇒ no hand-back, rm only. */
   agentUser?: string;
+  /**
+   * #205: hand back as EACH of these accounts instead of `agentUser` alone. A
+   * dir whose owner is unknown (the boot sweep: the run that made it may have
+   * executed on any slot) is handed back by every slot account in turn — each
+   * `find -user "$(id -un)"` touches only its own inodes, so the passes are
+   * independent and the union covers the dir. Omitted ⇒ `[agentUser]`.
+   */
+  agentUsers?: string[];
   /** Where the hand-back failure / incomplete-cleanup lines go. */
   log?: (line: string) => void;
   /** Injectable platform (tests only) — defaults to the host's. */
@@ -467,23 +475,27 @@ async function handBackAgentFiles(
   opts: CleanupWorkdirOpts,
   log: (line: string) => void,
 ): Promise<void> {
-  const agentUser = opts.agentUser ?? "";
   const platform = opts.platform ?? process.platform;
-  if (!agentUser || platform !== "linux") return;
+  const users = (
+    opts.agentUsers?.length ? opts.agentUsers : [opts.agentUser ?? ""]
+  ).filter(Boolean);
+  if (users.length === 0 || platform !== "linux") return;
   if (!(await fs.lstat(workdir).catch(() => null))) return;
-  try {
-    const inv = buildHandBackInvocation({ agentUser, workdir });
-    if (!inv) return;
-    const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
-    if (exit.code !== 0) {
-      log(
-        `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
-          exit.signal ? ` ${exit.signal}` : ""
-        }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
-      );
+  for (const agentUser of users) {
+    try {
+      const inv = buildHandBackInvocation({ agentUser, workdir });
+      if (!inv) continue;
+      const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
+      if (exit.code !== 0) {
+        log(
+          `workdir hand-back incomplete: ${workdir} (exit ${String(exit.code)}${
+            exit.signal ? ` ${exit.signal}` : ""
+          }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
+        );
+      }
+    } catch (e) {
+      log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
     }
-  } catch (e) {
-    log(`workdir hand-back failed: ${workdir} (${errorMessage(e)})`);
   }
 }
 
@@ -566,12 +578,15 @@ export interface SweepStaleRunDirsResult {
 export async function sweepStaleRunDirs(opts: {
   workdirRoot: string;
   agentUser: string;
+  /** #205: every slot's account — a stale dir may belong to any slot. */
+  agentUsers?: string[];
   log: (line: string) => void;
   now?: () => number;
   platform?: NodeJS.Platform;
   runAsAgent?: RunAsAgent;
 }): Promise<SweepStaleRunDirsResult> {
-  const { workdirRoot, agentUser, log, platform, runAsAgent } = opts;
+  const { workdirRoot, agentUser, agentUsers, log, platform, runAsAgent } =
+    opts;
   const now = opts.now ?? Date.now;
   const result: SweepStaleRunDirsResult = {
     removed: 0,
@@ -611,6 +626,7 @@ export async function sweepStaleRunDirs(opts: {
     }
     const gone = await cleanupWorkdir(target, {
       agentUser,
+      agentUsers,
       log,
       platform,
       runAsAgent,

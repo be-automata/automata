@@ -6,6 +6,13 @@ import { INHERITABLE_ACE_RIGHTS, TRAVERSE_ACE_RIGHTS } from "./agent-uid-fs";
 import {
   claimRunNamespace,
   ensureRunNamespace,
+  ensureSlotNamespace,
+  runGhSocketPath,
+  runPidPath,
+  runSocketPath,
+  runUserPath,
+  slotFor,
+  slotRunDir,
   workerLockPath,
   workerRunDir,
 } from "./run-namespace";
@@ -198,5 +205,133 @@ describe("ensureRunNamespace — survives the dir being reaped", () => {
     });
     expect(calls).toEqual([]);
     expect(fs.existsSync(workerRunDir(root, "w-1"))).toBe(true);
+  });
+});
+
+describe("#205: slot layout — one subdir per slot, granted to that slot alone", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const r of roots.splice(0)) {
+      fs.rmSync(r, { recursive: true, force: true });
+    }
+  });
+  function mkRoot(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "slot-ns-"));
+    roots.push(root);
+    return root;
+  }
+
+  it("the flat layout is byte-identical when no slot is given (N = 1)", () => {
+    const root = "/tmp/automata-agent-run";
+    expect(slotRunDir(root, "w-1")).toBe(workerRunDir(root, "w-1"));
+    expect(runSocketPath(root, "w-1", "thr_1")).toBe(`${root}/w-1/thr_1.sock`);
+    expect(runPidPath(root, "w-1", "thr_1")).toBe(`${root}/w-1/thr_1.pid`);
+    expect(runGhSocketPath(root, "w-1", "thr_1")).toBe(
+      `${root}/w-1/thr_1-gh.sock`,
+    );
+  });
+
+  it("slot i puts every per-run artefact under s<i>/ and stays under the sun_path limit", () => {
+    const root = "/tmp/automata-agent-run";
+    const threadId = "fc4eff11-fb76-49c4-af74-128c7b1200f0";
+    expect(slotRunDir(root, "w-12345-abcdef12", 2)).toBe(
+      `${root}/w-12345-abcdef12/s2`,
+    );
+    const gh = runGhSocketPath(root, "w-12345-abcdef12", threadId, 15);
+    expect(gh).toBe(`${root}/w-12345-abcdef12/s15/${threadId}-gh.sock`);
+    expect(Buffer.byteLength(gh)).toBeLessThan(104);
+    expect(runPidPath(root, "w-1", threadId, 1)).toBe(
+      `${root}/w-1/s1/${threadId}.pid`,
+    );
+    expect(() => slotRunDir(root, "w-1", -1)).toThrow(/slot/);
+  });
+
+  it("runUserPath is the pidfile's `.user` sibling", () => {
+    expect(runUserPath("/x/w-1/thr_1.pid")).toBe("/x/w-1/thr_1.user");
+    expect(runUserPath("/x/w-1/s1/thr_1.pid")).toBe("/x/w-1/s1/thr_1.user");
+  });
+
+  it("slotFor: undefined at N = 1; the run's boxSlot at N > 1; a missing override is an invariant violation", () => {
+    expect(slotFor({ boxSlots: 1 })).toBeUndefined();
+    expect(slotFor({ boxSlots: 1, boxSlot: 0 })).toBeUndefined();
+    expect(slotFor({ boxSlots: 3, boxSlot: 2 })).toBe(2);
+    expect(() => slotFor({ boxSlots: 3 })).toThrow(/invariant.*boxSlot/);
+  });
+
+  it("ensureRunNamespace with several slot accounts grants TRAVERSE only on the root and the worker dir — nothing inheritable, for anyone", async () => {
+    const root = mkRoot();
+    const calls: string[][] = [];
+    await ensureRunNamespace({
+      root,
+      workerId: "w-1",
+      agentUser: "automata-agent",
+      agentUsers: ["automata-agent", "automata-agent-1"],
+      workerLogin: "automata",
+      exec: async (_f, a) => void calls.push(a),
+      platform: "linux",
+    });
+    const dir = workerRunDir(root, "w-1");
+    expect(calls).toEqual([
+      ["-m", "u:automata-agent:--x", root],
+      ["-m", "u:automata-agent-1:--x", root],
+      ["-m", "u:automata-agent:--x", dir],
+      ["-m", "u:automata-agent-1:--x", dir],
+    ]);
+  });
+
+  it("ensureRunNamespace with ONE account is byte-identical to today's grants", async () => {
+    const root = mkRoot();
+    const calls: string[][] = [];
+    await ensureRunNamespace({
+      root,
+      workerId: "w-1",
+      agentUser: "automata-agent",
+      agentUsers: ["automata-agent"],
+      workerLogin: "automata",
+      exec: async (_f, a) => void calls.push(a),
+      platform: "linux",
+    });
+    const dir = workerRunDir(root, "w-1");
+    expect(calls).toEqual([
+      ["-m", "u:automata-agent:--x", root],
+      ["-m", "u:automata-agent:rwx", dir],
+      ["-d", "-m", "u:automata-agent:rwx", dir],
+      ["-m", "u:automata:rwx", dir],
+      ["-d", "-m", "u:automata:rwx", dir],
+    ]);
+  });
+
+  it("ensureSlotNamespace creates s<i>/, strips inherited ACLs, then grants the slot account and the worker login inheritably", async () => {
+    const root = mkRoot();
+    const calls: string[][] = [];
+    const dir = await ensureSlotNamespace({
+      root,
+      workerId: "w-1",
+      slot: 1,
+      agentUser: "automata-agent-1",
+      workerLogin: "automata",
+      exec: async (_f, a) => void calls.push(a),
+      platform: "linux",
+    });
+    expect(dir).toBe(path.join(workerRunDir(root, "w-1"), "s1"));
+    expect(fs.statSync(dir).isDirectory()).toBe(true);
+    expect(calls).toEqual([
+      ["-b", dir],
+      ["-m", "u:automata-agent-1:rwx", dir],
+      ["-d", "-m", "u:automata-agent-1:rwx", dir],
+      ["-m", "u:automata:rwx", dir],
+      ["-d", "-m", "u:automata:rwx", dir],
+    ]);
+    // Idempotent: a second admission on the slot re-applies the same grants.
+    await ensureSlotNamespace({
+      root,
+      workerId: "w-1",
+      slot: 1,
+      agentUser: "automata-agent-1",
+      workerLogin: "automata",
+      exec: async (_f, a) => void calls.push(a),
+      platform: "linux",
+    });
+    expect(calls.length).toBe(10);
   });
 });

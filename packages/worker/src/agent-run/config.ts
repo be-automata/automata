@@ -83,6 +83,15 @@ export interface WorkerConfig {
    */
   boxSlots: number;
   /**
+   * #205: WHICH slot the current run holds — a per-run override the workflow
+   * sets on its copy of the config after the slot acquire, together with the
+   * slot's `agentUser`. Never read from env and undefined at boot. With
+   * `boxSlots > 1` every per-run namespace path (daemon socket, pidfile,
+   * gh-broker socket) lives under the slot's own subdir, so a run can reach
+   * only its own sockets; with `boxSlots === 1` the flat layout is unchanged.
+   */
+  boxSlot?: number;
+  /**
    * #204: per-run memory ceiling in bytes. 0 (the DEFAULT) = off, and the spawn
    * is byte-for-byte what it is today. Requires agent-uid mode and a delegated
    * cgroup subtree; see run-cgroup.ts.

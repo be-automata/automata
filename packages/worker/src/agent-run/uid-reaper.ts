@@ -3,9 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { settlesWithin, tryAcquireBoxLock, type BoxLock } from "./box-lock";
+import {
+  settlesWithin,
+  tryAcquireAllBoxSlots,
+  tryAcquireBoxLock,
+  type BoxLock,
+} from "./box-lock";
 import { writeSnapshotAtomic } from "./scheduling-maintenance";
 import {
+  agentUserForSlot,
   assertAgentUser,
   buildKillAllAsAgentInvocation,
   type Invocation,
@@ -118,9 +124,19 @@ export type BootUidScanOutcome =
 
 export interface BootUidScanOpts {
   root: string;
+  /** The base agent account (slot 0). */
   agentUser: string;
+  /**
+   * #205: how many box slots exist. 1 (the default) is byte-identical to the
+   * exclusive-lock scan. Above 1 the scan takes EVERY slot non-blocking — with
+   * all N held no run can be live — and reaps each slot's own account in turn,
+   * because `kill -9 -- -1` as slot i's account reaches only slot i's processes.
+   */
+  slots?: number;
   log: (line: string) => void;
   tryAcquire?: typeof tryAcquireBoxLock;
+  /** #205: injected for tests; defaults to `tryAcquireAllBoxSlots`. */
+  tryAcquireAll?: typeof tryAcquireAllBoxSlots;
   reap?: typeof reapAgentUidEscapees;
 }
 
@@ -651,8 +667,10 @@ export async function bootUidScan(
   const {
     root,
     agentUser,
+    slots = 1,
     log,
     tryAcquire = tryAcquireBoxLock,
+    tryAcquireAll = tryAcquireAllBoxSlots,
     reap = reapAgentUidEscapees,
   } = opts;
 
@@ -661,9 +679,23 @@ export async function bootUidScan(
     return { outcome: "disabled" };
   }
 
-  let lock: BoxLock | null;
+  // One lock at N = 1 (today's path, byte-identical); every slot at N > 1 —
+  // any busy slot means a live run owns part of the box and its own teardown
+  // scan reclaims, so the whole boot scan is skipped rather than reaping a
+  // sibling slot's account while another is live.
+  let locks: BoxLock[] | null;
   try {
-    lock = await tryAcquire({ root, holder: "boot uid scan", log });
+    if (slots === 1) {
+      const lock = await tryAcquire({ root, holder: "boot uid scan", log });
+      locks = lock === null ? null : [lock];
+    } else {
+      locks = await tryAcquireAll({
+        root,
+        slots,
+        holder: "boot uid scan",
+        log,
+      });
+    }
   } catch (e) {
     // Typically a BoxLockUnavailableError: a helper that vanished after the
     // boot assert, or a spawn failure. Hygiene, not admission — continue.
@@ -671,19 +703,31 @@ export async function bootUidScan(
     log(`boot uid scan failed: ${error}`);
     return { outcome: "error", error };
   }
-  if (lock === null) {
+  if (locks === null) {
     log("box lock held by a live worker — boot uid scan skipped");
     return { outcome: "skipped-busy" };
   }
 
   let result: ReapAgentUidResult;
   try {
+    // Slot by slot, as that slot's own account: the uid-wide kill is bounded by
+    // kill(2) to the account issuing it. The summed result is what the caller
+    // sees; a per-slot error surfaces as the error of the whole scan.
     result = await reap({
       agentUser,
       phase: "boot",
       runNamespaceRoot: root,
       log,
     });
+    for (let slot = 1; slot < slots; slot++) {
+      const slotResult = await reap({
+        agentUser: agentUserForSlot(agentUser, slot),
+        phase: "boot",
+        runNamespaceRoot: root,
+        log,
+      });
+      result = mergeReapResults(result, slotResult);
+    }
   } catch (e) {
     // `reap` never throws by contract; this wrapper's own contract is the
     // one `main()` relies on, so an injected/edited reaper that does throw
@@ -692,14 +736,36 @@ export async function bootUidScan(
     log(`boot uid scan failed: ${error}`);
     return { outcome: "error", error };
   } finally {
-    try {
-      await lock.release();
-    } catch (e) {
-      log(`boot uid scan: lock release failed: ${errorMessage(e)}`);
+    for (const lock of locks) {
+      try {
+        await lock.release();
+      } catch (e) {
+        log(`boot uid scan: lock release failed: ${errorMessage(e)}`);
+      }
     }
   }
   if (result.error !== undefined) {
     return { outcome: "error", result, error: result.error };
   }
   return { outcome: "scanned", result };
+}
+
+/** Sum two per-slot reap results into one (#205 boot scan over N slots). */
+function mergeReapResults(
+  a: ReapAgentUidResult,
+  b: ReapAgentUidResult,
+): ReapAgentUidResult {
+  return {
+    skipped: a.skipped && b.skipped,
+    scanned: a.scanned + b.scanned,
+    groups: a.groups + b.groups,
+    helpers: a.helpers + b.helpers,
+    killed: a.killed + b.killed,
+    residual: a.residual + b.residual,
+    failed: a.failed + b.failed,
+    durationMs: a.durationMs + b.durationMs,
+    ...(a.error !== undefined || b.error !== undefined
+      ? { error: [a.error, b.error].filter(Boolean).join("; ") }
+      : {}),
+  };
 }

@@ -277,6 +277,62 @@ export async function applyRunNamespaceAces(opts: {
   });
 }
 
+/**
+ * #205, N > 1: the grants on the SHARED worker dir when the box runs several
+ * slots. Every slot account gets traverse on the root AND on the worker dir —
+ * nothing inheritable, anywhere shared. The inheritable grant moves to each
+ * slot's own subdir (applySlotDirAces), so a socket bound in slot i's subdir is
+ * connectable by slot i's account and the worker, and by nobody else. The
+ * worker owns the shared dir and needs no ACE on it.
+ */
+export async function applySlotLayoutAces(opts: {
+  root: string;
+  runDir: string;
+  agentUsers: string[];
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { root, runDir, agentUsers, exec, platform } = opts;
+  const users = agentUsers.filter(Boolean);
+  if (users.length === 0) {
+    return;
+  }
+  await applyTraverseAce({ dir: root, users, exec, platform });
+  await applyTraverseAce({ dir: runDir, users, exec, platform });
+}
+
+/**
+ * #205: the grant on ONE slot's subdir — strip whatever extended ACL the subdir
+ * inherited or accumulated (`setfacl -b`), then the inheritable pair for the
+ * slot account and the worker login. The strip is what makes the subdir's
+ * reach exactly those two: a default entry inherited from the parent for
+ * another account would otherwise propagate onto every socket created here.
+ * Linux-only by construction (N > 1 requires the cgroup ceiling); on any other
+ * platform the strip is skipped and the inheritable pair is applied as usual.
+ */
+export async function applySlotDirAces(opts: {
+  dir: string;
+  agentUser: string;
+  workerLogin: string;
+  exec?: AceExec;
+  platform?: NodeJS.Platform;
+}): Promise<void> {
+  const { dir, agentUser, workerLogin, platform } = opts;
+  if (!agentUser) {
+    return;
+  }
+  const exec = opts.exec ?? defaultExec;
+  if ((platform ?? process.platform) === "linux") {
+    await exec("/usr/bin/setfacl", ["-b", dir]);
+  }
+  await applyInheritableAces({
+    dir,
+    users: [agentUser, workerLogin],
+    exec,
+    platform,
+  });
+}
+
 /** Re-grant rights for a FILE: read and write, never execute. */
 export const LINUX_FILE_REGRANT_RIGHTS = "rw-";
 

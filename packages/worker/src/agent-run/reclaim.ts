@@ -2,11 +2,17 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  SLOT_DIR_RE,
   WORKER_LOCK_FILENAME,
   runPidPath,
+  runUserPath,
   workerRunDir,
 } from "./run-namespace";
-import { buildKillInvocation, type Invocation } from "./spawn-as-user";
+import {
+  assertAgentUser,
+  buildKillInvocation,
+  type Invocation,
+} from "./spawn-as-user";
 
 /**
  * Boot-time reclaim of orphaned daemons (enterprise-hardening Phase 0.2b, BINDING
@@ -68,6 +74,46 @@ function isPidDead(
   }
 }
 
+/**
+ * Every `*.pid` under a worker dir: the flat layout's own files plus those in
+ * its slot subdirs (`s<i>/`, #205). *.pid = per-run daemon group pids.
+ */
+function listPidFiles(dir: string): string[] {
+  const out: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.endsWith(".pid")) {
+      out.push(path.join(dir, entry.name));
+    } else if (entry.isDirectory() && SLOT_DIR_RE.test(entry.name)) {
+      try {
+        for (const f of fs.readdirSync(path.join(dir, entry.name))) {
+          if (f.endsWith(".pid")) out.push(path.join(dir, entry.name, f));
+        }
+      } catch {
+        // a vanished subdir is nothing to reap
+      }
+    }
+  }
+  return out;
+}
+
+/** The slot subdirs present under a worker dir, as slot indexes (#205). */
+function listSlotDirs(dir: string): number[] {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && SLOT_DIR_RE.test(e.name))
+      .map((e) => Number(e.name.slice(1)));
+  } catch {
+    return [];
+  }
+}
+
 /** readdir the namespace root, [] when it does not exist — shared by both reapers. */
 function listWorkerDirs(root: string): fs.Dirent[] {
   try {
@@ -122,6 +168,43 @@ function readPid(file: string): number | null {
   }
 }
 
+/**
+ * #205: the agent account a pidfile's run executed as, from its `.user`
+ * sibling. Null when absent or not a plain login name — then the caller's
+ * configured account is used, which is exactly today's behaviour for every
+ * pre-#205 pidfile and for agent-uid mode off. A malformed record is never
+ * passed to sudo.
+ */
+function readRunUser(pidFile: string): string | null {
+  try {
+    const raw = fs.readFileSync(runUserPath(pidFile), "utf8").trim();
+    if (!raw) return null;
+    assertAgentUser(raw);
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+/** The account to kill a recorded group as: the run's own record, else the configured one. */
+function killOptsFor(
+  pidFile: string,
+  opts: ReclaimOpts | Omit<ReclaimOpts, "selfWorkerId">,
+) {
+  const recorded = opts.agentUser ? readRunUser(pidFile) : null;
+  return recorded ? { ...opts, agentUser: recorded } : opts;
+}
+
+function removeRunRecord(pidFile: string): void {
+  for (const f of [pidFile, runUserPath(pidFile)]) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
   const { root, selfWorkerId } = opts;
   const kill = opts.kill ?? ((pid, signal) => process.kill(pid, signal));
@@ -144,18 +227,13 @@ export function reclaimDeadWorkerRuns(opts: ReclaimOpts): void {
     }
 
     // Dead worker: SIGKILL every recorded daemon process group, then remove the dir.
-    let daemonFiles: string[] = [];
-    try {
-      daemonFiles = fs.readdirSync(dir).filter((f) => f.endsWith(".pid")); // *.pid = per-run daemon group pids
-    } catch {
-      daemonFiles = [];
-    }
-    for (const file of daemonFiles) {
-      const daemonPid = readPid(path.join(dir, file));
+    for (const pidFile of listPidFiles(dir)) {
+      const daemonPid = readPid(pidFile);
       if (daemonPid === null) {
         continue; // malformed pid file — tolerate
       }
-      const how = killDaemonGroup(daemonPid, opts);
+      // #205: a dead slot-1 run must be signalled as slot 1's account.
+      const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
       if (how !== "gone") {
         log(
           `reclaim: ${how === "sudo" ? "sudo-" : ""}SIGKILLed orphan daemon group ${daemonPid} (${entry.name})`,
@@ -208,22 +286,29 @@ export function reapOwnThreadAttempts(
   let reaped = 0;
   for (const entry of listWorkerDirs(root)) {
     // The producer's own path builder (daemon-process.ts writes these files
-    // via runPidPath) — the filename contract has exactly one owner.
-    const pidFile = runPidPath(root, entry.name, threadId);
-    const daemonPid = readPid(pidFile);
-    if (daemonPid === null) continue;
-    const how = killDaemonGroup(daemonPid, opts);
-    if (how !== "gone") {
-      log(
-        `admission-reap: ${how === "sudo" ? "sudo-" : ""}SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
-      );
+    // via runPidPath) — the filename contract has exactly one owner. The flat
+    // layout first, then every slot subdir (#205): a prior attempt of this
+    // thread may have run on any slot.
+    const dir = workerRunDir(root, entry.name);
+    const candidates = [
+      runPidPath(root, entry.name, threadId),
+      ...listSlotDirs(dir).map((slot) =>
+        runPidPath(root, entry.name, threadId, slot),
+      ),
+    ];
+    for (const pidFile of candidates) {
+      const daemonPid = readPid(pidFile);
+      if (daemonPid === null) continue;
+      // The prior attempt's record names the account it ran as.
+      const how = killDaemonGroup(daemonPid, killOptsFor(pidFile, opts));
+      if (how !== "gone") {
+        log(
+          `admission-reap: ${how === "sudo" ? "sudo-" : ""}SIGKILLed prior attempt group ${daemonPid} of ${threadId} (${entry.name})`,
+        );
+      }
+      removeRunRecord(pidFile);
+      reaped += 1;
     }
-    try {
-      fs.rmSync(pidFile, { force: true });
-    } catch {
-      // best-effort
-    }
-    reaped += 1;
   }
   return reaped;
 }

@@ -18,7 +18,9 @@ import {
   getProcessWorkerId,
   runPidPath,
   runSocketPath,
-  workerRunDir,
+  runUserPath,
+  slotFor,
+  slotRunDir,
 } from "./run-namespace";
 import {
   assessCgroupSupport,
@@ -142,16 +144,22 @@ export class DaemonProcess {
     } = {},
   ) {
     const workerId = getProcessWorkerId();
-    this.runDir = workerRunDir(config.runNamespaceRoot, workerId);
+    // #205: at N > 1 every per-run artefact lives in the slot's own subdir
+    // (`slotFor` throws if the workflow forgot the per-run slot override, since
+    // writing into the shared dir would re-open the cross-slot socket reach).
+    const slot = slotFor(config);
+    this.runDir = slotRunDir(config.runNamespaceRoot, workerId, slot);
     this.socketPath = runSocketPath(
       config.runNamespaceRoot,
       workerId,
       input.threadId,
+      slot,
     );
     this.pidFilePath = runPidPath(
       config.runNamespaceRoot,
       workerId,
       input.threadId,
+      slot,
     );
   }
 
@@ -330,6 +338,15 @@ export class DaemonProcess {
     // here — this method must never touch another run's or worker's resources.
     fs.mkdirSync(this.runDir, { recursive: true });
     this.cleanOwnStaleFiles();
+    // #205: record which agent account this run executes as, BEFORE the spawn,
+    // beside the pidfile. A recorded process group can only be signalled as
+    // the account that owns it, so the reclaim paths (reclaim.ts) read this
+    // when they find the pidfile; writing it first means a crash between here
+    // and the pidfile write leaves a record without a pid (ignored), never a
+    // pid without an account. Agent-uid mode off ⇒ no record, as before.
+    if (this.config.agentUser) {
+      fs.writeFileSync(runUserPath(this.pidFilePath), this.config.agentUser);
+    }
 
     // #108 F2: the cross-uid ACEs are NOT applied here. macOS applies ACE
     // inheritance at CREATE time, and workflow.ts binds the gh-broker socket in
@@ -563,6 +580,11 @@ export class DaemonProcess {
     // a recycled pid and the next same-threadId run binds clean.
     try {
       fs.rmSync(this.pidFilePath, { force: true });
+    } catch {
+      // ignore
+    }
+    try {
+      fs.rmSync(runUserPath(this.pidFilePath), { force: true });
     } catch {
       // ignore
     }
