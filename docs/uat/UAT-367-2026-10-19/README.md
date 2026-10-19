@@ -20,7 +20,7 @@
 | C9 | observe log holds only refused rows | PASS | `15-…-observe-window-log.txt` (verifier probes only) |
 | C10 | test cards present | PASS | `26-…-test-cards.txt` (9/9; proxy 6) |
 | C11 | CI green, egress assertions unchanged | PASS | `27-…-ci-pr-checks.txt` |
-| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | per-run ledger (evidence 30): 34 runs started under enforce in the window; 31 started AND completed inside it (ledger rows 1,2,4–14,16–33), 1 completed 27 s after the capture (row 34, 16:52:17), 0 failed, 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394, 15:10:59) is logged "cancelled under newest-wins → superseded" 13 s after a newer run for the same PR started; row 3 (task, 14:08:47) was torn down at 14:08:57, 10 s after boot, as the next task run on the same repo started, eleven minutes before the first restart, with no ECONNREFUSED or Connection refused string. No run overlapped a restart (14:19, 16:31, 16:37): each restart happened between runs and reloaded the table via ExecStartPre. Counters in evidence 28 date from the 16:37 reload (its header says 14:19); evidence 30 states the correction |
+| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4–14, 16–33); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged "cancelled under newest-wins → superseded", row 3 (task) was torn down 10 s after boot as the next task run on the same repo started, with no ECONNREFUSED or Connection refused string. Restart overlap is computed from each run's own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29's "4 completed after T1" counted runs that also started after T1, and evidence 30's restart column treated a missing completion as open-ended; evidence 31 states both corrections. Counters in evidence 28 date from the 16:37 reload (its header says 14:19) |
 
 ## Deviations
 
@@ -42,5 +42,6 @@ None: ssh key name and gh auth were the only requirements, both present.
 
 ## Run history
 
-- 2026-10-19 15:33 UTC — first run (this record).
-- 2026-10-19 16:51 UTC — C12 graded PASS on the 30-run hold; page version 3.
+- 2026-10-19 15:33 UTC — first run (this record); page v1–v2.
+- 2026-10-19 16:51 UTC — C12 graded PASS on the 30-run hold; page v3.
+- 2026-10-19 — review rounds on PR #398: deviation wording (v4), run-count reconciliation (v5), per-run ledger (v6), corrected ledger as evidence 31 (v7).

@@ -1,0 +1,41 @@
+C12 window 2026-10-19 13:55:30 -> 2026-10-19 16:51:50 UTC. Worker restarts (Stopped) in the window: ['2026-10-19 14:19:09', '2026-10-19 16:31:24', '2026-10-19 16:37:22']
+A run 'overlaps' a restart only if the restart falls between its start and its last own log line (completion, or box-lock release for a run with no completion line).
+ # start               lane   pr   end       end/last-own-line   last status restart? superseded  agent-run repo
+ 1 2026-10-19 13:56:44 review 385  completed 2026-10-19 13:57:31 complete   no       -           9c372e5c be-automata/automata
+ 2 2026-10-19 13:57:38 task        completed 2026-10-19 14:08:46 complete   no       -           a26fa39e be-automata/automata
+ 3 2026-10-19 14:08:47 task        NONE      2026-10-19 14:08:58 booting    no       -           d87f2086 be-automata/automata
+ 4 2026-10-19 14:08:56 task        completed 2026-10-19 14:11:55 complete   no       -           14943c6c be-automata/automata
+ 5 2026-10-19 14:11:56 task        completed 2026-10-19 14:15:27 complete   no       -           7e614963 be-automata/automata
+ 6 2026-10-19 14:15:28 task        completed 2026-10-19 14:16:23 complete   no       -           9acb5a3a bangr-inc/Bangr-Admin-Panel
+ 7 2026-10-19 14:16:24 review 385  completed 2026-10-19 14:17:16 complete   no       -           0e9366da be-automata/automata
+ 8 2026-10-19 14:17:16 review 388  completed 2026-10-19 14:17:47 complete   no       -           a9c7f859 be-automata/automata
+ 9 2026-10-19 14:18:15 review 385  completed 2026-10-19 14:18:53 complete   no       -           06897d4c be-automata/automata
+10 2026-10-19 14:20:35 task        completed 2026-10-19 14:24:21 complete   no       -           7da35690 be-automata/automata
+11 2026-10-19 14:28:10 task        completed 2026-10-19 14:31:45 complete   no       -           c07e484c be-automata/automata
+12 2026-10-19 14:31:45 task        completed 2026-10-19 14:36:02 complete   no       -           624cde02 be-automata/automata
+13 2026-10-19 15:01:01 task        completed 2026-10-19 15:01:53 complete   no       -           db1db653 bangr-inc/bangr-core
+14 2026-10-19 15:05:16 review 393  completed 2026-10-19 15:05:46 complete   no       -           8db91aa3 be-automata/automata
+15 2026-10-19 15:10:59 review 394  NONE      2026-10-19 15:11:13            no       newest-wins 39e898e9 be-automata/automata
+16 2026-10-19 15:11:12 review 394  completed 2026-10-19 15:11:45 complete   no       -           645c7fed be-automata/automata
+17 2026-10-19 15:12:50 task        completed 2026-10-19 15:13:17 complete   no       -           3c3b09fb be-automata/automata
+18 2026-10-19 15:14:02 review 394  completed 2026-10-19 15:14:24 complete   no       -           910f4fdf be-automata/automata
+19 2026-10-19 15:18:26 review 394  completed 2026-10-19 15:19:04 complete   no       -           55c5ef1b be-automata/automata
+20 2026-10-19 15:24:24 review 393  completed 2026-10-19 15:24:58 complete   no       -           9a2d932e be-automata/automata
+21 2026-10-19 15:36:31 review 392  completed 2026-10-19 15:37:03 complete   no       -           74057d70 be-automata/automata
+22 2026-10-19 15:43:26 review 396  completed 2026-10-19 15:43:59 complete   no       -           6c458d46 be-automata/automata
+23 2026-10-19 15:51:54 review 393  completed 2026-10-19 15:52:54 complete   no       -           9785ae68 be-automata/automata
+24 2026-10-19 15:54:56 pr     731  completed 2026-10-19 15:55:22 complete   no       -           2fa55f48 bangr-inc/bangr-core
+25 2026-10-19 15:55:47 pr     733  completed 2026-10-19 15:56:20 complete   no       -           b521ae08 bangr-inc/bangr-core
+26 2026-10-19 16:16:08 review 394  completed 2026-10-19 16:17:00 complete   no       -           4c778c89 be-automata/automata
+27 2026-10-19 16:23:07 review 394  completed 2026-10-19 16:24:02 complete   no       -           6187e4ac be-automata/automata
+28 2026-10-19 16:26:34 pr     737  completed 2026-10-19 16:26:56 complete   no       -           49deeb6b bangr-inc/bangr-core
+29 2026-10-19 16:29:09 review 394  completed 2026-10-19 16:30:09 complete   no       -           0499e978 be-automata/automata
+30 2026-10-19 16:33:46 review 394  completed 2026-10-19 16:35:02 complete   no       -           5a3f5d9e be-automata/automata
+31 2026-10-19 16:45:28 review 397  completed 2026-10-19 16:46:19 complete   no       -           6c7f6bed be-automata/automata
+32 2026-10-19 16:48:35 review 397  completed 2026-10-19 16:49:26 complete   no       -           e98f31d1 be-automata/automata
+33 2026-10-19 16:49:26 review 394  completed 2026-10-19 16:50:12 complete   no       -           844e34e8 be-automata/automata
+34 2026-10-19 16:51:29 review 397  completed 2026-10-19 16:52:17 complete   no       -           93f2973c be-automata/automata
+
+started in window: 34; started AND completed inside the window: 31; completed after T1: 1; failed: 0; no completion line: 2
+restart-overlapped runs (by the definition above): none
+Evidence 29 and 30, superseded by this file: 29's 'completed after T1: 4' counted every completion between T1 and 17:30 including runs that also STARTED after T1 (only 1 belongs to a window start, row 34), and its 'starts without a completion' section was empty because its grep looked for thread-status terminal lines that this worker does not emit. 30's 'overlaps restart' column treated a missing completion time as open-ended, which flagged rows 3 and 15; neither coincides with a restart (14:19:09, 16:31:24, 16:37:22).
