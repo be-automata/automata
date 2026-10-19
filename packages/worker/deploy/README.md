@@ -343,9 +343,49 @@ pnpm --filter @terragon/daemon run build
 ## Zombie / leaked-worker guard
 
 Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim reaps a
-dead sibling worker's orphaned daemons. Add a worker-liveness alert (gap #7): alert on
-a worker that stops heartbeating so a silently-dead unit is noticed before queued runs
-hit their `scheduleTimeout`.
+dead sibling worker's orphaned daemons. Worker liveness (gap #7) is closed by two
+pieces: the #215 engine-liveness watchdog restarts a worker that stops heartbeating
+(`WORKER_LIVENESS_STALE_S`), and the #373 growth-trigger evaluator below does the
+alerting, so a box that is falling behind pages someone before queued runs hit their
+`scheduleTimeout`.
+
+### Growth triggers (#373)
+
+An in-process evaluator that checks five signals every interval and POSTs a webhook
+when one crosses its threshold. Each trigger authorizes exactly one move:
+
+- `queue_wait_p90` — daily queue-wait p90 > 600 s on each of the last 7 complete UTC
+  days → raise the cap, then resize CX43 (cap 6) / CX53 (cap 8).
+- `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
+  window → add a second shared box on the same tenant.
+- `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split
+  that client to its own box.
+- `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
+  questionnaire → start the per-run sandbox path.
+- `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
+  supersede policy.
+
+| Knob                                 | Default | Notes                                                    |
+| :----------------------------------- | :------ | :------------------------------------------------------- |
+| `WORKER_ALERT_WEBHOOK_URL`           | unset   | Unset = OFF, silent, nothing else is read. http(s) only. |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30.                                                |
+| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`    | 900     | Floor 60; must be ≥ 2 × interval.                        |
+| `WORKER_GROWTH_TRIGGER_RAM_FRACTION` | 0.70    | 0 < x < 1.                                               |
+| `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.                 |
+
+A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
+The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
+state}` with `state` `fired` or `cleared`; `text` is a one-line summary, so the same URL
+works for a Slack incoming webhook or ntfy. A trigger that stays over re-fires at most
+once per 24 h, and one `cleared` notice is sent when it drops back under. A failed POST
+is not recorded and is retried next tick.
+
+State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
+atomically every tick). `/tmp` is cleared at reboot, so a trigger may re-fire once after
+a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
+`unattributed`; the client signals are meaningful only once 7 complete days of tagged
+runs exist. The webhook URL is a secret: it is never logged — keep it in
+`worker-box.env`, never in the unit file or the repo.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
 
