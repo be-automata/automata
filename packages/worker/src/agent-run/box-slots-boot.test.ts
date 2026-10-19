@@ -518,9 +518,10 @@ Committed_AS:    2600000 kB
   // cx43 at vm.overcommit_ratio=80: 8 GB swap + 80 % of 16 GB ≈ 20.8 GB.
   const CX43_R80 = meminfo(20311244);
   const fiveG = 5000 * 1024 ** 2;
-  const tuple = (boxSlots: number, fraction = 0.9) => ({
+  const tuple = (boxSlots: number, fraction = 0.9, floor = 1024 ** 3) => ({
     boxSlots,
     memoryMaxBytes: fiveG,
+    headroomFloorBytes: floor,
     headroomRunCommitBytes: fiveG,
     headroomCommitFraction: fraction,
   });
@@ -529,7 +530,7 @@ Committed_AS:    2600000 kB
     readMeminfo: () => text,
   });
 
-  it("the pilot's own numbers: ONE 5000M run fits 0.9 × CommitLimit beside the base, TWO do not — refused naming the knobs (what #371's drill observed as 'every second run deferred')", () => {
+  it("the pilot's own numbers: N = 1 is not this guard's business (#371 owns it); TWO 5000M runs do not fit 0.9 × CommitLimit beside the base — refused naming the knobs (what #371's drill observed as 'every second run deferred')", () => {
     expect(() =>
       assertSlotsFitCommitLimit(tuple(1), linux(CX33)),
     ).not.toThrow();
@@ -547,12 +548,19 @@ Committed_AS:    2600000 kB
     );
   });
 
-  it("an inert fraction (≥ 1) budgets the whole CommitLimit; the boundary is exact", () => {
+  it("the documented rollback (floor 0 AND fraction 1.0 — the headroom check OFF) skips the guard: an oversized tuple boots", () => {
+    expect(() =>
+      assertSlotsFitCommitLimit(tuple(8, 1, 0), linux(CX33)),
+    ).not.toThrow();
+  });
+
+  it("an inert commit arm alone (fraction ≥ 1, floor still set) budgets the whole CommitLimit; the boundary is exact", () => {
     const commitLimit = 12357216 * 1024;
     const exact = Math.floor((commitLimit - BOX_BASE_COMMIT_BYTES) / 2);
     const t = (runCommit: number) => ({
       boxSlots: 2,
       memoryMaxBytes: fiveG,
+      headroomFloorBytes: 1024 ** 3,
       headroomRunCommitBytes: runCommit,
       headroomCommitFraction: 1,
     });
@@ -579,7 +587,7 @@ Committed_AS:    2600000 kB
         },
       }),
     ).not.toThrow();
-    expect(() => assertSlotsFitCommitLimit(tuple(1), linux("garbage"))).toThrow(
+    expect(() => assertSlotsFitCommitLimit(tuple(2), linux("garbage"))).toThrow(
       /\/proc\/meminfo: missing or malformed/,
     );
   });

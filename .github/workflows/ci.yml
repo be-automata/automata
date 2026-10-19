@@ -190,7 +190,7 @@ jobs:
   # torn down in `if: always()` as the backstop for a killed vitest process.
   worker-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

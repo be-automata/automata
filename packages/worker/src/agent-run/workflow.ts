@@ -601,19 +601,12 @@ async function postSuperseded(
     );
     return;
   }
-  const result = await postRunTerminal(wwwOpts, {
-    runExternalId,
-    cause: "superseded",
-    policy,
-  });
-  ctx.log(
-    `[agent-run ${input.threadId}] cancelled under ${policy} → superseded terminal: ${result}`,
-  );
   // #372 supersede-waste decision: ACCEPT the waste of cancelling a running run
   // (newest-wins keeps the verdict current with the latest push) and MEASURE
-  // it. This is the per-run figure; the 7-day fraction (Σ duration of
-  // CANCELLED run tasks / Σ all, from the engine's collection route) is #373's
-  // trigger, revisited above ~20 %.
+  // it. Measured BEFORE the terminal post (the figure is the run's execution,
+  // not www's latency) and logged whatever the post does. This is the per-run
+  // figure; the 7-day fraction (Σ duration of CANCELLED run tasks / Σ all, from
+  // the engine's collection route) is #373's trigger, revisited above ~20 %.
   ctx.log(
     `box.supersede_waste ${JSON.stringify({
       runId: runExternalId,
@@ -622,6 +615,14 @@ async function postSuperseded(
       policy,
       executionMs: Date.now() - runStartedAt,
     })}`,
+  );
+  const result = await postRunTerminal(wwwOpts, {
+    runExternalId,
+    cause: "superseded",
+    policy,
+  });
+  ctx.log(
+    `[agent-run ${input.threadId}] cancelled under ${policy} → superseded terminal: ${result}`,
   );
 }
 

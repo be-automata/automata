@@ -1042,8 +1042,9 @@ The order matters because each step checks the one before it.
    `listening for actions`.
    The concurrency tuple in `worker-box.env` is ONE setting (#372, detail in
    `packages/worker/deploy/README.md`): `WORKER_BOX_SLOTS` = `WORKER_GLOBAL_MAX_RUNS`
-   ≥ `WORKER_PER_ORG_MAX_RUNS`, with `WORKER_RUN_MEMORY_MAX` and the swap sized so
-   `slots × ceiling + 2 GiB` fits the box's `CommitLimit`. Move them together; the
+   ≥ `WORKER_PER_ORG_MAX_RUNS`, with `WORKER_RUN_MEMORY_MAX` and the swap sized so `slots × run commit + 2 GiB`
+   fits `WORKER_HEADROOM_COMMIT_FRACTION` (0.9) × the box's `CommitLimit` — the
+   headroom check's own budget. Move them together; the
    worker refuses to boot on any inconsistent pairing, naming the knobs
    (`FATAL: worker configuration is invalid` / `the box slots do not fit this
 box's CommitLimit`). The production tuple and its derivation from the memory

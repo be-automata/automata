@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
-import { parseMeminfo, readProcMeminfo } from "./headroom";
+import { isInertPolicy, parseMeminfo, readProcMeminfo } from "./headroom";
 import { KILL_BIN, SH_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
 
@@ -470,8 +470,10 @@ export function warnIfSlotsExceedMemory(
 
 /**
  * #372: the base load every box carries beside its runs (worker, engine
- * container, Postgres, sshd — measured 2.4–3.5 GB idle on the pilot). Added to
- * N × ceiling when the tuple is checked against the kernel's commit budget.
+ * container, Postgres, sshd — measured 2.4–3.5 GB idle on the pilot). The
+ * FLOOR of that range, deliberately: this is the operator's typo guard for the
+ * tuple, not the admission decision — #371's boot-load WARNING reports the
+ * Committed_AS actually observed, and its admission uses the live figure.
  */
 export const BOX_BASE_COMMIT_BYTES = 2 * 1024 ** 3;
 
@@ -483,7 +485,9 @@ export const BOX_BASE_COMMIT_BYTES = 2 * 1024 ** 3;
  * overcommit_ratio × RAM), or N full runs could never be admitted together —
  * the headroom check would defer every run past the first until it failed
  * (observed: #371's drill on the cx33 deferred every second 5000M run). With
- * the fraction inert (≥ 1) the whole `CommitLimit` is the budget. Refuses
+ * the whole headroom policy inert (the documented rollback: floor 0 AND
+ * fraction 1.0) the check is skipped — nothing would defer; with only the
+ * commit arm inert (fraction ≥ 1) the whole `CommitLimit` is the budget. Refuses
  * (throws, naming the knobs) on Linux with the ceiling on; a box without the
  * ceiling or /proc/meminfo is not this check's business (N > 1 already
  * requires both). `warnIfSlotsExceedMemory` stays the softer RAM warning
@@ -494,6 +498,7 @@ export function assertSlotsFitCommitLimit(
   cfg: {
     boxSlots: number;
     memoryMaxBytes: number;
+    headroomFloorBytes: number;
     headroomRunCommitBytes: number;
     headroomCommitFraction: number;
   },
@@ -508,7 +513,23 @@ export function assertSlotsFitCommitLimit(
     readMeminfo = readProcMeminfo,
     baseBytes = BOX_BASE_COMMIT_BYTES,
   } = opts;
-  if (platform !== "linux" || cfg.memoryMaxBytes <= 0) return;
+  // N = 1 is #371's business (assessHeadroomSupport refuses a run commit the
+  // box can never admit); this guard is the N-run SUM the ticket's AC names.
+  if (platform !== "linux" || cfg.memoryMaxBytes <= 0 || cfg.boxSlots <= 1) {
+    return;
+  }
+  // The documented rollback (floor 0, fraction 1.0) turns the headroom check
+  // OFF — then nothing defers, CommitLimit is not kernel-enforced
+  // (vm.overcommit_memory 0), and this guard has nothing to guard.
+  if (
+    isInertPolicy({
+      floorBytes: cfg.headroomFloorBytes,
+      commitFraction: cfg.headroomCommitFraction,
+      runCommitBytes: cfg.headroomRunCommitBytes,
+    })
+  ) {
+    return;
+  }
   const { commitLimit } = parseMeminfo(readMeminfo());
   const fraction = Math.min(cfg.headroomCommitFraction, 1);
   const budget = fraction * commitLimit;
