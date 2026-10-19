@@ -376,18 +376,20 @@ export function assessHeadroomSupport(opts: {
       } — set WORKER_HEADROOM_FLOOR=0 and WORKER_HEADROOM_COMMIT_FRACTION=1.0 to run without it`,
     );
   }
-  // The knobs against the BOX: a run commit above fraction × CommitLimit can
-  // never pass the commit arm (Committed_AS ≥ 0), so every dispatched run would
-  // hold its engine slot for the whole deferral budget and fail final — the
-  // silent "every run fails" a boot check exists to refuse up front (an
-  // oversized WORKER_RUN_MEMORY_MAX on a small box, or a typo such as 50G).
+  // The knobs against the BOX, with the commit arm's own inequality at
+  // reserved = 0 (no run is in flight at boot): Committed_AS never drops below
+  // the box's base load, so a run commit that cannot fit beside it would be
+  // refused on EVERY admission — each dispatched run holding its engine slot
+  // for the whole deferral budget and failing final. That is the silent
+  // "every run fails" a boot check exists to refuse up front (an oversized
+  // WORKER_RUN_MEMORY_MAX on a small box, or a typo such as 50G).
   const commitCeiling = opts.policy.commitFraction * reading.commitLimit;
   if (
     opts.policy.commitFraction < 1 &&
-    opts.policy.runCommitBytes > commitCeiling
+    reading.committedAs + opts.policy.runCommitBytes > commitCeiling
   ) {
     throw new Error(
-      `the memory headroom check can never admit a run on this box: run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
+      `the memory headroom check can never admit a run on this box: Committed_AS ${mib(reading.committedAs)} (idle, at boot) + run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
     );
   }
   // Same for the floor arm: a floor at or above the box's memory means

@@ -330,28 +330,25 @@ describe("assessHeadroomSupport (boot)", () => {
     });
   });
 
-  it("a run commit above fraction × the box's CommitLimit can NEVER be admitted: boot refuses, naming both values and the rollback; one that fits is on", () => {
-    const commitLimit = parseMeminfo(MEMINFO).commitLimit;
+  it("a run commit that cannot fit beside the box's idle Committed_AS under fraction × CommitLimit can NEVER be admitted: boot refuses at the exact boundary, naming all three values and the rollback", () => {
+    const { committedAs, commitLimit } = parseMeminfo(MEMINFO);
+    const room = Math.floor(0.9 * commitLimit - committedAs); // the largest run commit that fits at boot
     expect(() =>
       assessHeadroomSupport({
         policy: {
           ...POLICY,
           commitFraction: 0.9,
-          runCommitBytes: Math.ceil(0.9 * commitLimit) + 1,
+          runCommitBytes: room + 1024 ** 2,
         },
         platform: "linux",
         readMeminfo: () => MEMINFO,
       }),
     ).toThrow(
-      /can never admit a run on this box: run commit \d+M .* exceeds 0\.9 × CommitLimit \d+M = \d+M .*fraction 1\.0/,
+      /can never admit a run on this box: Committed_AS \d+M .* \+ run commit \d+M .* exceeds 0\.9 × CommitLimit \d+M = \d+M .*fraction 1\.0/,
     );
     expect(
       assessHeadroomSupport({
-        policy: {
-          ...POLICY,
-          commitFraction: 0.9,
-          runCommitBytes: Math.floor(0.9 * commitLimit),
-        },
+        policy: { ...POLICY, commitFraction: 0.9, runCommitBytes: room },
         platform: "linux",
         readMeminfo: () => MEMINFO,
       }),
