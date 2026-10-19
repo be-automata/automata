@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   assertFenceCoversSlotUids,
+  assertProcHidepid,
   assertSlotAccountsExist,
   assertSlotSudoGrants,
   retiredSlotAccounts,
@@ -93,6 +94,63 @@ describe("assertSlotSudoGrants (#205 boot)", () => {
     const probe = vi.fn(async () => {});
     await assertSlotSudoGrants([], probe);
     expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
+  const line = (opts: string, superOpts: string) =>
+    `25 30 0:23 / /proc ${opts} shared:14 - proc proc ${superOpts}\n` +
+    "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n";
+
+  it("passes with hidepid=invisible (or 2 / ptraceable / 4), in the superblock options where the kernel puts it", () => {
+    for (const v of ["invisible", "2", "ptraceable", "4"]) {
+      expect(() =>
+        assertProcHidepid({
+          platform: "linux",
+          readMountinfo: () =>
+            line("rw,nosuid,nodev,noexec,relatime", `rw,hidepid=${v},gid=990`),
+        }),
+      ).not.toThrow();
+    }
+    // ...and tolerates it in the per-mount options too.
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        readMountinfo: () => line("rw,hidepid=invisible", "rw"),
+      }),
+    ).not.toThrow();
+  });
+
+  it("refuses a /proc without hidepid, or with hidepid=0/1 (which hide nothing), naming §6", () => {
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        readMountinfo: () => line("rw,nosuid,nodev,noexec,relatime", "rw"),
+      }),
+    ).toThrow(/without hidepid.*AGENT-UID-PROVISIONING\.md/);
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        readMountinfo: () => line("rw", "rw,hidepid=1"),
+      }),
+    ).toThrow(/hidepid=1/);
+  });
+
+  it("refuses when mountinfo is unreadable or has no /proc; is a no-op off Linux", () => {
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        readMountinfo: () => {
+          throw new Error("EACCES");
+        },
+      }),
+    ).toThrow(/cannot read \/proc\/self\/mountinfo \(EACCES\)/);
+    expect(() =>
+      assertProcHidepid({ platform: "linux", readMountinfo: () => "" }),
+    ).toThrow(/no \/proc mount/);
+    const readMountinfo = vi.fn(() => "");
+    assertProcHidepid({ platform: "darwin", readMountinfo });
+    expect(readMountinfo).not.toHaveBeenCalled();
   });
 });
 

@@ -22,6 +22,7 @@ import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
   EGRESS_FENCE_UIDS_FILE,
   assertFenceCoversSlotUids,
+  assertProcHidepid,
   assertSlotAccountsExist,
   assertSlotSudoGrants,
   retiredSlotAccounts,
@@ -179,6 +180,7 @@ async function main() {
         const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
         await assertSlotSudoGrants(cfg.agentUsers);
         assertFenceCoversSlotUids({ uids: slotUids });
+        assertProcHidepid();
         console.log(
           `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
         );

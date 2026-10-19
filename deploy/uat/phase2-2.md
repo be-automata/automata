@@ -22,7 +22,7 @@ the restart.
 
 | #   | Check                                                                                                                                                                                             | Evidence  |
 | :-- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :-------- |
-| 1   | Boot: `box slots: 2 (automata-agent, automata-agent-1)`; `max_units` 2 on the Worker row                                                                                                          | _pending_ |
+| 1   | Boot: a `box slots: 2 (automata-agent, automata-agent-1; uids 999, 2001); egress fence covers every slot uid (...)` line; `max_units` 2 on the Worker row                                         | _pending_ |
 | 2   | Two runs on different variants/orgs execute concurrently, each in its own run cgroup under its own uid; `lsof` shows holders on `box.lock` and `box.lock.1`                                       | _pending_ |
 | 3   | Teardown of one leaves the sibling's processes alive; its verdict posts; no cross-slot kill in the journal                                                                                        | _pending_ |
 | 4   | A third run while both slots are held waits (engine QUEUED / worker `box budget full`), is not FAILED or CANCELLED, and runs when a slot frees                                                    | _pending_ |

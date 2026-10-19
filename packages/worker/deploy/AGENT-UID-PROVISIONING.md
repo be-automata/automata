@@ -260,7 +260,9 @@ the shared `<root>/<workerId>/` dir and an inheritable grant on that slot's own
 connectable by another), keeps each run's pidfile under its slot's subdir so a
 reclaim kills a dead group as that slot's account, and scans each slot's uid at
 boot only once it holds every slot. The boot log shows
-`box slots: 2 (automata-agent, automata-agent-1)`.
+`box slots: 2 (automata-agent, automata-agent-1; uids 999, 2001); egress fence
+covers every slot uid (/run/automata/egress-fence.uids)` — grep for the
+`box slots: 2 (` prefix.
 
 Rollback: `WORKER_BOX_SLOTS=1` and restart. The extra accounts, sudoers entries
 and nft set may stay; they fence nothing while unused, and the boot uid scan
@@ -284,6 +286,8 @@ sudo mount -o remount,hidepid=invisible,gid="$WORKER_GID" /proc
 grep -q hidepid= /etc/fstab || printf 'proc /proc proc defaults,hidepid=invisible,gid=%s 0 0\n' "$WORKER_GID" | sudo tee -a /etc/fstab
 sudo -u automata-agent-1 ps -eo user | sort -u   # must list only automata-agent-1
 ```
+
+The worker checks this at boot (N > 1, Linux) and refuses to start without it.
 
 Caveat, checked before trusting it: `hidepid` also hides processes from
 `systemd-logind`/polkit sessions of unprivileged logins; on a box with an

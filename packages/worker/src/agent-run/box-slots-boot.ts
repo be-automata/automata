@@ -111,6 +111,62 @@ async function sudoListProbe(user: string): Promise<void> {
   });
 }
 
+/** The `hidepid=` values that hide other uids' processes (`2` ≡ invisible, `4` ≡ ptraceable). */
+const HIDEPID_OK = new Set(["invisible", "2", "ptraceable", "4"]);
+
+/**
+ * #205: at N > 1 on Linux, /proc must be mounted with `hidepid` (invisible or
+ * ptraceable) — the run's proxy credential rides in the agent children's
+ * HTTPS_PROXY, the worker keeps it out of every argv it writes, but a tool the
+ * agent runs may copy it into one, and `/proc/<pid>/cmdline` is otherwise
+ * world-readable to a sibling slot. The same fail-closed shape as the other
+ * N > 1 preconditions (accounts, sudo, fence): a box raised to N = 2 without
+ * the remount must not boot clean. Reads /proc/self/mountinfo — the /proc
+ * mount's per-mount AND superblock options (hidepid is a superblock option).
+ * Not Linux ⇒ nothing.
+ */
+export function assertProcHidepid(
+  opts: {
+    platform?: NodeJS.Platform;
+    readMountinfo?: () => string;
+  } = {},
+): void {
+  const {
+    platform = process.platform,
+    readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
+  } = opts;
+  if (platform !== "linux") return;
+  let text: string;
+  try {
+    text = readMountinfo();
+  } catch (e) {
+    throw new Error(
+      `cannot read /proc/self/mountinfo (${e instanceof Error ? e.message : String(e)}); at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
+  const procLine = text
+    .split("\n")
+    .map((l) => l.split(" "))
+    .find((f) => f[4] === "/proc");
+  if (!procLine) {
+    throw new Error(
+      "no /proc mount in /proc/self/mountinfo; at WORKER_BOX_SLOTS > 1 the /proc hidepid mount is a precondition (deploy/AGENT-UID-PROVISIONING.md §6)",
+    );
+  }
+  const sep = procLine.indexOf("-");
+  const options = [procLine[5] ?? "", procLine[sep + 3] ?? ""]
+    .join(",")
+    .split(",");
+  const hidepid = options
+    .find((o) => o.startsWith("hidepid="))
+    ?.slice("hidepid=".length);
+  if (hidepid === undefined || !HIDEPID_OK.has(hidepid)) {
+    throw new Error(
+      `/proc is mounted ${hidepid === undefined ? "without hidepid" : `with hidepid=${hidepid}`}; at WORKER_BOX_SLOTS > 1 another slot's account could read a run's argv (and a copied proxy credential) — remount with hidepid=invisible and the worker group exempt (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
+}
+
 /** Where nft-preflight.sh records the uids the loaded fence covers (tmpfs: gone at reboot, rewritten by the automata-egress unit). */
 export const EGRESS_FENCE_UIDS_FILE = "/run/automata/egress-fence.uids";
 
@@ -213,7 +269,7 @@ export function warnIfSlotsExceedMemory(
   const need = cfg.boxSlots * cfg.memoryMaxBytes;
   if (need > memTotalBytes) {
     log(
-      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0), so the headroom check (#371) will defer admissions under load`,
+      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0), so concurrent runs can hit ENOMEM under load until the admission headroom check (#371) lands`,
     );
   }
 }
