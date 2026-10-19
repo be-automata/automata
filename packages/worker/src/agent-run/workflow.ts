@@ -79,6 +79,7 @@ import {
   type BrokerHandoff,
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
+import { guardRunTerminal } from "./run-terminal-ledger";
 import {
   ensureRunNamespace,
   ensureSlotNamespace,
@@ -434,15 +435,34 @@ function wwwOptsFor(input: AgentRunInput, ctx: RunCtx): WwwClientOpts {
 }
 
 /**
- * The ONE run task fn shared by every variant. Wraps `runAgentInner` with the
- * #125 C4 queue-mode staleness self-check and the #125 C1 cancel hook: when
- * the engine cancels THIS run (in-flight or pre-daemon during provision)
+ * The ONE run task fn shared by every variant: the #386 terminal guard
+ * (run-terminal-ledger.ts) around `runAgentAttempt`, which wraps
+ * `runAgentInner` with the #125 C4 queue-mode staleness self-check and the
+ * #125 C1 cancel hook: when the engine cancels THIS run (in-flight or pre-daemon during provision)
  * under a native policy, an explicit `superseded` terminal is posted to www
  * after teardown — `finally` runs on both return and throw, so exactly once.
  * Legacy runs (no supersedePolicy — non-review lanes) post nothing: the
  * control plane owns that terminal.
  */
 async function runAgent(
+  input: AgentRunInput,
+  ctx: RunCtx,
+): Promise<AgentRunOutput> {
+  // #386: one terminal per workflow run id on this box. A run that already
+  // ended (returned or threw) and is redelivered after a graceful drain is
+  // refused here, before admission — never re-executed. A run that never ended
+  // (a worker crash mid-run, #152) has no entry and re-executes as before.
+  return guardRunTerminal(
+    {
+      root: loadWorkerConfig().runNamespaceRoot,
+      runId: ctx.workflowRunId?.() || "",
+      log: (msg) => ctx.log(`[agent-run ${input.threadId}] ${msg}`),
+    },
+    () => runAgentAttempt(input, ctx),
+  );
+}
+
+async function runAgentAttempt(
   input: AgentRunInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
