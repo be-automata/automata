@@ -418,5 +418,20 @@
     "captured_at": "2026-10-19T15:35:15Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 28,
+    "file": "28-api-C367-thirty-run-hold.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "thirty-run-hold",
+    "kind": "text",
+    "sha256": "0741f2b6dd8a2206837cf44465df58ee391508b2647715e8d917ecab2db0bfe6",
+    "bytes": 1438,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/thirty-run-hold.txt",
+    "captured_at": "2026-10-19T16:52:38Z",
+    "env": "",
+    "build": ""
   }
 ]

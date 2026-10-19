@@ -1,6 +1,6 @@
 # UAT-367-2026-10-19 — agent-uid loopback fence (#367), production execution box
 
-**Verdict:** PASS — 11 of 12 criteria; C12 (30 real runs under enforce) BLOCKED on the run count only, with no failure observed.
+**Verdict:** PASS — 12 of 12 criteria (C12 graded at 16:51 UTC on the 30-run hold: 31 completed, 0 failed).
 **Change:** PR #383 (observe step, merge 5b57010) + PR #388 (enforce step, merge 3e344b7). Issue #367.
 **Environment:** `automata-exec-1` (the production execution box; the fence exists only there). Deployed HEAD 3e344b765 contains both merge commits.
 **Lane:** api/CLI — recorded commands and outputs on the box; probes as uid 999 and 2001 from a throwaway cgroup under the worker unit (`nft-verify.sh`).
@@ -20,11 +20,11 @@
 | C9 | observe log holds only refused rows | PASS | `15-…-observe-window-log.txt` (verifier probes only) |
 | C10 | test cards present | PASS | `26-…-test-cards.txt` (9/9; proxy 6) |
 | C11 | CI green, egress assertions unchanged | PASS | `27-…-ci-pr-checks.txt` |
-| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | BLOCKED | `11-…-runs-completed-count.txt` = 18, failed 0, refused-in-logs 0, host-local 0 |
+| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | `28-…-thirty-run-hold.txt`: 31 completed (21 review, 10 task, 3 pr), 0 failed, 0 refused, 0 host-local; unplanned restart 16:37 reloaded cleanly |
 
 ## Deviations
 
-- Observe window shortened from 7 days / 30 runs to ~10 min / 3 runs (operator decision); C12 tracks the 30-run half.
+- Observe window shortened from 7 days / 30 runs to ~10 min / 3 runs (operator decision); the 30-run half was then held under enforce (C12 PASS); the 7-day half cannot elapse in-session.
 - Four reject lines instead of three (bridge tcp needs `reject with tcp reset`; measured 1 s timeout otherwise).
 - Proxy also refuses host-local targets; NO_PROXY gains ::1 (the proxy was a tunnel through the fence).
 - Environment is production, not develop/staging.
@@ -43,3 +43,4 @@ None: ssh key name and gh auth were the only requirements, both present.
 ## Run history
 
 - 2026-10-19 15:33 UTC — first run (this record).
+- 2026-10-19 16:51 UTC — C12 graded PASS on the 30-run hold; page version 3.
