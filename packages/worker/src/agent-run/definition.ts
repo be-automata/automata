@@ -2,7 +2,7 @@ import {
   ConcurrencyLimitStrategy,
   type Duration,
 } from "@hatchet-dev/typescript-sdk";
-import { ADMISSION_BACKOFF } from "./headroom";
+import { ADMISSION_BACKOFF } from "./admission-retry";
 
 /**
  * The PURE registration shape of the agent-run workflows (#125 C1): the
@@ -133,6 +133,7 @@ export function buildAgentRunDefinition(
       `buildAgentRunDefinition(${name}): unsupported per-PR concurrency strategy ${String(perPrStrategy)}`,
     );
   }
+  const retries = opts.admissionRetries ?? 0;
   return {
     workflow: {
       name,
@@ -202,10 +203,8 @@ export function buildAgentRunDefinition(
       // construction whatever `retries` is. With `admissionRetries` 0 this is the
       // pre-#371 shape: retries 0, no backoff. Engine redelivery after a worker
       // death is a separate mechanism, absorbed by the www single-writer.
-      retries: opts.admissionRetries ?? 0,
-      ...((opts.admissionRetries ?? 0) > 0
-        ? { backoff: ADMISSION_BACKOFF }
-        : {}),
+      retries,
+      ...(retries > 0 ? { backoff: ADMISSION_BACKOFF } : {}),
       // slotCost DEFERRED (#8): meaningless at GLOBAL_MAX_RUNS=1 (one run at a time), so
       // it stays unset until #3b raises the global cap — at which point set slotCost to
       // model each agent-run's memory weight so a worker's physical slots reflect real

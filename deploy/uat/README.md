@@ -11,7 +11,6 @@ any non-BeAutomata organisation is reduced to run ids, tenant ids and timestamps
 | 1 — per-run memory ceiling | #204  | recorded in #204 / `docs/adr/ADR-007-…` |
 | 2 — counting box slots     | #205  | [phase2-2.md](phase2-2.md)              |
 | 3 — headroom admission     | #371  | [phase2-3.md](phase2-3.md)              |
-| 3 — headroom check         | #371  | phase2-3.md                             |
 | 4 — env-driven caps        | #372  | phase2-4.md                             |
 | 5 — growth triggers        | #373  | phase2-5.md                             |
 | 6 — tenant map             | #374  | phase2-6.md                             |

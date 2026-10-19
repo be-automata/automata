@@ -39,6 +39,10 @@ import {
   nonRetryablePreflight,
 } from "./retry-classification";
 import {
+  ADMISSION_DEFERRAL_BUDGET_S,
+  sumBackoffSeconds,
+} from "./admission-retry";
+import {
   AdmissionController,
   assessHeadroomSupport,
   type Reservation,
@@ -291,17 +295,15 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 export function makeAgentRunWorkflow(
   name: string,
   perPrStrategy: PerPrStrategy,
+  admissionRetries: number,
 ) {
   // #371: the run task's retries are admission deferrals (headroom check);
-  // every other failure is fenced non-retryable in runAgent. With the check
-  // inert or unavailable (macOS, rollback values) nothing can ever throw the
-  // deferral, so the shipped pre-#371 shape — retries 0, no backoff — is
-  // registered, byte-identical.
-  const bootConfig = loadWorkerConfig();
+  // every other failure is fenced non-retryable in runAgent, so the count is
+  // registered the same on every host — where the check is inert or absent
+  // (macOS, rollback values) nothing ever throws the deferral and the retries
+  // are never used.
   const def = buildAgentRunDefinition(name, perPrStrategy, {
-    admissionRetries: getAdmissionController(bootConfig).enabled
-      ? bootConfig.admissionMaxDeferrals
-      : 0,
+    admissionRetries,
   });
   const wf = hatchet.workflow<AgentRunInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
@@ -321,45 +323,52 @@ type RunCtx = {
 
 /**
  * #371: the worker-wide admission gate — one per process, decided once from
- * the boot config. Lazy so importing this module (tests, the E2E suites) reads
- * nothing; `assessHeadroomSupport` is what makes macOS and the inert rollback
- * setting a no-op.
+ * the boot config on first use (a run's admission, or the boot line). null
+ * where the check cannot run (`assessHeadroomSupport`: no /proc/meminfo, an
+ * inert policy) — then admission is byte-for-byte today's.
  */
-let admissionController: AdmissionController | null = null;
-let admissionSupportReason = "";
-export function getAdmissionController(
+type AdmissionGate = { controller: AdmissionController | null; reason: string };
+let admissionGate: AdmissionGate | undefined;
+function admissionGateFor(
   config: ReturnType<typeof loadWorkerConfig>,
-): AdmissionController {
-  if (admissionController) {
-    return admissionController;
-  }
+): AdmissionGate {
+  if (admissionGate) return admissionGate;
   const policy = {
     floorBytes: config.headroomFloorBytes,
     commitFraction: config.headroomCommitFraction,
     runCommitBytes: config.headroomRunCommitBytes,
   };
   const support = assessHeadroomSupport({ policy });
-  admissionSupportReason = support.enabled ? "" : support.reason;
-  admissionController = new AdmissionController(policy, support.enabled);
-  return admissionController;
+  admissionGate = support.enabled
+    ? { controller: new AdmissionController(policy), reason: "" }
+    : { controller: null, reason: support.reason };
+  return admissionGate;
+}
+/** Boot-cached: the FIRST caller's config decides (the policy is box-wide, never per slot); later arguments are ignored. */
+export function getAdmissionController(
+  config: ReturnType<typeof loadWorkerConfig>,
+): AdmissionController | null {
+  return admissionGateFor(config).controller;
 }
 
 /** The boot log line for the gate: armed with its thresholds, or OFF and why. */
 export function headroomBootLine(
   config: ReturnType<typeof loadWorkerConfig>,
 ): string {
-  const c = getAdmissionController(config);
-  return c.enabled
-    ? `memory headroom check armed: floor=${c.policy.floorBytes} fraction=${c.policy.commitFraction} runCommit=${c.policy.runCommitBytes} maxDeferrals=${config.admissionMaxDeferrals}`
-    : `memory headroom check OFF: ${admissionSupportReason}`;
+  const gate = admissionGateFor(config);
+  return gate.controller
+    ? `memory headroom check armed: floor=${gate.controller.policy.floorBytes} fraction=${gate.controller.policy.commitFraction} runCommit=${gate.controller.policy.runCommitBytes} maxDeferrals=${config.admissionMaxDeferrals} budgetS=${sumBackoffSeconds(config.admissionMaxDeferrals)}/${ADMISSION_DEFERRAL_BUDGET_S}`
+    : `memory headroom check OFF: ${gate.reason}`;
 }
 
-/** Test seam: replace (or reset with null) the process-wide gate. */
+/** Test seam: install a gate (a controller, or null = the check is off), or reset with undefined. */
 export function _setAdmissionControllerForTests(
-  controller: AdmissionController | null,
+  controller: AdmissionController | null | undefined,
 ): void {
-  admissionController = controller;
-  admissionSupportReason = "";
+  admissionGate =
+    controller === undefined
+      ? undefined
+      : { controller, reason: controller ? "" : "test: off" };
 }
 
 /**
@@ -394,8 +403,16 @@ async function runAgent(
   // TMO-01: the 30-minute execution timeout counts from here; the post-agent
   // fix check must finish inside it.
   const runStartedAt = Date.now();
-  const config = loadWorkerConfig();
-  const wwwOpts = wwwOptsFor(input, ctx);
+  // Inside the fence's reach: a config or option error here is side-effect
+  // free but must not be the one plain Error the engine retries 8× (#371).
+  let config: ReturnType<typeof loadWorkerConfig>;
+  let wwwOpts: WwwClientOpts;
+  try {
+    config = loadWorkerConfig();
+    wwwOpts = wwwOptsFor(input, ctx);
+  } catch (err) {
+    throw fenceNonRetryable(err);
+  }
   const runExternalId = wwwOpts.runExternalId ?? "";
   // Under complete-run·queue a run may have waited behind an older one while
   // newer commits landed. Ask www FIRST; if a newer run is already recorded,
@@ -521,9 +538,13 @@ async function postSuperseded(
  * Registered variants, in the table's order. `agent-run` (legacy, no per-PR
  * entry) keeps the pre-#125 REST trigger contract byte-identical.
  */
+// One config read for every variant; the deferral count is a boot constant.
+const bootAdmissionRetries = loadWorkerConfig().admissionMaxDeferrals;
 export const agentRunWorkflows = (
   Object.keys(AGENT_RUN_VARIANTS) as AgentRunVariantName[]
-).map((name) => makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name]));
+).map((name) =>
+  makeAgentRunWorkflow(name, AGENT_RUN_VARIANTS[name], bootAdmissionRetries),
+);
 
 /** The legacy workflow, exported by name for existing callers/tests. */
 export const agentRunWorkflow = agentRunWorkflows.find(
@@ -1012,11 +1033,12 @@ async function runAgentInner(
     // it returns is released at the first thread-status past `booting` (the
     // agent child is alive and in the kernel's Committed_AS by then — the
     // daemon alone is small), and in the finally.
-    reservation = await getAdmissionController(config).admit({
-      threadId: input.threadId,
-      attempt: ctx.retryCount?.() ?? 0,
-      log: admissionLog,
-    });
+    reservation =
+      getAdmissionController(config)?.admit({
+        threadId: input.threadId,
+        attempt: ctx.retryCount?.() ?? 0,
+        log: admissionLog,
+      }) ?? null;
     if (config.boxSlots > 1) {
       await ensureSlotNamespace({
         root: config.runNamespaceRoot,

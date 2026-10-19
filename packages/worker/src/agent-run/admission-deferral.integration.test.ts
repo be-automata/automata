@@ -169,14 +169,15 @@ describe.skipIf(!itEnabled)(
         label: "defer",
         mode: "defer-once",
       });
-      const seen = new Set<Status>();
-      // Sample every status until terminal; the backoff window between the two
-      // attempts is where QUEUED must be observed.
+      // Sample (status, attempts so far) until terminal. The pre-start 404 also
+      // reads as QUEUED, so the re-queue proof is QUEUED observed AFTER attempt 0
+      // ran and BEFORE attempt 1 did — the backoff window.
+      const seen: Array<[Status, number]> = [];
       const final = await pollUntil(
         `${label} terminal`,
         async () => {
           const s = await statusOf(id);
-          seen.add(s);
+          seen.push([s, attempts.get(label)?.length ?? 0]);
           return s;
         },
         (s) => TERMINAL.includes(s),
@@ -184,9 +185,13 @@ describe.skipIf(!itEnabled)(
         100,
       );
       expect(final).toBe(Status.COMPLETED);
-      expect(seen.has(Status.FAILED)).toBe(false);
-      expect(seen.has(Status.CANCELLED)).toBe(false);
-      expect(seen.has(Status.QUEUED)).toBe(true);
+      const statuses = seen.map(([s]) => s);
+      expect(statuses).not.toContain(Status.FAILED);
+      expect(statuses).not.toContain(Status.CANCELLED);
+      expect(
+        seen.some(([s, n]) => s === Status.QUEUED && n === 1),
+        `QUEUED between the attempts; saw ${JSON.stringify(seen)}`,
+      ).toBe(true);
       expect(attempts.get(label)).toEqual([0, 1]);
     });
 
@@ -203,8 +208,8 @@ describe.skipIf(!itEnabled)(
         100,
       );
       expect(final).toBe(Status.FAILED);
-      // Give a would-be retry its backoff window; it must not come.
-      await new Promise((r) => setTimeout(r, 3_000));
+      // Give a would-be retry well over its 2 s backoff; it must not come.
+      await new Promise((r) => setTimeout(r, 6_000));
       expect(attempts.get(label)).toEqual([0]);
     });
   },

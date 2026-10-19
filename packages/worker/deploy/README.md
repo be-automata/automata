@@ -87,7 +87,7 @@ reserved + WORKER_HEADROOM_RUN_COMMIT ≤ WORKER_HEADROOM_COMMIT_FRACTION ×
 CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`). A refusal gives the slot
   back and throws `AdmissionDeferredError`, the ONE error the engine retries
-  (`retries` = `WORKER_ADMISSION_MAX_DEFERRALS`, default 15, backoff ×2 capped
+  (`retries` = `WORKER_ADMISSION_MAX_DEFERRALS`, default 8, backoff ×2 capped
   at 120 s; the whole budget must fit the deferral window — boot refuses
   otherwise); the run shows QUEUED between attempts, never FAILED. Every other
   error after admission is non-retryable (exactly-once). Journal lines

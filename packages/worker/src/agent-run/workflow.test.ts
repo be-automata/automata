@@ -144,18 +144,10 @@ describe("agentRunWorkflow registration shape", () => {
     // (default 8). These retries are admission deferrals ONLY: every error
     // after admission is fenced non-retryable (fenceNonRetryable), so a raised
     // count can never re-execute an agent.
-    // On a Linux box with /proc/meminfo the gate is armed and retries = 8; on
-    // macOS (this suite's host) the gate is OFF and the shipped pre-#371 shape
-    // (retries 0, no backoff) is registered — byte-identical pilot.
-    const armed = wf.getAdmissionController(loadWorkerConfig({})).enabled;
-    expect(run.retries).toBe(
-      armed ? loadWorkerConfig({}).admissionMaxDeferrals : 0,
-    );
-    if (armed) {
-      expect(run.backoff).toEqual({ factor: 2, maxSeconds: 120 });
-    } else {
-      expect(run.backoff).toBeUndefined();
-    }
+    // Registered the same on every host: where the gate is OFF (macOS, inert
+    // values) nothing ever throws the deferral, so the retries are never used.
+    expect(run.retries).toBe(loadWorkerConfig({}).admissionMaxDeferrals);
+    expect(run.backoff).toEqual({ factor: 2, maxSeconds: 120 });
     expect(run.scheduleTimeout).toBe("30m");
     expect(run.executionTimeout).toBe("30m");
   });

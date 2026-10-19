@@ -2,7 +2,6 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  ADMISSION_MAX_DEFERRALS_CAP,
   BOX_SLOTS_MAX,
   loadWorkerConfig,
   parseBoxSlots,
@@ -625,20 +624,15 @@ describe("#371: memory-headroom admission knobs are validated at boot", () => {
         /WORKER_HEADROOM_COMMIT_FRACTION/,
       );
     }
-    for (const bad of [
-      "-1",
-      "1.5",
-      "x",
-      String(ADMISSION_MAX_DEFERRALS_CAP + 1),
-    ]) {
+    for (const bad of ["-1", "1.5", "x"]) {
       expect(() => parseMaxDeferrals(bad), bad).toThrow(
         /WORKER_ADMISSION_MAX_DEFERRALS/,
       );
     }
     expect(parseMaxDeferrals("0")).toBe(0);
-    expect(parseMaxDeferrals(String(ADMISSION_MAX_DEFERRALS_CAP))).toBe(
-      ADMISSION_MAX_DEFERRALS_CAP,
-    );
+    // The parser has no numeric cap of its own: the budget check in
+    // loadWorkerConfig is the one upper bound (tested above).
+    expect(parseMaxDeferrals("20")).toBe(20);
     expect(() => loadWorkerConfig({ WORKER_HEADROOM_RUN_COMMIT: "0" })).toThrow(
       /WORKER_HEADROOM_RUN_COMMIT must be positive/,
     );

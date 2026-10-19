@@ -271,6 +271,11 @@ beforeAll(async () => {
   const def = (mod.agentRunWorkflow as any).definition;
   runFn = def._tasks[0].fn;
   createEgressEventBatcher = mod.createEgressEventBatcher;
+  // #371: the headroom gate is OFF for this file unless a describe installs a
+  // controller — on a Linux runner the lazy boot decision would otherwise read
+  // the runner's live /proc/meminfo and a loaded CI box could defer unrelated
+  // admissions.
+  mod._setAdmissionControllerForTests(null);
 });
 
 beforeEach(() => {
@@ -1034,7 +1039,7 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     ).toBe(true);
   });
 
-  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: the abort propagates (fenced non-retryable since #371, message intact), ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
+  it("#183 AC13 (#205 shape): cancel while WAITING on the box slot: the abort propagates untouched (a cancel is the engine's own act, never fenced — #371), ONE superseded terminal, NO clone yet so nothing to clean, no failure post, no release", async () => {
     const { ctx, abortIn } = makeCtx("run-ext-lockwait");
     const { postRunFailed } = await import("./www-client");
     vi.mocked(postRunFailed).mockClear();
@@ -1043,9 +1048,15 @@ describe("#125 C1: engine cancel → explicit superseded terminal", () => {
     // the AbortError shape (box-lock.ts) — the workflow must not wrap it.
     abortIn(acquireBoxSlotMock, "box lock wait aborted");
     try {
-      await expect(
-        runFn({ ...PR_INPUT, supersedePolicy: "newest-wins" }, ctx),
-      ).rejects.toThrow(/aborted/);
+      // A cancel is the engine's own act: it passes the fence UNWRAPPED (a
+      // non-cancel AbortError IS fenced — see retry-classification.test).
+      const abortErr: unknown = await runFn(
+        { ...PR_INPUT, supersedePolicy: "newest-wins" },
+        ctx,
+      ).catch((e: unknown) => e);
+      expect(abortErr).toBeInstanceOf(Error);
+      expect((abortErr as Error).message).toMatch(/aborted/);
+      expect(abortErr).not.toBeInstanceOf(NonRetryableError);
       expect(postRunTerminal).toHaveBeenCalledTimes(1);
       expect(postRunTerminal.mock.calls[0]![1]).toEqual(
         expect.objectContaining({
@@ -2147,6 +2158,7 @@ Committed_AS:   12000000 kB
   });
   afterEach(async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
+    // Back to OFF for the rest of the file (see the top-level beforeAll).
     _setAdmissionControllerForTests(null);
     releaseMock.mockClear();
   });
@@ -2157,7 +2169,7 @@ Committed_AS:   12000000 kB
       "./headroom"
     );
     _setAdmissionControllerForTests(
-      new AdmissionController(POLICY, true, () => STARVED),
+      new AdmissionController(POLICY, () => STARVED),
     );
     const ctx = { cancelled: false, log: vi.fn(), retryCount: () => 3 };
     let caught: unknown;
@@ -2170,8 +2182,12 @@ Committed_AS:   12000000 kB
     expect(caught).not.toBeInstanceOf(NonRetryableError);
     expect((caught as Error).message).toMatch(/attempt 4,/);
     expect(releaseMock).toHaveBeenCalledTimes(1);
+    // AC 3: nothing else was touched — no clone, no credential, no daemon.
     expect(provisionWorkdir).not.toHaveBeenCalled();
     expect(cleanupWorkdir).not.toHaveBeenCalled();
+    expect(pullAgentCredentials).not.toHaveBeenCalled();
+    expect(materialiseAgentCredentials).not.toHaveBeenCalled();
+    expect(daemonCtorArgs).toHaveLength(0);
     expect(
       ctx.log.mock.calls.some((c) =>
         String(c[0]).includes("box.headroom_rejected"),
@@ -2182,7 +2198,7 @@ Committed_AS:   12000000 kB
   it("with headroom the run is admitted (headroom_ok logged) and proceeds to the clone", async () => {
     const { _setAdmissionControllerForTests } = await import("./workflow");
     const { AdmissionController } = await import("./headroom");
-    const controller = new AdmissionController(POLICY, true, () => ROOMY);
+    const controller = new AdmissionController(POLICY, () => ROOMY);
     _setAdmissionControllerForTests(controller);
     const ctx = { cancelled: false, log: vi.fn() };
     await runFn(INPUT, ctx);

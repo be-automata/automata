@@ -133,10 +133,7 @@ export function fenceNonRetryable(err: unknown): unknown {
     `post-admission failure — non-retryable (an agent run never re-executes): ${message}`,
   );
   // The original stays reachable as `cause` (ES2022) for every caller that
-  // classifies or asserts on it; the stack carries it too for the journal.
+  // classifies or asserts on it; Node prints it under `[cause]` with its stack.
   wrapped.cause = err;
-  if (err instanceof Error && err.stack) {
-    wrapped.stack = `${wrapped.stack ?? ""}\nCaused by: ${err.stack}`;
-  }
   return wrapped;
 }

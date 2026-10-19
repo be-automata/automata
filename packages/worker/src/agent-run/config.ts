@@ -7,7 +7,7 @@ import {
   ADMISSION_BACKOFF,
   ADMISSION_DEFERRAL_BUDGET_S,
   sumBackoffSeconds,
-} from "./headroom";
+} from "./admission-retry";
 import {
   agentUserForSlot,
   assertAgentUser,
@@ -131,7 +131,7 @@ export interface WorkerConfig {
   /**
    * #371: how many times one run may be deferred before the engine fails it
    * (= the run task's `retries`). Backoff is 2^n s capped at 120 s, so the
-   * default 8 bounds total deferral at roughly 7 minutes — deliberately under
+   * default 8 bounds total deferral at 366 s (≈ 6 minutes) — deliberately under
    * the control plane's 75-minute stalled-thread cutoff once the 30 m schedule
    * and 30 m execution windows are added (`apps/www/src/server-lib/cron.ts`).
    */
@@ -309,31 +309,10 @@ export function resolveBoxId(raw: string | undefined): string {
  * was about.
  */
 export function parseMemoryMax(raw: string | undefined): number {
+  // The byte grammar (and the "a typo must not become a nonsense ceiling"
+  // safe-integer refusal) is parseBytesEnv's; this knob adds only its floor.
+  const bytes = parseBytesEnv("WORKER_RUN_MEMORY_MAX", raw, 0);
   const v = (raw ?? "").trim();
-  if (!v) {
-    return 0;
-  }
-  const m = /^(\d+)([KMG]?)$/i.exec(v);
-  if (!m?.[1]) {
-    throw new Error(
-      `WORKER_RUN_MEMORY_MAX must be bytes with an optional K/M/G suffix, got ${JSON.stringify(v)}`,
-    );
-  }
-  const suffix = (m[2] ?? "").toUpperCase();
-  const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
-  const bytes = Number(m[1]) * scale;
-  // A TYPO MUST NOT BECOME A NONSENSE CEILING. The regex accepts any run of
-  // digits, so `99999999999999999999G` parses — and `Number(...) * scale` then
-  // exceeds 2^53 or overflows to Infinity, which is written verbatim into
-  // `memory.max`. The kernel's answer to that is not something to find out in
-  // production, and this file's whole posture is to refuse a typo at boot rather
-  // than carry it into a run.
-  if (!Number.isSafeInteger(bytes)) {
-    throw new Error(
-      `WORKER_RUN_MEMORY_MAX=${v} does not fit an exact integer number of bytes ` +
-        `(got ${bytes}); use a realistic value such as 1500M`,
-    );
-  }
   // A ceiling below one session's measured ~1.1 GB would OOM-kill every run.
   // Refusing is kinder than a box where nothing completes.
   if (bytes > 0 && bytes < 256 * 1024 ** 2) {
@@ -405,9 +384,13 @@ export function parseBytesEnv(
   const suffix = (m[2] ?? "").toUpperCase();
   const scale = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3 }[suffix] ?? 1;
   const bytes = Number(m[1]) * scale;
+  // A TYPO MUST NOT BECOME A NONSENSE VALUE. The regex accepts any run of
+  // digits, so `99999999999999999999G` parses — and `Number(...) * scale` then
+  // exceeds 2^53 or overflows to Infinity, which would be written verbatim into
+  // `memory.max` or compared against the kernel's numbers. Refuse at boot.
   if (!Number.isSafeInteger(bytes)) {
     throw new Error(
-      `${name}=${v} does not fit an exact integer number of bytes`,
+      `${name}=${v} does not fit an exact integer number of bytes (got ${bytes}); use a realistic value such as 1500M`,
     );
   }
   return bytes;
@@ -419,31 +402,34 @@ export function parseCommitFraction(raw: string | undefined): number {
   if (!v) {
     return 0.9;
   }
-  const n = Number(v);
+  // Plain decimal only: `Number()` would also take "0x1" (→ 1, silently inert)
+  // or "1e-1", and a typo must not quietly change the guard.
+  const n = /^\d*\.?\d+$/.test(v) ? Number(v) : NaN;
   if (!Number.isFinite(n) || n <= 0 || n > 1) {
     throw new Error(
-      `WORKER_HEADROOM_COMMIT_FRACTION must be a number in (0, 1], got ${JSON.stringify(v)} (1.0 makes that arm inert)`,
+      `WORKER_HEADROOM_COMMIT_FRACTION must be a decimal in (0, 1], got ${JSON.stringify(v)} (1.0 makes that arm inert)`,
     );
   }
   return n;
 }
 
-/** Upper bound on deferrals; see admissionMaxDeferrals for why the default is 8. */
-export const ADMISSION_MAX_DEFERRALS_CAP = 20;
-
-/** Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8; integer in [0, cap]. */
+/**
+ * Parse `WORKER_ADMISSION_MAX_DEFERRALS` (#371): unset ⇒ 8 (the largest count
+ * whose Σbackoff fits ADMISSION_DEFERRAL_BUDGET_S); a non-negative integer. The
+ * ONE upper bound is the budget check in loadWorkerConfig — a second numeric cap
+ * here could only disagree with it.
+ */
 export function parseMaxDeferrals(raw: string | undefined): number {
   const v = (raw ?? "").trim();
   if (!v) {
     return 8;
   }
-  const n = Number(v);
-  if (!/^\d+$/.test(v) || n > ADMISSION_MAX_DEFERRALS_CAP) {
+  if (!/^\d+$/.test(v)) {
     throw new Error(
-      `WORKER_ADMISSION_MAX_DEFERRALS must be an integer between 0 and ${ADMISSION_MAX_DEFERRALS_CAP}, got ${JSON.stringify(v)}`,
+      `WORKER_ADMISSION_MAX_DEFERRALS must be a non-negative integer, got ${JSON.stringify(v)}`,
     );
   }
-  return n;
+  return Number(v);
 }
 
 /** Minimum accepted WORKER_LIVENESS_STALE_S. See parseLivenessStaleAfterS. */

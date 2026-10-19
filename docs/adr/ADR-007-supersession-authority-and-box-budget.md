@@ -167,8 +167,12 @@ budget that does not). **Exactly-once is preserved by construction**: every erro
 after admission is rethrown as `NonRetryableError` (`fenceNonRetryable`), so a retry can
 only ever re-run the admission, never the agent. A cancel during backoff is the engine's
 cancel of a QUEUED attempt — no worker code runs. The check is inert (`floor 0` and
-`fraction 1.0`, or no `/proc/meminfo`) without a deploy; with it inert `retries` is 0 and
-the registration is the pre-#371 shape. Decision 5 stands: nothing here signals a
+`fraction 1.0`, or no `/proc/meminfo`) without a deploy; the retries stay registered on every
+host, and with the check inert nothing ever throws the deferral, so they are never used. An
+unreadable `/proc/meminfo` at admission (boot proved it readable) fails OPEN with one
+`box.headroom_unreadable` line — a transient kernel read must not idle the box; the deferral
+budget assumes a priority-4 retry is scheduled promptly (admission-retry.ts states the risk:
+a retry that waits a full scheduleTimeout is reaped by www as stalled). Decision 5 stands: nothing here signals a
 lock-holding run.
 
 ## Anti-deviation invariants

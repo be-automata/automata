@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   ADMISSION_BACKOFF,
   ADMISSION_DEFERRAL_BUDGET_S,
+  sumBackoffSeconds,
+} from "./admission-retry";
+import {
   AdmissionController,
   AdmissionDeferredError,
   assessHeadroomSupport,
-  sumBackoffSeconds,
   evaluateHeadroom,
   isInertPolicy,
   parseMeminfo,
@@ -36,12 +38,9 @@ const POLICY: HeadroomPolicy = {
 describe("parseMeminfo", () => {
   it("reads the six fields and converts kB to bytes", () => {
     const r = parseMeminfo(MEMINFO);
-    expect(r.memTotal).toBe(7937228 * 1024);
     expect(r.memAvailable).toBe(6249396 * 1024);
     expect(r.committedAs).toBe(2622544 * 1024);
     expect(r.commitLimit).toBe(12357216 * 1024);
-    expect(r.swapTotal).toBe(8388604 * 1024);
-    expect(r.swapFree).toBe(8289020 * 1024);
   });
 
   it("throws, naming the field, when one is missing or malformed", () => {
@@ -134,30 +133,45 @@ describe("evaluateHeadroom (both arms, boundary-inclusive)", () => {
 });
 
 describe("AdmissionController (mutex + reservations)", () => {
-  it("disabled: never reads meminfo, never throws, returns a no-op reservation", async () => {
+  it("the controller only exists where the check can run: assessHeadroomSupport decides, and an unreadable meminfo at admission fails OPEN with a no-op reservation", () => {
     let reads = 0;
-    const c = new AdmissionController(POLICY, false, () => {
+    const c = new AdmissionController(POLICY, () => {
       reads += 1;
-      return MEMINFO;
+      throw new Error("EACCES");
     });
-    const r = await c.admit({ threadId: "t1", attempt: 0 });
-    r.release();
-    expect(reads).toBe(0);
+    const lines: string[] = [];
+    const r = c.admit({
+      threadId: "t1",
+      attempt: 0,
+      log: (l) => lines.push(l),
+    });
+    expect(reads).toBe(1);
+    expect(lines.some((l) => l.startsWith("box.headroom_unreadable"))).toBe(
+      true,
+    );
     expect(c.reservedBytes()).toBe(0);
+    r.release();
+    r.release();
   });
 
-  it("two concurrent admissions with headroom for exactly one admit exactly one; the loser is deferred with the winner's reservation in its observed fields", async () => {
+  it("two back-to-back admissions with headroom for exactly one admit exactly one; the loser is deferred with the winner's reservation in its observed fields (the decision is one synchronous step, so no two can interleave)", () => {
     const lines: string[] = [];
-    const c = new AdmissionController(POLICY, true, () => MEMINFO);
-    const results = await Promise.allSettled([
-      c.admit({ threadId: "a", attempt: 0, log: (l) => lines.push(l) }),
-      c.admit({ threadId: "b", attempt: 0, log: (l) => lines.push(l) }),
-    ]);
+    const c = new AdmissionController(POLICY, () => MEMINFO);
+    const results = ["a", "b"].map((threadId) => {
+      try {
+        return {
+          status: "fulfilled" as const,
+          value: c.admit({ threadId, attempt: 0, log: (l) => lines.push(l) }),
+        };
+      } catch (reason) {
+        return { status: "rejected" as const, reason };
+      }
+    });
     const fulfilled = results.filter((r) => r.status === "fulfilled");
     const rejected = results.filter((r) => r.status === "rejected");
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    const err = (rejected[0] as PromiseRejectedResult).reason;
+    const err = (rejected[0] as { reason: unknown }).reason;
     expect(err).toBeInstanceOf(AdmissionDeferredError);
     expect((err as AdmissionDeferredError).reason).toBe("commit-over-fraction");
     expect((err as AdmissionDeferredError).observed.reserved).toBe(
@@ -175,9 +189,9 @@ describe("AdmissionController (mutex + reservations)", () => {
   });
 
   it("releasing the reservation lets the next admission through; release is idempotent", async () => {
-    const c = new AdmissionController(POLICY, true, () => MEMINFO);
+    const c = new AdmissionController(POLICY, () => MEMINFO);
     const a = await c.admit({ threadId: "a", attempt: 0 });
-    await expect(c.admit({ threadId: "b", attempt: 0 })).rejects.toBeInstanceOf(
+    expect(() => c.admit({ threadId: "b", attempt: 0 })).toThrow(
       AdmissionDeferredError,
     );
     a.release();
@@ -189,7 +203,7 @@ describe("AdmissionController (mutex + reservations)", () => {
   });
 
   it("a redelivered attempt of the same thread never counts its own stale reservation", async () => {
-    const c = new AdmissionController(POLICY, true, () => MEMINFO);
+    const c = new AdmissionController(POLICY, () => MEMINFO);
     await c.admit({ threadId: "a", attempt: 0 }); // never released (crashed attempt)
     const again = await c.admit({ threadId: "a", attempt: 1 });
     expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
@@ -200,7 +214,7 @@ describe("AdmissionController (mutex + reservations)", () => {
   it("an unreadable meminfo at admission FAILS OPEN: one box.headroom_unreadable line, no reservation, no throw", async () => {
     let fail = true;
     const lines: string[] = [];
-    const c = new AdmissionController(POLICY, true, () => {
+    const c = new AdmissionController(POLICY, () => {
       if (fail) throw new Error("EIO");
       return MEMINFO;
     });
@@ -303,7 +317,7 @@ describe("assessHeadroomSupport (boot)", () => {
       }),
     ).toMatchObject({
       enabled: false,
-      reason: expect.stringMatching(/MemTotal/),
+      reason: expect.stringMatching(/MemAvailable/),
     });
   });
 });

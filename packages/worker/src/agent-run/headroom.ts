@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 /**
  * Memory-headroom admission check (#371, epic #193 ticket 3; ADR-007 Decision 5).
+ * The engine-retry constants live in admission-retry.ts (import-free).
  *
  * WHY. The per-run ceiling (#204) bounds ONE run and the slot locks (#205) bound
  * HOW MANY run; neither bounds the SUM. N runs each under their `memory.max` can
@@ -21,65 +22,42 @@ import fs from "node:fs";
  * is never cancelled by the host (Decision 5: the budget may delay or reject
  * admission, terminating a running review stays the engine's act).
  *
- * WHY A RESERVATION AND A MUTEX. With N slots two admissions can run at once. Both
- * would read the same `/proc/meminfo`, both would see headroom for ONE more run,
- * and both would pass — the exact over-commit the check exists to prevent. The
- * worker is one process, so an in-process mutex serialises the decision, and an
- * admitted run RESERVES its expected commit until its daemon has started (by then
- * the kernel's own `Committed_AS` carries it).
+ * WHY A RESERVATION. With N slots two admissions can run at once. Both would
+ * read the same `/proc/meminfo`, both would see headroom for ONE more run, and
+ * both would pass — the exact over-commit the check exists to prevent. The
+ * decision itself is one synchronous step (a sync read of /proc/meminfo, parse,
+ * evaluate, reserve) on one event loop, so no two decisions can interleave; and
+ * an admitted run RESERVES its expected commit until its agent is alive (by then
+ * the kernel's own `Committed_AS` carries it). Keep `decide` synchronous — an
+ * `await` inside it would need a mutex.
  *
  * Every function here is pure or injectable; the only I/O is reading
  * `/proc/meminfo`, which does not exist on macOS — there the check is inert by
  * construction (the pilot Mac runs N = 1 and never had this guard).
  */
 
-/**
- * Backoff between deferred admissions: 2^n seconds capped at 120 (the engine's
- * `backoff.factor` / `backoff.maxSeconds`). Shared by the task registration
- * (definition.ts) and the config budget check so the two can never disagree.
- */
-export const ADMISSION_BACKOFF = { factor: 2, maxSeconds: 120 } as const;
-
-/**
- * The most a run may spend deferred, in seconds, over all its retries. The
- * control plane reaps a thread still `booting` after 75 minutes
- * (apps/www/src/server-lib/cron.ts STALLED_CUTOFF_SECS) and nothing in a
- * deferral touches the thread, so the budget must satisfy
- *   initial queue wait (≤ 30 m scheduleTimeout) + Σbackoff + 30 m execution + margin ≤ 75 m
- * — 12 minutes is the Σbackoff that leaves that inequality true with a 3-minute margin.
- */
-export const ADMISSION_DEFERRAL_BUDGET_S = 12 * 60;
-
-/** Σ min(factor^n, maxSeconds) for n in 1..retries — the worst-case total wait. */
-export function sumBackoffSeconds(retries: number): number {
-  let total = 0;
-  for (let n = 1; n <= retries; n++) {
-    total += Math.min(
-      ADMISSION_BACKOFF.factor ** n,
-      ADMISSION_BACKOFF.maxSeconds,
-    );
-  }
-  return total;
-}
-
-/** The `/proc/meminfo` fields the check reads, in BYTES. */
+/** The `/proc/meminfo` fields the check reads, in BYTES — exactly the three the two arms use. */
 export interface MeminfoReading {
-  memTotal: number;
   memAvailable: number;
   committedAs: number;
   commitLimit: number;
-  swapTotal: number;
-  swapFree: number;
 }
 
-const REQUIRED_FIELDS: ReadonlyArray<[keyof MeminfoReading, string]> = [
-  ["memTotal", "MemTotal"],
-  ["memAvailable", "MemAvailable"],
-  ["committedAs", "Committed_AS"],
-  ["commitLimit", "CommitLimit"],
-  ["swapTotal", "SwapTotal"],
-  ["swapFree", "SwapFree"],
-];
+/** Field → its line matcher, compiled once (the parse runs on every admission). */
+const MEMINFO_FIELDS: ReadonlyArray<[keyof MeminfoReading, string, RegExp]> = (
+  [
+    ["memAvailable", "MemAvailable"],
+    ["committedAs", "Committed_AS"],
+    ["commitLimit", "CommitLimit"],
+  ] as const
+).map(([key, label]) => [
+  key,
+  label,
+  new RegExp(`^${label}:\\s+(\\d+)\\s+kB\\s*$`, "m"),
+]);
+
+export const readProcMeminfo = (): string =>
+  fs.readFileSync("/proc/meminfo", "utf8");
 
 /**
  * Parse `/proc/meminfo` text. Values are reported in kB; returned in bytes.
@@ -88,8 +66,8 @@ const REQUIRED_FIELDS: ReadonlyArray<[keyof MeminfoReading, string]> = [
  */
 export function parseMeminfo(text: string): MeminfoReading {
   const out: Partial<Record<keyof MeminfoReading, number>> = {};
-  for (const [key, label] of REQUIRED_FIELDS) {
-    const m = new RegExp(`^${label}:\\s+(\\d+)\\s+kB\\s*$`, "m").exec(text);
+  for (const [key, label, re] of MEMINFO_FIELDS) {
+    const m = re.exec(text);
     if (!m?.[1]) {
       throw new Error(`/proc/meminfo: missing or malformed ${label}`);
     }
@@ -174,7 +152,7 @@ export class AdmissionDeferredError extends Error {
   constructor(
     readonly reason: HeadroomReason,
     readonly observed: HeadroomObserved,
-    readonly attempt: number,
+    attempt: number,
   ) {
     // Operator-facing: when the deferrals run out this becomes the thread's
     // error banner (onFailure), so it must read as a cause, not a dump.
@@ -200,116 +178,93 @@ export interface Reservation {
 const NO_RESERVATION: Reservation = { release: () => {} };
 
 /**
- * The per-worker admission gate: one mutex, one reservation table, one reader.
- *
- * `enabled` is decided ONCE at boot: false on a platform with no `/proc/meminfo`
- * (macOS) or with an inert policy. Disabled, `admit()` never reads anything and
- * never throws — the default-off path is byte-for-byte today's admission.
+ * The per-worker admission gate: one reservation table, one reader. Built only
+ * where the check can run (assessHeadroomSupport); where it cannot — no
+ * `/proc/meminfo` (macOS), an inert policy — there is no controller at all and
+ * admission is byte-for-byte today's.
  */
 export class AdmissionController {
-  private reserved = new Map<string, number>();
-  /** The mutex: each admission awaits the previous decision, success or throw. */
-  private lock: Promise<void> = Promise.resolve();
+  /** threadId → the live reservation (bytes + its identity, so a stale generation's release cannot drop a newer one). */
+  private reserved = new Map<string, { bytes: number; token: symbol }>();
 
   constructor(
     readonly policy: HeadroomPolicy,
-    readonly enabled: boolean,
-    private readonly readMeminfo: () => string = () =>
-      fs.readFileSync("/proc/meminfo", "utf8"),
+    private readonly readMeminfo: () => string = readProcMeminfo,
   ) {}
 
   /** Sum of every live reservation, in bytes. */
   reservedBytes(): number {
     let sum = 0;
-    for (const v of this.reserved.values()) sum += v;
+    for (const v of this.reserved.values()) sum += v.bytes;
     return sum;
   }
 
   /**
-   * Admit one run or throw `AdmissionDeferredError`. Decisions are serialised,
-   * and a successful admission reserves `policy.runCommitBytes` under
-   * `threadId` until the returned reservation is released.
+   * Admit one run or throw `AdmissionDeferredError`. One synchronous decision
+   * (see the module comment: no await, so no interleaving); a successful
+   * admission reserves `policy.runCommitBytes` under `threadId` until the
+   * returned reservation is released.
    */
-  async admit(opts: {
-    threadId: string;
-    attempt: number;
-    log?: (line: string) => void;
-  }): Promise<Reservation> {
-    if (!this.enabled) {
-      return NO_RESERVATION;
-    }
-    // Serialise: the next admission waits for this decision (success OR
-    // throw) so it reads a `reserved` sum that already includes ours.
-    const previous = this.lock;
-    let unlock: () => void = () => {};
-    this.lock = new Promise<void>((resolve) => {
-      unlock = resolve;
-    });
-    try {
-      await previous;
-      return this.decide(opts);
-    } finally {
-      unlock();
-    }
-  }
-
-  private decide(opts: {
+  admit(opts: {
     threadId: string;
     attempt: number;
     log?: (line: string) => void;
   }): Reservation {
-    {
-      // FAIL-OPEN on an unreadable kernel: a check that cannot read
-      // /proc/meminfo at this instant admits with one loud line rather than
-      // failing the run (the fence would make that failure final). Boot already
-      // proved the file readable; this covers a transient error only.
-      let reading: MeminfoReading;
-      try {
-        reading = parseMeminfo(this.readMeminfo());
-      } catch (e) {
-        opts.log?.(
-          `box.headroom_unreadable ${JSON.stringify({
-            threadId: opts.threadId,
-            attempt: opts.attempt,
-            error: e instanceof Error ? e.message : String(e),
-          })}`,
-        );
-        return NO_RESERVATION;
-      }
-      // A redelivered attempt of the same thread must not count its own stale
-      // reservation (a crashed worker never releases; the map dies with it, but
-      // an in-process retry of the same threadId could).
-      this.reserved.delete(opts.threadId);
-      const verdict = evaluateHeadroom(
-        reading,
-        this.policy,
-        this.reservedBytes(),
+    // FAIL-OPEN on an unreadable kernel: a check that cannot read
+    // /proc/meminfo at this instant admits with one loud line rather than
+    // failing the run (the fence would make that failure final). Boot already
+    // proved the file readable; this covers a transient error only.
+    let reading: MeminfoReading;
+    try {
+      reading = parseMeminfo(this.readMeminfo());
+    } catch (e) {
+      opts.log?.(
+        `box.headroom_unreadable ${JSON.stringify({
+          threadId: opts.threadId,
+          attempt: opts.attempt,
+          error: e instanceof Error ? e.message : String(e),
+        })}`,
       );
-      const fields = JSON.stringify({
-        threadId: opts.threadId,
-        attempt: opts.attempt,
-        ...verdict.observed,
-        ...(verdict.ok ? {} : { reason: verdict.reason }),
-      });
-      if (!verdict.ok) {
-        opts.log?.(`box.headroom_rejected ${fields}`);
-        throw new AdmissionDeferredError(
-          verdict.reason,
-          verdict.observed,
-          opts.attempt,
-        );
-      }
-      opts.log?.(`box.headroom_ok ${fields}`);
-      this.reserved.set(opts.threadId, this.policy.runCommitBytes);
-      let released = false;
-      return {
-        release: () => {
-          if (released) return;
-          released = true;
-          this.reserved.delete(opts.threadId);
-        },
-      };
+      return NO_RESERVATION;
     }
+    // A redelivered attempt of the same thread must not count its own stale
+    // reservation (a crashed worker never releases; the map dies with it, but
+    // an in-process retry of the same threadId could).
+    this.reserved.delete(opts.threadId);
+    const verdict = evaluateHeadroom(
+      reading,
+      this.policy,
+      this.reservedBytes(),
+    );
+    const fields = JSON.stringify({
+      threadId: opts.threadId,
+      attempt: opts.attempt,
+      ...verdict.observed,
+      reason: verdict.ok ? undefined : verdict.reason,
+    });
+    if (!verdict.ok) {
+      opts.log?.(`box.headroom_rejected ${fields}`);
+      throw new AdmissionDeferredError(
+        verdict.reason,
+        verdict.observed,
+        opts.attempt,
+      );
+    }
+    opts.log?.(`box.headroom_ok ${fields}`);
+    const token = Symbol(opts.threadId);
+    this.reserved.set(opts.threadId, {
+      bytes: this.policy.runCommitBytes,
+      token,
+    });
+    return {
+      release: () => {
+        // Only this generation's entry: an older attempt's late release must
+        // not drop a re-admitted attempt's reservation.
+        if (this.reserved.get(opts.threadId)?.token === token) {
+          this.reserved.delete(opts.threadId);
+        }
+      },
+    };
   }
 }
 
@@ -333,9 +288,7 @@ export function assessHeadroomSupport(opts: {
     };
   }
   try {
-    parseMeminfo(
-      (opts.readMeminfo ?? (() => fs.readFileSync("/proc/meminfo", "utf8")))(),
-    );
+    parseMeminfo((opts.readMeminfo ?? readProcMeminfo)());
   } catch (e) {
     return {
       enabled: false,
