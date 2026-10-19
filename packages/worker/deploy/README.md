@@ -80,6 +80,20 @@ are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
 - `WORKER_RUN_MEMORY_MAX` (#204) is the per-run memory ceiling and **requires**
   `WORKER_AGENT_USER` plus the `automata-worker.service.d/10-ceiling.conf`
   drop-in; set without either, the worker refuses to boot.
+- Memory-headroom admission (#371, Linux only; inert where `/proc/meminfo` is
+  absent): a run is admitted under its slot only if `MemAvailable − reserved ≥
+WORKER_HEADROOM_FLOOR` (default `1G`; `0` = inert) AND `Committed_AS +
+reserved + WORKER_HEADROOM_RUN_COMMIT ≤ WORKER_HEADROOM_COMMIT_FRACTION ×
+CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
+  defaults to `WORKER_RUN_MEMORY_MAX`, else `1300M`). A refusal gives the slot
+  back and throws `AdmissionDeferredError`, the ONE error the engine retries
+  (`retries` = `WORKER_ADMISSION_MAX_DEFERRALS`, default 15, backoff ×2 capped
+  at 120 s; the whole budget must fit the deferral window — boot refuses
+  otherwise); the run shows QUEUED between attempts, never FAILED. Every other
+  error after admission is non-retryable (exactly-once). Journal lines
+  `box.headroom_rejected` / `box.headroom_ok` carry the three memory values.
+  Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
+  `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
 
 ## Engine-liveness watchdog (#215)
 

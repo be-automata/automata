@@ -150,12 +150,35 @@ N > 1 requires the #204 ceiling; the box refuses otherwise. The engine's
 `slots` equals N; its per-variant caps are #372's. `box-budget.json` and
 `escapeesSinceBoot` are box-wide aggregates across slots (last reap writes the snapshot).
 
+## Amendment (2026-10-19, #371 / epic #193 ticket 3) — the headroom check
+
+Decision 5 permits the host budget to **delay** admission; this is the first mechanism that
+does so on a resource other than the slot count. Under its slot and BEFORE the clone, a run
+reads `/proc/meminfo` and is admitted only if both arms hold — `MemAvailable − reserved ≥
+floor` and `Committed_AS + reserved + runCommit ≤ fraction × CommitLimit` (`headroom.ts`,
+knobs in `deploy/README.md`). Admissions are serialised by an in-process mutex and an
+admitted run **reserves** `runCommit` until its agent is alive (the first thread status past
+`booting`), so two concurrent admissions cannot both pass on the same headroom. A refusal
+releases the slot (nothing of the run is on disk) and throws `AdmissionDeferredError` — the
+ONE plain error the run task lets escape: the engine re-queues the attempt (QUEUED, never
+FAILED or CANCELLED) with `retries` = `WORKER_ADMISSION_MAX_DEFERRALS` and exponential
+backoff, and the whole deferral budget must fit the www stalled cutoff (boot refuses a
+budget that does not). **Exactly-once is preserved by construction**: every error thrown
+after admission is rethrown as `NonRetryableError` (`fenceNonRetryable`), so a retry can
+only ever re-run the admission, never the agent. A cancel during backoff is the engine's
+cancel of a QUEUED attempt — no worker code runs. The check is inert (`floor 0` and
+`fraction 1.0`, or no `/proc/meminfo`) without a deploy; with it inert `retries` is 0 and
+the registration is the pre-#371 shape. Decision 5 stands: nothing here signals a
+lock-holding run.
+
 ## Anti-deviation invariants
 
 - **I1** Exactly one host-exclusion primitive, kernel-released; no `staleMs`/`heartbeat`
   in `packages/worker/src`. (N slot files are N instances of that one primitive.)
 - **I2** The slot is acquired at admission after both Stage A reaps and released last in
-  the run's finally, after `daemon.teardown()` and the teardown uid-scan.
+  the run's finally, after `daemon.teardown()` and the teardown uid-scan. The headroom
+  check (#371) runs under the slot and before the clone; its refusal releases the slot and
+  is the only retryable error the run task throws.
 - **I3** One worker unit per box; engine `slots` = `WORKER_BOX_SLOTS` = the number of kernel
   slot locks; the `definition.ts` global key is documented as per-workflow, never as the
   box cap.
