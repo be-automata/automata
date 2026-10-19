@@ -40,9 +40,10 @@ export function readPlaneKeyFile(path: string): PlanePrivateKey[] {
   let text: string;
   try {
     // Guarded like the box's other secret file: no symlink, regular file,
-    // size-capped, never world-accessible (a 0400 ring that became 0644
+    // size-capped — and OWNER-ONLY: a slot account that shares the service
+    // user's group must never read the ring (a 0400 ring that became 0640
     // is refused, not silently used).
-    text = readGuardedFile(path);
+    text = readGuardedFile(path, { ownerOnly: true });
   } catch (err) {
     if (err instanceof GuardedFileError && err.code === "ENOENT") {
       throw new PlaneKeyFileMissingError(path);

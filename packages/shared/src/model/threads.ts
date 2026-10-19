@@ -1746,7 +1746,11 @@ export async function findOrphanRemoteThreads({
  * join is on IN-FLIGHT rows only: a thread that once had a (now retired)
  * review row and is re-run without one must still be reconciled. Bounded
  * like rule (i)'s batch so a queued backlog costs a bounded number of engine
- * listings per tick.
+ * listings per tick — and SAMPLED, not oldest-first: the sweep deliberately
+ * leaves QUEUED/RUNNING/unlisted threads alone, and with no lease column on
+ * the thread an ordered LIMIT would let those pin the batch and starve the
+ * rest; a random sample reaches every candidate with the same probability
+ * each tick.
  */
 export async function findUnreportedRemoteThreads({
   db,
@@ -1782,7 +1786,7 @@ export async function findUnreportedRemoteThreads({
         lt(schema.thread.updatedAt, new Date(now.getTime() - olderThanMs)),
       ),
     )
-    .orderBy(schema.thread.updatedAt)
+    .orderBy(sql`random()`)
     .limit(limit);
 }
 

@@ -421,6 +421,42 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     );
   });
 
+  it("rule (i) generation guard: a FAILED row whose thread was RESUMED later (booting again, written well after the dispatch) is retired as stale — no terminal, token kept", async () => {
+    const resumed = await createTestRemoteRun({
+      db,
+      userId: user.id,
+      organizationId: orgId,
+      prNumber: 43,
+      externalId: "r-stale-attempt",
+      ageMs: T + 60_000,
+      repoFullName: "be-automata/automata",
+      status: "booting",
+    });
+    // The resume: a later write on the thread (minutes after the row).
+    await db
+      .update(threadTable)
+      .set({ updatedAt: new Date() })
+      .where(eq(threadTable.id, resumed.threadId));
+    const name = daemonRunKey(resumed);
+    await auth.api.createApiKey({
+      body: { name, userId: user.id, metadata: { tokenType: "daemon" } },
+    });
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({ "r-stale-attempt": "FAILED" }),
+      listRuns: async () => [],
+    });
+    expect(report.terminals).toEqual([]);
+    expect((await threadRow(resumed.threadId)).status).toBe("booting");
+    expect(await hasActiveDaemonToken({ userId: user.id, name })).toBe(true);
+    const [row] = await db
+      .select({ status: hatchetRunTable.status })
+      .from(hatchetRunTable)
+      .where(eq(hatchetRunTable.externalId, "r-stale-attempt"));
+    expect(row?.status).toBe("terminal");
+  });
+
   it("a thread WITH a run row is rule (i)'s: never listed by rule (iii), and rule (i)'s FAILED terminal revokes its daemon token too", async () => {
     const { threadId, threadChatId } = await createTestRemoteRun({
       db,

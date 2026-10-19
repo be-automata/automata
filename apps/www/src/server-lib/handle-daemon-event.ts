@@ -591,6 +591,7 @@ export async function handleDaemonEvent({
           db,
           key: { externalId },
           as: "terminal",
+          onlyInFlight: true,
         }).catch((error: unknown) => {
           console.error("[daemon-event] run row retire failed (non-fatal)", {
             threadId,

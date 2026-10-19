@@ -135,18 +135,24 @@ export async function retireHatchetRun({
   db,
   key,
   as,
+  onlyInFlight = false,
 }: {
   db: DB;
   key: { id: string } | { externalId: string };
   as: "superseded" | "terminal";
+  /** #380: never rewrite a row already `superseded` (the daemon-event path). */
+  onlyInFlight?: boolean;
 }): Promise<void> {
   await db
     .update(hatchetRun)
     .set({ status: as, sweepLeaseUntil: null })
     .where(
-      "id" in key
-        ? eq(hatchetRun.id, key.id)
-        : eq(hatchetRun.externalId, key.externalId),
+      and(
+        "id" in key
+          ? eq(hatchetRun.id, key.id)
+          : eq(hatchetRun.externalId, key.externalId),
+        onlyInFlight ? eq(hatchetRun.status, "in_flight") : undefined,
+      ),
     );
 }
 
@@ -195,6 +201,10 @@ export async function findSweepCandidates({
       // clone failure) — the sweep names that `run-failed-unreported`, not
       // `daemon-failed`. Read in the same join: zero extra reads.
       threadBooting: sql<boolean>`coalesce((${threadEffectiveStatusIn(["booting"])}), false)`,
+      // #380: the thread's last write. A thread written well after this
+      // run was created, and booting again, belongs to a LATER attempt
+      // (a resume) — this row is stale, not evidence about that attempt.
+      threadUpdatedAt: threadTable.updatedAt,
     })
     .from(hatchetRun)
     .innerJoin(threadTable, eq(threadTable.id, hatchetRun.threadId))

@@ -357,10 +357,20 @@ export async function createTestRemoteRun({
     snapshot,
   });
   if (ageMs > 0) {
+    const dispatchedAt = new Date(Date.now() - ageMs);
     await db
       .update(schema.hatchetRun)
-      .set({ createdAt: new Date(Date.now() - ageMs) })
+      .set({ createdAt: dispatchedAt })
       .where(eq(schema.hatchetRun.id, run.id));
+    // A dispatched thread's last write IS its dispatch (the active-run stamp
+    // lands seconds after the trigger): age the thread row with the run, as
+    // production would look, so the sweep's generation guard (#380) sees a
+    // thread that was NOT written again after this run — a test that models
+    // a later resume bumps `updatedAt` itself.
+    await db
+      .update(schema.thread)
+      .set({ updatedAt: dispatchedAt })
+      .where(eq(schema.thread.id, threadId));
   }
   return { threadId, threadChatId, runId: run.id };
 }

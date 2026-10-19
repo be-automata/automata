@@ -23,7 +23,14 @@ export class GuardedFileError extends Error {
 
 export function readGuardedFile(
   path: string,
-  { maxBytes = 64 * 1024 }: { maxBytes?: number } = {},
+  {
+    maxBytes = 64 * 1024,
+    ownerOnly = false,
+  }: {
+    maxBytes?: number;
+    /** Refuse group bits too (a 0400/0600 secret): `mode & 0o077` must be 0. */
+    ownerOnly?: boolean;
+  } = {},
 ): string {
   let fd: number;
   try {
@@ -40,6 +47,9 @@ export function readGuardedFile(
     }
     if ((stat.mode & 0o007) !== 0) {
       throw new GuardedFileError(path, "world-accessible");
+    }
+    if (ownerOnly && (stat.mode & 0o070) !== 0) {
+      throw new GuardedFileError(path, "group-accessible");
     }
     return fs.readFileSync(fd, "utf8");
   } finally {

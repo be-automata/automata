@@ -27,7 +27,7 @@
  * (gitignored), chowns nothing, and is a no-op when the file exists. Each
  * developer generates their own; dev keys are never shared.
  *
- * Options: --file <path> --kid <id> --owner <user> --rotate --dev --force-kid
+ * Options: --file <path> --kid <id> --owner <user> --rotate --dev
  */
 import { execFileSync } from "node:child_process";
 import {

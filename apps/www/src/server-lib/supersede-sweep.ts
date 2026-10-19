@@ -126,7 +126,12 @@ function newerSibling(run: SweepCandidate) {
 type Decision =
   | { kind: "terminal"; cause: TerminalCause; supersededByThreadId?: string }
   | { kind: "retire" }
+  /** #380: the row belongs to an earlier attempt of a resumed thread — retire it, touch nothing else. */
+  | { kind: "stale-row" }
   | { kind: "live" };
+
+/** A thread written this long after a run's dispatch, and booting again, is a later attempt. */
+export const STALE_ROW_RESUME_MARGIN_MS = 60 * 1000;
 
 /** The exhaustive rule (i) table; a new engine status fails compilation here. */
 async function decide(
@@ -176,6 +181,20 @@ async function decide(
       // an admission throw): the same reconcile class as rule (iii), with
       // the same cause, so every lane reads alike. FAILED after the daemon
       // was up stays the daemon's failure.
+      //
+      // Generation guard: the terminal CAS checks only that the thread is
+      // reapable, not WHICH attempt is live. A booting thread whose last
+      // write is well past this run's dispatch was RESUMED under a newer
+      // attempt (dispatch and its bookkeeping writes land within seconds of
+      // the row's createdAt); this row is stale evidence, so it is retired
+      // without a terminal and the live attempt is left to its own run.
+      if (
+        run.threadBooting &&
+        run.threadUpdatedAt.getTime() >
+          run.createdAt.getTime() + STALE_ROW_RESUME_MARGIN_MS
+      ) {
+        return { kind: "stale-row" };
+      }
       return {
         kind: "terminal",
         cause: run.threadBooting ? "run-failed-unreported" : "daemon-failed",
@@ -295,6 +314,13 @@ export async function runSupersedeSweep(
             db,
             id: run.id,
             until: new Date(now.getTime() + LIVE_RECHECK_MS),
+          });
+          return;
+        case "stale-row":
+          await retireHatchetRun({ db, key: { id: run.id }, as: "terminal" });
+          console.log("[supersede-sweep] stale row retired (thread resumed)", {
+            threadId: run.threadId,
+            externalId: run.externalId,
           });
           return;
         case "retire":
@@ -467,11 +493,15 @@ export async function runSupersedeSweep(
  * terminal, and — ONLY when that compare-and-set applied — the thread's
  * remote daemon tokens, because a terminal the sweep wrote means the run is
  * dead and a live token would make the double-dispatch guard skip every
- * retry for a day. A CAS that lost (the thread went terminal or was resumed
- * under a NEW run between the read and this write) must not touch tokens: the
- * `${threadId}:` prefix would hit the new run's token too (the S12 class of
- * sibling kill). The revoke is best-effort — a failure never undoes the
- * terminal (the token still expires); it is logged.
+ * retry for a day. A CAS that lost (the thread went terminal between the
+ * read and this write) must not touch tokens. The CAS checks the thread's
+ * status, NOT which attempt is live: a thread resumed under a newer run is
+ * booting again and the write WOULD apply — that case is kept out of this
+ * function by rule (i)'s generation guard (`stale-row` in decide) and by
+ * rule (iii)'s all-FAILED listing, because the `${threadId}:` prefix would
+ * hit the new run's token too (the S12 class of sibling kill). The revoke
+ * is best-effort — a failure never undoes the terminal (the token still
+ * expires); it is logged.
  */
 async function sweepTerminal({
   threadId,

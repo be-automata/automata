@@ -97,6 +97,11 @@ describe("readPlaneKeyFile", () => {
       mode: 0o644,
     });
     expect(() => readPlaneKeyFile(loose)).toThrow("world-accessible");
+    const group = path.join(d, "group.json");
+    writeFileSync(group, JSON.stringify({ keys: [a.privateKey] }), {
+      mode: 0o640,
+    });
+    expect(() => readPlaneKeyFile(group)).toThrow("group-accessible");
     const tight = path.join(d, "tight.json");
     writeFileSync(tight, JSON.stringify({ keys: [a.privateKey] }), {
       mode: 0o600,
