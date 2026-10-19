@@ -1,6 +1,6 @@
 # UAT-367-2026-10-19 — agent-uid loopback fence (#367), production execution box
 
-**Verdict:** PASS — 11 of 12 criteria; C12 (30 real runs under enforce) BLOCKED on the run count only, with no failure observed.
+**Verdict:** PASS — 12 of 12 criteria (C12 graded at 16:51 UTC on the 30-run hold: 31 completed, 0 failed).
 **Change:** PR #383 (observe step, merge 5b57010) + PR #388 (enforce step, merge 3e344b7). Issue #367.
 **Environment:** `automata-exec-1` (the production execution box; the fence exists only there). Deployed HEAD 3e344b765 contains both merge commits.
 **Lane:** api/CLI — recorded commands and outputs on the box; probes as uid 999 and 2001 from a throwaway cgroup under the worker unit (`nft-verify.sh`).
@@ -20,11 +20,11 @@
 | C9 | observe log holds only refused rows | PASS | `15-…-observe-window-log.txt` (verifier probes only) |
 | C10 | test cards present | PASS | `26-…-test-cards.txt` (9/9; proxy 6) |
 | C11 | CI green, egress assertions unchanged | PASS | `27-…-ci-pr-checks.txt` |
-| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | BLOCKED | `11-…-runs-completed-count.txt` = 18, failed 0, refused-in-logs 0, host-local 0 |
+| C12 | 30 runs under enforce, none fence-failed (regression, issue gate) | PASS | per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4–14, 16–33); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged "cancelled under newest-wins → superseded", row 3 (task, agent-run d87f2086 = engine run a611397c) was cancelled by the engine: the worker logged "Task run cancelling… run/a611397c" at 14:08:56, killed the run's daemon and started the next task run the same second, and released the box lock at 14:08:58, 11 s after the start (evidence 32, the run's full journal; 0 ECONNREFUSED/Connection refused/EPERM strings in it, no line attributes the cancel to the fence). Restart overlap is computed from each run's own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29's "4 completed after T1" counted runs that also started after T1, and evidence 30's restart column treated a missing completion as open-ended; evidence 31 states both corrections. Counters in evidence 28 date from the 16:37 reload (its header says 14:19) |
 
 ## Deviations
 
-- Observe window shortened from 7 days / 30 runs to ~10 min / 3 runs (operator decision); C12 tracks the 30-run half.
+- Observe window shortened from 7 days / 30 runs to ~10 min / 3 runs (operator decision); the 30-run half was then held under enforce (C12 PASS); the 7-day half cannot elapse in-session.
 - Four reject lines instead of three (bridge tcp needs `reject with tcp reset`; measured 1 s timeout otherwise).
 - Proxy also refuses host-local targets; NO_PROXY gains ::1 (the proxy was a tunnel through the fence).
 - Environment is production, not develop/staging.
@@ -42,4 +42,6 @@ None: ssh key name and gh auth were the only requirements, both present.
 
 ## Run history
 
-- 2026-10-19 15:33 UTC — first run (this record).
+- 2026-10-19 15:33 UTC — first run (this record); page v1–v2.
+- 2026-10-19 16:51 UTC — C12 graded PASS on the 30-run hold; page v3.
+- 2026-10-19 — review rounds on PR #398: deviation wording (v4), run-count reconciliation (v5), per-run ledger (v6), corrected ledger as evidence 31 (v7), row 3's full journal as evidence 32 (v8).

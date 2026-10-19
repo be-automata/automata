@@ -12,7 +12,7 @@
  },
  "build": "3e344b765e60df6fa4620625fd9639f59c910e5d",
  "captured_at": "2026-10-19T15:33:44Z",
- "verdict": "PASS (11/12; C12 BLOCKED on run count)",
+ "verdict": "PASS (12/12)",
  "criteria": [
   {
    "id": "C1",
@@ -94,16 +94,16 @@
   {
    "id": "C12",
    "text": "REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue's 30-run half of the gate)",
-   "source": "#367 rollout gate (observed, not yet complete)",
-   "verdict": "BLOCKED",
-   "evidence": "runs-under-enforce: 18 completed, 0 failed, 0 ECONNREFUSED in run logs, 0 proxy host-local \u2014 30 not yet reached at capture time (no evidence of failure; count still accruing)"
+   "source": "#367 rollout gate (30-run half; the 7-day half is the operator's deviation)",
+   "verdict": "PASS",
+   "evidence": "per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4\u201314, 16\u201333); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged \"cancelled under newest-wins \u2192 superseded\", row 3 (task, agent-run d87f2086 = engine run a611397c) was cancelled by the engine: the worker logged \"Task run cancelling\u2026 run/a611397c\" at 14:08:56, killed the run's daemon and started the next task run the same second, and released the box lock at 14:08:58, 11 s after the start (evidence 32, the run's full journal; 0 ECONNREFUSED/Connection refused/EPERM strings in it, no line attributes the cancel to the fence). Restart overlap is computed from each run's own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29's \"4 completed after T1\" counted runs that also started after T1, and evidence 30's restart column treated a missing completion as open-ended; evidence 31 states both corrections"
   }
  ],
  "deviations": [
   {
    "spec": "Observe for 7 days or 30 runs, whichever is later, before enforcing",
    "delivered": "Enforce loaded 13:55 UTC after ~10 min / 3 runs at the operator's direction; the observe log held only verifier probe rows",
-   "consequence": "C9 graded on the shortened window; C12 added as a regression criterion to hold the enforced fence to the 30-run count (BLOCKED until reached)"
+   "consequence": "C9 graded on the shortened window; C12 added as a regression criterion and graded PASS once the fence had been held to 30 completed runs under enforce (31 completed, 0 failed, 13:55\u219216:51 UTC); the 7-day half cannot elapse in-session"
   },
   {
    "spec": "Three deny lines flipped to reject",
@@ -179,11 +179,23 @@
   "25-api-C367-ci-merge-commits.txt",
   "26-api-C367-test-cards.txt",
   "27-api-C367-ci-pr-checks.txt",
+  "28-api-C367-thirty-run-hold.txt",
+  "29-api-C367-run-count-reconciliation.txt",
+  "30-api-C367-run-ledger.txt",
+  "31-api-C367-run-ledger-v2.txt",
+  "32-api-C367-run-d87f2086-log.txt",
   "manifest.json"
  ],
  "artifact_url": "https://app.superset.sh/page/367-loopback-fence-uat-k2r66b",
  "validator": "PASS (code lens; no markers; seams unset at call site; ExecStartPre paths consistent with \u00a77)",
  "terraform": "not applicable",
  "page_id": "fc56d656-53f8-4453-b201-49f8856a57f5",
- "page_slug": "367-loopback-fence-uat-k2r66b"
+ "page_slug": "367-loopback-fence-uat-k2r66b",
+ "run_history": [
+  "2026-10-19 16:51 UTC \u2014 C12 graded PASS on the 30-run hold (31/0); page v3",
+  "2026-10-19 \u2014 review round 2: run-count reconciliation (evidence 29) and counter-date correction; page v5",
+  "2026-10-19 \u2014 review round 3: per-run ledger (evidence 30); page v6",
+  "2026-10-19 \u2014 review round 4: corrected ledger (evidence 31) supersedes 29/30; README run history aligned; page v7",
+  "2026-10-19 \u2014 review round 5: row 3's cause from its full journal (evidence 32); page v8"
+ ]
 }

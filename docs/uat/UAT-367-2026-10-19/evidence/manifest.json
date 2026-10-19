@@ -418,5 +418,82 @@
     "captured_at": "2026-10-19T15:35:15Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 28,
+    "file": "28-api-C367-thirty-run-hold.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "thirty-run-hold",
+    "kind": "text",
+    "sha256": "0741f2b6dd8a2206837cf44465df58ee391508b2647715e8d917ecab2db0bfe6",
+    "bytes": 1438,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/thirty-run-hold.txt",
+    "captured_at": "2026-10-19T16:52:38Z",
+    "env": "",
+    "build": ""
+  },
+  {
+    "seq": 29,
+    "file": "29-api-C367-run-count-reconciliation.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-count-reconciliation",
+    "kind": "text",
+    "sha256": "3403dbacde46fb4c684dde90b5470564cb6476888d739d43588dc79f0dbacb71",
+    "bytes": 1419,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/run-count-reconciliation.txt",
+    "captured_at": "2026-10-19T16:57:21Z",
+    "env": "",
+    "build": ""
+  },
+  {
+    "seq": 30,
+    "file": "30-api-C367-run-ledger.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-ledger",
+    "kind": "text",
+    "sha256": "6aebabe94fad9551950ce142284a441298e604794bbf32fa941163b6cca7b6bb",
+    "bytes": 8511,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/run-ledger.txt",
+    "captured_at": "2026-10-19T17:00:31Z",
+    "env": "",
+    "build": ""
+  },
+  {
+    "seq": 31,
+    "file": "31-api-C367-run-ledger-v2.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-ledger-v2",
+    "kind": "text",
+    "sha256": "ff07f1c1b2aeab8691654f581a8fc2739b8187cd7d300955427bcb06a32de482",
+    "bytes": 5480,
+    "redactions": {},
+    "source": "/private/tmp/claude-501/uat367/uat367/run-ledger-v2.txt",
+    "captured_at": "2026-10-19T17:04:02Z",
+    "env": "",
+    "build": ""
+  },
+  {
+    "seq": 32,
+    "file": "32-api-C367-run-d87f2086-log.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-d87f2086-log",
+    "kind": "text",
+    "sha256": "b2101e2dd517d355021febeca80e828d274c084b39bf96fbca301527ff862254",
+    "bytes": 10098,
+    "redactions": {
+      "plaintext_assignment": 7
+    },
+    "source": "/private/tmp/claude-501/uat367/uat367/run-d87f2086-log.txt",
+    "captured_at": "2026-10-19T17:06:58Z",
+    "env": "",
+    "build": ""
   }
 ]
