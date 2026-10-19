@@ -366,6 +366,33 @@ describe("assessHeadroomSupport (boot)", () => {
     ).toEqual({ enabled: true });
   });
 
+  it("a floor at or above the box's MemTotal can NEVER be admitted: boot refuses, naming both values and the rollback; a floor below is on; floor 0 skips the check", () => {
+    const memTotal = 7937228 * 1024; // MEMINFO's MemTotal
+    expect(() =>
+      assessHeadroomSupport({
+        policy: { ...POLICY, floorBytes: memTotal },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toThrow(
+      /can never admit a run on this box: floor \d+M .* at or above MemTotal \d+M .*fraction 1\.0/,
+    );
+    expect(
+      assessHeadroomSupport({
+        policy: { ...POLICY, floorBytes: memTotal - 1024 ** 2 },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toEqual({ enabled: true });
+    expect(
+      assessHeadroomSupport({
+        policy: { ...POLICY, floorBytes: 0 },
+        platform: "linux",
+        readMeminfo: () => MEMINFO,
+      }),
+    ).toEqual({ enabled: true });
+  });
+
   it("linux with a readable meminfo ⇒ on; unreadable or unparseable ⇒ THROWS (the boot refuses, never a silent OFF for the process life)", () => {
     expect(
       assessHeadroomSupport({

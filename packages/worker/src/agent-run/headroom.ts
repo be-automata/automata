@@ -362,8 +362,13 @@ export function assessHeadroomSupport(opts: {
   // per-admission fail-open in `admit` covers only a transient read AFTER boot
   // proved the file readable.
   let reading: MeminfoReading;
+  let memTotal: number | null = null;
   try {
-    reading = parseMeminfo((opts.readMeminfo ?? readProcMeminfo)());
+    const text = (opts.readMeminfo ?? readProcMeminfo)();
+    reading = parseMeminfo(text);
+    // MemTotal is only needed here (the floor's box check), never per admission.
+    const m = /^MemTotal:\s+(\d+)\s+kB/m.exec(text);
+    memTotal = m?.[1] ? Number(m[1]) * 1024 : null;
   } catch (e) {
     throw new Error(
       `the memory headroom check is configured but /proc/meminfo cannot be read or parsed: ${
@@ -383,6 +388,18 @@ export function assessHeadroomSupport(opts: {
   ) {
     throw new Error(
       `the memory headroom check can never admit a run on this box: run commit ${mib(opts.policy.runCommitBytes)} (WORKER_HEADROOM_RUN_COMMIT, default WORKER_RUN_MEMORY_MAX) exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)} — lower the run commit or the ceiling, raise WORKER_HEADROOM_COMMIT_FRACTION, or set floor 0 and fraction 1.0 to run without the check`,
+    );
+  }
+  // Same for the floor arm: a floor at or above the box's memory means
+  // `MemAvailable − reserved ≥ floor` can never hold (a typo such as 10G on a
+  // 7.6 GB box) — refuse at boot rather than fail every run after its budget.
+  if (
+    opts.policy.floorBytes > 0 &&
+    memTotal !== null &&
+    opts.policy.floorBytes >= memTotal
+  ) {
+    throw new Error(
+      `the memory headroom check can never admit a run on this box: floor ${mib(opts.policy.floorBytes)} (WORKER_HEADROOM_FLOOR) is at or above MemTotal ${mib(memTotal)} — lower the floor, or set floor 0 and fraction 1.0 to run without the check`,
     );
   }
   return { enabled: true };

@@ -462,7 +462,7 @@ export function warnIfSlotsExceedMemory(
   const need = cfg.boxSlots * cfg.memoryMaxBytes;
   if (need > memTotalBytes) {
     log(
-      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0), so concurrent runs can hit ENOMEM under load until the admission headroom check (#371) lands`,
+      `[worker-boot] WARNING: WORKER_BOX_SLOTS=${cfg.boxSlots} × WORKER_RUN_MEMORY_MAX=${cfg.memoryMaxBytes} = ${need} bytes exceeds MemTotal ${memTotalBytes}; runs cannot swap (memory.swap.max=0). With the memory-headroom check armed (#371) a second concurrent run is DEFERRED — expect box.headroom_rejected / box.headroom_deferred_wait lines and, past the budget, budget-exhausted failures; with the check OFF (inert rollback) concurrent runs can hit ENOMEM under load`,
     );
   }
 }
