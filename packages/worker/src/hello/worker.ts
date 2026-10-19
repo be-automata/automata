@@ -25,6 +25,7 @@ import {
   assertProcHidepid,
   assertSlotAccountsExist,
   assertSlotSudoGrants,
+  assertSlotWorkdirTraverse,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
@@ -179,6 +180,7 @@ async function main() {
       if (cfg.boxSlots > 1) {
         const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
         await assertSlotSudoGrants(cfg.agentUsers);
+        await assertSlotWorkdirTraverse(cfg.agentUsers, cfg.workdirRoot);
         assertFenceCoversSlotUids({ uids: slotUids });
         assertProcHidepid();
         console.log(

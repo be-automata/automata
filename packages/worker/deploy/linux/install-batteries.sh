@@ -2863,11 +2863,18 @@ write_mcp_wrapper() {
     printf 'PATH=%s; export PATH\n' "'$BUILD_PATH'"
     printf 'LANG=C.UTF-8; export LANG\n'
     local env_keys=""
-    while IFS= read -r entry; do
+    # NUL-delimited: one entry is always one assignment, whatever the value
+    # holds; a value with a control character (a newline would otherwise split
+    # into a second, silently exported variable) is refused outright.
+    while IFS= read -r -d '' entry; do
       [ -n "$entry" ] || continue
       case "$entry" in
         *"'"*) STEP_ERROR="mcpServe.env entry contains a single quote"; return 1 ;;
       esac
+      [[ "$entry" =~ [[:cntrl:]] ]] && {
+        STEP_ERROR="mcpServe.env entry contains a control character: ${entry%%=*}"
+        return 1
+      }
       local key="${entry%%=*}"
       # The key is written into shell code unquoted: it must be a shell
       # identifier, and never one of the names the wrapper or the filter own.
@@ -2883,7 +2890,7 @@ write_mcp_wrapper() {
       esac
       printf "%s='%s'; export %s\n" "$key" "${entry#*=}" "$key"
       env_keys="${env_keys:+$env_keys,}$key"
-    done < <(jq -r --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)"' "$HARNESS")
+    done < <(jq -j --argjson i "$i" '.packs[$i].mcpServe.env | to_entries[] | "\(.key)=\(.value)\u0000"' "$HARNESS")
     # The filter builds the server's env from this list (plus PATH/HOME/LANG and
     # the proxy names) — the exhaustive allowlist; the scrub above is belt and braces.
     printf "AUTOMATA_MCP_ENV_KEYS='%s'; export AUTOMATA_MCP_ENV_KEYS\n" "$env_keys"

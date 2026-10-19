@@ -287,7 +287,11 @@ grep -q hidepid= /etc/fstab || printf 'proc /proc proc defaults,hidepid=invisibl
 sudo -u automata-agent-1 ps -eo user | sort -u   # must list only automata-agent-1
 ```
 
-The worker checks this at boot (N > 1, Linux) and refuses to start without it.
+The worker checks this at boot (N > 1, Linux) and refuses to start without it —
+and without a `gid=` naming one of its own groups: a hidepid that also hides the
+slot accounts from the worker would silently blind the escapee reaper. The boot
+also probes each slot account's traverse on the workdir root (step 4) through
+the sudo grant.
 
 Caveat, checked before trusting it: `hidepid` also hides processes from
 `systemd-logind`/polkit sessions of unprivileged logins; on a box with an

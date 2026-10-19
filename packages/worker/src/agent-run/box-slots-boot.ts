@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { BOX_SLOTS_MAX } from "./box-lock";
-import { KILL_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
+import { KILL_BIN, SH_BIN, SUDO_BIN, agentUserForSlot } from "./spawn-as-user";
 import { resolveUidViaId } from "./uid-reaper";
 
 const execFileAsync = promisify(execFile);
@@ -129,11 +129,17 @@ export function assertProcHidepid(
   opts: {
     platform?: NodeJS.Platform;
     readMountinfo?: () => string;
+    /** The worker's gid and supplementary gids; one of them must be the mount's `gid=` exemption. */
+    workerGids?: readonly number[];
   } = {},
 ): void {
   const {
     platform = process.platform,
     readMountinfo = () => readFileSync("/proc/self/mountinfo", "utf8"),
+    workerGids = [
+      ...(process.getgid ? [process.getgid()] : []),
+      ...(process.getgroups ? process.getgroups() : []),
+    ],
   } = opts;
   if (platform !== "linux") return;
   let text: string;
@@ -165,6 +171,62 @@ export function assertProcHidepid(
       `/proc is mounted ${hidepid === undefined ? "without hidepid" : `with hidepid=${hidepid}`}; at WORKER_BOX_SLOTS > 1 another slot's account could read a run's argv (and a copied proxy credential) — remount with hidepid=invisible and the worker group exempt (deploy/AGENT-UID-PROVISIONING.md §6)`,
     );
   }
+  // The worker itself must stay exempt: without `gid=<a group of the worker>`
+  // hidepid blinds the non-root worker to every slot account's processes, so
+  // the escapee reaper scans nothing and silently never kills — while the boot
+  // would report fail-closed. `ptraceable` without the exemption blinds it the
+  // same way (it cannot ptrace other uids).
+  const gidOpt = options
+    .find((o) => o.startsWith("gid="))
+    ?.slice("gid=".length);
+  const gid = gidOpt === undefined ? undefined : Number(gidOpt);
+  if (
+    gid === undefined ||
+    !Number.isInteger(gid) ||
+    !workerGids.includes(gid)
+  ) {
+    throw new Error(
+      `/proc hidepid=${hidepid} ${gidOpt === undefined ? "has no gid= exemption" : `exempts gid ${gidOpt}, which the worker (gids ${workerGids.join(", ")}) is not in`}; the worker would see none of the slot accounts' processes and the escapee reaper would silently scan nothing — remount with gid=<a group of the worker> (deploy/AGENT-UID-PROVISIONING.md §6)`,
+    );
+  }
+}
+
+/**
+ * #205: at N > 1 every slot account needs traverse (`--x`) on the workdir root
+ * — §6 step 4's `setfacl -m u:<slot>:--x` — or every run that lands on that
+ * slot dies at the clone grant or the daemon start with EACCES, after the box
+ * registered N slots. Exercised through the sudo grant the runs use
+ * (`sudo -n -u <slot> sh -c 'test -x "$1"' sh <root>`), so it is the slot
+ * account's own view that is tested, ACL mask included. Probes run in
+ * parallel; every refused account is named. Not Linux ⇒ nothing (macOS runs
+ * N = 1 by construction).
+ */
+export async function assertSlotWorkdirTraverse(
+  users: readonly string[],
+  workdirRoot: string,
+  probe: (user: string, root: string) => Promise<void> = sudoTraverseProbe,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform !== "linux" || users.length === 0) return;
+  const results = await Promise.allSettled(
+    users.map((u) => probe(u, workdirRoot)),
+  );
+  const refused = results.flatMap((r, i) =>
+    r.status === "rejected" ? [JSON.stringify(users[i])] : [],
+  );
+  if (refused.length > 0) {
+    throw new Error(
+      `slot account(s) ${refused.join(", ")} cannot traverse the workdir root ${workdirRoot}; grant it (setfacl -m u:<slot>:--x, deploy/AGENT-UID-PROVISIONING.md §6 step 4) or lower WORKER_BOX_SLOTS`,
+    );
+  }
+}
+
+async function sudoTraverseProbe(user: string, root: string): Promise<void> {
+  await execFileAsync(
+    SUDO_BIN,
+    ["-n", "-u", user, "--", SH_BIN, "-c", 'test -x "$1"', "sh", root],
+    { timeout: SUDO_PROBE_TIMEOUT_MS, killSignal: "SIGKILL" },
+  );
 }
 
 /** Where nft-preflight.sh records the uids the loaded fence covers (tmpfs: gone at reboot, rewritten by the automata-egress unit). */

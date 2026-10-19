@@ -5,6 +5,7 @@ import {
   assertProcHidepid,
   assertSlotAccountsExist,
   assertSlotSudoGrants,
+  assertSlotWorkdirTraverse,
   retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "./box-slots-boot";
@@ -102,23 +103,44 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     `25 30 0:23 / /proc ${opts} shared:14 - proc proc ${superOpts}\n` +
     "30 1 252:1 / / rw,relatime shared:1 - ext4 /dev/vda1 rw\n";
 
-  it("passes with hidepid=invisible (or 2 / ptraceable / 4), in the superblock options where the kernel puts it", () => {
+  it("passes with hidepid=invisible (or 2 / ptraceable / 4) AND a gid= exemption the worker holds, in the superblock options where the kernel puts them", () => {
     for (const v of ["invisible", "2", "ptraceable", "4"]) {
       expect(() =>
         assertProcHidepid({
           platform: "linux",
+          workerGids: [990, 4],
           readMountinfo: () =>
             line("rw,nosuid,nodev,noexec,relatime", `rw,hidepid=${v},gid=990`),
         }),
       ).not.toThrow();
     }
-    // ...and tolerates it in the per-mount options too.
+    // ...and tolerates both in the per-mount options too.
     expect(() =>
       assertProcHidepid({
         platform: "linux",
-        readMountinfo: () => line("rw,hidepid=invisible", "rw"),
+        workerGids: [990],
+        readMountinfo: () => line("rw,hidepid=invisible,gid=990", "rw"),
       }),
     ).not.toThrow();
+  });
+
+  it("refuses hidepid without a gid= exemption, or with one the worker is not in: the reaper would silently see nothing", () => {
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        workerGids: [990],
+        readMountinfo: () => line("rw", "rw,hidepid=invisible"),
+      }),
+    ).toThrow(
+      /has no gid= exemption.*escapee reaper would silently scan nothing/,
+    );
+    expect(() =>
+      assertProcHidepid({
+        platform: "linux",
+        workerGids: [990, 4],
+        readMountinfo: () => line("rw", "rw,hidepid=ptraceable,gid=1234"),
+      }),
+    ).toThrow(/exempts gid 1234, which the worker \(gids 990, 4\) is not in/);
   });
 
   it("refuses a /proc without hidepid, or with hidepid=0/1 (which hide nothing), naming §6", () => {
@@ -151,6 +173,45 @@ describe("assertProcHidepid (#205 boot, Linux N > 1)", () => {
     const readMountinfo = vi.fn(() => "");
     assertProcHidepid({ platform: "darwin", readMountinfo });
     expect(readMountinfo).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertSlotWorkdirTraverse (#205 boot, Linux N > 1)", () => {
+  it("probes every slot account's traverse on the workdir root through sudo, in parallel, and passes when each succeeds", async () => {
+    const probe = vi.fn(async () => {});
+    await assertSlotWorkdirTraverse(
+      ["automata-agent", "automata-agent-1"],
+      "/usr/local/automata/runs",
+      probe,
+      "linux",
+    );
+    expect(probe.mock.calls).toEqual([
+      ["automata-agent", "/usr/local/automata/runs"],
+      ["automata-agent-1", "/usr/local/automata/runs"],
+    ]);
+  });
+
+  it("names every account without traverse and §6 step 4", async () => {
+    const probe = vi.fn(async (user: string) => {
+      if (user !== "automata-agent") throw new Error("exit 1");
+    });
+    await expect(
+      assertSlotWorkdirTraverse(
+        ["automata-agent", "automata-agent-1"],
+        "/usr/local/automata/runs",
+        probe,
+        "linux",
+      ),
+    ).rejects.toThrow(
+      /slot account\(s\) "automata-agent-1" cannot traverse the workdir root \/usr\/local\/automata\/runs.*setfacl -m u:<slot>:--x.*§6 step 4/,
+    );
+  });
+
+  it("no-op off Linux and with no accounts", async () => {
+    const probe = vi.fn(async () => {});
+    await assertSlotWorkdirTraverse(["a"], "/r", probe, "darwin");
+    await assertSlotWorkdirTraverse([], "/r", probe, "linux");
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 
