@@ -478,5 +478,22 @@
     "captured_at": "2026-10-19T17:04:02Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 32,
+    "file": "32-api-C367-run-d87f2086-log.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "run-d87f2086-log",
+    "kind": "text",
+    "sha256": "b2101e2dd517d355021febeca80e828d274c084b39bf96fbca301527ff862254",
+    "bytes": 10098,
+    "redactions": {
+      "plaintext_assignment": 7
+    },
+    "source": "/private/tmp/claude-501/uat367/uat367/run-d87f2086-log.txt",
+    "captured_at": "2026-10-19T17:06:58Z",
+    "env": "",
+    "build": ""
   }
 ]

@@ -96,7 +96,7 @@
    "text": "REGRESSION: 30 real runs under enforce complete with no fence-caused failure (the issue's 30-run half of the gate)",
    "source": "#367 rollout gate (30-run half; the 7-day half is the operator's deviation)",
    "verdict": "PASS",
-   "evidence": "per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4\u201314, 16\u201333); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged \"cancelled under newest-wins \u2192 superseded\", row 3 (task) was torn down 10 s after boot as the next task run on the same repo started, with no ECONNREFUSED or Connection refused string. Restart overlap is computed from each run's own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29's \"4 completed after T1\" counted runs that also started after T1, and evidence 30's restart column treated a missing completion as open-ended; evidence 31 states both corrections"
+   "evidence": "per-run ledger, corrected (evidence 31, which supersedes 29 and 30): 34 runs started under enforce in the window; 31 started AND completed inside it (rows 1, 2, 4\u201314, 16\u201333); 1 completed 27 s after the capture (row 34); 0 failed; 2 ended without a completion line and neither is a fence effect: row 15 (review pr=394) is logged \"cancelled under newest-wins \u2192 superseded\", row 3 (task, agent-run d87f2086 = engine run a611397c) was cancelled by the engine: the worker logged \"Task run cancelling\u2026 run/a611397c\" at 14:08:56, killed the run's daemon and started the next task run the same second, and released the box lock at 14:08:58, 11 s after the start (evidence 32, the run's full journal; 0 ECONNREFUSED/Connection refused/EPERM strings in it, no line attributes the cancel to the fence). Restart overlap is computed from each run's own last log line: none of the 34 runs overlaps a restart (14:19:09, 16:31:24, 16:37:22). Evidence 29's \"4 completed after T1\" counted runs that also started after T1, and evidence 30's restart column treated a missing completion as open-ended; evidence 31 states both corrections"
   }
  ],
  "deviations": [
@@ -183,6 +183,7 @@
   "29-api-C367-run-count-reconciliation.txt",
   "30-api-C367-run-ledger.txt",
   "31-api-C367-run-ledger-v2.txt",
+  "32-api-C367-run-d87f2086-log.txt",
   "manifest.json"
  ],
  "artifact_url": "https://app.superset.sh/page/367-loopback-fence-uat-k2r66b",
@@ -194,6 +195,7 @@
   "2026-10-19 16:51 UTC \u2014 C12 graded PASS on the 30-run hold (31/0); page v3",
   "2026-10-19 \u2014 review round 2: run-count reconciliation (evidence 29) and counter-date correction; page v5",
   "2026-10-19 \u2014 review round 3: per-run ledger (evidence 30); page v6",
-  "2026-10-19 \u2014 review round 4: corrected ledger (evidence 31) supersedes 29/30; README run history aligned; page v7"
+  "2026-10-19 \u2014 review round 4: corrected ledger (evidence 31) supersedes 29/30; README run history aligned; page v7",
+  "2026-10-19 \u2014 review round 5: row 3's cause from its full journal (evidence 32); page v8"
  ]
 }
