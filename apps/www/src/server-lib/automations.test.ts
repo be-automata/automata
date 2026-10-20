@@ -22,6 +22,10 @@ import type {
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { createNewThread } from "./new-thread-shared";
 import {
+  NO_PR_REVIEW_CONTEXT,
+  prefetchReviewContextForPr,
+} from "./review/prefetch-review-context";
+import {
   runAutomation,
   validateAutomationCreationOrUpdate,
 } from "./automations";
@@ -34,6 +38,17 @@ vi.mock("./new-thread-shared", () => ({
     .fn()
     .mockResolvedValue({ threadId: "t1", threadChatId: "tc1" }),
 }));
+
+// The PR prefetch reads GitHub with the App token; tests assert the call and
+// what replaces the directive, never a network read.
+vi.mock("./review/prefetch-review-context", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./review/prefetch-review-context")>();
+  return {
+    ...actual,
+    prefetchReviewContextForPr: vi.fn(async () => "PREFETCHED-CONTEXT"),
+  };
+});
 
 // Pass-through spy: the real resolver runs, the tests can assert whether it
 // was consulted at all.
@@ -897,5 +912,169 @@ describe("audit-fix rollback simulation (ROLL-01)", () => {
     expect(legacy.config.filter).not.toHaveProperty("labels");
     expect(legacyShouldTrigger("opened", legacy.config)).toBe(false);
     expect(legacyShouldTrigger("labeled", legacy.config)).toBe(false);
+  });
+});
+
+describe("runAutomation — skill_message model + review context directive", () => {
+  let user: User;
+  let orgId: string;
+
+  const DIRECTIVE =
+    "<!-- automata:context pr-view prior-reviews review-threads -->";
+  const BODY_WITH_CONTEXT =
+    "Review {{repoFullName}}.\n## Trigger Context\n" +
+    DIRECTIVE +
+    '\n```json\n{ "verdict": "approve" }\n```\n';
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(createNewThread).mockResolvedValue({
+      threadId: "t1",
+      threadChatId: "tc1",
+    });
+    user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "CtxOrg",
+      slug: `ctx-${nanoid(8).toLowerCase()}`,
+    });
+    orgId = org.id;
+  });
+
+  async function makeAutomation(config: {
+    skillName: string;
+    version: string;
+    model?: "opus" | "sonnet";
+  }) {
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: { action: { type: "skill_message", config } },
+    });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: orgId })
+      .where(eq(automationsTable.id, automation.id));
+    return automation;
+  }
+
+  function sentMessage() {
+    const callArgs = vi.mocked(createNewThread).mock.calls[0]![0];
+    return {
+      model: callArgs.message.model,
+      text: (callArgs.message.parts[0] as { text: string }).text,
+    };
+  }
+
+  it("a pinned model rides the thread message; an unpinned one stays null (owner default)", async () => {
+    const pinned = await makeAutomation({
+      skillName: "flutter-pr-review",
+      version: "latest",
+      model: "opus",
+    });
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: pinned.repoFullName,
+      skillName: "flutter-pr-review",
+      body: BODY_WITH_CONTEXT,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: pinned.id,
+      source: "manual",
+    });
+    expect(sentMessage().model).toBe("opus");
+
+    vi.mocked(createNewThread).mockClear();
+    const unpinned = await makeAutomation({
+      skillName: "flutter-pr-review",
+      version: "latest",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: unpinned.id,
+      source: "manual",
+    });
+    expect(sentMessage().model).toBeNull();
+  });
+
+  it("a PR run replaces the directive with the prefetched context, after placeholders", async () => {
+    const automation = await makeAutomation({
+      skillName: "flutter-pr-review",
+      version: "latest",
+    });
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: automation.repoFullName,
+      skillName: "flutter-pr-review",
+      body: BODY_WITH_CONTEXT,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+      options: {
+        branchName: "feat/x",
+        prBaseBranchName: "develop",
+        prNumber: 41,
+      },
+    });
+    expect(prefetchReviewContextForPr).toHaveBeenCalledWith({
+      repoFullName: automation.repoFullName,
+      prNumber: 41,
+      fetchers: ["pr-view", "prior-reviews", "review-threads"],
+    });
+    const { text } = sentMessage();
+    expect(text).toContain("## Trigger Context\nPREFETCHED-CONTEXT\n");
+    expect(text).not.toContain("automata:context");
+    expect(text).toContain(`Review ${automation.repoFullName}.`);
+  });
+
+  it("a run no PR started gets the no-PR note and never fetches", async () => {
+    const automation = await makeAutomation({
+      skillName: "flutter-pr-review",
+      version: "latest",
+    });
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: automation.repoFullName,
+      skillName: "flutter-pr-review",
+      body: BODY_WITH_CONTEXT,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+    });
+    expect(prefetchReviewContextForPr).not.toHaveBeenCalled();
+    expect(sentMessage().text).toContain(NO_PR_REVIEW_CONTEXT);
+  });
+
+  it("a body without the directive never fetches", async () => {
+    const automation = await makeAutomation({
+      skillName: "github-ops",
+      version: "latest",
+    });
+    await createRepoSkillVersion({
+      db,
+      organizationId: orgId,
+      repoFullName: automation.repoFullName,
+      skillName: "github-ops",
+      body: 'Plain.\n```json\n{ "verdict": "approve" }\n```\n',
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+      options: { prNumber: 9 },
+    });
+    expect(prefetchReviewContextForPr).not.toHaveBeenCalled();
   });
 });

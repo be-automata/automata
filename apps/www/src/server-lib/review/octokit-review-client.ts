@@ -1,3 +1,4 @@
+import type { FileAtCommit } from "@terragon/review/finding-verifier";
 import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import type { ReviewWriterClient } from "./review-notice";
@@ -184,5 +185,170 @@ export async function getPrHeadState(
     headSha: data.head.sha,
     isDraft: data.draft === true,
     authorLogin: data.user?.login ?? null,
+  };
+}
+
+/** One retry for a transient read: the verifier must not flip on a blip. */
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (statusOf(err) === 404) throw err;
+    return await fn();
+  }
+}
+
+function statusOf(err: unknown): number | undefined {
+  if (typeof err === "object" && err !== null && "status" in err) {
+    const status = (err as { status: unknown }).status;
+    return typeof status === "number" ? status : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * verify-before-block's reader (packages/review finding-verifier): a file AT
+ * the commit the agent reviewed, read raw through the contents API with the
+ * App token. 404 = the file is not there (the finding is unverified); any other
+ * failure after one retry, or binary content, = could not check (the finding
+ * keeps gating — an outage never changes a verdict).
+ */
+export function createFileAtCommitReader(
+  octokit: Octokit,
+  repoFullName: string,
+): (path: string, sha: string) => Promise<FileAtCommit> {
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  return async (path, sha) => {
+    try {
+      const response = await withOneRetry(() =>
+        octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+          owner,
+          repo,
+          path,
+          ref: sha,
+          mediaType: { format: "raw" },
+        }),
+      );
+      // The raw media type returns the file body as a string; Octokit's types
+      // only model the JSON shape, so narrow from unknown.
+      const data: unknown = response.data;
+      if (typeof data !== "string") {
+        return { kind: "unchecked", reason: "not a file" };
+      }
+      if (data.includes("\u0000")) {
+        return { kind: "unchecked", reason: "binary file" };
+      }
+      return { kind: "content", text: data };
+    } catch (err) {
+      if (statusOf(err) === 404) return { kind: "missing" };
+      return {
+        kind: "unchecked",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+}
+
+const FIND_THREAD_QUERY = `
+  query ($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            isResolved
+            comments(first: 100) { nodes { databaseId body } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface FindThreadPage {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        nodes: Array<{
+          id: string;
+          isResolved: boolean;
+          comments: {
+            nodes: Array<{ databaseId: number | null; body: string | null }>;
+          };
+        }>;
+      };
+    } | null;
+  } | null;
+}
+
+/** The review-thread surface the terminal writer resolves threads through. */
+export interface ReviewThreadClient {
+  /** The PR's thread containing the comment `commentId`, or null. */
+  findThreadByCommentId(
+    prNumber: number,
+    commentId: number,
+  ): Promise<{
+    threadId: string;
+    isResolved: boolean;
+    commentBodies: string[];
+  } | null>;
+  replyToReviewComment(
+    prNumber: number,
+    commentId: number,
+    body: string,
+  ): Promise<void>;
+  resolveThread(threadId: string): Promise<void>;
+}
+
+/** The App-scoped implementation of {@link ReviewThreadClient}. */
+export function createOctokitThreadClient(
+  octokit: Octokit,
+  repoFullName: string,
+): ReviewThreadClient {
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  return {
+    async findThreadByCommentId(prNumber, commentId) {
+      let cursor: string | null = null;
+      for (let page = 0; page < 5; page++) {
+        const result: FindThreadPage = await octokit.graphql(
+          FIND_THREAD_QUERY,
+          { owner, repo, number: prNumber, cursor },
+        );
+        const connection = result.repository?.pullRequest?.reviewThreads;
+        if (!connection) return null;
+        for (const node of connection.nodes) {
+          const comments = node.comments.nodes;
+          if (comments.some((c) => c.databaseId === commentId)) {
+            return {
+              threadId: node.id,
+              isResolved: node.isResolved,
+              commentBodies: comments.map((c) => c.body ?? ""),
+            };
+          }
+        }
+        if (!connection.pageInfo.hasNextPage) return null;
+        cursor = connection.pageInfo.endCursor;
+      }
+      return null;
+    },
+
+    async replyToReviewComment(prNumber, commentId, body) {
+      await octokit.rest.pulls.createReplyForReviewComment({
+        owner,
+        repo,
+        pull_number: prNumber,
+        comment_id: commentId,
+        body,
+      });
+    },
+
+    async resolveThread(threadId) {
+      await octokit.graphql(
+        `mutation ($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`,
+        { threadId },
+      );
+    },
   };
 }

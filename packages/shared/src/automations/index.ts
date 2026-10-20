@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { AIModelSchema } from "@terragon/agent/types";
 import { DBUserMessage } from "../db/db-message";
 
 /**
@@ -45,6 +46,10 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .describe("Comma-separated list of authors to include"),
         // Match PRs from ANY author (unconditional routing — mirror parity).
         includeAllAuthors: z.boolean().optional(),
+        // Skip `opened` / `synchronize` deliveries whose SENDER is a bot
+        // (dependabot, the App's own pushes) — the legacy orchestrator's
+        // routing rule. Absent = today's behaviour (bots trigger too).
+        excludeBotSenders: z.boolean().optional(),
       }),
       // The events to trigger on.
       on: z.object({
@@ -171,6 +176,10 @@ export const AutomationActionSchema = z.discriminatedUnion("type", [
       version: z
         .string()
         .describe(`'latest' (follow the current version) or a version-id pin`),
+      // The model this automation's threads run with. Absent = the owner's
+      // default model, which spans every org the owner runs — so an
+      // automation that must run a specific model pins it here.
+      model: AIModelSchema.optional(),
     }),
   }),
 ]);

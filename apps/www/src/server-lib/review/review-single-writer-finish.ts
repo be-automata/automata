@@ -14,9 +14,15 @@ import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
 import {
+  createFileAtCommitReader,
   createOctokitReviewClient,
+  createOctokitThreadClient,
   getPrHeadState,
 } from "./octokit-review-client";
+import {
+  THREAD_RESOLUTION_CLAIM_TTL_SECONDS,
+  threadResolutionClaimKey,
+} from "./review-thread-resolutions";
 import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
@@ -431,6 +437,26 @@ export async function handleReviewEffectAtFinish({
         // A self-heal fix PR is opened by this same App, and GitHub refuses a
         // formal verdict from a PR's author: post it as a COMMENT instead.
         prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),
+        // Verify-before-block: every blocking finding must reproduce its
+        // quote at the reviewed commit (contents API, App token).
+        readFileAtCommit: createFileAtCommitReader(octokit, repoFullName),
+        // The prior threads the agent verified addressed: replied to and
+        // resolved once, by the terminal writer, under a (thread, commit) claim.
+        threadResolutions: {
+          client: createOctokitThreadClient(octokit, repoFullName),
+          // Redis is loaded only when a claim is actually taken: most reviews
+          // resolve nothing, and the finish hook must not need a Redis client
+          // just to be imported.
+          claim: async (commit) => {
+            const { redis } = await import("@/lib/redis");
+            const taken = await redis.set(
+              threadResolutionClaimKey(threadId, commit),
+              "1",
+              { nx: true, ex: THREAD_RESOLUTION_CLAIM_TTL_SECONDS },
+            );
+            return taken === "OK";
+          },
+        },
         // Same two degraded-path gates as the sweep: a run that produced no
         // parseable intent must not stamp a warning onto a head it was never
         // dispatched against, nor speak at all if it was abandoned before it

@@ -5,9 +5,9 @@
  * (org, repo, skill) picks up the new version: the resolver reads Neon live,
  * so there is no seed script and no redeploy.
  *
- * Usage (DATABASE_URL must point at the target Postgres):
+ * Usage (DATABASE_URL must point at the target Postgres, except with --dry-run):
  *   DATABASE_URL=postgres://... pnpm exec tsx deploy/skill-push.ts \
- *     <orgSlug> <owner/repo> <skillName> <path-to-md>
+ *     <orgSlug> <owner/repo> <skillName> <path-to-md> [--dry-run] [--out <file>]
  *   # or import a PINNED git skill pack (source: 'git-pack', #64):
  *   DATABASE_URL=postgres://... pnpm exec tsx deploy/skill-push.ts \
  *     <orgSlug> <owner/repo> <skillName> --from-git <src-owner/src-repo>@<40-hex-sha>:<src-path>
@@ -20,17 +20,30 @@
  *     deploy/skills/github-pr-merged-youtrack/SKILL.md
  *   ... deploy/skill-push.ts beautomata be-automata/automata github-ops \
  *     --from-git be-automata/skill-library@<sha>:github-ops/SKILL.md
+ *   # inspect the flattened body without touching any database:
+ *   ... deploy/skill-push.ts <orgSlug> <owner/repo> flutter-pr-review \
+ *     deploy/skills/flutter-pr-review/SKILL.md --dry-run --out /tmp/flutter.md
+ *
+ * Flattening (A5, deploy/lib/flatten-skill.ts): `<!-- include: <name> -->`
+ * lines are replaced by `<skill dir>/../_shared/<name>.md` and
+ * `<!-- include-pinned: <url> -->` lines by the pinned file fetched now, so
+ * the stored version is self-contained. Any failure exits 1 before anything
+ * is written. `--dry-run` prints the flattened body's contentSha and byte
+ * length and writes nothing to the DB; `--out <file>` writes the flattened
+ * body to a file (with or without --dry-run). Unknown flags are a hard error.
  *
  * The body is validated LOCALLY with the SAME per-skill registry the resolver
- * applies at dispatch (github-ops: fenced-json verdict contract;
- * github-pr-merged: fenced-json audit-intent contract + hard rules; others:
- * non-empty) BEFORE any DB write — a push that would only be rejected or
- * fallen-back-from at run time must fail here, loudly, instead. Frontmatter is
- * stripped exactly like the seed loader (deploy/lib/review-skill-file) so a SKILL.md
- * pushes the same text the seed would inline. The body is NEVER logged — only
- * its sha (it can be multi-KB and shas are the traceability currency).
+ * applies at dispatch (github-ops / flutter-pr-review: fenced-json verdict
+ * contract; github-pr-merged: fenced-json audit-intent contract + hard rules;
+ * others: non-empty) AFTER flattening and BEFORE any write — a push that would
+ * only be rejected or fallen-back-from at run time must fail here, loudly,
+ * instead. Frontmatter is stripped exactly like the seed loader
+ * (deploy/lib/review-skill-file) so a SKILL.md pushes the same text the seed
+ * would inline. The body is NEVER logged — only its sha (it can be multi-KB
+ * and shas are the traceability currency).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { createDb } from "../packages/shared/src/db";
 import { getOrganizationBySlug } from "../packages/shared/src/model/organizations";
 import { createRepoSkillVersion } from "../packages/shared/src/model/repo-skills";
@@ -40,93 +53,180 @@ import {
   validateSkillBody,
 } from "../apps/www/src/server-lib/review/review-skill";
 import { fetchGitPackBody, parseGitPackRef } from "./lib/git-pack-ref";
+import {
+  prepareSkillBody,
+  type FlattenOptions,
+  type PreparedSkillBody,
+} from "./lib/flatten-skill";
 
 const USAGE =
   "Usage:\n" +
-  "  local: pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> <path-to-md>\n" +
-  "  git:   pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> --from-git <src-owner/src-repo>@<40-hex-sha>:<src-path>";
+  "  local: pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> <path-to-md> [--dry-run] [--out <file>]\n" +
+  "  git:   pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> --from-git <src-owner/src-repo>@<40-hex-sha>:<src-path> [--dry-run] [--out <file>]";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  console.error(
-    "DATABASE_URL is not set. Point it at the target Postgres, e.g.\n  " +
-      USAGE,
-  );
+/** Pinned-file fetch budget: a hung CDN must fail the push, not stall it. */
+const PINNED_FETCH_TIMEOUT_MS = 30_000;
+
+function fail(message: string): never {
+  console.error(message);
   process.exit(1);
 }
 
-const [orgSlug, repoFullName, skillName, arg4, arg5] = process.argv.slice(2);
-if (!orgSlug || !repoFullName || !skillName || !arg4) {
-  console.error(USAGE);
-  process.exit(1);
+// ---- Arguments ---------------------------------------------------------------
+// Unknown --flags are a HARD ERROR, never silently dropped: a typo like
+// `--dryrun` must abort, not fall through to a live production write.
+const VALUE_FLAGS = new Set(["--from-git", "--out"]);
+const BOOLEAN_FLAGS = new Set(["--dry-run"]);
+const positional: string[] = [];
+const flagValues = new Map<string, string>();
+let dryRun = false;
+{
+  const argv = process.argv.slice(2);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
+    if (BOOLEAN_FLAGS.has(arg)) {
+      dryRun = true;
+      continue;
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        fail(`${arg} needs a value.\n${USAGE}`);
+      }
+      if (flagValues.has(arg)) fail(`${arg} given twice.\n${USAGE}`);
+      flagValues.set(arg, value);
+      i++;
+      continue;
+    }
+    fail(
+      `Unknown flag: ${arg}. Known: ${[...BOOLEAN_FLAGS, ...VALUE_FLAGS].join(", ")}. ` +
+        `Aborting — a mistyped --dry-run must never become a live write.`,
+    );
+  }
+}
+
+const gitRef = flagValues.get("--from-git");
+const outPath = flagValues.get("--out");
+const [orgSlug, repoFullName, skillName, localPath, ...extra] = positional;
+if (
+  !orgSlug ||
+  !repoFullName ||
+  !skillName ||
+  extra.length > 0 ||
+  (gitRef === undefined) === (localPath === undefined)
+) {
+  fail(USAGE);
 }
 if (!/^[^/\s]+\/[^/\s]+$/.test(repoFullName)) {
-  console.error(`repo must be 'owner/repo', got: ${repoFullName}`);
-  process.exit(1);
+  fail(`repo must be 'owner/repo', got: ${repoFullName}`);
 }
 
-const gitMode = arg4 === "--from-git";
-if (gitMode && !arg5) {
-  console.error(
-    "--from-git needs a pinned ref: <src-owner/src-repo>@<40-hex-sha>:<src-path>",
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl && !dryRun) {
+  fail(
+    "DATABASE_URL is not set. Point it at the target Postgres (or pass --dry-run), e.g.\n  " +
+      USAGE,
   );
-  process.exit(1);
 }
 
-const db = createDb(databaseUrl);
+async function fetchPinnedText(url: string) {
+  return fetch(url, {
+    redirect: "error",
+    signal: AbortSignal.timeout(PINNED_FETCH_TIMEOUT_MS),
+    headers: { "User-Agent": "automata-skill-push" },
+  });
+}
 
 async function resolveSource(): Promise<{
-  body: string;
+  raw: string;
   source: RepoSkillVersionSource;
   sourceRef: string | null;
   label: string;
+  readPartial: FlattenOptions["readPartial"];
 }> {
-  if (gitMode) {
+  if (gitRef !== undefined) {
     // Parse (validates the 40-hex pin) BEFORE any network call.
-    const ref = parseGitPackRef(arg5!);
-    const raw = await fetchGitPackBody(ref);
+    const ref = parseGitPackRef(gitRef);
     return {
-      body: stripFrontmatter(raw),
+      raw: await fetchGitPackBody(ref),
       source: "git-pack",
       sourceRef: ref.canonical,
       label: ref.canonical,
+      readPartial: () => {
+        throw new Error(
+          "local `include` partials are not available to a --from-git skill pack",
+        );
+      },
     };
   }
   let raw: string;
   try {
-    raw = readFileSync(arg4!, "utf8");
+    raw = readFileSync(localPath!, "utf8");
   } catch (err) {
     throw new Error(
-      `Skill file not readable at ${arg4}: ${(err as Error).message}`,
+      `Skill file not readable at ${localPath}: ${(err as Error).message}`,
     );
   }
+  const sharedDir = path.resolve(path.dirname(localPath!), "..", "_shared");
   return {
-    body: stripFrontmatter(raw),
+    raw,
     source: "api",
     sourceRef: null,
-    label: arg4!,
+    label: localPath!,
+    readPartial: (name) =>
+      readFileSync(path.join(sharedDir, `${name}.md`), "utf8"),
   };
 }
 
 async function main() {
   const src = await resolveSource();
 
-  // Validate BEFORE touching the DB: a body the resolver would refuse must
-  // never become a stored version some surface later trips over. Same registry
-  // the resolver applies at dispatch, whichever source the body came from.
+  // Flatten, then validate, BEFORE any write: a body the resolver would refuse
+  // must never become a stored version some surface later trips over. Same
+  // registry the resolver applies at dispatch, whichever source the body came
+  // from. Any failure here exits 1 with nothing written (no --out, no DB).
+  let prepared: PreparedSkillBody;
   try {
-    validateSkillBody(skillName!, src.body, src.label);
+    prepared = await prepareSkillBody({
+      raw: src.raw,
+      skillName: skillName!,
+      label: src.label,
+      flatten: {
+        readPartial: src.readPartial,
+        fetchText: fetchPinnedText,
+        stripFrontmatter,
+      },
+      validate: validateSkillBody,
+      writeOut: outPath
+        ? (body) => writeFileSync(outPath, body, "utf8")
+        : undefined,
+    });
   } catch (err) {
-    console.error(`Validation failed: ${(err as Error).message}`);
-    process.exit(1);
+    fail(`Skill push aborted, nothing written: ${(err as Error).message}`);
+  }
+  if (outPath) {
+    console.log(`Wrote the flattened body to ${outPath}.`);
   }
 
+  if (dryRun) {
+    console.log(
+      `[dry-run] '${skillName}' for ${repoFullName} (org '${orgSlug}') from ` +
+        `${src.label}: contentSha ${prepared.sha}, ${prepared.bytes} bytes. ` +
+        `Nothing was written to the database.`,
+    );
+    process.exit(0);
+  }
+
+  const db = createDb(databaseUrl!);
   const org = await getOrganizationBySlug({ db, slug: orgSlug! });
   if (!org) {
-    console.error(
+    fail(
       `No organization found with slug '${orgSlug}'. Create it first (dashboard).`,
     );
-    process.exit(1);
   }
 
   const { version } = await createRepoSkillVersion({
@@ -134,7 +234,7 @@ async function main() {
     organizationId: org.id,
     repoFullName: repoFullName!,
     skillName: skillName!,
-    body: src.body,
+    body: prepared.body,
     source: src.source,
     sourceRef: src.sourceRef,
   });

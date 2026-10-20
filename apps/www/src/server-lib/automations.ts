@@ -58,9 +58,15 @@ import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
   isAuditFixAction,
   CLASSIC_REVIEW_PROMPT,
+  findReviewContextDirective,
   hasReviewModeSections,
+  substituteReviewContext,
   type ReviewPromptMode,
 } from "./review/review-skill";
+import {
+  NO_PR_REVIEW_CONTEXT,
+  prefetchReviewContextForPr,
+} from "./review/prefetch-review-context";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -177,7 +183,7 @@ export async function runAutomation({
         // single seam where a stored instruction becomes a thread's first
         // message — so an accepted edit is live on the next run and in-flight
         // threads are untouched by construction.
-        const { skillName, version } = automation.action.config;
+        const { skillName, version, model } = automation.action.config;
         const resolved = await resolveReviewSkill({
           db,
           organizationId: automation.organizationId,
@@ -232,19 +238,33 @@ export async function runAutomation({
         const orchestratedApplied =
           reviewPrompt?.mode === "orchestrated" &&
           hasReviewModeSections(resolved.body);
+        const renderedBody = renderSkillPlaceholders(resolved.body, {
+          repoFullName: automation.repoFullName,
+          baseBranch: reviewDiffBase,
+          reviewPrompt,
+        });
+        // A skill's context directive is substituted LAST, after sections and
+        // placeholders, so the fetched (untrusted) GitHub text is never itself
+        // rendered. Read with the App token here; the agent never touches
+        // GitHub (ADR-004).
+        const contextFetchers = findReviewContextDirective(renderedBody);
+        const text = contextFetchers
+          ? substituteReviewContext(
+              renderedBody,
+              options?.prNumber !== undefined
+                ? await prefetchReviewContextForPr({
+                    repoFullName: automation.repoFullName,
+                    prNumber: options.prNumber,
+                    fetchers: contextFetchers,
+                  })
+                : NO_PR_REVIEW_CONTEXT,
+            )
+          : renderedBody;
         const message: DBUserMessage = {
           type: "user",
-          model: null,
-          parts: [
-            {
-              type: "text",
-              text: renderSkillPlaceholders(resolved.body, {
-                repoFullName: automation.repoFullName,
-                baseBranch: reviewDiffBase,
-                reviewPrompt,
-              }),
-            },
-          ],
+          // A pinned model wins; absent keeps the owner's default (null).
+          model: model ?? null,
+          parts: [{ type: "text", text }],
           timestamp: new Date().toISOString(),
         };
         const newThreadResult = await createNewThread({

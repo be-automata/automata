@@ -63,7 +63,6 @@ tool-policy live in apps/www (control-plane I/O), not here.
 | `src/review/review-gate.ts`          | Pipeline orchestrator; depends on `shared/logger`, `shared/errors`, executor interfaces (DiffReviewer/TestRunner/SecurityScanner).                |
 | `src/review/review-pipeline.ts`      | Pipeline; event-bus + executors.                                                                                                                  |
 | `src/review/claude-diff-reviewer.ts` | Claude Agent SDK executor.                                                                                                                        |
-| `src/review/finding-verifier.ts`     | verify-before-block; needs GitHub quote-at-HEAD.                                                                                                  |
 | `src/review/break-glass-handler.ts`  | Handler; event-bus + GitHub.                                                                                                                      |
 | `src/review/cli-test-runner.ts`      | Runs the target repo's test suite (child process).                                                                                                |
 | `src/review/package-manager.ts`      | Target-repo PM detection; intentionally multi-PM (orch-agents CLAUDE.md keeps it out of scope).                                                   |
@@ -104,3 +103,13 @@ exists but is a **worktree** lifecycle (execution concern), not review — out o
 
 - `pnpm --filter @terragon/review test` → `node --import tsx --test` → **164/164 pass**.
 - `pnpm --filter @terragon/review tsc-check` → clean.
+
+## Ported later (legacy review-lane migration)
+
+- `src/review/finding-verifier.ts` → `src/review/finding-verifier.ts`, reading the file through an injected
+  `FileAtCommitReader` (the GitHub contents API at the reviewed commit) instead of a local worktree. Adds an
+  `unchecked` outcome so an API outage never changes a verdict.
+- `src/execution/effects/verify-before-block.ts` → `src/review/verify-before-block.ts`, unchanged rules plus
+  the `unchecked` row (the finding keeps gating, annotated `[quote not checked: …]`).
+- `src/intake/context-fetchers.ts` (`formatPriorReviews`, `formatReviewThreads`) and
+  `src/integration/github-client.ts` (`formatPrView`) → `src/review/context/render.ts`, byte-compatible.

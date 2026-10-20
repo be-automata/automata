@@ -259,15 +259,19 @@ export interface SeverityFloorIntent {
 }
 
 /**
- * Server-side enforcement of the approve severity floor.
+ * Server-side enforcement of the severity floor. It only ever TIGHTENS
+ * (ADR-005); `request_changes` is always returned untouched.
  *
- * ONLY acts when the incoming verdict is `approve` — an LLM-issued `comment` or
- * `request_changes` is returned untouched (the floor never UPGRADES a verdict,
- * only downgrades a too-generous approve). When it does act it recomputes the
- * verdict from the findings' severities:
- *   - `block`   → `request_changes`
- *   - `surface` → `comment`
- *   - `clean`   → `approve` (unchanged)
+ *   - `approve` is recomputed from the findings' severities:
+ *       `block` → `request_changes`, `surface` → `comment`, `clean` → `approve`.
+ *   - `comment` carrying a GATING finding at or above the block threshold is
+ *     raised to `request_changes` — `comment` is not an escape hatch from the
+ *     agent's own findings (legacy-orchestrator parity, ADR-038). A `comment`
+ *     whose findings all sit below the threshold stays `comment`.
+ *
+ * "Gating" = not `suppressGating`: a finding whose quote failed verification
+ * (verify-before-block) is surfaced but can neither lower an `approve` nor
+ * raise a `comment`.
  *
  * Draft cap (`opts.isDraft`): a draft PR must NEVER receive a `request_changes`.
  * When the floor would block on a draft it caps the output at `comment`.
@@ -280,13 +284,17 @@ export function applyApproveSeverityFloor<T extends SeverityFloorIntent>(
   policy: ApproveSeverityPolicy,
   opts?: { isDraft?: boolean },
 ): T {
-  // Invariant: only downgrade an `approve`. Leave comment/request_changes alone.
-  if (intent.verdict !== "approve") return intent;
+  // Invariant: an LLM `request_changes` is never weakened.
+  if (intent.verdict === "request_changes") return intent;
 
   const severities = (intent.comments ?? [])
     .filter((c) => !c.suppressGating)
     .map((c) => c.severity ?? DEFAULT_SEVERITY);
-  let nextVerdict = tierToVerdict(classifySeverities(severities, policy));
+  const tier = classifySeverities(severities, policy);
+  // A `comment` moves only when a gating finding blocks; anything milder keeps
+  // the agent's own `comment` (never turned into an `approve`).
+  if (intent.verdict === "comment" && tier !== "block") return intent;
+  let nextVerdict = tierToVerdict(tier);
 
   // Draft cap: never promote approve → request_changes on a draft PR.
   if (opts?.isDraft && nextVerdict === "request_changes") {

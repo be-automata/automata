@@ -40,6 +40,9 @@ vi.mock("./octokit-review-client", () => ({
     headSha: "head-sha",
     isDraft: false,
   })),
+  // The finish hook now hands the writer a quote reader and a thread client.
+  createFileAtCommitReader: () => async () => ({ kind: "missing" as const }),
+  createOctokitThreadClient: () => ({}),
 }));
 vi.mock("@terragon/shared/model/threads", () => ({
   getThreadMinimal: vi.fn(async () => threadRow.value),
@@ -125,6 +128,16 @@ describe("handleReviewEffectAtFinish — terminal-text selection (phase 6)", () 
     const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
     expect(args.preferTaggedIntent).toBeFalsy();
     expect(args.terminalText).toBe(LEAD_RESUMED_TEXT);
+  });
+
+  it("hands the writer a quote reader and the thread-resolution client + claim", async () => {
+    threadRow.value = thread(UNSTAMPED_METADATA);
+    chatMessages.value = F2;
+    await runHook();
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(typeof args.readFileAtCommit).toBe("function");
+    expect(args.threadResolutions?.client).toBeDefined();
+    expect(typeof args.threadResolutions?.claim).toBe("function");
   });
 });
 
