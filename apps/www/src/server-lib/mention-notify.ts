@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
 import * as schema from "@terragon/shared/db/schema";
-import { ThreadErrorType } from "@terragon/shared";
+import { MentionLaneStamp, ThreadErrorType } from "@terragon/shared";
 import { DB } from "@terragon/shared/db";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 
 /**
  * #163: when a github-mention thread's boot fails, the person who mentioned
@@ -40,6 +41,10 @@ export async function notifyMentionSourceOfFailure({
       .where(eq(schema.thread.id, threadId))
       .limit(1);
 
+    if (row && isMentionLaneStamp(row.sourceMetadata)) {
+      await notifyOrgLaneMention(row.sourceMetadata.mention, errorType);
+      return;
+    }
     if (!row || row.sourceType !== "github-mention") {
       return;
     }
@@ -84,4 +89,36 @@ export async function notifyMentionSourceOfFailure({
   } catch (error) {
     console.error("[mention-notify] failed", { threadId, error });
   }
+}
+
+/**
+ * The org-owned mention lane's boot-failure reply. It carries the lane's reply
+ * marker, so a later finish of the same thread never answers twice. Lives here
+ * (not in the finish writer) to keep this boot-error path's import graph small.
+ */
+async function notifyOrgLaneMention(
+  stamp: MentionLaneStamp,
+  errorType: ThreadErrorType,
+): Promise<void> {
+  const [owner, repo] = parseRepoFullName(stamp.repoFullName);
+  const octokit = await getOctokitForApp({ owner, repo });
+  const body =
+    `⚠️ I couldn't start on this request (\`${errorType}\`). Mention me again to retry.` +
+    `\n\n<!-- automata:mention-reply comment=${stamp.commentId} -->`;
+  if (stamp.commentKind === "review_comment") {
+    await octokit.rest.pulls.createReplyForReviewComment({
+      owner,
+      repo,
+      pull_number: stamp.issueOrPrNumber,
+      comment_id: stamp.inReplyToId ?? stamp.commentId,
+      body,
+    });
+    return;
+  }
+  await octokit.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: stamp.issueOrPrNumber,
+    body,
+  });
 }

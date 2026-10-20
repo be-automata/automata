@@ -148,7 +148,35 @@ export type ThreadSourceMetadata =
       // thread runs, written at thread creation so the dispatch planner reads
       // it from the thread instead of racing the dispatcher's bind.
       selfHealAttemptId?: string;
+      // The org-owned mention lane: set ONLY on threads a mention started.
+      // The finish hook replies to this comment as the App (emit-only).
+      mention?: MentionLaneStamp;
     };
+
+/**
+ * The mention a mention-lane thread answers. Written at intake from the
+ * webhook (the comment) and the App-token permission check (the commenter);
+ * the commenter needs no platform account: the thread runs as the
+ * automation's owner and this stamp is the attribution.
+ */
+export type MentionLaneStamp = {
+  repoFullName: string;
+  issueOrPrNumber: number;
+  isPullRequest: boolean;
+  commentId: number;
+  /** issue = an issue / PR conversation comment; review_comment = inline. */
+  commentKind: "issue" | "review_comment";
+  commenterLogin: string;
+  /** Review comments only: the anchor and the (clipped) diff hunk. */
+  path?: string;
+  line?: number | null;
+  diffHunk?: string;
+  /**
+   * Review comments only: the thread's first comment when the mention is a
+   * reply (GitHub accepts replies to a thread's top-level comment only).
+   */
+  inReplyToId?: number;
+};
 
 /**
  * Server-derived trust snapshot for a PR-triggered thread (ADR-005 §3a). Captured

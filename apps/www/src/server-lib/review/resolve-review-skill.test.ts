@@ -297,15 +297,15 @@ describe("resolveReviewSkill (fallback chain)", () => {
       db,
       organizationId: orgId,
       repoFullName: REPO,
-      skillName: "github-mention",
-      body: "Respond to the GitHub mention.",
+      skillName: "github-deep-research",
+      body: "Research the issue.",
       source: "seed",
     });
     const resolved = await resolveReviewSkill({
       db,
       organizationId: orgId,
       repoFullName: REPO,
-      skillName: "github-mention",
+      skillName: "github-deep-research",
       version: "latest",
     });
     expect(resolved?.source).toBe("db-version");
@@ -319,7 +319,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
         db,
         organizationId: orgId,
         repoFullName: REPO,
-        skillName: "github-mention",
+        skillName: "github-deep-research",
         version: "latest",
       }),
     ).toBeNull();
@@ -328,7 +328,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
       db,
       organizationId: orgId,
       repoFullName: REPO,
-      skillName: "github-mention",
+      skillName: "github-deep-research",
       body: "   ",
       source: "api",
     });
@@ -337,7 +337,7 @@ describe("resolveReviewSkill (fallback chain)", () => {
         db,
         organizationId: orgId,
         repoFullName: REPO,
-        skillName: "github-mention",
+        skillName: "github-deep-research",
         version: "latest",
       }),
     ).toBeNull();

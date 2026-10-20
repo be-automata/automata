@@ -24,6 +24,7 @@ import {
 import {
   AccessTier,
   DBUserMessage,
+  MentionLaneStamp,
   ThreadTrustContext,
 } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
@@ -126,8 +127,11 @@ export async function runAutomation({
      * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
      * at thread creation, so the fix attempt travels with the thread. Applies
      * to skill_message automations only; ignored for user_message.
+     * `mention` (the org-owned mention lane) also turns git checkpointing off
+     * for the thread: the agent pushes its own fix to the PR head, and the
+     * lane never auto-commits or opens a pull request.
      */
-    stampExtra?: { selfHealAttemptId: string };
+    stampExtra?: { selfHealAttemptId?: string; mention?: MentionLaneStamp };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -292,15 +296,20 @@ export async function runAutomation({
             ...(orchestratedApplied
               ? { reviewPromptMode: "orchestrated" as const }
               : {}),
-            ...(options?.stampExtra
+            ...(options?.stampExtra?.selfHealAttemptId
               ? { selfHealAttemptId: options.stampExtra.selfHealAttemptId }
+              : {}),
+            ...(options?.stampExtra?.mention
+              ? { mention: options.stampExtra.mention }
               : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
-          disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+          disableGitCheckpointing:
+            options?.stampExtra?.mention !== undefined ||
+            (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
         });

@@ -189,3 +189,83 @@ describe("notifyMentionSourceOfFailure", () => {
     consoleErrorSpy.mockRestore();
   });
 });
+
+describe("notifyMentionSourceOfFailure — the org-owned mention lane", () => {
+  it("replies where the mention was, with the lane's marker, for an automation-stamped thread", async () => {
+    vi.clearAllMocks();
+    const { user } = await createTestUser({ db });
+    const octokit = {
+      rest: {
+        pulls: {
+          createReplyForReviewComment: vi.fn().mockResolvedValue({ data: {} }),
+        },
+        issues: { createComment: vi.fn().mockResolvedValue({ data: {} }) },
+      },
+    };
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+    const mention = {
+      repoFullName: "acme/widgets",
+      issueOrPrNumber: 4,
+      isPullRequest: true,
+      commentId: 77,
+      commenterLogin: "alice",
+    };
+    const stamp = (extra: Record<string, unknown>) => ({
+      type: "automation-skill" as const,
+      skillName: "github-mention",
+      contentSha: "sha",
+      source: "db-version",
+      mention: { ...mention, ...extra } as never,
+    });
+    const { threadId: inThread } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sourceType: "automation",
+        sourceMetadata: stamp({
+          commentKind: "review_comment",
+          inReplyToId: 70,
+        }),
+      },
+    });
+    const { threadId: topLevel } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sourceType: "automation",
+        sourceMetadata: stamp({ commentKind: "issue" }),
+      },
+    });
+
+    await notifyMentionSourceOfFailure({
+      db,
+      threadId: inThread,
+      errorType: "unknown-error",
+    });
+    await notifyMentionSourceOfFailure({
+      db,
+      threadId: topLevel,
+      errorType: "unknown-error",
+    });
+
+    expect(octokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pull_number: 4,
+        comment_id: 70,
+        body: expect.stringContaining(
+          "<!-- automata:mention-reply comment=77 -->",
+        ),
+      }),
+    );
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+      expect.objectContaining({ issue_number: 4 }),
+    );
+    for (const call of [
+      ...octokit.rest.pulls.createReplyForReviewComment.mock.calls,
+      ...octokit.rest.issues.createComment.mock.calls,
+    ]) {
+      expect(isAppMentioned((call[0] as { body: string }).body)).toBe(false);
+    }
+  });
+});
