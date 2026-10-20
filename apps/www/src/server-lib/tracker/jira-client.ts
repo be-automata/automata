@@ -15,7 +15,11 @@
  */
 
 import {
+  asArray,
   assertIssueKey,
+  asString,
+  createTrackerRequest,
+  isRecord,
   normalizeTrackerBaseUrl,
   type TrackerClient,
   type TrackerComment,
@@ -37,18 +41,6 @@ export const JIRA_SUBTASK_LINK = "Subtask";
 
 /** ADF nesting is bounded so a hostile document cannot blow the stack. */
 const MAX_ADF_DEPTH = 32;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function asString(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
 
 function attrsOf(node: Record<string, unknown>): Record<string, unknown> {
   return isRecord(node.attrs) ? node.attrs : {};
@@ -327,7 +319,8 @@ export function toJiraWikiText(text: string): string {
   );
 }
 
-function sameName(a: string, b: string): boolean {
+/** Jira status names compare trimmed and case-insensitively. */
+export function sameName(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
@@ -351,38 +344,12 @@ export function createJiraClient({
     String.fromCharCode(...new TextEncoder().encode(`${username}:${token}`)),
   )}`;
 
-  async function request(
-    operation: string,
-    method: "GET" | "POST",
-    path: string,
-    body?: unknown,
-  ): Promise<unknown> {
-    const response = await fetchImpl(`${origin}${path}`, {
-      method,
-      headers: {
-        Authorization: authorization,
-        Accept: "application/json",
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-      // Never follow a redirect: the credential must not travel to another
-      // host. "manual" — the Workers runtime rejects "error" — so a 3xx fails
-      // the `ok` check below like any other non-2xx.
-      redirect: "manual",
-    });
-    if (!response.ok) {
-      // Status only; the body can echo request details.
-      throw new TrackerRequestError(operation, response.status);
-    }
-    const text = await response.text();
-    if (!text) return null;
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new TrackerRequestError(`${operation} parse`, 502);
-    }
-  }
+  const request = createTrackerRequest({
+    base: origin,
+    authorization,
+    timeoutMs,
+    fetchImpl,
+  });
 
   function issuePath(key: string, suffix = ""): string {
     assertIssueKey(key);
@@ -394,6 +361,10 @@ export function createJiraClient({
       await request("transitions fetch", "GET", issuePath(key, "/transitions")),
     );
   }
+
+  // `listStageTargets` then `setStage` on the same key is one move: the list
+  // just fetched is reused once instead of fetching it again.
+  let listed: { key: string; transitions: JiraTransition[] } | null = null;
 
   return {
     async getIssue(key) {
@@ -416,14 +387,16 @@ export function createJiraClient({
     },
 
     async listStageTargets(key) {
-      return [
-        ...new Set((await transitions(key)).map((transition) => transition.to)),
-      ];
+      const available = await transitions(key);
+      listed = { key, transitions: available };
+      return [...new Set(available.map((transition) => transition.to))];
     },
 
     async setStage(key, stage) {
-      const transition = (await transitions(key)).find((candidate) =>
-        sameName(candidate.to, stage),
+      const cached = listed?.key === key ? listed.transitions : null;
+      listed = null;
+      const transition = (cached ?? (await transitions(key))).find(
+        (candidate) => sameName(candidate.to, stage),
       );
       if (!transition) {
         throw new TrackerTransitionError(stage);

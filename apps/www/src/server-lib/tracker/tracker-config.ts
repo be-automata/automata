@@ -5,6 +5,8 @@ import {
   getControlPlaneTrackerEnvironment,
 } from "@/server-lib/env-audience";
 
+import { selectsJira, TRACKER_CONFIG_KEYS } from "@/lib/tracker-env-keys";
+
 import { normalizeProjects } from "./extract-ticket-keys";
 import { normalizeTrackerBaseUrl } from "./youtrack-client";
 
@@ -59,17 +61,7 @@ export type TrackerConfig = YouTrackTrackerConfig | JiraTrackerConfig;
 
 export type TrackerKind = TrackerConfig["kind"];
 
-/** Every key the tracker config reads, for diagnostics. Names only. */
-export const TRACKER_CONFIG_KEYS = [
-  "YOUTRACK_URL",
-  "YOUTRACK_TOKEN",
-  "YOUTRACK_PROJECTS",
-  "JIRA_URL",
-  "JIRA_USERNAME",
-  "JIRA_API_TOKEN",
-  "JIRA_PROJECTS",
-  "AUTOMATA_TRACKER_WRITES",
-] as const;
+export { TRACKER_CONFIG_KEYS };
 
 /** The URL and token keys of each tracker kind. */
 export const TRACKER_CREDENTIAL_KEYS: Record<
@@ -80,15 +72,6 @@ export const TRACKER_CREDENTIAL_KEYS: Record<
   jira: { url: "JIRA_URL", token: "JIRA_API_TOKEN" },
 };
 
-/** True when the Jira keys select Jira as the tracker. */
-function selectsJira(lookup: ReadonlyMap<string, string>): boolean {
-  return (
-    !!lookup.get("JIRA_URL") &&
-    !!lookup.get("JIRA_USERNAME") &&
-    !!lookup.get("JIRA_API_TOKEN")
-  );
-}
-
 export function parseTrackerConfig(
   variables: ReadonlyArray<{ key: string; value: string }>,
 ): TrackerConfig | null {
@@ -97,7 +80,7 @@ export function parseTrackerConfig(
   );
   const writes: TrackerWriteMode =
     lookup.get("AUTOMATA_TRACKER_WRITES") === "live" ? "live" : "off";
-  if (selectsJira(lookup)) {
+  if (selectsJira((key) => !!lookup.get(key))) {
     return {
       kind: "jira",
       // Invalid → TrackerConfigError, exactly like YOUTRACK_URL below.

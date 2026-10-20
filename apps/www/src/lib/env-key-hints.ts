@@ -6,6 +6,11 @@
  */
 
 import { SLACK_APP_ENV_KEYS } from "./slack-app-keys";
+import {
+  JIRA_REQUIRED_KEYS,
+  selectsJira,
+  TRACKER_CONFIG_KEYS,
+} from "./tracker-env-keys";
 
 export type EnvKeyScope = "global" | "organization" | "repository";
 
@@ -62,20 +67,6 @@ export const ENV_KEY_ALIASES: Readonly<Record<string, string>> = {
   JIRA_PROJECT: "JIRA_PROJECTS",
 };
 
-const TRACKER_KEYS = [
-  "YOUTRACK_URL",
-  "YOUTRACK_TOKEN",
-  "YOUTRACK_PROJECTS",
-  "JIRA_URL",
-  "JIRA_USERNAME",
-  "JIRA_API_TOKEN",
-  "JIRA_PROJECTS",
-  "AUTOMATA_TRACKER_WRITES",
-];
-
-/** Jira is selected only when all three are set. */
-const JIRA_REQUIRED_KEYS = ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"];
-
 export function getEnvKeyHints(
   variables: ReadonlyArray<{ key: string; value?: string }>,
   scope: EnvKeyScope,
@@ -113,7 +104,7 @@ export function getEnvKeyHints(
   }
 
   if (scope === "global") {
-    const trackerKeys = TRACKER_KEYS.filter((key) => keys.has(key));
+    const trackerKeys = TRACKER_CONFIG_KEYS.filter((key) => keys.has(key));
     if (trackerKeys.length > 0) {
       hints.push({
         key: null,
@@ -138,7 +129,7 @@ export function getEnvKeyHints(
   if (
     scope === "organization" &&
     presentJiraKeys.length > 0 &&
-    presentJiraKeys.length < JIRA_REQUIRED_KEYS.length
+    !selectsJira((key) => keys.has(key))
   ) {
     const missing = JIRA_REQUIRED_KEYS.filter((key) => !keys.has(key));
     hints.push({

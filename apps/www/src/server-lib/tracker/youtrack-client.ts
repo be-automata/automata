@@ -169,15 +169,15 @@ export function assertIssueKey(key: string): void {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function asString(value: unknown): string {
+export function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function asArray(value: unknown): unknown[] {
+export function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
@@ -248,6 +248,57 @@ export function parseTrackerIssue(raw: unknown): TrackerIssue {
   };
 }
 
+/**
+ * The one HTTP path every tracker client takes: JSON in and out, a per-request
+ * timeout, and errors typed by operation and status only — the response body
+ * can echo request details and is never logged or surfaced.
+ */
+export function createTrackerRequest({
+  base,
+  authorization,
+  timeoutMs,
+  fetchImpl,
+}: {
+  /** Origin plus API prefix; request paths are appended to it. */
+  base: string;
+  authorization: string;
+  timeoutMs: number;
+  fetchImpl: typeof fetch;
+}) {
+  return async function request(
+    operation: string,
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
+    const response = await fetchImpl(`${base}${path}`, {
+      method,
+      headers: {
+        Authorization: authorization,
+        Accept: "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+      // Never follow a redirect: the credential must not travel to another
+      // host. "manual", not "error" — the Workers runtime rejects "error"
+      // outright (only "follow" | "manual" are valid there), and a 3xx then
+      // fails the `ok` check below like any other non-2xx.
+      redirect: "manual",
+    });
+    if (!response.ok) {
+      throw new TrackerRequestError(operation, response.status);
+    }
+    const text = await response.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new TrackerRequestError(`${operation} parse`, 502);
+    }
+  };
+}
+
 export function createYouTrackClient({
   baseUrl,
   token,
@@ -262,40 +313,12 @@ export function createYouTrackClient({
 }): TrackerClient {
   const origin = normalizeTrackerBaseUrl(baseUrl);
 
-  async function request(
-    operation: string,
-    method: "GET" | "POST",
-    path: string,
-    body?: unknown,
-  ): Promise<unknown> {
-    const response = await fetchImpl(`${origin}/api${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-      // Never follow a redirect: the bearer must not travel to another host.
-      // "manual", not "error" — the Workers runtime rejects "error" outright
-      // (only "follow" | "manual" are valid there), and a 3xx then fails the
-      // `ok` check below like any other non-2xx.
-      redirect: "manual",
-    });
-    if (!response.ok) {
-      // Status only. The response body can echo request details and is never
-      // logged or surfaced.
-      throw new TrackerRequestError(operation, response.status);
-    }
-    const text = await response.text();
-    if (!text) return null;
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new TrackerRequestError(`${operation} parse`, 502);
-    }
-  }
+  const request = createTrackerRequest({
+    base: `${origin}/api`,
+    authorization: `Bearer ${token}`,
+    timeoutMs,
+    fetchImpl,
+  });
 
   function issuePath(key: string, fields: string): string {
     assertIssueKey(key);

@@ -1,19 +1,18 @@
-import { JIRA_SUBTASK_LINK } from "./jira-client";
+import { JIRA_SUBTASK_LINK, sameName } from "./jira-client";
 import {
   ALLOWED_STAGE_TARGETS,
   canonicalStage,
   decidePrimaryTransition,
-  decideSiblingPromotion,
-  decideSiblingPromotionWith,
   inlineCode,
   isClearedIssue,
   isTerminalIssue,
   sanitizeInline,
+  type SiblingPromotionVocabulary,
   type TransitionDecision,
 } from "./merge-audit";
 import type { MergeAuditTicket } from "./parse-merge-audit-intent";
 import type { TrackerKind } from "./tracker-config";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import type { TrackerLinkedIssue } from "./youtrack-client";
 
 /**
  * Per-tracker stage vocabulary for the post-merge audit (ADR-008). Pure.
@@ -45,27 +44,19 @@ interface StagedIssue {
   resolved: boolean;
 }
 
-export interface TrackerStagePolicy {
-  readonly kind: TrackerKind;
+/** Where a dependant goes once its final blocker merged, on every tracker. */
+export const PROMOTION_TARGET = "To Do";
+
+export interface TrackerStagePolicy extends SiblingPromotionVocabulary {
   /** The ONLY stage targets a decision may name. Checked again at the write. */
   readonly allowedTargets: readonly string[];
   /** Target of a completed merge; only that move probes the dependants. */
   readonly mergedTarget: string;
-  /** Where a dependant goes once its final blocker merged. */
-  readonly promotionTarget: string;
   /** Link type whose OUTWARD side lists the tickets this one blocks. */
   readonly dependLinkType: string;
   /** Link type whose OUTWARD side lists this ticket's subtasks. */
   readonly subtaskLinkType: string;
-  /** Action shown for an open subtask that holds the ticket back. */
-  readonly openSubtaskAction: string;
-  decidePrimaryTransition(
-    input: PrimaryTransitionInput,
-  ): TransitionDecision<string>;
-  decideSiblingPromotion(input: { mergedKey: string; sibling: TrackerIssue }): {
-    promote: boolean;
-    reason: string;
-  };
+  decidePrimaryTransition(input: PrimaryTransitionInput): TransitionDecision;
   isTerminalIssue(issue: StagedIssue): boolean;
   isClearedIssue(issue: StagedIssue): boolean;
   /**
@@ -86,15 +77,12 @@ export interface TrackerStagePolicy {
 // ---------------------------------------------------------------------------
 
 export const youTrackStagePolicy: TrackerStagePolicy = {
-  kind: "youtrack",
   allowedTargets: ALLOWED_STAGE_TARGETS,
   mergedTarget: "PR Merged",
-  promotionTarget: "To Do",
   dependLinkType: "Depend",
   subtaskLinkType: "Subtask",
-  openSubtaskAction: "Open — holds this ticket short of PR Merged",
   decidePrimaryTransition,
-  decideSiblingPromotion,
+  isBacklog: (stage) => canonicalStage(stage) === "Backlog",
   isTerminalIssue,
   isClearedIssue,
   resolveTarget: (target) => ({ stage: target, fallback: false }),
@@ -136,8 +124,8 @@ export function decideJiraPrimaryTransition({
   resolved,
   audit,
   openSubtasks,
-}: PrimaryTransitionInput): TransitionDecision<string> {
-  const unchanged = (note: string): TransitionDecision<string> => ({
+}: PrimaryTransitionInput): TransitionDecision {
+  const unchanged = (note: string): TransitionDecision => ({
     target: null,
     note,
   });
@@ -187,22 +175,12 @@ export function decideJiraPrimaryTransition({
 }
 
 export const jiraStagePolicy: TrackerStagePolicy = {
-  kind: "jira",
-  allowedTargets: [JIRA_READY_FOR_QA, JIRA_CODE_REVIEW, "To Do"],
+  allowedTargets: [JIRA_READY_FOR_QA, JIRA_CODE_REVIEW, PROMOTION_TARGET],
   mergedTarget: JIRA_READY_FOR_QA,
-  promotionTarget: "To Do",
   dependLinkType: "Blocks",
   subtaskLinkType: JIRA_SUBTASK_LINK,
-  openSubtaskAction: `Open — holds this ticket short of ${JIRA_READY_FOR_QA}`,
   decidePrimaryTransition: decideJiraPrimaryTransition,
-  decideSiblingPromotion: ({ mergedKey, sibling }) =>
-    decideSiblingPromotionWith({
-      mergedKey,
-      sibling,
-      isBacklog: (stage) => /^backlog$/i.test(stage?.trim() ?? ""),
-      dependLinkType: "Blocks",
-      isCleared: jiraIsCleared,
-    }),
+  isBacklog: (stage) => /^backlog$/i.test(stage?.trim() ?? ""),
   isTerminalIssue: jiraIsTerminal,
   isClearedIssue: jiraIsCleared,
   resolveTarget(target, available) {
@@ -219,14 +197,13 @@ export const jiraStagePolicy: TrackerStagePolicy = {
         return first(READY_FOR_QA_RE) ?? first(REVIEW_RE, true);
       case JIRA_CODE_REVIEW:
         return first(REVIEW_RE);
-      case "To Do":
+      case PROMOTION_TARGET:
         return first(/^to do$/i);
       default:
         return null;
     }
   },
-  reached: (stageAfter, requested) =>
-    (stageAfter ?? "").trim().toLowerCase() === requested.trim().toLowerCase(),
+  reached: (stageAfter, requested) => sameName(stageAfter ?? "", requested),
 };
 
 export function stagePolicyFor(kind: TrackerKind): TrackerStagePolicy {

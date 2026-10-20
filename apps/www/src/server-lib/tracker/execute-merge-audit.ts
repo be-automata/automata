@@ -1,5 +1,6 @@
 import { extractTicketKeys } from "./extract-ticket-keys";
 import {
+  decideSiblingPromotion,
   isBlockerNotice,
   isMergeRecord,
   linksOf,
@@ -18,6 +19,7 @@ import {
   parseMergeAuditIntent,
 } from "./parse-merge-audit-intent";
 import {
+  PROMOTION_TARGET,
   type ResolvedStage,
   stagePolicyFor,
   type TrackerStagePolicy,
@@ -183,7 +185,7 @@ async function probeDependant(
   ) {
     return { stage, action: "Already notified" };
   }
-  const promotion = policy.decideSiblingPromotion({ mergedKey, sibling });
+  const promotion = decideSiblingPromotion(policy, { mergedKey, sibling });
   if (!promotion.promote) {
     if (live) {
       await tracker.addComment(
@@ -196,7 +198,7 @@ async function probeDependant(
       action: `${live ? "Notified" : "Would notify"} — ${promotion.reason}`,
     };
   }
-  const target = policy.promotionTarget;
+  const target = PROMOTION_TARGET;
   if (!live) {
     return {
       stage,
@@ -326,7 +328,7 @@ async function auditTicket(
       key: child.key,
       relation: "subtask",
       stage: child.stage,
-      action: policy.openSubtaskAction,
+      action: `Open — holds this ticket short of ${policy.mergedTarget}`,
     })),
     errors: [],
   };

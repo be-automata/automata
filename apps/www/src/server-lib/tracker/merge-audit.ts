@@ -155,10 +155,8 @@ export function formatScore(score: AuditScore): string {
 // Stage decisions
 // ---------------------------------------------------------------------------
 
-export interface TransitionDecision<
-  Target extends string = AllowedStageTarget,
-> {
-  target: Target | null;
+export interface TransitionDecision {
+  target: string | null;
   /** One line explaining the decision, shown in both comments. */
   note: string;
 }
@@ -237,41 +235,18 @@ export function decidePrimaryTransition({
  * blockers. That also makes the rule safe against a mis-read link direction —
  * if the relation were the other way round, the guard fails and nothing moves.
  */
-export function decideSiblingPromotion({
-  mergedKey,
-  sibling,
-}: {
-  mergedKey: string;
-  sibling: TrackerIssue;
-}): { promote: boolean; reason: string } {
-  return decideSiblingPromotionWith({
-    mergedKey,
-    sibling,
-    isBacklog: (stage) => canonicalStage(stage) === "Backlog",
-    dependLinkType: "Depend",
-    isCleared: isClearedIssue,
-  });
+/** The tracker vocabulary the promotion rule reads — a stage policy. */
+export interface SiblingPromotionVocabulary {
+  /** Link type whose INWARD side lists the sibling's blockers. */
+  readonly dependLinkType: string;
+  isBacklog(stage: string | null): boolean;
+  isClearedIssue(issue: TrackerLinkedIssue): boolean;
 }
 
-/**
- * The promotion rule with the tracker's vocabulary passed in — the link type
- * that reads "blocks", what counts as `Backlog`, and when a blocker is cleared.
- * `decideSiblingPromotion` is this rule with YouTrack's vocabulary.
- */
-export function decideSiblingPromotionWith({
-  mergedKey,
-  sibling,
-  isBacklog,
-  dependLinkType,
-  isCleared,
-}: {
-  mergedKey: string;
-  sibling: TrackerIssue;
-  isBacklog: (stage: string | null) => boolean;
-  /** Link type whose INWARD side lists the sibling's blockers. */
-  dependLinkType: string;
-  isCleared: (issue: TrackerLinkedIssue) => boolean;
-}): { promote: boolean; reason: string } {
+export function decideSiblingPromotion(
+  { dependLinkType, isBacklog, isClearedIssue }: SiblingPromotionVocabulary,
+  { mergedKey, sibling }: { mergedKey: string; sibling: TrackerIssue },
+): { promote: boolean; reason: string } {
   if (!isBacklog(sibling.stage)) {
     return {
       promote: false,
@@ -286,7 +261,7 @@ export function decideSiblingPromotionWith({
     };
   }
   const stillOpen = blockers.filter(
-    (blocker) => blocker.key !== mergedKey && !isCleared(blocker),
+    (blocker) => blocker.key !== mergedKey && !isClearedIssue(blocker),
   );
   if (stillOpen.length > 0) {
     return {
@@ -408,7 +383,7 @@ export interface TicketAuditResult {
   summary: string;
   stageBefore: string | null;
   stageAfter: string | null;
-  decision: TransitionDecision<string>;
+  decision: TransitionDecision;
   /** True when the stage write was performed and read back as the target. */
   transitionApplied: boolean;
   audit: MergeAuditTicket | null;

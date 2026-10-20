@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decidePrimaryTransition } from "./merge-audit";
+import { decidePrimaryTransition, decideSiblingPromotion } from "./merge-audit";
 import {
   decideJiraPrimaryTransition,
   jiraStagePolicy,
@@ -133,7 +133,7 @@ describe("jiraStagePolicy.resolveTarget", () => {
   });
 });
 
-describe("jiraStagePolicy.decideSiblingPromotion", () => {
+describe("decideSiblingPromotion with the Jira policy", () => {
   const sibling = (
     stage: string,
     blockers: TrackerLinkedIssue[],
@@ -156,7 +156,7 @@ describe("jiraStagePolicy.decideSiblingPromotion", () => {
 
   it("promotes a Backlog issue whose last blocker merged", () => {
     expect(
-      jiraStagePolicy.decideSiblingPromotion({
+      decideSiblingPromotion(jiraStagePolicy, {
         mergedKey: "ACME-1",
         sibling: sibling("Backlog", [
           linked("ACME-1", "In Progress"),
@@ -167,7 +167,7 @@ describe("jiraStagePolicy.decideSiblingPromotion", () => {
   });
 
   it("holds when another blocker is still open", () => {
-    const decision = jiraStagePolicy.decideSiblingPromotion({
+    const decision = decideSiblingPromotion(jiraStagePolicy, {
       mergedKey: "ACME-1",
       sibling: sibling("Backlog", [
         linked("ACME-1", "In Progress"),
@@ -180,7 +180,7 @@ describe("jiraStagePolicy.decideSiblingPromotion", () => {
 
   it("never promotes when the merged key is not a blocker", () => {
     expect(
-      jiraStagePolicy.decideSiblingPromotion({
+      decideSiblingPromotion(jiraStagePolicy, {
         mergedKey: "ACME-1",
         sibling: sibling("Backlog", [linked("ACME-7", "Done", true)]),
       }).promote,
