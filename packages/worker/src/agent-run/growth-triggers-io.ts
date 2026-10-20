@@ -27,6 +27,7 @@ import {
   dedupeStatesFromSnapshot,
   evaluateRamSwap,
   evaluateRunSignals,
+  GROWTH_TRIGGER_IDS,
   growthWindow,
   parseMemTotalAvailable,
   parsePswpin,
@@ -42,14 +43,18 @@ import {
   type TriggerEvaluation,
 } from "./growth-triggers";
 import { loadGrowthTriggerConfig } from "./growth-trigger-config";
-import { writeSnapshotAtomic } from "./scheduling-maintenance";
+import { errnoCode } from "./node-errors";
+import {
+  writeSnapshotAtomic,
+  type SnapshotWriteOptions,
+} from "./scheduling-maintenance";
 
 /** Rows per page of the collection route. */
 export const GROWTH_RUNS_PAGE_LIMIT = 200;
 /** Hard cap on pages per read (~600 run rows / 7 days today; 50 pages = 10 000 rows). */
 export const GROWTH_RUNS_MAX_PAGES = 50;
 /** Upper bound on one webhook POST; the effective timeout is min(this, intervalMs / 2) (V2). */
-export const GROWTH_WEBHOOK_TIMEOUT_CAP_MS = 10_000;
+const GROWTH_WEBHOOK_TIMEOUT_CAP_MS = 10_000;
 /** The snapshot file under `<runNamespaceRoot>`. */
 export const GROWTH_SNAPSHOT_FILENAME = "growth-triggers.json";
 /** Snapshot permissions (V9): owner rw, group r, other none. */
@@ -59,12 +64,14 @@ export const GROWTH_SNAPSHOT_MODE = 0o640;
  * tick budget: a hung engine must still leave the tick time to POST a /proc-backed fire
  * (ram_swap does not depend on the engine).
  */
-export const GROWTH_ENGINE_READ_BUDGET_FRACTION = 0.5;
+const GROWTH_ENGINE_READ_BUDGET_FRACTION = 0.5;
 /** Every POST must finish within this fraction of the interval, so ticks cannot stack. */
-export const GROWTH_TICK_BUDGET_FRACTION = 0.95;
+const GROWTH_TICK_BUDGET_FRACTION = 0.95;
 
 const PROC_MEMINFO = "/proc/meminfo";
 const PROC_VMSTAT = "/proc/vmstat";
+/** The fixed phrase for a read or POST that ran out of tick budget. */
+const DEADLINE_EXCEEDED = "tick deadline exceeded";
 
 /** The error's class name only (`TimeoutError`, `AbortError`, `TypeError`) — never its message. */
 function errorName(err: unknown): string {
@@ -112,7 +119,7 @@ async function withDeadline<T>(
 // Engine collection route
 // ---------------------------------------------------------------------------
 
-export interface ReadRunWindowInput {
+interface ReadRunWindowInput {
   apiUrl: string;
   tenantId: string;
   /** Never logged, never returned. */
@@ -152,7 +159,7 @@ function parseRunsPage(body: unknown): RunsPage | null {
   };
 }
 
-export function buildRunWindowUrl(input: {
+function buildRunWindowUrl(input: {
   apiUrl: string;
   tenantId: string;
   sinceMs: number;
@@ -227,10 +234,6 @@ export async function readRunWindow(
   const now = input.now ?? Date.now;
   const rowsById = new Map<string, RunRow>();
   const anonymousRows: RunRow[] = [];
-  const collected = (): RunsReading => ({
-    kind: "rows",
-    rows: [...rowsById.values(), ...anonymousRows],
-  });
   let offset = 0;
 
   for (let page = 0; page < GROWTH_RUNS_MAX_PAGES; page++) {
@@ -238,7 +241,7 @@ export async function readRunWindow(
     if (remainingMs <= 0) {
       return {
         kind: "unreadable",
-        reason: "engine read: tick deadline exceeded",
+        reason: `engine read: ${DEADLINE_EXCEEDED}`,
       };
     }
     const url = buildRunWindowUrl({
@@ -254,7 +257,7 @@ export async function readRunWindow(
     if (bounded.timedOut) {
       return {
         kind: "unreadable",
-        reason: "engine read: tick deadline exceeded",
+        reason: `engine read: ${DEADLINE_EXCEEDED}`,
       };
     }
     if (bounded.value.kind === "unreadable") return bounded.value;
@@ -271,7 +274,9 @@ export async function readRunWindow(
     const noNext =
       parsed.nextPage === null ||
       (parsed.currentPage !== null && parsed.nextPage <= parsed.currentPage);
-    if (shortPage || noNext) return collected();
+    if (shortPage || noNext) {
+      return { kind: "rows", rows: [...rowsById.values(), ...anonymousRows] };
+    }
     offset += parsed.rows.length;
   }
   return { kind: "unreadable", reason: "engine read: page cap" };
@@ -281,11 +286,11 @@ export async function readRunWindow(
 // /proc
 // ---------------------------------------------------------------------------
 
-export type MemReading =
+type MemReading =
   | { kind: "sample"; sample: MemSample }
   | { kind: "unreadable"; reason: string };
 
-export type ReadText = (filePath: string) => Promise<string>;
+type ReadText = (filePath: string) => Promise<string>;
 
 /**
  * One RAM/swap sample. An unreadable or malformed `/proc/meminfo` is `unreadable` (the
@@ -326,7 +331,7 @@ export async function readMemSample(
 // Webhook sink
 // ---------------------------------------------------------------------------
 
-export type WebhookResult =
+type WebhookResult =
   | { delivered: true; status: number }
   | { delivered: false; status?: number; reason: string };
 
@@ -388,7 +393,7 @@ export async function postWebhook(
 // The driver
 // ---------------------------------------------------------------------------
 
-export interface GrowthEngineTarget {
+interface GrowthEngineTarget {
   apiUrl: string;
   tenantId: string;
   /** Never logged. */
@@ -398,8 +403,7 @@ export interface GrowthEngineTarget {
 export type WriteSnapshot = (
   dir: string,
   snapshot: GrowthSnapshot,
-  filename: string,
-  mode: number,
+  options: Required<SnapshotWriteOptions>,
 ) => void;
 
 export interface GrowthTriggerDeps {
@@ -420,14 +424,14 @@ export interface GrowthTriggerDeps {
   log?: (line: string) => void;
 }
 
-export interface GrowthTickResult {
+interface GrowthTickResult {
   /** True when another tick was still in flight and this one did nothing. */
   skipped: boolean;
   /** The snapshot written (or attempted) this tick; null when skipped or the tick failed. */
   snapshot: GrowthSnapshot | null;
 }
 
-export interface GrowthTriggersHandle {
+interface GrowthTriggersHandle {
   /** One evaluation. Exported for tests: no real timers anywhere in the suite. */
   tick: () => Promise<GrowthTickResult>;
   /** The immediate tick fired at arm time; tests await it. */
@@ -451,7 +455,7 @@ function defaultReadSnapshot(filePath: string): string | null {
   try {
     return readFileSync(filePath, "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (errnoCode(err) === "ENOENT") return null;
     throw err;
   }
 }
@@ -485,8 +489,7 @@ export function armGrowthTriggers(
   const readText: ReadText =
     deps.readText ?? ((p: string) => readFile(p, "utf8"));
   const writeSnapshot: WriteSnapshot =
-    deps.writeSnapshot ??
-    ((dir, snap, file, mode) => writeSnapshotAtomic(dir, snap, file, mode));
+    deps.writeSnapshot ?? writeSnapshotAtomic;
   const readSnapshot = deps.readSnapshot ?? defaultReadSnapshot;
   const schedule =
     deps.setInterval ??
@@ -570,16 +573,16 @@ export function armGrowthTriggers(
       sustainMs,
       ...(mem.kind === "unreadable" ? { unreadableReason: mem.reason } : {}),
     });
-    const evaluations: TriggerEvaluation[] = [
-      runSignals.queueWait,
-      ramSwap,
-      runSignals.clientShare,
-      runSignals.scaleComposite,
-      runSignals.supersedeWaste,
-    ];
+    const evaluations: Record<GrowthTriggerId, TriggerEvaluation> = {
+      queue_wait_p90: runSignals.queueWait,
+      ram_swap: ramSwap,
+      client_share: runSignals.clientShare,
+      scale_composite: runSignals.scaleComposite,
+      supersede_waste: runSignals.supersedeWaste,
+    };
 
-    for (const evaluation of evaluations) {
-      const id = evaluation.trigger;
+    for (const id of GROWTH_TRIGGER_IDS) {
+      const evaluation = evaluations[id];
       if (evaluation.verdict === "unknown") {
         const reason = evaluation.reason ?? "unknown";
         if (unknownReasonLogged.get(id) !== reason) {
@@ -592,10 +595,7 @@ export function armGrowthTriggers(
       }
       const current = states[id];
       const transition = decideTransition(current, evaluation.verdict, nowMs);
-      if (transition.action === "none") {
-        states[id] = commitTransition(current, transition, true);
-        continue;
-      }
+      if (transition.action === "none") continue;
       const state = transition.action === "fire" ? "fired" : "cleared";
       const body = buildWebhookBody({
         evaluation,
@@ -606,7 +606,7 @@ export function armGrowthTriggers(
       const remainingMs = deadlineMs - now();
       const result: WebhookResult =
         remainingMs <= 0
-          ? { delivered: false, reason: "tick deadline exceeded" }
+          ? { delivered: false, reason: DEADLINE_EXCEEDED }
           : await postWebhook(
               config.webhookUrl,
               body,
@@ -644,16 +644,13 @@ export function armGrowthTriggers(
       stats: runSignals.stats,
     });
     try {
-      writeSnapshot(
-        deps.snapshotDir,
-        snapshot,
-        GROWTH_SNAPSHOT_FILENAME,
-        GROWTH_SNAPSHOT_MODE,
-      );
+      writeSnapshot(deps.snapshotDir, snapshot, {
+        filename: GROWTH_SNAPSHOT_FILENAME,
+        mode: GROWTH_SNAPSHOT_MODE,
+      });
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | undefined)?.code;
       logLine(log, "growth.snapshot_write_failed", {
-        error: typeof code === "string" ? code : errorName(err),
+        error: errnoCode(err) ?? errorName(err),
       });
     }
     return snapshot;

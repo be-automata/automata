@@ -482,7 +482,7 @@ function harness(opts: { snapshotText?: string | null } = {}): Harness {
       return engine();
     },
   );
-  const writeSnapshot: WriteSnapshot = (dir, snapshot, filename, mode) => {
+  const writeSnapshot: WriteSnapshot = (dir, snapshot, { filename, mode }) => {
     writes.push({ dir, snapshot: structuredClone(snapshot), filename, mode });
   };
 
@@ -906,11 +906,11 @@ describe("writeSnapshotAtomic", () => {
   it("writes the file and leaves no temp file behind (default behaviour)", () => {
     const root = tmpRoot();
     try {
-      writeSnapshotAtomic(root, { a: 1 }, "s.json");
+      writeSnapshotAtomic(root, { a: 1 }, { filename: "s.json" });
       expect(
         JSON.parse(fs.readFileSync(path.join(root, "s.json"), "utf8")),
       ).toEqual({ a: 1 });
-      writeSnapshotAtomic(root, { a: 2 }, "m.json", 0o640);
+      writeSnapshotAtomic(root, { a: 2 }, { filename: "m.json", mode: 0o640 });
       expect(fs.statSync(path.join(root, "m.json")).mode & 0o777).toBe(0o640);
       expect(fs.readdirSync(root).sort()).toEqual(["m.json", "s.json"]);
     } finally {
@@ -930,7 +930,7 @@ describe("writeSnapshotAtomic", () => {
         fs.mkdirSync(path.join(root, "busy.json"));
         fs.writeFileSync(path.join(root, "busy.json", "x"), "x");
         expect(() =>
-          writeSnapshotAtomic(root, { a: 1 }, "busy.json", mode),
+          writeSnapshotAtomic(root, { a: 1 }, { filename: "busy.json", mode }),
         ).toThrow();
         expect(fs.readdirSync(root)).toEqual(["busy.json"]);
       } finally {

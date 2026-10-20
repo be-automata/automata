@@ -22,25 +22,25 @@
 /** One UTC day, milliseconds. */
 export const DAY_MS = 86_400_000;
 /** The run-signal window: the last 7 COMPLETE UTC days; today's partial day is excluded (V6). */
-export const GROWTH_WINDOW_DAYS = 7;
+const GROWTH_WINDOW_DAYS = 7;
 /** Queue-wait daily p90 must exceed this on every one of the 7 days. */
-export const QUEUE_WAIT_P90_THRESHOLD_S = 600;
+const QUEUE_WAIT_P90_THRESHOLD_S = 600;
 /** The p90 is nearest-rank at this percentile. */
-export const QUEUE_WAIT_PERCENTILE = 0.9;
+const QUEUE_WAIT_PERCENTILE = 0.9;
 /** One client's share of ATTRIBUTED run time must exceed this (Q-1). */
-export const CLIENT_SHARE_THRESHOLD = 0.4;
+const CLIENT_SHARE_THRESHOLD = 0.4;
 /** ...and only when the window holds at least this many distinct orgs (Q-1). */
-export const CLIENT_SHARE_MIN_ORGS = 2;
+const CLIENT_SHARE_MIN_ORGS = 2;
 /** Scale-composite arm: distinct clients must exceed this. */
-export const SCALE_CLIENTS_THRESHOLD = 5;
+const SCALE_CLIENTS_THRESHOLD = 5;
 /** Scale-composite arm: the 7-day average of distinct PRs per UTC day must exceed this (Q-2). */
-export const SCALE_PRS_PER_DAY_THRESHOLD = 100;
+const SCALE_PRS_PER_DAY_THRESHOLD = 100;
 /** Scale composite fires when at least this many of its three arms hold ("any two"). */
-export const SCALE_COMPOSITE_MIN_ARMS = 2;
+const SCALE_COMPOSITE_MIN_ARMS = 2;
 /** CANCELLED run time over all run time must exceed this (#372 AC 9). */
-export const SUPERSEDE_WASTE_THRESHOLD = 0.2;
+const SUPERSEDE_WASTE_THRESHOLD = 0.2;
 /** A trigger that stays over re-fires at most once per this window. */
-export const GROWTH_REFIRE_MS = 24 * 60 * 60 * 1000;
+export const GROWTH_REFIRE_MS = DAY_MS;
 
 export type GrowthTriggerId =
   | "queue_wait_p90"
@@ -68,7 +68,7 @@ export const AUTHORIZED_MOVES: Readonly<Record<GrowthTriggerId, string>> = {
   supersede_waste: "Revisit the default policy",
 };
 
-export type GrowthVerdict = "over" | "under" | "unknown";
+type GrowthVerdict = "over" | "under" | "unknown";
 
 export interface TriggerEvaluation {
   trigger: GrowthTriggerId;
@@ -94,7 +94,6 @@ export interface RunRow {
    * the engine row carries neither.
    */
   id: string | null;
-  actionId: string;
   status: string;
   createdAtMs: number;
   startedAtMs: number | null;
@@ -158,7 +157,6 @@ export function parseRunRow(raw: unknown): RunRow | null {
       : {};
   return {
     id: nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId),
-    actionId,
     status: typeof r.status === "string" ? r.status : "",
     createdAtMs,
     startedAtMs: parseTimestampMs(r.startedAt),
@@ -173,7 +171,7 @@ export function parseRunRow(raw: unknown): RunRow | null {
 // The 7-complete-day window (V6)
 // ---------------------------------------------------------------------------
 
-export interface GrowthWindow {
+interface GrowthWindow {
   /** Inclusive: 00:00 UTC seven days before today. Also the reader's `since`. */
   startMs: number;
   /** Exclusive: 00:00 UTC today — the partial day is never counted. */
@@ -203,7 +201,7 @@ function dayIndex(window: GrowthWindow, ms: number): number | null {
 }
 
 /** Run time = finishedAt − startedAt (V4: the engine has no `duration`); null when either is missing. */
-export function runTimeMs(row: RunRow): number | null {
+function runTimeMs(row: RunRow): number | null {
   if (row.startedAtMs === null || row.finishedAtMs === null) return null;
   const d = row.finishedAtMs - row.startedAtMs;
   return d >= 0 ? d : null;
@@ -232,7 +230,7 @@ export type RunsReading =
   | { kind: "rows"; rows: readonly RunRow[] }
   | { kind: "unreadable"; reason: string };
 
-export interface RunWindowStats {
+interface RunWindowStats {
   windowDays: number;
   /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no started run. */
   queueWaitDailyP90S: Array<number | null>;
@@ -248,7 +246,7 @@ export interface RunWindowStats {
   busiestDay: { date: string; prs: number } | null;
 }
 
-export interface RunSignalsInput {
+interface RunSignalsInput {
   runs: RunsReading;
   nowMs: number;
   /** `WORKER_ENTERPRISE_QUESTIONNAIRE=1`: the composite's manual arm. */
@@ -284,6 +282,51 @@ function round(n: number, digits = 3): number {
   return Math.round(n * f) / f;
 }
 
+type RunTriggerKey = Exclude<keyof RunSignalsResult, "stats">;
+
+/** The four engine-backed triggers: their id and threshold, readable or not. */
+const RUN_THRESHOLDS = {
+  queueWait: {
+    trigger: "queue_wait_p90",
+    threshold: QUEUE_WAIT_P90_THRESHOLD_S,
+  },
+  clientShare: { trigger: "client_share", threshold: CLIENT_SHARE_THRESHOLD },
+  scaleComposite: {
+    trigger: "scale_composite",
+    threshold: SCALE_COMPOSITE_MIN_ARMS,
+  },
+  supersedeWaste: {
+    trigger: "supersede_waste",
+    threshold: SUPERSEDE_WASTE_THRESHOLD,
+  },
+} as const satisfies Record<
+  RunTriggerKey,
+  { trigger: GrowthTriggerId; threshold: number }
+>;
+
+/**
+ * A readable run trigger's evaluation. The verdict compares the UNROUNDED `raw` (over
+ * when `raw > threshold`, unless `over` says otherwise); only the reported value is
+ * rounded, so a reading just past a threshold cannot be rounded back onto it. `summary`
+ * receives that rounded value.
+ */
+function thresholdEvaluation(
+  key: RunTriggerKey,
+  raw: number,
+  summary: (value: number) => string,
+  over: boolean = raw > RUN_THRESHOLDS[key].threshold,
+): TriggerEvaluation {
+  const { trigger, threshold } = RUN_THRESHOLDS[key];
+  const value = round(raw);
+  return {
+    trigger,
+    verdict: over ? "over" : "under",
+    value,
+    threshold,
+    summary: summary(value),
+  };
+}
+
 /**
  * Evaluate the four engine-backed triggers over the last 7 complete UTC days.
  *
@@ -305,27 +348,17 @@ function round(n: number, digits = 3): number {
 export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   if (input.runs.kind === "unreadable") {
     const reason = input.runs.reason;
+    const unknown = (key: RunTriggerKey): TriggerEvaluation =>
+      unknownEvaluation(
+        RUN_THRESHOLDS[key].trigger,
+        RUN_THRESHOLDS[key].threshold,
+        reason,
+      );
     return {
-      queueWait: unknownEvaluation(
-        "queue_wait_p90",
-        QUEUE_WAIT_P90_THRESHOLD_S,
-        reason,
-      ),
-      clientShare: unknownEvaluation(
-        "client_share",
-        CLIENT_SHARE_THRESHOLD,
-        reason,
-      ),
-      scaleComposite: unknownEvaluation(
-        "scale_composite",
-        SCALE_COMPOSITE_MIN_ARMS,
-        reason,
-      ),
-      supersedeWaste: unknownEvaluation(
-        "supersede_waste",
-        SUPERSEDE_WASTE_THRESHOLD,
-        reason,
-      ),
+      queueWait: unknown("queueWait"),
+      clientShare: unknown("clientShare"),
+      scaleComposite: unknown("scaleComposite"),
+      supersedeWaste: unknown("supersedeWaste"),
       stats: null,
     };
   }
@@ -368,22 +401,17 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   const queueWaitDailyP90S = dailyP90Ms.map((v) =>
     v === null ? null : round(v / 1000),
   );
-  // Thresholds compare the UNROUNDED value; only the reported value is rounded, so a
-  // reading just past a threshold cannot be rounded back onto it.
   const weakestDayRawS = Math.min(...dailyP90Ms.map((v) => (v ?? 0) / 1000));
-  const weakestDayS = round(weakestDayRawS);
   const emptyDays = queueWaitDailyP90S.filter((v) => v === null).length;
-  const queueWait: TriggerEvaluation = {
-    trigger: "queue_wait_p90",
-    verdict: weakestDayRawS > QUEUE_WAIT_P90_THRESHOLD_S ? "over" : "under",
-    value: weakestDayS,
-    threshold: QUEUE_WAIT_P90_THRESHOLD_S,
-    summary:
+  const queueWait = thresholdEvaluation(
+    "queueWait",
+    weakestDayRawS,
+    (weakestDayS) =>
       `queue-wait p90: weakest of the last ${GROWTH_WINDOW_DAYS} UTC days ${weakestDayS}s ` +
       `(threshold > ${QUEUE_WAIT_P90_THRESHOLD_S}s every day` +
       (emptyDays > 0 ? `; ${emptyDays} day(s) with no started run` : "") +
       ")",
-  };
+  );
 
   // Client share.
   let topOrg: { orgId: string; share: number } | null = null;
@@ -398,20 +426,16 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       ? null
       : { orgId: topOrg.orgId, share: round(topOrg.share) };
   const maxShareRaw = topOrg?.share ?? 0;
-  const maxShare = round(maxShareRaw);
-  const shareOver =
-    orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShareRaw > CLIENT_SHARE_THRESHOLD;
-  const clientShare: TriggerEvaluation = {
-    trigger: "client_share",
-    verdict: shareOver ? "over" : "under",
-    value: maxShare,
-    threshold: CLIENT_SHARE_THRESHOLD,
-    summary:
+  const clientShare = thresholdEvaluation(
+    "clientShare",
+    maxShareRaw,
+    (maxShare) =>
       topClient === null
         ? `client share: no attributed run time in the last ${GROWTH_WINDOW_DAYS} UTC days`
         : `client share: ${topClient.orgId} holds ${round(maxShare * 100, 1)}% of attributed run time ` +
           `across ${orgs.size} org(s) (threshold > ${CLIENT_SHARE_THRESHOLD * 100}% with ≥ ${CLIENT_SHARE_MIN_ORGS} orgs)`,
-  };
+    orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShareRaw > CLIENT_SHARE_THRESHOLD,
+  );
 
   // Scale composite.
   const prCounts = prsByDay.map((s) => s.size);
@@ -432,30 +456,26 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     questionnaire: input.questionnaire,
   };
   const armsHeld = Object.values(arms).filter(Boolean).length;
-  const scaleComposite: TriggerEvaluation = {
-    trigger: "scale_composite",
-    verdict: armsHeld >= SCALE_COMPOSITE_MIN_ARMS ? "over" : "under",
-    value: armsHeld,
-    threshold: SCALE_COMPOSITE_MIN_ARMS,
-    summary:
+  const scaleComposite = thresholdEvaluation(
+    "scaleComposite",
+    armsHeld,
+    () =>
       `scale composite: ${armsHeld} of 3 arms (clients ${orgs.size} > ${SCALE_CLIENTS_THRESHOLD}: ${arms.clients}; ` +
       `PRs/day ${prsPerDay} > ${SCALE_PRS_PER_DAY_THRESHOLD}: ${arms.prsPerDay}; ` +
       `questionnaire: ${arms.questionnaire}; fires on ≥ ${SCALE_COMPOSITE_MIN_ARMS})`,
-  };
+    armsHeld >= SCALE_COMPOSITE_MIN_ARMS,
+  );
 
   // Supersede waste.
   const totalMs = attributedMs + unattributedMs;
   const wasteRaw = totalMs > 0 ? cancelledMs / totalMs : 0;
-  const waste = round(wasteRaw);
-  const supersedeWaste: TriggerEvaluation = {
-    trigger: "supersede_waste",
-    verdict: wasteRaw > SUPERSEDE_WASTE_THRESHOLD ? "over" : "under",
-    value: waste,
-    threshold: SUPERSEDE_WASTE_THRESHOLD,
-    summary:
+  const supersedeWaste = thresholdEvaluation(
+    "supersedeWaste",
+    wasteRaw,
+    (waste) =>
       `supersede waste: ${round(waste * 100, 1)}% of run time was CANCELLED ` +
       `(threshold > ${SUPERSEDE_WASTE_THRESHOLD * 100}%)`,
-  };
+  );
 
   return {
     queueWait,
@@ -518,7 +538,7 @@ export function parsePswpin(vmstatText: string): number | null {
 }
 
 /** (MemTotal − MemAvailable) / MemTotal. */
-export function ramUtilisation(sample: MemSample): number {
+function ramUtilisation(sample: MemSample): number {
   return (sample.memTotal - sample.memAvailable) / sample.memTotal;
 }
 
@@ -543,7 +563,7 @@ export function pruneMemSamples(
   return sorted.slice(Math.max(0, boundary));
 }
 
-export interface RamSwapInput {
+interface RamSwapInput {
   samples: readonly MemSample[];
   nowMs: number;
   /** `WORKER_GROWTH_TRIGGER_RAM_FRACTION`, 0 < x < 1. */
@@ -583,8 +603,8 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
     return unknownEvaluation("ram_swap", input.ramFraction, "no samples");
   }
   const cutoff = input.nowMs - input.sustainMs;
-  const first = sorted[0];
-  if (first === undefined || first.atMs > cutoff) {
+  // `sorted` is non-empty here (it has a `latest`), so the fallback never applies.
+  if ((sorted[0] ?? latest).atMs > cutoff) {
     return unknownEvaluation("ram_swap", input.ramFraction, "warming up");
   }
 
@@ -634,9 +654,9 @@ export const INITIAL_DEDUPE_STATE: TriggerDedupeState = {
   lastFiredAtMs: null,
 };
 
-export type DedupeAction = "none" | "fire" | "clear";
+type DedupeAction = "none" | "fire" | "clear";
 
-export interface DedupeTransition {
+interface DedupeTransition {
   action: DedupeAction;
   /** The state to commit — but only after the action's POST succeeded (V2). */
   next: TriggerDedupeState;
@@ -676,15 +696,15 @@ export function decideTransition(
 }
 
 /**
- * The state after the transition's side effect ran. `none` always commits (nothing to
- * deliver); `fire` and `clear` commit only when delivered, so the next tick retries.
+ * The state after the transition's side effect ran: `next` only when delivered, so a
+ * failed fire or clear is retried next tick. A `none` transition's `next` is `state`
+ * itself, so it needs no commit at all.
  */
 export function commitTransition(
   state: TriggerDedupeState,
   transition: DedupeTransition,
   delivered: boolean,
 ): TriggerDedupeState {
-  if (transition.action === "none") return transition.next;
   return delivered ? transition.next : state;
 }
 
@@ -692,7 +712,7 @@ export function commitTransition(
 // Webhook body and snapshot
 // ---------------------------------------------------------------------------
 
-export type WebhookState = "fired" | "cleared";
+type WebhookState = "fired" | "cleared";
 
 export interface GrowthWebhookBody {
   /** One line; makes the body a valid Slack incoming-webhook payload (ntfy accepts it too). */
@@ -731,10 +751,9 @@ export function buildWebhookBody(input: {
   };
 }
 
-export interface SnapshotTriggerEntry {
+interface SnapshotTriggerEntry {
   value: number | null;
-  /** Null only for a trigger that was not evaluated this tick. */
-  threshold: number | null;
+  threshold: number;
   verdict: GrowthVerdict;
   reason?: string;
   firing: boolean;
@@ -762,28 +781,25 @@ export interface GrowthSnapshot {
 export function buildSnapshot(input: {
   nowMs: number;
   boxId: string;
-  evaluations: readonly TriggerEvaluation[];
-  states: Readonly<Partial<Record<GrowthTriggerId, TriggerDedupeState>>>;
+  evaluations: Readonly<Record<GrowthTriggerId, TriggerEvaluation>>;
+  states: Readonly<Record<GrowthTriggerId, TriggerDedupeState>>;
   stats: RunWindowStats | null;
 }): GrowthSnapshot {
-  const byId = new Map(input.evaluations.map((e) => [e.trigger, e]));
   const triggers = {} as Record<GrowthTriggerId, SnapshotTriggerEntry>;
   for (const id of GROWTH_TRIGGER_IDS) {
-    const e = byId.get(id);
-    const s = input.states[id] ?? INITIAL_DEDUPE_STATE;
-    const entry: SnapshotTriggerEntry = {
-      value: e?.value ?? null,
-      threshold: e?.threshold ?? null,
-      verdict: e?.verdict ?? "unknown",
+    const e = input.evaluations[id];
+    const s = input.states[id];
+    triggers[id] = {
+      value: e.value,
+      threshold: e.threshold,
+      verdict: e.verdict,
       firing: s.firing,
       lastFiredAt:
         s.lastFiredAtMs === null
           ? null
           : new Date(s.lastFiredAtMs).toISOString(),
+      ...(e.reason !== undefined ? { reason: e.reason } : {}),
     };
-    if (e === undefined) entry.reason = "not evaluated";
-    else if (e.reason !== undefined) entry.reason = e.reason;
-    triggers[id] = entry;
   }
   return {
     evaluatedAt: new Date(input.nowMs).toISOString(),

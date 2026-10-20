@@ -16,14 +16,14 @@
  */
 
 export const GROWTH_TRIGGER_INTERVAL_DEFAULT_S = 300;
-export const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
+const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
 /** One day: a slower tick could not hold the 24 h dedupe window it serves. */
 export const GROWTH_TRIGGER_INTERVAL_CEILING_S = 86_400;
 export const GROWTH_TRIGGER_SUSTAIN_DEFAULT_S = 900;
-export const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
+const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
 export const GROWTH_TRIGGER_RAM_FRACTION_DEFAULT = 0.7;
 
-export interface GrowthTriggerConfig {
+interface GrowthTriggerConfig {
   /** Never log this. */
   webhookUrl: string;
   intervalS: number;

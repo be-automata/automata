@@ -19,6 +19,7 @@ import {
   parsePswpin,
   parseRunRow,
   pruneMemSamples,
+  type GrowthTriggerId,
   type MemSample,
   type RunRow,
   type RunSignalsResult,
@@ -56,7 +57,6 @@ function row(spec: RowSpec): RunRow {
   rowSeq += 1;
   return {
     id: spec.id === undefined ? `run-${rowSeq}` : spec.id,
-    actionId: "agent-run:run",
     status: spec.status ?? "COMPLETED",
     createdAtMs,
     startedAtMs,
@@ -98,7 +98,6 @@ describe("parseRunRow", () => {
   it("parses a full row; metadata values are strings", () => {
     expect(parseRunRow(base)).toEqual({
       id: "run-uuid-1",
-      actionId: "agent-run-newest:run",
       status: "COMPLETED",
       createdAtMs: Date.parse("2026-10-15T10:00:00Z"),
       startedAtMs: Date.parse("2026-10-15T10:05:00Z"),
@@ -770,6 +769,33 @@ describe("webhook body", () => {
   });
 });
 
+/** The five evaluations keyed by trigger, as the driver hands them to buildSnapshot. */
+function evaluationsOf(
+  run: RunSignalsResult,
+  ram: TriggerEvaluation,
+): Record<GrowthTriggerId, TriggerEvaluation> {
+  return {
+    queue_wait_p90: run.queueWait,
+    ram_swap: ram,
+    client_share: run.clientShare,
+    scale_composite: run.scaleComposite,
+    supersede_waste: run.supersedeWaste,
+  };
+}
+
+const UNREADABLE_RUNS = evaluateRunSignals({
+  runs: { kind: "unreadable", reason: "engine read: http 503" },
+  nowMs: NOW,
+  questionnaire: false,
+});
+const UNREADABLE_RAM = evaluateRamSwap({
+  samples: [],
+  nowMs: NOW,
+  ramFraction: 0.7,
+  sustainMs: 900_000,
+  unreadableReason: "ENOENT /proc/meminfo",
+});
+
 describe("snapshot", () => {
   it("lists every trigger with value, threshold, verdict, firing and lastFiredAt", () => {
     const run = evalRows([
@@ -786,14 +812,9 @@ describe("snapshot", () => {
     const snap = buildSnapshot({
       nowMs: NOW,
       boxId: "box-1",
-      evaluations: [
-        run.queueWait,
-        ram,
-        run.clientShare,
-        run.scaleComposite,
-        run.supersedeWaste,
-      ],
+      evaluations: evaluationsOf(run, ram),
       states: {
+        ...dedupeStatesFromSnapshot(null),
         client_share: { firing: true, lastFiredAtMs: NOW - MIN },
       },
       stats: run.stats,
@@ -824,13 +845,13 @@ describe("snapshot", () => {
     expect(JSON.parse(JSON.stringify(snap))).toEqual(snap);
   });
 
-  it("with the engine unreadable, run stats are null and missing triggers read not evaluated", () => {
+  it("with the engine unreadable, run stats are null and run triggers read unknown", () => {
     const snap = buildSnapshot({
       nowMs: NOW,
       boxId: "box-1",
-      evaluations: [],
-      states: {},
-      stats: null,
+      evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+      states: dedupeStatesFromSnapshot(null),
+      stats: UNREADABLE_RUNS.stats,
     });
     expect(snap).toMatchObject({
       unattributed: null,
@@ -840,9 +861,9 @@ describe("snapshot", () => {
     });
     expect(snap.triggers.supersede_waste).toEqual({
       value: null,
-      threshold: null,
+      threshold: 0.2,
       verdict: "unknown",
-      reason: "not evaluated",
+      reason: "engine read: http 503",
       firing: false,
       lastFiredAt: null,
     });
@@ -852,8 +873,11 @@ describe("snapshot", () => {
     const snap = buildSnapshot({
       nowMs: NOW,
       boxId: "b",
-      evaluations: [],
-      states: { ram_swap: { firing: true, lastFiredAtMs: NOW - MIN } },
+      evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+      states: {
+        ...dedupeStatesFromSnapshot(null),
+        ram_swap: { firing: true, lastFiredAtMs: NOW - MIN },
+      },
       stats: null,
     });
     const seeded = dedupeStatesFromSnapshot(JSON.parse(JSON.stringify(snap)));

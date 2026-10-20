@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createEngineDb, resolveTenantId, type EngineDb } from "./engine-db";
 import { resolveMechanismMode, type WorkerConfig } from "./config";
+import { errnoCode } from "./node-errors";
 import {
   alertableRecoveryLatencySeconds,
   detectSchedulingTimeoutEvents,
@@ -74,10 +75,10 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
  * Write-temp-then-rename so a reader never observes a partial snapshot file.
  * Throws on write/rename failure — the caller decides (the maintenance tick
  * logs `scheduling.tick_error`; the uid reaper logs `box.budget_write_failed`).
- * `filename` defaults to the scheduling-health snapshot; #184 reuses the
+ * `options.filename` defaults to the scheduling-health snapshot; #184 reuses the
  * writer for `box-budget.json`.
  *
- * `mode` (#373) is optional: when omitted the write is exactly what it always was
+ * `options.mode` (#373) is optional: when omitted the write is exactly what it always was
  * (process umask decides the permissions). When given, it is applied to the temp file
  * with an explicit chmod before the rename — `writeFileSync`'s own `mode` only takes
  * effect on creation and is filtered by the umask, so it alone would not guarantee
@@ -88,11 +89,15 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
  * root. The ORIGINAL error is what propagates: a cleanup failure other than ENOENT is
  * not allowed to mask it (the next write reuses the same pid-suffixed name anyway).
  */
+export interface SnapshotWriteOptions {
+  filename?: string;
+  mode?: number;
+}
+
 export function writeSnapshotAtomic<T extends object>(
   runNamespaceRoot: string,
   snapshot: T,
-  filename = "scheduling-health.json",
-  mode?: number,
+  { filename = "scheduling-health.json", mode }: SnapshotWriteOptions = {},
 ): void {
   try {
     fs.mkdirSync(runNamespaceRoot, { recursive: true });
@@ -102,19 +107,19 @@ export function writeSnapshotAtomic<T extends object>(
   const target = path.join(runNamespaceRoot, filename);
   const tmp = `${target}.tmp-${process.pid}`;
   try {
-    if (mode === undefined) {
-      fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2));
-    } else {
-      fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2), { mode });
-      fs.chmodSync(tmp, mode);
-    }
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify(snapshot, null, 2),
+      mode === undefined ? undefined : { mode },
+    );
+    if (mode !== undefined) fs.chmodSync(tmp, mode);
     fs.renameSync(tmp, target);
   } catch (err) {
     try {
       fs.unlinkSync(tmp);
     } catch (unlinkErr) {
       // ENOENT: the write never created it. Anything else: the original error wins.
-      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      const code = errnoCode(unlinkErr);
       if (code !== "ENOENT") {
         defaultLogger({
           event: "snapshot.tmp_cleanup_failed",
