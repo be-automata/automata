@@ -30,6 +30,16 @@ export interface PrimaryTransitionInput {
   openSubtasks: readonly TrackerLinkedIssue[];
 }
 
+/** The stage to request, and whether it stands in for the target itself. */
+export interface ResolvedStage {
+  stage: string;
+  /**
+   * True when the workflow has no transition into the target and the policy
+   * chose a lesser stage instead — the target was NOT reached.
+   */
+  fallback: boolean;
+}
+
 interface StagedIssue {
   stage: string | null;
   resolved: boolean;
@@ -66,7 +76,7 @@ export interface TrackerStagePolicy {
   resolveTarget(
     target: string,
     available: readonly string[] | null,
-  ): string | null;
+  ): ResolvedStage | null;
   /** Read-back: does the tracker now report the requested stage? */
   reached(stageAfter: string | null, requested: string): boolean;
 }
@@ -87,7 +97,7 @@ export const youTrackStagePolicy: TrackerStagePolicy = {
   decideSiblingPromotion,
   isTerminalIssue,
   isClearedIssue,
-  resolveTarget: (target) => target,
+  resolveTarget: (target) => ({ stage: target, fallback: false }),
   reached: (stageAfter, requested) => canonicalStage(stageAfter) === requested,
 };
 
@@ -198,12 +208,15 @@ export const jiraStagePolicy: TrackerStagePolicy = {
   resolveTarget(target, available) {
     // Jira always reports its transitions; without them nothing is chosen.
     if (available === null) return null;
-    const first = (pattern: RegExp) =>
-      available.find((name) => pattern.test(name)) ?? null;
+    const first = (pattern: RegExp, fallback = false): ResolvedStage | null => {
+      const stage = available.find((name) => pattern.test(name));
+      return stage === undefined ? null : { stage, fallback };
+    };
     switch (target) {
       case JIRA_READY_FOR_QA:
-        // A workflow without a QA status still records the merge as reviewed.
-        return first(READY_FOR_QA_RE) ?? first(REVIEW_RE);
+        // A workflow without a QA status still records the merge as reviewed
+        // — a fallback: the ticket is NOT ready for QA.
+        return first(READY_FOR_QA_RE) ?? first(REVIEW_RE, true);
       case JIRA_CODE_REVIEW:
         return first(REVIEW_RE);
       case "To Do":

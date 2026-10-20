@@ -320,9 +320,10 @@ function parseTransitions(raw: unknown): JiraTransition[] {
  * is rewritten — ticket text reaches the comment with `[` already escaped.
  */
 export function toJiraWikiText(text: string): string {
+  // Lookbehind, not a consumed preceding char: two adjacent links both match.
   return text.replace(
-    /(^|[^\\])\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)/g,
-    "$1[$2|$3]",
+    /(?<!\\)\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)/g,
+    "[$1|$2]",
   );
 }
 

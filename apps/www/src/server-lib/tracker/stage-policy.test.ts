@@ -31,9 +31,10 @@ describe("stagePolicyFor", () => {
     expect(youTrackStagePolicy.mergedTarget).toBe("PR Merged");
     expect(youTrackStagePolicy.dependLinkType).toBe("Depend");
     expect(youTrackStagePolicy.subtaskLinkType).toBe("Subtask");
-    expect(youTrackStagePolicy.resolveTarget("PR Merged", null)).toBe(
-      "PR Merged",
-    );
+    expect(youTrackStagePolicy.resolveTarget("PR Merged", null)).toEqual({
+      stage: "PR Merged",
+      fallback: false,
+    });
   });
 
   it("Jira maps Depend → Blocks and never allows Done", () => {
@@ -101,20 +102,22 @@ describe("jiraStagePolicy.resolveTarget", () => {
   it("prefers a Ready for QA transition", () => {
     expect(
       resolveTarget("Ready for QA", ["Code Review", "READY FOR QA", "Done"]),
-    ).toBe("READY FOR QA");
+    ).toEqual({ stage: "READY FOR QA", fallback: false });
   });
 
   it("falls back to a review status only when no QA transition exists", () => {
-    expect(resolveTarget("Ready for QA", ["In Review", "Done"])).toBe(
-      "In Review",
-    );
+    expect(resolveTarget("Ready for QA", ["In Review", "Done"])).toEqual({
+      stage: "In Review",
+      fallback: true,
+    });
     expect(resolveTarget("Ready for QA", ["Done", "Closed"])).toBeNull();
   });
 
   it("Code Review matches any review-ish status, never Done", () => {
-    expect(resolveTarget("Code Review", ["Done", "Ready for Review"])).toBe(
-      "Ready for Review",
-    );
+    expect(resolveTarget("Code Review", ["Done", "Ready for Review"])).toEqual({
+      stage: "Ready for Review",
+      fallback: false,
+    });
     expect(resolveTarget("Code Review", ["Done"])).toBeNull();
   });
 

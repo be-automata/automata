@@ -357,4 +357,10 @@ describe("toJiraWikiText", () => {
       toJiraWikiText("see [docs](https://x.example/a) and \\[x\\](y)"),
     ).toBe("see [docs|https://x.example/a] and \\[x\\](y)");
   });
+
+  it("rewrites adjacent links", () => {
+    expect(
+      toJiraWikiText("[a](https://x.example/1)[b](https://x.example/2)"),
+    ).toBe("[a|https://x.example/1][b|https://x.example/2]");
+  });
 });

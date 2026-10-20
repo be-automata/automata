@@ -271,6 +271,35 @@ describe("executeMergeAudit with a Jira tracker", () => {
     );
   });
 
+  it("live: fallback to review is not completion → no dependant probe", async () => {
+    const { tracker, comments } = await run({
+      issues: blockedPair(),
+      writes: "live",
+      workflow: ["Backlog", "To Do", "In Progress", "In Review", "Done"],
+    });
+    expect(tracker.transitions).toEqual([{ key: "ACME-1", to: "In Review" }]);
+    expect(tracker.store.get("ACME-2")!.stage).toBe("Backlog");
+    expect(tracker.added.map((entry) => entry.key)).toEqual(["ACME-1"]);
+    const body = comments.upserts[0]!.body;
+    expect(body).not.toContain("ACME-2");
+    expect(body).toContain(
+      "No `Ready for QA` transition exists; moved to `In Review` instead.",
+    );
+  });
+
+  it("live: a case variant of the QA status is the target, not a fallback", async () => {
+    const { tracker, comments } = await run({
+      issues: blockedPair(),
+      writes: "live",
+      workflow: ["Backlog", "To Do", "In Progress", "READY FOR QA", "Done"],
+    });
+    expect(tracker.transitions).toEqual([
+      { key: "ACME-1", to: "READY FOR QA" },
+      { key: "ACME-2", to: "To Do" },
+    ]);
+    expect(comments.upserts[0]!.body).not.toContain("transition exists");
+  });
+
   it("live: no acceptable transition → nothing written to the status, error reported", async () => {
     const { outcome, tracker, comments } = await run({
       issues: [issue("ACME-1")],

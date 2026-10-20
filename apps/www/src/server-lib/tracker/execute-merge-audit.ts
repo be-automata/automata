@@ -17,7 +17,11 @@ import {
   type MergeAuditIntent,
   parseMergeAuditIntent,
 } from "./parse-merge-audit-intent";
-import { stagePolicyFor, type TrackerStagePolicy } from "./stage-policy";
+import {
+  type ResolvedStage,
+  stagePolicyFor,
+  type TrackerStagePolicy,
+} from "./stage-policy";
 import type { TrackerConfig } from "./tracker-config";
 import {
   describeTrackerError,
@@ -116,7 +120,11 @@ async function applyStage(
   tracker: TrackerClient,
   key: string,
   target: string,
-): Promise<{ applied: boolean; stageAfter: string | null; requested: string }> {
+): Promise<{
+  applied: boolean;
+  stageAfter: string | null;
+  requested: ResolvedStage;
+}> {
   if (!policy.allowedTargets.includes(target)) {
     throw new Error(`stage target not allowed: ${String(target)}`);
   }
@@ -127,10 +135,10 @@ async function applyStage(
   if (requested === null) {
     throw new TrackerTransitionError(target);
   }
-  await tracker.setStage(key, requested);
+  await tracker.setStage(key, requested.stage);
   const stageAfter = await tracker.getStage(key);
   return {
-    applied: policy.reached(stageAfter, requested),
+    applied: policy.reached(stageAfter, requested.stage),
     stageAfter,
     requested,
   };
@@ -328,6 +336,9 @@ async function auditTicket(
     result.errors.push(detail);
   };
 
+  // Live: true only once the tracker reads back the merged target itself — a
+  // fallback stage (Jira with no QA status) leaves the ticket short of it.
+  let reachedMergedTarget = false;
   if (decision.target !== null && live) {
     try {
       const { applied, stageAfter, requested } = await applyStage(
@@ -338,12 +349,16 @@ async function auditTicket(
       );
       result.stageAfter = stageAfter;
       result.transitionApplied = applied;
-      if (requested !== decision.target) {
+      reachedMergedTarget =
+        applied &&
+        !requested.fallback &&
+        decision.target === policy.mergedTarget;
+      if (requested.fallback) {
         // The workflow has no transition into the target itself; the policy
         // chose its fallback. Report the stage actually requested.
         result.decision = {
-          target: requested,
-          note: `${decision.note} No \`${decision.target}\` transition exists; moved to ${inlineCode(requested)} instead.`,
+          target: requested.stage,
+          note: `${decision.note} No \`${decision.target}\` transition exists; moved to ${inlineCode(requested.stage)} instead.`,
         };
       }
     } catch (error) {
@@ -353,11 +368,8 @@ async function auditTicket(
 
   // Dependants are probed only by the merge that completes the ticket
   // (`PR Merged` on YouTrack) — a later release PR naming the same key stays
-  // quiet.
-  if (
-    decision.target === policy.mergedTarget &&
-    (!live || result.transitionApplied)
-  ) {
+  // quiet, and so does a move that fell back short of the merged target.
+  if (live ? reachedMergedTarget : decision.target === policy.mergedTarget) {
     result.linked.push(...(await probeDependants(context, issue)));
   }
 
