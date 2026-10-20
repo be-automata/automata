@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   armGrowthTriggers,
+  GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS,
   GROWTH_RUNS_MAX_PAGES,
   GROWTH_RUNS_PAGE_LIMIT,
   GROWTH_SNAPSHOT_FILENAME,
@@ -167,21 +168,75 @@ describe("readRunWindow", () => {
 
   it("stops on a full page whose next_page is missing or not past current_page", async () => {
     const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
-    const fetchImpl = engineFetch(() => jsonResponse(page(full, 1, 1)));
+    for (const body of [
+      page(full, 1, 1),
+      page(full, 2, null),
+      { pagination: { current_page: 1, next_page: "2" }, rows: full },
+    ]) {
+      const fetchImpl = engineFetch(() => jsonResponse(body));
+      const r = await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(r.kind).toBe("rows");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("a short page whose pagination says more pages exist does not end the read", async () => {
+    // An engine that caps `limit` at 100: every page is "short", yet next_page is set.
+    const hundred = (from: number) =>
+      Array.from({ length: 100 }, (_, i) => rawRow({ id: `run-${from + i}` }));
+    const fetchImpl = engineFetch((offset) => {
+      if (offset === 0) return jsonResponse(page(hundred(0), 1, 2));
+      if (offset === 100) return jsonResponse(page(hundred(100), 2, 3));
+      return jsonResponse(page(hundred(200).slice(0, 7), 3, null));
+    });
     const r = await readRunWindow({
       ...base,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(r.kind).toBe("rows");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    if (r.kind === "rows") expect(r.rows).toHaveLength(207);
+    expect(
+      ENGINE_URLS.map((u) => new URL(u).searchParams.get("offset")),
+    ).toEqual(["0", "100", "200"]);
+  });
 
-    const noPagination = engineFetch(() => jsonResponse({ rows: full }));
-    const r2 = await readRunWindow({
+  it("without pagination (or a non-numeric current_page) only a short page ends the read", async () => {
+    const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
+    const short = full.slice(0, 3);
+    for (const wrap of [
+      (rows: unknown[]) => ({ rows }),
+      (rows: unknown[]) => ({
+        pagination: { current_page: "1", next_page: 2 },
+        rows,
+      }),
+    ]) {
+      const fetchImpl = engineFetch((offset) =>
+        jsonResponse(wrap(offset === 0 ? full : short)),
+      );
+      const r = await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(r.kind).toBe("rows");
+      if (r.kind === "rows") expect(r.rows).toHaveLength(203);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("an empty page that still claims more pages → unreadable", async () => {
+    const fetchImpl = engineFetch(() => jsonResponse(page([], 1, 2)));
+    const r = await readRunWindow({
       ...base,
-      fetchImpl: noPagination as unknown as typeof fetch,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    expect(r2.kind).toBe("rows");
-    expect(noPagination).toHaveBeenCalledTimes(1);
+    expect(r).toEqual({
+      kind: "unreadable",
+      reason: "engine read: empty page claims more pages",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("hits the page cap → unreadable 'page cap'", async () => {
@@ -269,6 +324,38 @@ describe("readRunWindow", () => {
         kind: "unreadable",
         reason: "engine read: tick deadline exceeded",
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("one hanging page is abandoned at the per-request cap, not the long engine budget", async () => {
+    expect(GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS).toBe(30_000);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const fetchImpl = engineFetch(() => new Promise<Response>(() => {}));
+      let settled = false;
+      const pending = readRunWindow({
+        ...base,
+        // A one-day interval: half of it is the engine budget.
+        deadlineMs: NOW + DAY_MS / 2,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      void pending.finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(
+        GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS - 1,
+      );
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toEqual({
+        kind: "unreadable",
+        reason: "engine read: request timed out after 30000 ms",
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const init = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
+      expect(init?.signal?.aborted).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -784,8 +871,9 @@ describe("armGrowthTriggers", () => {
       h.setEngine(() => new Promise<Response>(() => {}));
       h.clock.ms = NOW + 900_000;
       const pending = handle?.tick();
-      // The engine read is abandoned at 0.5 × the 300 s interval.
-      await vi.advanceTimersByTimeAsync(150_000);
+      // The page request is abandoned at the 30 s per-request cap, well inside the
+      // 0.5 × 300 s engine budget.
+      await vi.advanceTimersByTimeAsync(GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS);
       const r = await pending;
 
       expect(h.posts.map((p) => [p.trigger, p.state])).toEqual([
@@ -797,7 +885,7 @@ describe("armGrowthTriggers", () => {
       });
       expect(r?.snapshot?.triggers.supersede_waste).toMatchObject({
         verdict: "unknown",
-        reason: "engine read: tick deadline exceeded",
+        reason: "engine read: request timed out after 30000 ms",
       });
       handle?.stop();
     } finally {

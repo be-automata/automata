@@ -53,6 +53,12 @@ import {
 export const GROWTH_RUNS_PAGE_LIMIT = 200;
 /** Hard cap on pages per read (~600 run rows / 7 days today; 50 pages = 10 000 rows). */
 export const GROWTH_RUNS_MAX_PAGES = 50;
+/**
+ * Upper bound on ONE engine page request; the effective bound is min(this, the engine
+ * read budget left). Without it, a single hung page on a long interval would hold the
+ * read for up to half the interval (hours at the one-day ceiling).
+ */
+export const GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS = 30_000;
 /** Upper bound on one webhook POST; the effective timeout is min(this, intervalMs / 2) (V2). */
 const GROWTH_WEBHOOK_TIMEOUT_CAP_MS = 10_000;
 /** The snapshot file under `<runNamespaceRoot>`. */
@@ -135,8 +141,12 @@ interface ReadRunWindowInput {
 
 interface RunsPage {
   rows: unknown[];
-  currentPage: number | null;
-  nextPage: number | null;
+  /**
+   * The engine's own paging verdict, when the body carries a `pagination` object with a
+   * numeric `current_page`: true iff `next_page` is a number past it. Null when pagination
+   * is absent, and only then does the reader fall back to the short-page stop.
+   */
+  hasMore: boolean | null;
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -152,10 +162,12 @@ function parseRunsPage(body: unknown): RunsPage | null {
     typeof b.pagination === "object" && b.pagination !== null
       ? (b.pagination as { current_page?: unknown; next_page?: unknown })
       : {};
+  const currentPage = finiteNumber(p.current_page);
+  const nextPage = finiteNumber(p.next_page);
   return {
     rows: b.rows,
-    currentPage: finiteNumber(p.current_page),
-    nextPage: finiteNumber(p.next_page),
+    hasMore:
+      currentPage === null ? null : nextPage !== null && nextPage > currentPage,
   };
 }
 
@@ -216,12 +228,18 @@ async function fetchRunsPage(
 }
 
 /**
- * Offset-paginated read of every run task created since `sinceMs` (V7). Stops on a
- * short page, or when `pagination.next_page` is missing or not past `current_page`.
- * More than GROWTH_RUNS_MAX_PAGES pages → `unreadable` "page cap": a partial window
- * would silently understate every run signal. Each request (headers AND body) is bounded
- * by the time left until `deadlineMs`, whether or not the engine honours the abort, so a
- * hung engine cannot push the tick past its interval.
+ * Offset-paginated read of every run task created since `sinceMs` (V7). When the body
+ * carries `pagination` with a numeric `current_page`, the engine decides: the read goes on
+ * while `next_page` is a number past `current_page`, whatever the page size — an engine
+ * that caps `limit` below GROWTH_RUNS_PAGE_LIMIT returns short pages that are NOT the
+ * end. Only without pagination does a short page end the read. A page with no rows that
+ * still claims more is `unreadable`: the offset could not advance. More than
+ * GROWTH_RUNS_MAX_PAGES pages → `unreadable` "page cap": a partial window would silently
+ * understate every run signal.
+ *
+ * Each request (headers AND body) is bounded by min(GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS,
+ * time left until `deadlineMs`), whether or not the engine honours the abort, so neither
+ * one hung page nor a hung engine can push the tick past its interval.
  *
  * Rows are deduped by engine id across pages: offset paging over a collection that
  * grows while it is read can shift a row onto the next page, and counting it twice
@@ -251,13 +269,17 @@ export async function readRunWindow(
       offset,
     });
 
-    const bounded = await withDeadline(remainingMs, (signal) =>
-      fetchRunsPage(url, input.token, signal, fetchImpl),
+    const capped = remainingMs > GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS;
+    const bounded = await withDeadline(
+      capped ? GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS : remainingMs,
+      (signal) => fetchRunsPage(url, input.token, signal, fetchImpl),
     );
     if (bounded.timedOut) {
       return {
         kind: "unreadable",
-        reason: `engine read: ${DEADLINE_EXCEEDED}`,
+        reason: capped
+          ? `engine read: request timed out after ${GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS} ms`
+          : `engine read: ${DEADLINE_EXCEEDED}`,
       };
     }
     if (bounded.value.kind === "unreadable") return bounded.value;
@@ -270,12 +292,15 @@ export async function readRunWindow(
       else rowsById.set(row.id, row);
     }
 
-    const shortPage = parsed.rows.length < GROWTH_RUNS_PAGE_LIMIT;
-    const noNext =
-      parsed.nextPage === null ||
-      (parsed.currentPage !== null && parsed.nextPage <= parsed.currentPage);
-    if (shortPage || noNext) {
+    const more = parsed.hasMore ?? parsed.rows.length >= GROWTH_RUNS_PAGE_LIMIT;
+    if (!more) {
       return { kind: "rows", rows: [...rowsById.values(), ...anonymousRows] };
+    }
+    if (parsed.rows.length === 0) {
+      return {
+        kind: "unreadable",
+        reason: "engine read: empty page claims more pages",
+      };
     }
     offset += parsed.rows.length;
   }

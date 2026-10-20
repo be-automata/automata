@@ -359,19 +359,26 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 - `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
   window → add a second shared box on the same tenant.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split
-  that client to its own box.
+  that client to its own box. Reads `unknown` while more than 5 % of run time is
+  unattributed (see below).
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
   supersede policy.
 
-| Knob                                 | Default | Notes                                                    |
-| :----------------------------------- | :------ | :------------------------------------------------------- |
-| `WORKER_ALERT_WEBHOOK_URL`           | unset   | Unset = OFF, silent, nothing else is read. http(s) only. |
-| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30.                                                |
-| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`    | 900     | Floor 60; must be ≥ 2 × interval.                        |
-| `WORKER_GROWTH_TRIGGER_RAM_FRACTION` | 0.70    | 0 < x < 1.                                               |
-| `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.                 |
+| Knob                                 | Default | Notes                                                 |
+| :----------------------------------- | :------ | :---------------------------------------------------- |
+| `WORKER_ALERT_WEBHOOK_URL`           | unset   | Unset = OFF, silent, nothing else is read. See below. |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30.                                             |
+| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`    | 900     | Floor 60; must be ≥ 2 × interval.                     |
+| `WORKER_GROWTH_TRIGGER_RAM_FRACTION` | 0.70    | 0 < x < 1.                                            |
+| `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.              |
+
+`WORKER_ALERT_WEBHOOK_URL` must be `https:`. Plain `http:` is accepted only when the
+host is loopback (`localhost`, `127.0.0.0/8`, `::1`) or a private IPv4 literal
+(`10/8`, `172.16/12`, `192.168/16`) — the URL is a credential and must not cross a
+network in cleartext. A hostname such as `ntfy.local` is refused over `http:` even if it
+resolves privately: use https, or the IP literal.
 
 A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
 The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
@@ -384,7 +391,18 @@ State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, wr
 atomically every tick). `/tmp` is cleared at reboot, so a trigger may re-fire once after
 a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
 `unattributed`; the client signals are meaningful only once 7 complete days of tagged
-runs exist. The webhook URL is a secret: it is never logged — keep it in
+runs exist. The attribution gate enforces that: while more than 5 % of the window's run
+time is unattributed, `client_share` and the scale composite's clients arm read
+`unknown` (the share and the unattributed figures are still in the snapshot). The
+composite then fires only if the other two arms hold, and reads `unknown` when the
+clients arm could decide it.
+
+**One box per tenant sends alerts.** The four run-based triggers (`queue_wait_p90`,
+`client_share`, `scale_composite`, `supersede_waste`) read the whole engine TENANT, not
+this box's runs. With more than one box on a tenant, every box evaluates the same rows
+and sends identical alerts. There is one box today; when a second joins, set
+`WORKER_ALERT_WEBHOOK_URL` on one box only, until a per-box filter exists. (`ram_swap`
+is per box and is lost on the boxes left without the URL.) The webhook URL is a secret: it is never logged — keep it in
 `worker-box.env`, never in the unit file or the repo.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
