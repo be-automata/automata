@@ -4,6 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
 import { WORKER_LOCK_FILENAME } from "./run-namespace";
+import {
+  RUN_TERMINAL_LEDGER_DIR,
+  recordRunTerminal,
+} from "./run-terminal-ledger";
 
 /**
  * Phase 0.2b boot-reclaim unit tests. A worker reaps daemons orphaned by a DEAD
@@ -180,6 +184,26 @@ describe("reclaimDeadWorkerRuns", () => {
       }),
     ).not.toThrow();
   });
+
+  it("#386: the run-terminal ledger dir is not a worker dir — never logged as a lockless skip, never probed, never removed", () => {
+    const root = tmpRoot();
+    recordRunTerminal(root, "run-1", { outcome: "failed" });
+    const ledgerEntry = path.join(root, RUN_TERMINAL_LEDGER_DIR, "run-1.json");
+    expect(fs.existsSync(ledgerEntry)).toBe(true);
+    const logs: string[] = [];
+    const kill = vi.fn((_pid: number, _signal: NodeJS.Signals | 0) => {});
+
+    reclaimDeadWorkerRuns({
+      root,
+      selfWorkerId: "w-self",
+      kill,
+      log: (m) => logs.push(m),
+    });
+
+    expect(logs).toEqual([]);
+    expect(kill).not.toHaveBeenCalled();
+    expect(fs.existsSync(ledgerEntry)).toBe(true);
+  });
 });
 
 /**
@@ -354,6 +378,15 @@ describe("reapOwnThreadAttempts (#152 Stage A admission reap)", () => {
     expect(kills).toEqual([]);
     expect(spawned).toHaveLength(1);
     expect(spawned[0]!.join(" ")).toContain("-7004");
+  });
+
+  it("#386: never scans the run-terminal ledger dir as a worker dir", () => {
+    const root = tmpRoot();
+    const stray = writeRunPid(root, RUN_TERMINAL_LEDGER_DIR, 7005);
+    const { kills, kill } = killRecorder();
+    expect(reapOwnThreadAttempts({ root, threadId: THREAD, kill })).toBe(0);
+    expect(kills).toEqual([]);
+    expect(fs.existsSync(stray)).toBe(true);
   });
 
   it("no pid file anywhere / missing root: returns 0, never throws", () => {

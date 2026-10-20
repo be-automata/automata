@@ -34,7 +34,12 @@ import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 /** How long an entry is kept: well past any redelivery (30m execution + 30m schedule). */
 export const RUN_TERMINAL_TTL_MS = 24 * 60 * 60 * 1000;
 
-const LEDGER_DIR = "run-terminals";
+/**
+ * The ledger's dir under the run namespace root. It sits beside the
+ * per-worker `<workerId>/` dirs, so the reapers' root scan (reclaim.ts
+ * `listWorkerDirs`) excludes it by this name.
+ */
+export const RUN_TERMINAL_LEDGER_DIR = "run-terminals";
 // Hatchet run ids are UUIDs; anything else is never used as a file name.
 const SAFE_RUN_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -67,7 +72,7 @@ export class RunAlreadyTerminalError extends NonRetryableError {
 
 function entryPath(root: string, runId: string): string | null {
   return SAFE_RUN_ID.test(runId)
-    ? path.join(root, LEDGER_DIR, `${runId}.json`)
+    ? path.join(root, RUN_TERMINAL_LEDGER_DIR, `${runId}.json`)
     : null;
 }
 

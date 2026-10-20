@@ -269,9 +269,9 @@ not a rolling restart:
 > therefore records every run id that reached a terminal in
 > `<WORKER_RUN_NAMESPACE_ROOT>/run-terminals/` (kept 24h; `PrivateTmp=no` keeps
 > it across a restart) and refuses a redelivered attempt of a recorded id with
-> `RunAlreadyTerminalError` (journal: `redelivered attempt refused, not
-> re-executed`) — no clone, no daemon. A run that never ended (worker crash
-> mid-run, #152) has no entry and is re-executed as before. A deferring run
+> `RunAlreadyTerminalError` — no clone, no daemon. The journal line reads
+> `redelivered attempt refused, not re-executed`. A run that never ended (worker
+> crash mid-run, #152) has no entry and is re-executed as before. A deferring run
 > (`box.headroom_deferred_wait`) holds the drain for up to its 12-minute budget,
 > and has no cgroup yet, so a cgroup idle check does not see it.
 
