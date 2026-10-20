@@ -385,9 +385,10 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   window → add a second shared box on the same tenant.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split
   that client to its own box. Reads `unknown` while more than 5 % of run time is
-  unattributed (see below). It re-fires at once, inside the 24 h hold, when the
-  dominant client changes: the alert names the org, and a different org is a different
-  split.
+  unattributed (see below). The 24 h hold is per org: each org over the threshold is
+  announced once per 24 h, so a different org is announced as its own split, and two
+  orgs trading the top spot are announced once each, not on every swap. An exact tie
+  goes to the lower orgId.
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
@@ -418,14 +419,22 @@ network in cleartext. Any hostname, `localhost` included, is refused over `http:
 goes through the resolver. Use https, or the IP literal.
 
 A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
+Under `Restart=always` that is a crash loop which stops every run lane on the box, not
+just the alerts, so validate the knobs before restarting — from `packages/worker`, with
+the new env exported:
+`pnpm exec tsx -e 'import("./src/agent-run/growth-trigger-config.ts").then((m) => { m.loadGrowthTriggerConfig(process.env); console.log("growth knobs ok"); })'`
+throws on exactly the value boot would refuse (it prints no knob values: the URL is a
+credential).
 The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
 state}` with `state` `fired` or `cleared`; `text` is a one-line summary, so the same URL
 works for a Slack incoming webhook or ntfy. A trigger that stays over re-fires at most
-once per 24 h (sooner only for `client_share` when the top client changes, and when a
-recorded fire time lies in the future — a clock that stepped back never extends the
-hold), and one `cleared` notice is sent when it drops back under. A failed POST is not
-recorded and is retried next tick; `growth.webhook_failed` is logged once per
-(trigger, state, reason) streak and `growth.webhook_recovered` on the next delivery.
+once per 24 h (per org for `client_share`; sooner only when a recorded fire time lies in
+the future — a clock that stepped back never extends the hold), and one `cleared` notice
+is sent when it drops back under. The 24 h hold still applies after a `cleared`: an over
+again within the day is not re-announced, and the snapshot carries the live verdict. A
+failed POST is not recorded and is retried next tick; `growth.webhook_failed` is logged
+once per (trigger, state, reason) streak — a tick with no transition for that trigger
+ends the streak — and `growth.webhook_recovered` on the next delivery.
 
 The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
 `until` = 00:00 UTC today, so today's partial day is never paged in.

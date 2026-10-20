@@ -134,8 +134,9 @@ interface ReadRunWindowInput {
   sinceMs: number;
   /**
    * The reader's `until`, normally growthWindow(now).endMs (00:00 UTC today): the engine
-   * honours it (verified on the box's engine 2026-10-20: num_pages 620 → 604, newest row
-   * before `until`), so today's partial day is never paged in only to be dropped.
+   * honours it (verified on the box's engine 2026-10-20 with limit=1, where num_pages is a
+   * row count: 620 → 604, newest row before `until`), so today's partial day is never
+   * paged in only to be dropped.
    */
   untilMs: number;
   /** Absolute clock time after which no request may still be in flight. */
@@ -524,8 +525,8 @@ function defaultReadSnapshot(filePath: string): string | null {
  *      unchanged);
  *   3. for each fire/clear transition POSTs the webhook and commits the transition only
  *      when delivered (V2: a failed POST retries next tick; `growth.webhook_failed` is
- *      logged once per (trigger, state, reason) streak, `growth.webhook_recovered` on the
- *      next delivery); each POST is bounded by min(10 s, interval / 2, time left before
+ *      logged once per (trigger, state, reason) streak — a tick with no transition for that
+ *      trigger ends the streak — `growth.webhook_recovered` on the next delivery); each POST is bounded by min(10 s, interval / 2, time left before
  *      0.95 × interval); a delivered transition is persisted to the snapshot at once, so
  *      a crash later in the tick cannot re-send it after restart;
  *   4. ALWAYS writes the snapshot atomically with mode 0640 (AC 5, V9).
@@ -605,6 +606,8 @@ export function armGrowthTriggers(
     const engineDeadlineMs = startMs + engineReadBudgetMs;
     const deadlineMs = startMs + tickBudgetMs;
 
+    // ONE window per tick, from the tick start: the read and the evaluation must agree
+    // even when the tick crosses 00:00 UTC.
     const window = growthWindow(startMs);
     const [runs, mem] = await Promise.all([
       readRunWindow({
@@ -631,6 +634,7 @@ export function armGrowthTriggers(
     const runSignals = evaluateRunSignals({
       runs,
       nowMs,
+      window,
       questionnaire: config.questionnaire,
     });
     const ramSwap = evaluateRamSwap({
@@ -686,7 +690,7 @@ export function armGrowthTriggers(
         logLine(log, "growth.trigger_known", { trigger: id });
       }
       const current = states[id];
-      // client_share names its top org, so a different dominant client re-fires at once.
+      // client_share's hold is per top org: a different dominant client is its own split.
       const topOrgId =
         id === "client_share" ? runSignals.stats?.topClient?.orgId : undefined;
       const transition = decideTransition(
@@ -695,7 +699,12 @@ export function armGrowthTriggers(
         nowMs,
         topOrgId === undefined ? {} : { topOrgId },
       );
-      if (transition.action === "none") continue;
+      if (transition.action === "none") {
+        // No transition ends this trigger's failure streak: a later outage with the same
+        // reason is a new incident and is logged again.
+        webhookFailureLogged.delete(id);
+        continue;
+      }
       const state = transition.action === "fire" ? "fired" : "cleared";
       const body = buildWebhookBody({
         evaluation,

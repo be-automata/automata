@@ -171,6 +171,26 @@ describe("growthWindow / nearestRankPercentile", () => {
     expect(w.dayStartsMs[6]).toBe(Date.UTC(2026, 9, 18));
   });
 
+  it("evaluateRunSignals uses the window it is given, not one recomputed from nowMs", () => {
+    // Every day of NOW's window waits 700 s; evaluated one day later without the window,
+    // the newest day (never read) is empty and the streak breaks.
+    const rows = sevenDays({ waitS: 700 });
+    const nextDay = NOW + DAY_MS;
+    const given = evaluateRunSignals({
+      runs: { kind: "rows", rows },
+      nowMs: nextDay,
+      window: growthWindow(NOW),
+      questionnaire: false,
+    });
+    expect(given.queueWait.verdict).toBe("over");
+    const recomputed = evaluateRunSignals({
+      runs: { kind: "rows", rows },
+      nowMs: nextDay,
+      questionnaire: false,
+    });
+    expect(recomputed.queueWait.verdict).toBe("under");
+  });
+
   it("is nearest-rank", () => {
     expect(nearestRankPercentile([], 0.9)).toBeNull();
     expect(nearestRankPercentile([5], 0.9)).toBe(5);
@@ -289,6 +309,19 @@ describe("client share", () => {
     ]).clientShare;
     expect(near.value).toBe(0.4);
     expect(near.verdict).toBe("over");
+  });
+
+  it("an exact tie goes to the lower orgId, whatever the row order", () => {
+    const a = () => row({ day: 0, org: "org-a", runS: 500 });
+    const b = () => row({ day: 1, org: "org-b", runS: 500 });
+    for (const rows of [
+      [a(), b()],
+      [b(), a()],
+    ]) {
+      const r = evalRows(rows);
+      expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.5 });
+      expect(r.clientShare.verdict).toBe("over");
+    }
   });
 
   it("at exactly 40% it stays under", () => {
@@ -863,104 +896,150 @@ describe("dedupe state machine", () => {
     ).toBe("none");
   });
 
-  describe("client_share re-fires when the top client changes", () => {
+  describe("client_share holds 24 h PER ORG", () => {
     const firedForA: TriggerDedupeState = {
       firing: true,
       lastFiredAtMs: T0,
-      lastFiredTopOrgId: "org-a",
+      orgLastFiredAtMs: { "org-a": T0 },
     };
+    const over = (s: TriggerDedupeState, atMs: number, org: string) =>
+      decideTransition(s, "over", atMs, { topOrgId: org });
 
     it("records the top org on a fire", () => {
-      expect(
-        decideTransition(INITIAL_DEDUPE_STATE, "over", T0, {
-          topOrgId: "org-a",
-        }),
-      ).toEqual({ action: "fire", next: firedForA });
+      expect(over(INITIAL_DEDUPE_STATE, T0, "org-a")).toEqual({
+        action: "fire",
+        next: firedForA,
+      });
     });
 
-    it("the same org within 24 h does not re-fire", () => {
-      expect(
-        decideTransition(firedForA, "over", T0 + HOUR, { topOrgId: "org-a" }),
-      ).toEqual({ action: "none", next: firedForA });
-    });
-
-    it("a different top org within 24 h fires at once and records the new org", () => {
-      expect(
-        decideTransition(firedForA, "over", T0 + HOUR, { topOrgId: "org-b" }),
-      ).toEqual({
+    it("A, B, A, B within 24 h fires exactly twice (A then B); A fires again after 24 h", () => {
+      let s = INITIAL_DEDUPE_STATE;
+      const fired: string[] = [];
+      const ticks: Array<[number, string]> = [
+        [T0, "org-a"],
+        [T0 + HOUR, "org-b"],
+        [T0 + 2 * HOUR, "org-a"],
+        [T0 + 3 * HOUR, "org-b"],
+      ];
+      for (const [atMs, org] of ticks) {
+        const t = over(s, atMs, org);
+        if (t.action === "fire") fired.push(org);
+        s = commitTransition(s, t, true);
+      }
+      expect(fired).toEqual(["org-a", "org-b"]);
+      expect(s).toEqual({
+        firing: true,
+        lastFiredAtMs: T0 + HOUR,
+        orgLastFiredAtMs: { "org-a": T0, "org-b": T0 + HOUR },
+      });
+      expect(over(s, T0 + GROWTH_REFIRE_MS - 1, "org-a").action).toBe("none");
+      // org-a's own window has passed; org-b's has not, and its entry is kept.
+      expect(over(s, T0 + GROWTH_REFIRE_MS, "org-a")).toEqual({
         action: "fire",
         next: {
           firing: true,
-          lastFiredAtMs: T0 + HOUR,
-          lastFiredTopOrgId: "org-b",
+          lastFiredAtMs: T0 + GROWTH_REFIRE_MS,
+          orgLastFiredAtMs: {
+            "org-a": T0 + GROWTH_REFIRE_MS,
+            "org-b": T0 + HOUR,
+          },
         },
       });
-      // Also after a clear: a different client is a different split.
-      const cleared = { ...firedForA, firing: false };
-      expect(
-        decideTransition(cleared, "over", T0 + HOUR, { topOrgId: "org-b" })
-          .action,
-      ).toBe("fire");
     });
 
-    it("a clear keeps the org, so the next over for it is still held", () => {
+    it("a fire prunes org entries older than 24 h or in the future", () => {
+      const s: TriggerDedupeState = {
+        firing: false,
+        lastFiredAtMs: T0 - HOUR,
+        orgLastFiredAtMs: {
+          "org-old": T0 - GROWTH_REFIRE_MS,
+          "org-future": T0 + HOUR,
+          "org-live": T0 - HOUR,
+        },
+      };
+      expect(over(s, T0, "org-new").next.orgLastFiredAtMs).toEqual({
+        "org-live": T0 - HOUR,
+        "org-new": T0,
+      });
+      // A future entry for the org itself holds nothing: due, like the trigger-level rule.
+      expect(over(s, T0, "org-future").action).toBe("fire");
+    });
+
+    it("a clear keeps the per-org map, so the next over for that org is still held", () => {
       const clear = decideTransition(firedForA, "under", T0 + MIN);
       expect(clear).toEqual({
         action: "clear",
         next: { ...firedForA, firing: false },
       });
-      expect(
-        decideTransition(clear.next, "over", T0 + HOUR, { topOrgId: "org-a" })
-          .action,
-      ).toBe("none");
+      expect(over(clear.next, T0 + HOUR, "org-a").action).toBe("none");
+      expect(over(clear.next, T0 + HOUR, "org-b").action).toBe("fire");
     });
 
-    it("an unrecorded previous org is not a change (no re-fire on upgrade)", () => {
-      const legacy: TriggerDedupeState = { firing: true, lastFiredAtMs: T0 };
-      expect(
-        decideTransition(legacy, "over", T0 + HOUR, { topOrgId: "org-b" })
-          .action,
-      ).toBe("none");
-    });
-
-    it("a restart seeded from the snapshot keeps the org", () => {
+    it("a restart seeded from the snapshot keeps the per-org map", () => {
+      const twoOrgs: TriggerDedupeState = {
+        firing: true,
+        lastFiredAtMs: T0,
+        orgLastFiredAtMs: { "org-a": T0 - HOUR, "org-b": T0 },
+      };
       const snap = buildSnapshot({
         nowMs: T0,
         boxId: "b",
         evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
         states: {
           ...dedupeStatesFromSnapshot(null, T0),
-          client_share: firedForA,
+          client_share: twoOrgs,
         },
         stats: null,
       });
-      expect(snap.triggers.client_share.lastFiredTopOrgId).toBe("org-a");
-      expect(snap.triggers.ram_swap).not.toHaveProperty("lastFiredTopOrgId");
+      expect(snap.triggers.client_share.orgLastFiredAt).toEqual({
+        "org-a": new Date(T0 - HOUR).toISOString(),
+        "org-b": new Date(T0).toISOString(),
+      });
+      expect(snap.triggers.ram_swap).not.toHaveProperty("orgLastFiredAt");
       const seeded = dedupeStatesFromSnapshot(
         JSON.parse(JSON.stringify(snap)),
         T0 + HOUR,
       );
-      expect(seeded.client_share).toEqual(firedForA);
-      expect(
-        decideTransition(seeded.client_share, "over", T0 + HOUR, {
-          topOrgId: "org-a",
-        }).action,
-      ).toBe("none");
-      expect(
-        decideTransition(seeded.client_share, "over", T0 + HOUR, {
-          topOrgId: "org-b",
-        }).action,
-      ).toBe("fire");
+      expect(seeded.client_share).toEqual(twoOrgs);
+      expect(over(seeded.client_share, T0 + HOUR, "org-a").action).toBe("none");
+      expect(over(seeded.client_share, T0 + HOUR, "org-b").action).toBe("none");
+      expect(over(seeded.client_share, T0 + HOUR, "org-c").action).toBe("fire");
     });
 
-    it("other triggers never seed an org, even if the snapshot carries one", () => {
+    it("the seed drops org entries that no longer hold, and junk ones", () => {
+      const seeded = dedupeStatesFromSnapshot(
+        {
+          triggers: {
+            client_share: {
+              firing: true,
+              lastFiredAt: new Date(T0 - HOUR).toISOString(),
+              orgLastFiredAt: {
+                "org-live": new Date(T0 - HOUR).toISOString(),
+                "org-old": new Date(T0 - GROWTH_REFIRE_MS).toISOString(),
+                "org-future": new Date(T0 + HOUR).toISOString(),
+                "org-junk": "garbage",
+                "  ": new Date(T0).toISOString(),
+              },
+            },
+          },
+        },
+        T0,
+      );
+      expect(seeded.client_share).toEqual({
+        firing: true,
+        lastFiredAtMs: T0 - HOUR,
+        orgLastFiredAtMs: { "org-live": T0 - HOUR },
+      });
+    });
+
+    it("other triggers never seed an org map, even if the snapshot carries one", () => {
       const seeded = dedupeStatesFromSnapshot(
         {
           triggers: {
             ram_swap: {
               firing: true,
               lastFiredAt: new Date(T0).toISOString(),
-              lastFiredTopOrgId: "org-a",
+              orgLastFiredAt: { "org-a": new Date(T0).toISOString() },
             },
           },
         },
@@ -1075,6 +1154,77 @@ describe("dedupe matrix", () => {
   it("covers every state × input", () => {
     expect(CELLS).toHaveLength(Object.keys(STATES).length * 5);
   });
+
+  /**
+   * Cells for the two states whose over / restart-seed behaviour is pinned by their own
+   * tests above (a future lastFiredAt; client_share's per-org hold): the remaining inputs.
+   */
+  const FUTURE: TriggerDedupeState = { firing: true, lastFiredAtMs: T0 + HOUR };
+  const FIRED_FOR_A: TriggerDedupeState = {
+    firing: true,
+    lastFiredAtMs: T0 - HOUR,
+    orgLastFiredAtMs: { "org-a": T0 - HOUR },
+  };
+  const EXTRA_CELLS: Array<
+    [
+      string,
+      TriggerDedupeState,
+      "under" | "unknown" | "post-failed",
+      string | undefined,
+      DedupeActionName,
+      TriggerDedupeState,
+    ]
+  > = [
+    [
+      "future-lastFiredAt",
+      FUTURE,
+      "under",
+      undefined,
+      "clear",
+      { ...FUTURE, firing: false },
+    ],
+    ["future-lastFiredAt", FUTURE, "unknown", undefined, "none", FUTURE],
+    // Over is due (a future fire holds nothing), so the failed POST is a fire.
+    ["future-lastFiredAt", FUTURE, "post-failed", undefined, "fire", FUTURE],
+    [
+      "client_share-fired-for-org-a",
+      FIRED_FOR_A,
+      "unknown",
+      "org-a",
+      "none",
+      FIRED_FOR_A,
+    ],
+    // org-a is still held, so the state can only act by clearing; that POST fails.
+    [
+      "client_share-fired-for-org-a",
+      FIRED_FOR_A,
+      "post-failed",
+      "org-a",
+      "clear",
+      FIRED_FOR_A,
+    ],
+  ];
+
+  it.each(EXTRA_CELLS)(
+    "%s × %s",
+    (_name, start, input, topOrgId, action, committed) => {
+      const options = topOrgId === undefined ? {} : { topOrgId };
+      let verdict: "under" | "over" | "unknown" =
+        input === "post-failed" ? "over" : input;
+      if (
+        input === "post-failed" &&
+        start.firing &&
+        decideTransition(start, "over", T0, options).action === "none"
+      ) {
+        verdict = "under";
+      }
+      const t = decideTransition(start, verdict, T0, options);
+      expect(t.action).toBe(action);
+      expect(commitTransition(start, t, input !== "post-failed")).toEqual(
+        committed,
+      );
+    },
+  );
 });
 
 describe("webhook body", () => {
@@ -1135,8 +1285,7 @@ describe("webhook body", () => {
     expect(AUTHORIZED_MOVES).toEqual({
       queue_wait_p90: "Raise the cap, then resize CX43 (cap 6) / CX53 (cap 8)",
       ram_swap: "Add a second shared box on the same tenant",
-      client_share:
-        "Split that client to its own box (tickets 6/7); also fires manually on isolation / write-lane requests",
+      client_share: "Split that client to its own box (tickets 6/7)",
       scale_composite: "Start the per-run sandbox path",
       supersede_waste: "Revisit the default policy",
     });
@@ -1277,7 +1426,7 @@ describe("snapshot", () => {
     ).toEqual(INITIAL_DEDUPE_STATE);
   });
 
-  it("a lastFiredAt after the seed time resets that trigger to the initial state", () => {
+  it("a lastFiredAt after the seed time seeds no hold but keeps firing, so a pending clear is not dropped", () => {
     const seeded = dedupeStatesFromSnapshot(
       {
         triggers: {
@@ -1288,7 +1437,11 @@ describe("snapshot", () => {
           client_share: {
             firing: true,
             lastFiredAt: new Date(NOW + DAY_MS).toISOString(),
-            lastFiredTopOrgId: "org-a",
+            orgLastFiredAt: { "org-a": new Date(NOW - HOUR).toISOString() },
+          },
+          queue_wait_p90: {
+            firing: false,
+            lastFiredAt: new Date(NOW + MIN).toISOString(),
           },
           supersede_waste: {
             firing: true,
@@ -1298,8 +1451,19 @@ describe("snapshot", () => {
       },
       NOW,
     );
-    expect(seeded.ram_swap).toEqual(INITIAL_DEDUPE_STATE);
-    expect(seeded.client_share).toEqual(INITIAL_DEDUPE_STATE);
+    expect(seeded.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
+    expect(seeded.queue_wait_p90).toEqual(INITIAL_DEDUPE_STATE);
+    // The per-org map is seeded on its own terms (org-a's fire is in the past).
+    expect(seeded.client_share).toEqual({
+      firing: true,
+      lastFiredAtMs: null,
+      orgLastFiredAtMs: { "org-a": NOW - HOUR },
+    });
+    // The pending clear is still delivered; an over is due (no hold).
+    expect(decideTransition(seeded.ram_swap, "under", NOW).action).toBe(
+      "clear",
+    );
+    expect(decideTransition(seeded.ram_swap, "over", NOW).action).toBe("fire");
     // At exactly the seed time it is a past fire, honoured as such.
     expect(seeded.supersede_waste).toEqual({
       firing: true,

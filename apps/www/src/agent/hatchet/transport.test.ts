@@ -91,6 +91,40 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("a review-shaped input WITHOUT opts gets lane review and only the default keys (review metadata comes only through the review plan's triggerOpts)", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ run: { metadata: { id: "r" } } }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const reviewShaped = [
+      { ...INPUT, prNumber: 7, prKey: "be-automata/automata#7" },
+      { ...INPUT, prNumber: 7, supersedePolicy: "newest-wins" },
+    ];
+    for (const input of reviewShaped) {
+      expect(resolveRunDisplayLane(input)).toBe("review");
+      await triggerAgentRun(input, CONFIG);
+    }
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(init.body);
+      // No opts → the legacy workflow and the non-review metadata builder: no
+      // metaVersion, prKey or policy keys, which only buildReviewRunMetadata adds.
+      expect(body.workflowName).toBe("agent-run");
+      expect(body.additionalMetadata).toEqual({
+        threadId: "thr_1",
+        threadChatId: "tc_1",
+        orgId: "org_1",
+        lane: "review",
+        repoFullName: "be-automata/automata",
+        prNumber: "7",
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
   it("returns externalId undefined when the response has no run.metadata.id", async () => {
     // A body that isn't the expected V1WorkflowRunDetails shape must not throw —
     // it degrades to undefined (callers ignore it today; #8 will require it later).

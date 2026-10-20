@@ -1184,7 +1184,7 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     expect(onDiskAtSecondPost?.triggers.client_share).toMatchObject({
       firing: true,
       lastFiredAt: new Date(NOW).toISOString(),
-      lastFiredTopOrgId: "org-a",
+      orgLastFiredAt: { "org-a": new Date(NOW).toISOString() },
     });
     expect(onDiskAtSecondPost?.triggers.supersede_waste.firing).toBe(false);
 
@@ -1201,40 +1201,132 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     expect(second.posts.map((p) => p.trigger)).toEqual(["supersede_waste"]);
   });
 
-  it("client_share re-fires within 24 h when the top client changes, not when it stays", async () => {
-    const h = harness();
-    h.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
-    const handle = armGrowthTriggers(ENV_ON, h.deps);
-    await handle?.firstTick;
-    h.clock.ms = NOW + 300_000;
-    await handle?.tick();
-    const shareFires = () =>
-      h.posts.filter((p) => p.trigger === "client_share");
-    expect(shareFires()).toHaveLength(1);
-
-    h.setEngine(() =>
+  it("client_share holds 24 h per org: A, B, A, B fires A then B only; A again after 24 h", async () => {
+    // Both orgs hold > 40% whichever leads, so client_share is over on every tick. Day 1
+    // of NOW's window is also inside the window a day later.
+    const lead = (org: "org-a" | "org-b") =>
       jsonResponse(
         page(
           [
-            rawRow({ runS: 100, orgId: "org-a", id: "r-a" }),
-            rawRow({ runS: 600, orgId: "org-b", id: "r-b" }),
+            rawRow({
+              day: 1,
+              runS: org === "org-a" ? 550 : 450,
+              orgId: "org-a",
+              id: "r-a",
+            }),
+            rawRow({
+              day: 1,
+              runS: org === "org-b" ? 550 : 450,
+              orgId: "org-b",
+              id: "r-b",
+            }),
           ],
           1,
           1,
         ),
-      ),
-    );
-    h.clock.ms = NOW + 600_000;
-    await handle?.tick();
-    expect(shareFires()).toHaveLength(2);
-    expect(shareFires()[1]?.text).toContain("org-b");
+      );
+    const h = harness();
+    let leader: "org-a" | "org-b" = "org-a";
+    h.setEngine(() => lead(leader));
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    const sequence: Array<"org-a" | "org-b"> = ["org-b", "org-a", "org-b"];
+    for (const [i, org] of sequence.entries()) {
+      leader = org;
+      h.clock.ms = NOW + (i + 1) * 300_000;
+      await handle?.tick();
+    }
+    const shareFires = () =>
+      h.posts.filter((p) => p.trigger === "client_share");
+    expect(shareFires().map((p) => p.text.includes("org-b"))).toEqual([
+      false,
+      true,
+    ]);
+    expect(shareFires()[0]?.text).toContain("org-a holds");
+    expect(shareFires()[1]?.text).toContain("org-b holds");
     expect(h.writes.at(-1)?.snapshot.triggers.client_share).toMatchObject({
       firing: true,
-      lastFiredTopOrgId: "org-b",
+      orgLastFiredAt: {
+        "org-a": new Date(NOW).toISOString(),
+        "org-b": new Date(NOW + 300_000).toISOString(),
+      },
     });
-    h.clock.ms = NOW + 900_000;
+
+    leader = "org-a";
+    h.clock.ms = NOW + DAY_MS;
     await handle?.tick();
-    expect(shareFires()).toHaveLength(2);
+    expect(shareFires()).toHaveLength(3);
+    expect(shareFires()[2]?.text).toContain("org-a holds");
+    handle?.stop();
+  });
+
+  it("a tick crossing 00:00 UTC evaluates the window it read: no empty-yesterday clear", async () => {
+    const readStart = Date.parse("2026-10-19T23:59:59.900Z");
+    const afterRead = Date.parse("2026-10-20T00:00:00.100Z");
+    const w = growthWindow(readStart);
+    // Every day of the READ window waits 700 s (queue_wait over); 2026-10-19 itself —
+    // the newest day of the post-midnight window — was never read.
+    const rows = w.dayStartsMs.map((dayStart, i) => {
+      const created = dayStart + 3_600_000;
+      return {
+        actionId: "agent-run:run",
+        status: "COMPLETED",
+        createdAt: new Date(created).toISOString(),
+        startedAt: new Date(created + 700_000).toISOString(),
+        finishedAt: new Date(created + 760_000).toISOString(),
+        additionalMetadata: {},
+        metadata: { id: `r-${i}` },
+      };
+    });
+    const firedAt = new Date(readStart - 3_600_000).toISOString();
+    const h = harness({
+      snapshotText: JSON.stringify({
+        triggers: { queue_wait_p90: { firing: true, lastFiredAt: firedAt } },
+      }),
+    });
+    h.clock.ms = readStart;
+    h.setEngine(() => {
+      // The clock crosses midnight while the engine read is in flight.
+      h.clock.ms = afterRead;
+      return jsonResponse(page(rows, 1, 1));
+    });
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    handle?.stop();
+    expect(new URL(ENGINE_URLS[0] ?? "").searchParams.get("until")).toBe(
+      "2026-10-19T00:00:00.000Z",
+    );
+    expect(h.posts.filter((p) => p.trigger === "queue_wait_p90")).toEqual([]);
+    expect(h.writes.at(-1)?.snapshot).toMatchObject({
+      evaluatedAt: new Date(afterRead).toISOString(),
+      triggers: {
+        queue_wait_p90: { verdict: "over", firing: true, lastFiredAt: firedAt },
+      },
+    });
+  });
+
+  it("a tick with no transition ends the webhook_failed streak: the same outage later is logged again", async () => {
+    const h = harness();
+    h.setWebhookStatus(503);
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick; // supersede_waste over: fire fails (503), logged
+    const failed = () =>
+      h.logs.filter((l) => l.startsWith("growth.webhook_failed "));
+    expect(failed()).toHaveLength(1);
+
+    // Under while never committed as firing: no transition for supersede_waste.
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    h.clock.ms = NOW + 300_000;
+    await handle?.tick();
+    expect(h.posts).toHaveLength(1);
+
+    // Over again, the sink still answering 503: a new streak, logged again.
+    h.setEngine(() => jsonResponse(page(WASTEFUL, 1, 1)));
+    h.clock.ms = NOW + 600_000;
+    await handle?.tick();
+    expect(h.posts).toHaveLength(2);
+    expect(failed()).toHaveLength(2);
+    expect(failed()[1]).toContain('"reason":"non-2xx"');
     handle?.stop();
   });
 

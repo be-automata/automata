@@ -68,8 +68,7 @@ export const GROWTH_TRIGGER_IDS: readonly GrowthTriggerId[] = [
 export const AUTHORIZED_MOVES: Readonly<Record<GrowthTriggerId, string>> = {
   queue_wait_p90: "Raise the cap, then resize CX43 (cap 6) / CX53 (cap 8)",
   ram_swap: "Add a second shared box on the same tenant",
-  client_share:
-    "Split that client to its own box (tickets 6/7); also fires manually on isolation / write-lane requests",
+  client_share: "Split that client to its own box (tickets 6/7)",
   scale_composite: "Start the per-run sandbox path",
   supersede_waste: "Revisit the default policy",
 };
@@ -258,6 +257,14 @@ interface RunWindowStats {
 interface RunSignalsInput {
   runs: RunsReading;
   nowMs: number;
+  /**
+   * The window the runs were READ for. The driver computes it once at tick start and
+   * passes it here: a tick that crosses 00:00 UTC between the read and the evaluation
+   * would otherwise evaluate a window shifted by a day, whose newest day the read never
+   * fetched — an empty day that breaks the queue-wait streak and clears a firing trigger.
+   * Defaults to growthWindow(nowMs).
+   */
+  window?: GrowthWindow;
   /** `WORKER_ENTERPRISE_QUESTIONNAIRE=1`: the composite's manual arm. */
   questionnaire: boolean;
 }
@@ -400,7 +407,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     };
   }
 
-  const window = growthWindow(input.nowMs);
+  const window = input.window ?? growthWindow(input.nowMs);
   const waitsByDay: number[][] = window.dayStartsMs.map(() => []);
   const prsByDay: Array<Set<string>> = window.dayStartsMs.map(() => new Set());
   const orgs = new Set<string>();
@@ -458,19 +465,24 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       "; engine queue only, in-worker admission and box-slot waits not counted)",
   );
 
-  // Client share.
-  let topOrg: { orgId: string; share: number } | null = null;
-  if (attributedMs > 0) {
-    for (const [orgId, ms] of orgTimeMs) {
-      const share = ms / attributedMs;
-      if (topOrg === null || share > topOrg.share) topOrg = { orgId, share };
+  // Client share. An exact tie on run time goes to the lexicographically lower orgId, so
+  // the top org — which keys client_share's per-org hold — does not depend on row order.
+  let topOrg: { orgId: string; ms: number } | null = null;
+  for (const [orgId, ms] of orgTimeMs) {
+    if (
+      topOrg === null ||
+      ms > topOrg.ms ||
+      (ms === topOrg.ms && orgId < topOrg.orgId)
+    ) {
+      topOrg = { orgId, ms };
     }
   }
+  const maxShareRaw =
+    topOrg !== null && attributedMs > 0 ? topOrg.ms / attributedMs : 0;
   const topClient: RunWindowStats["topClient"] =
-    topOrg === null
+    topOrg === null || attributedMs <= 0
       ? null
-      : { orgId: topOrg.orgId, share: round(topOrg.share) };
-  const maxShareRaw = topOrg?.share ?? 0;
+      : { orgId: topOrg.orgId, share: round(maxShareRaw) };
   const totalMs = attributedMs + unattributedMs;
   const unattributedFractionRaw = totalMs > 0 ? unattributedMs / totalMs : 0;
   // Two decimals, so a gate tripped at 5.04 % never reads as "5 %" in the reason.
@@ -722,11 +734,14 @@ export interface TriggerDedupeState {
   firing: boolean;
   lastFiredAtMs: number | null;
   /**
-   * client_share only: the top org the last fire was about. A different top org is a new
-   * split signal, so it is announced at once instead of waiting out the 24 h hold. Absent
-   * for every other trigger, and for a client_share that never fired.
+   * client_share only: orgId → when a fire last named that org as the top client. The
+   * 24 h hold is PER ORG: an org is announced at most once per GROWTH_REFIRE_MS, so two
+   * orgs trading the top spot are announced once each, not on every swap. Pruned of
+   * entries that no longer hold anything (older than the window, or in the future) on
+   * every fire and on seed. Absent for every other trigger, and for a client_share that
+   * never fired.
    */
-  lastFiredTopOrgId?: string;
+  orgLastFiredAtMs?: Readonly<Record<string, number>>;
 }
 
 export const INITIAL_DEDUPE_STATE: TriggerDedupeState = {
@@ -744,10 +759,34 @@ interface DedupeTransition {
 
 interface DecideTransitionOptions {
   /**
-   * client_share only: the org that currently holds the largest share. Recorded on a fire,
-   * and an `over` for a different org than the last fire's is due at once.
+   * client_share only: the org that currently holds the largest share. When set, the hold
+   * is that org's own (`orgLastFiredAtMs`), not the trigger's, and a fire records it.
    */
   topOrgId?: string;
+}
+
+/**
+ * Whether a fire at `last` still holds an `over` at `nowMs`. A `last` AFTER `nowMs` (a
+ * clock that stepped back, or a snapshot written by a box with a fast clock) holds
+ * nothing: otherwise the hold would last until the clock caught up, however long that is.
+ */
+function heldBy(last: number | null | undefined, nowMs: number): boolean {
+  return (
+    last !== null &&
+    last !== undefined &&
+    last <= nowMs &&
+    nowMs - last < GROWTH_REFIRE_MS
+  );
+}
+
+/** The org fires that still hold at `nowMs`; null when none does. */
+function liveOrgFires(
+  fires: Readonly<Record<string, number>> | undefined,
+  nowMs: number,
+): Record<string, number> | null {
+  if (fires === undefined) return null;
+  const live = Object.entries(fires).filter(([, at]) => heldBy(at, nowMs));
+  return live.length > 0 ? Object.fromEntries(live) : null;
 }
 
 /**
@@ -755,14 +794,13 @@ interface DecideTransitionOptions {
  * was none — whether or not the trigger is still `firing`, so a condition that flaps (fire
  * → clear → over again) is announced at most once per window (AC 4), and one that stays
  * over is re-announced once a day, not every tick. `clear` once when it drops under while
- * firing, never held by the window; `unknown` is always a no-op.
+ * firing, never held by the window; `unknown` is always a no-op. A `lastFiredAtMs` AFTER
+ * `nowMs` holds nothing (see heldBy).
  *
- * Two more ways an `over` is due:
- *  - a `lastFiredAtMs` AFTER `nowMs` (a clock that stepped back, or a snapshot written by
- *    a box with a fast clock) is treated as never fired: otherwise the hold would last
- *    until the clock caught up, however long that is;
- *  - client_share, when `options.topOrgId` differs from the org the last fire named: a
- *    different client is a different split, not a repeat of the one already announced.
+ * client_share (`options.topOrgId` set): the hold is per org. An `over` fires iff THAT org
+ * was not announced in the last GROWTH_REFIRE_MS, so a different client is announced as
+ * its own split, and two clients trading the top spot are announced once each per window
+ * instead of on every swap.
  *
  * The transition is a PROPOSAL. A failed webhook must not be recorded as delivered (V2) —
  * otherwise a sink outage at the moment of the fire would silence the trigger for 24 h —
@@ -775,28 +813,29 @@ export function decideTransition(
   options: DecideTransitionOptions = {},
 ): DedupeTransition {
   if (verdict === "over") {
-    const last = state.lastFiredAtMs;
-    const topOrgChanged =
-      options.topOrgId !== undefined &&
-      state.lastFiredTopOrgId !== undefined &&
-      options.topOrgId !== state.lastFiredTopOrgId;
-    const due =
-      last === null ||
-      last > nowMs ||
-      nowMs - last >= GROWTH_REFIRE_MS ||
-      topOrgChanged;
-    return due
-      ? {
-          action: "fire",
-          next: {
-            firing: true,
-            lastFiredAtMs: nowMs,
-            ...(options.topOrgId !== undefined
-              ? { lastFiredTopOrgId: options.topOrgId }
-              : {}),
-          },
-        }
-      : { action: "none", next: state };
+    const orgId = options.topOrgId;
+    if (orgId === undefined) {
+      return heldBy(state.lastFiredAtMs, nowMs)
+        ? { action: "none", next: state }
+        : {
+            action: "fire",
+            next: { ...state, firing: true, lastFiredAtMs: nowMs },
+          };
+    }
+    if (heldBy(state.orgLastFiredAtMs?.[orgId], nowMs)) {
+      return { action: "none", next: state };
+    }
+    return {
+      action: "fire",
+      next: {
+        firing: true,
+        lastFiredAtMs: nowMs,
+        orgLastFiredAtMs: {
+          ...liveOrgFires(state.orgLastFiredAtMs, nowMs),
+          [orgId]: nowMs,
+        },
+      },
+    };
   }
   if (verdict === "under" && state.firing) {
     return { action: "clear", next: { ...state, firing: false } };
@@ -867,8 +906,8 @@ interface SnapshotTriggerEntry {
   reason?: string;
   firing: boolean;
   lastFiredAt: string | null;
-  /** client_share only, once it has fired: the top org that fire named. */
-  lastFiredTopOrgId?: string;
+  /** client_share only, once it has fired: orgId → ISO time of the last fire naming it. */
+  orgLastFiredAt?: Record<string, string>;
 }
 
 export interface GrowthSnapshot {
@@ -910,8 +949,15 @@ export function buildSnapshot(input: {
           ? null
           : new Date(s.lastFiredAtMs).toISOString(),
       ...(e.reason !== undefined ? { reason: e.reason } : {}),
-      ...(s.lastFiredTopOrgId !== undefined
-        ? { lastFiredTopOrgId: s.lastFiredTopOrgId }
+      ...(s.orgLastFiredAtMs !== undefined
+        ? {
+            orgLastFiredAt: Object.fromEntries(
+              Object.entries(s.orgLastFiredAtMs).map(([org, at]) => [
+                org,
+                new Date(at).toISOString(),
+              ]),
+            ),
+          }
         : {}),
     };
   }
@@ -928,12 +974,34 @@ export function buildSnapshot(input: {
   };
 }
 
+/** client_share's persisted per-org fires, keeping only those that still hold at `seedMs`. */
+function seedOrgFires(
+  raw: unknown,
+  seedMs: number,
+): Record<string, number> | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const parsed: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const orgId = nonEmptyString(key);
+    const at = parseTimestampMs(value);
+    if (orgId !== null && at !== null) parsed[orgId] = at;
+  }
+  return liveOrgFires(parsed, seedMs);
+}
+
 /**
  * Seed the dedupe states from a previous snapshot (parsed JSON, or anything) so a worker
  * restart does not re-fire every trigger that was already firing. Anything unreadable
  * seeds the initial state for that trigger — worst case one duplicate alert, never a
- * suppressed one that was not delivered. So does a `lastFiredAt` after `seedMs` (the
- * arm-time clock): a fire from the future cannot be honoured as a hold.
+ * suppressed one that was not delivered.
+ *
+ * A `lastFiredAt` after `seedMs` (the arm-time clock) is a fire from the future and cannot
+ * be honoured as a hold: it seeds `lastFiredAtMs: null`, but KEEPS `firing`, so a trigger
+ * that was firing can still be cleared when it drops under (seeding the initial state
+ * would drop that pending clear). client_share's per-org fires are seeded the same way:
+ * only entries that still hold at `seedMs` survive.
  */
 export function dedupeStatesFromSnapshot(
   raw: unknown,
@@ -956,21 +1024,20 @@ export function dedupeStatesFromSnapshot(
     const e = entry as {
       firing?: unknown;
       lastFiredAt?: unknown;
-      lastFiredTopOrgId?: unknown;
+      orgLastFiredAt?: unknown;
     };
+    const orgFires =
+      id === "client_share" ? seedOrgFires(e.orgLastFiredAt, seedMs) : null;
+    const orgField = orgFires !== null ? { orgLastFiredAtMs: orgFires } : {};
     const lastFiredAtMs = parseTimestampMs(e.lastFiredAt);
     if (lastFiredAtMs !== null && lastFiredAtMs > seedMs) {
-      out[id] = INITIAL_DEDUPE_STATE;
+      out[id] = { firing: e.firing === true, lastFiredAtMs: null, ...orgField };
       continue;
     }
-    const topOrgId =
-      id === "client_share" && lastFiredAtMs !== null
-        ? nonEmptyString(e.lastFiredTopOrgId)
-        : null;
     out[id] = {
       firing: e.firing === true && lastFiredAtMs !== null,
       lastFiredAtMs,
-      ...(topOrgId !== null ? { lastFiredTopOrgId: topOrgId } : {}),
+      ...orgField,
     };
   }
   return out;
