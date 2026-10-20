@@ -441,8 +441,9 @@ The engine read covers exactly the window: `since` = 00:00 UTC seven days ago an
 
 State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
 atomically every tick, and again right after each delivered alert so a worker that dies
-mid-tick does not resend it on restart). `/tmp` is cleared at reboot, so a trigger may re-fire once after
-a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
+mid-tick does not resend it on restart). With the default root (`/tmp/automata-agent-run`)
+the file does not survive a reboot, since `/tmp` is cleared, so a trigger may re-fire once
+after a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
 `unattributed`; the client signals are meaningful only once the window holds 7 complete
 UTC days of tagged runs — up to 8 calendar days after the www deploy. The attribution gate enforces that: while more than 5 % of the window's run
 time is unattributed, `client_share` and the scale composite's clients arm read

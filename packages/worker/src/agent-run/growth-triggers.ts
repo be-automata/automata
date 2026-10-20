@@ -64,7 +64,10 @@ export const GROWTH_TRIGGER_IDS: readonly GrowthTriggerId[] = [
   "supersede_waste",
 ];
 
-/** Verbatim from the #373 signal table: the one move each trigger authorizes. */
+/**
+ * From the #373 signal table: the one move each trigger authorizes. client_share omits the
+ * table's manual-fire clause, which no code path implements.
+ */
 export const AUTHORIZED_MOVES: Readonly<Record<GrowthTriggerId, string>> = {
   queue_wait_p90: "Raise the cap, then resize CX43 (cap 6) / CX53 (cap 8)",
   ram_swap: "Add a second shared box on the same tenant",

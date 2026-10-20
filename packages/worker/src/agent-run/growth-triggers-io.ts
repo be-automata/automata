@@ -59,7 +59,10 @@ export const GROWTH_RUNS_MAX_PAGES = 50;
  * read for up to half the interval (hours at the one-day ceiling).
  */
 export const GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS = 30_000;
-/** Upper bound on one webhook POST; the effective timeout is min(this, intervalMs / 2) (V2). */
+/**
+ * Upper bound on one webhook POST; the effective timeout is min(this, intervalMs / 2, time
+ * left before the 0.95 × interval tick deadline) (V2).
+ */
 const GROWTH_WEBHOOK_TIMEOUT_CAP_MS = 10_000;
 /** The snapshot file under `<runNamespaceRoot>`. */
 export const GROWTH_SNAPSHOT_FILENAME = "growth-triggers.json";

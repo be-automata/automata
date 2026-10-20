@@ -1014,7 +1014,8 @@ export async function dispatchAgentRun({
     // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
     // legacy plan (no extension, the `agent-run` workflow — IRON golden); by
     // decision OD-0 of #373 their metadata now carries orgId + lane (+ repo
-    // and PR when known), built below at the trigger. A REVIEW run always resolves the (org, repo) policy: it picks
+    // and PR when known), derived by triggerAgentRun (transport.ts
+    // buildRunMetadata). A REVIEW run always resolves the (org, repo) policy: it picks
     // the workflow variant, the input gains prKey/deliveryId + the policy
     // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
     // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's

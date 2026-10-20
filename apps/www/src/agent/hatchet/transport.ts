@@ -247,8 +247,7 @@ export async function triggerAgentRun<
             prNumber: input.prNumber,
           }),
       }),
-      // TMO-01: the caller's deadline. Absent → no key, so the legacy request
-      // stays byte-identical.
+      // TMO-01: the caller's deadline. Absent → no `signal` key on the request.
       ...(opts?.signal ? { signal: opts.signal } : {}),
     },
   );
