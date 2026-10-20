@@ -495,5 +495,20 @@
     "captured_at": "2026-10-19T17:06:58Z",
     "env": "",
     "build": ""
+  },
+  {
+    "seq": 33,
+    "file": "33-api-C367-slot-change-loader-refusals.txt",
+    "lane": "api",
+    "case": "C-367",
+    "slug": "slot-change-loader-refusals",
+    "kind": "text",
+    "sha256": "89a97b36a6308a8277482e6876ac93cedaa651a0c7995bb242d93f8deeb067ba",
+    "bytes": 3651,
+    "redactions": {},
+    "source": "ssh root@automata-exec-1 journalctl -u automata-worker + stat + nft-verify.sh",
+    "captured_at": "2026-10-19T21:54:56Z",
+    "env": "",
+    "build": ""
   }
 ]

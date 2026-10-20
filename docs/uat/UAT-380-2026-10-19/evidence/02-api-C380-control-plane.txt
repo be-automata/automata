@@ -1,0 +1,19 @@
+## control plane 2026-10-19T16:43:02Z
+### PR #393
+state=MERGED mergedAt=2026-10-19T16:28:38Z merge=1dedc77453ed7affe57a7a65ed31076dba91be5e head=949f662186e26433ba022120044038ff6637051c review=APPROVED
+review 2026-10-19T15:52:47Z automata-ai-bot[bot] APPROVED commit=949f66218
+### CI at 949f6621
+check: success 2026-10-19T15:52:49Z
+test: success 2026-10-19T16:06:05Z
+audit: success 2026-10-19T15:53:12Z
+e2e: success 2026-10-19T15:56:16Z
+worker-e2e: success 2026-10-19T15:57:05Z
+schema-drift: success 2026-10-19T15:53:33Z
+### automata-www
+BUILD_ID=grFqfejMFVPLBF6R33jQJ
+served BUILD_ID matches: 1
+Created:     2026-10-19T16:41:11.938Z
+Version(s):  (100%) 5158f74e-3d57-4979-a25b-cddcb607cd0c
+secret HATCHET_PAYLOAD_SEAL_KEY listed: 1
+cutover (secret put success): 2026-10-19T16:41:12Z
+plane public key (kid:pk, PUBLIC): plane-2026-10:LQ0YDXL3HGXLFCtSazO9IFwnOQzlYAH3PK4HlqBE3kI

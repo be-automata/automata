@@ -1,0 +1,9 @@
+## AC6 drill 2026-10-19T16:42:43Z — legacy review run a4b3f63a (PR #394), dispatched before cutover
+2026-10-19T16:33:46+00:00 automata-exec-1 automata-worker[146719]: 🪓 146719 | 10/19/26, 04:33:46 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run starting...          run/a4b3f63a-a50e-42
+2026-10-19T16:33:46+00:00 automata-exec-1 automata-worker[146719]: 🪓 146719 | 10/19/26, 04:33:46 PM  [INFO/ctx] [agent-run 5a3f5d9e-fd8a-40f0-9575-4aa2f0efe275] run secrets: legacy
+2026-10-19T16:33:46+00:00 automata-exec-1 automata-worker[146719]: 🪓 146719 | 10/19/26, 04:33:46 PM  [INFO/ctx] [agent-run 5a3f5d9e-fd8a-40f0-9575-4aa2f0efe275 trace=00-7b1b08ee4690930f074690635b98
+2026-10-19T16:35:02+00:00 automata-exec-1 automata-worker[146719]: 🪓 146719 | 10/19/26, 04:35:02 PM  [INFO/ctx] [agent-run 5a3f5d9e-fd8a-40f0-9575-4aa2f0efe275] token.revoke {"kind":"installation",
+2026-10-19T16:35:02+00:00 automata-exec-1 automata-worker[146719]: 🪓 146719 | 10/19/26, 04:35:02 PM  [INFO/Worker/automata-worker-automata-exec-1] Task run completed          run/a4b3f63a-a50e-4233
+engine row v1_task.input.input.installationToken: present=yes prefix=ghs_ length=390 (value withheld)
+engine row carries sealedSecrets: f
+GET https://api.github.com/installation/repositories with that token -> HTTP 401 {  "message": "Bad credentials",  "documentation_url": "ht

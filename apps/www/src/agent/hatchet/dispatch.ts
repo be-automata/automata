@@ -306,9 +306,10 @@ async function triggerSelfHealBounded({
  * /api/daemon/next-message with the daemon token (ADR-003 fork 3).
  *
  * `AgentRunInput` never carries `installationToken`, `githubReadToken`,
- * `daemonToken`, `repoEnv` or a self-heal token (a type test pins that). The PR-1 rollout shape with those
- * three in plain text is `LegacyAgentRunInput`, sent only while the plane key
- * is unset; PR 2 removes it.
+ * `daemonToken`, `repoEnv` or a self-heal token (a type test pins that).
+ * Strict since rollout step 4 (PR 2): what the trigger POSTs is always
+ * `AgentRunWireInput` — this input plus a REQUIRED `sealedSecrets`; with no
+ * plane key configured the dispatch fails closed instead.
  */
 export interface AgentRunInput {
   threadId: string;
@@ -332,8 +333,8 @@ export interface AgentRunInput {
    * token, the owner's `repoEnv` and the self-heal token — sealed to the
    * plane key, AAD-bound to the whole persisted input (SHA-256 of its
    * canonical JSON, minus the envelope).
-   * Optional only during the PR-1 rollout (absent ⇒ the legacy shape carries
-   * them in plain text); PR 2 makes it required.
+   * Absent while the input is being assembled; `sealWireInput` adds it and
+   * `AgentRunWireInput` (what the trigger POSTs) requires it.
    */
   sealedSecrets?: SealedRunSecrets;
   /** Not secret: the read token's ISO-8601 expiry, so the worker refuses an expired one. */
@@ -434,18 +435,12 @@ export type SelfHealRunWire =
   | Omit<SelfHealFixRunInput, "gateToken">;
 
 /**
- * PR-1 rollout shape (#380 step 1): the secrets in plain text, exactly as the
- * pre-#380 worker reads them (tokens at the top level, `repoEnv` at the top
- * level, the self-heal token INSIDE `selfHeal`), sent ONLY while
- * HATCHET_PAYLOAD_SEAL_KEY is empty. Deleted by PR 2 (strict mode).
+ * What the trigger POSTs (#380 strict, rollout step 4): the input with its
+ * envelope — `sealedSecrets` is REQUIRED; there is no plain-text shape.
  */
-export type LegacyAgentRunInput = Omit<AgentRunInput, "selfHeal"> &
-  Pick<RunSecrets, "installationToken" | "githubReadToken" | "daemonToken"> & {
-    repoEnv?: Record<string, string>;
-    selfHeal?: SelfHealRunInput;
-  };
-/** What the trigger POSTs: the sealed shape, or the legacy one. */
-export type AgentRunWireInput = AgentRunInput | LegacyAgentRunInput;
+export type AgentRunWireInput = AgentRunInput & {
+  sealedSecrets: SealedRunSecrets;
+};
 
 /** True when a thread should dispatch to the remote execution plane. */
 export function hatchetDispatchEnabled(thread: {
@@ -687,19 +682,6 @@ function splitSelfHealToken(selfHeal: SelfHealRunInput): {
   return { wire, token: gateToken };
 }
 
-/** The pre-#380 shape, for the legacy window only: the token back inside the plan. */
-export function reattachSelfHealToken(
-  wire: SelfHealRunWire,
-  token: string | undefined,
-): SelfHealRunInput {
-  if (token === undefined || token === "") {
-    throw new Error("payload-seal: self-heal plan without its token");
-  }
-  return wire.kind === "audit"
-    ? { ...wire, checkToken: token }
-    : { ...wire, gateToken: token };
-}
-
 /**
  * A redactor that also blanks the exact values of one dispatch's secrets.
  * The minted tokens are long; an owner's repoEnv value can be short (a PIN,
@@ -749,30 +731,42 @@ export class ScrubbedDispatchCause extends Error {
 }
 
 /**
- * #380: the plane key is parsed FIRST — before the self-heal planner writes
- * its rows (an audit run with its check-token hash, a fix attempt moved to
- * `dispatched`) and before any token is minted — so a malformed or
- * rotated-away HATCHET_PAYLOAD_SEAL_KEY fails the dispatch with nothing to
- * refund: no attempt stranded in `dispatched`, no run to read back. `null`
- * means the PR-1 legacy window (no key configured).
+ * #380 strict (rollout step 4): no plane key configured. The dispatch fails
+ * closed — nothing is minted, planned or triggered, and the thread fails with
+ * a typed cause — because the strict worker refuses plain-text secrets.
  */
-function resolvePlaneKey(): PlanePublicKey | null {
-  const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
-  return planeKeyText === "" ? null : parsePlanePublicKey(planeKeyText);
+export class PlaneKeyMissingError extends Error {
+  constructor() {
+    super(
+      "payload-seal: no plane key configured (HATCHET_PAYLOAD_SEAL_KEY is empty)",
+    );
+    this.name = "PlaneKeyMissingError";
+  }
 }
 
 /**
- * #380: the one place a secret meets the wire. With a plane key configured
- * every run secret — installationToken, githubReadToken, daemonToken, the
- * owner's repoEnv and the self-heal token — is sealed to it (AAD = SHA-256 of
- * the whole persisted input) and the input
- * gains `sealedSecrets`; the `kid` is logged so an operator can match it
- * against the kid list the worker logs at boot (rollout step 3). With no key
- * (the PR-1 rollout window) the legacy plain-text shape is returned and the
- * dual worker reads it; PR 2 fails closed here instead. Called INSIDE
- * dispatch's guarded region: a malformed key or a seal failure throws into
- * the catch that revokes the minted daemon token, exactly like every other
- * pre-trigger failure.
+ * #380: the plane key is parsed FIRST — before the self-heal planner writes
+ * its rows (an audit run with its check-token hash, a fix attempt moved to
+ * `dispatched`) and before any token is minted — so a missing, malformed or
+ * rotated-away HATCHET_PAYLOAD_SEAL_KEY fails the dispatch with nothing to
+ * refund: no attempt stranded in `dispatched`, no daemon token minted, no
+ * run to read back.
+ */
+function resolvePlaneKey(): PlanePublicKey {
+  const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
+  if (planeKeyText === "") throw new PlaneKeyMissingError();
+  return parsePlanePublicKey(planeKeyText);
+}
+
+/**
+ * #380: the one place a secret meets the wire. Every run secret —
+ * installationToken, githubReadToken, daemonToken, the owner's repoEnv and the
+ * self-heal token — is sealed to the plane key (AAD = SHA-256 of the whole
+ * persisted input) and the input gains `sealedSecrets`; the `kid` is logged
+ * so an operator can match it against the kid list the worker logs at boot.
+ * Strict (rollout step 4): there is no plain-text branch. Called INSIDE
+ * dispatch's guarded region: a seal failure throws into the catch that
+ * revokes the minted daemon token, like every other pre-trigger failure.
  */
 async function sealWireInput({
   input,
@@ -782,21 +776,8 @@ async function sealWireInput({
   input: AgentRunInput;
   secrets: RunSecrets;
   /** From resolvePlaneKey(), parsed before any row was written. */
-  planeKey: PlanePublicKey | null;
+  planeKey: PlanePublicKey;
 }): Promise<AgentRunWireInput> {
-  if (planeKey === null) {
-    const { repoEnv, selfHealToken, ...tokens } = secrets;
-    const { selfHeal, ...rest } = input;
-    const legacy: LegacyAgentRunInput = {
-      ...rest,
-      ...tokens,
-      ...(repoEnv !== undefined ? { repoEnv } : {}),
-      ...(selfHeal !== undefined
-        ? { selfHeal: reattachSelfHealToken(selfHeal, selfHealToken) }
-        : {}),
-    };
-    return legacy;
-  }
   // Bound to the whole input the worker will trust (callback URL, branches,
   // self-heal plan, task packs …): a copied envelope re-triggered with ANY
   // of them changed fails its tag.
@@ -1234,6 +1215,15 @@ export async function dispatchAgentRun({
     // transitions the thread to a terminal error — the remote path's equivalent of
     // in-process sandbox-creation-failed handling. Without this the thread would
     // sit in `booting` forever with no surfaced error (zombie thread).
+    // #380 strict: a missing plane key fails EVERY remote dispatch, not just
+    // this one — a deploy/config defect, not a run failure. One distinct,
+    // alertable line (no secret in it: the key is public, and absent here).
+    if (error instanceof PlaneKeyMissingError) {
+      console.error(
+        "[hatchet] CONFIG: HATCHET_PAYLOAD_SEAL_KEY is empty — every remote dispatch fails closed (#380 strict); set the plane public key printed by gen-payload-seal-key.ts",
+        { threadId, threadChatId },
+      );
+    }
     console.error(
       "[hatchet] dispatch failed after retries — revoking token + failing thread",
       {

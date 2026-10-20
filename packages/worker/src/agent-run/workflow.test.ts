@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
 import { AGENT_RUN_VARIANTS } from "./definition";
 
@@ -210,6 +218,55 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     orgId: "org-1",
   };
 
+  // #380 strict mode: onFailure accepts sealed inputs only. A describe-level
+  // ring seals INPUT's plain fields into the envelope (the shape www sends).
+  let ringPlane: Awaited<
+    ReturnType<
+      typeof import("@terragon/utils/payload-seal").generatePlaneKeyPair
+    >
+  >;
+  let ringFile = "";
+  const sealedInput = async () => {
+    const { sealBindingOf, sealRunSecrets } = await import(
+      "@terragon/utils/payload-seal"
+    );
+    const { installationToken, daemonToken, ...rest } = INPUT;
+    return {
+      ...rest,
+      sealedSecrets: await sealRunSecrets(
+        ringPlane.publicKey,
+        { installationToken, daemonToken },
+        sealBindingOf(rest),
+      ),
+    };
+  };
+  beforeAll(async () => {
+    const { generatePlaneKeyPair } = await import(
+      "@terragon/utils/payload-seal"
+    );
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    ringPlane = await generatePlaneKeyPair("plane-onfailure");
+    ringFile = path.join(
+      mkdtempSync(path.join(tmpdir(), "seal-onfailure-")),
+      "payload-seal.json",
+    );
+    writeFileSync(ringFile, JSON.stringify({ keys: [ringPlane.privateKey] }), {
+      mode: 0o600,
+    });
+  });
+  beforeEach(async () => {
+    const { resetPlaneKeyRingForTests } = await import("./payload-seal-keys");
+    process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = ringFile;
+    resetPlaneKeyRingForTests();
+  });
+  afterEach(async () => {
+    const { resetPlaneKeyRingForTests } = await import("./payload-seal-keys");
+    delete process.env.WORKER_PAYLOAD_SEAL_KEY_FILE;
+    resetPlaneKeyRingForTests();
+  });
+
   it("posts exactly one custom-error with the Hatchet error summary — no prompt", async () => {
     const fetchMock = vi
       .fn()
@@ -219,7 +276,7 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     // ctx.errors() is Hatchet's per-task error map (error class/message, NOT agent
     // output). The handler forwards ONLY this as the reason.
     const ctx = { errors: () => ({ run: "daemon rejected the message" }) };
-    await workflowDef.onFailure.fn(INPUT, ctx);
+    await workflowDef.onFailure.fn(await sealedInput(), ctx);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -243,9 +300,34 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const ctx = { errors: () => ({}) };
-    await expect(workflowDef.onFailure.fn(INPUT, ctx)).resolves.toBeUndefined();
+    await expect(
+      workflowDef.onFailure.fn(await sealedInput(), ctx),
+    ).resolves.toBeUndefined();
     const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
     expect(body.messages[0].error_info).toMatch(/agent-run failed/);
+  });
+
+  /**
+   * Card: protects=strict onFailure (rollout step 4) — a plain-text input
+   * posts NOTHING (no token is trusted from plain fields) and the log names
+   * field names only; fails_when=onFailure posts with a plain-text daemon
+   * token or logs a value; no_claim=the sweep reconcile.
+   */
+  it("#380 strict: a plain-text input posts nothing and logs field names only", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("OK", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await workflowDef.onFailure.fn(INPUT, { errors: () => ({ run: "boom" }) });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(
+      "payload-seal: strict mode refuses plain-text secret fields (installationToken, daemonToken)",
+    );
+    expect(logged).not.toContain("inst-secret");
+    expect(logged).not.toContain("daemon-tok");
+    errorSpy.mockRestore();
   });
 
   // #380: the daemon token now arrives sealed. onFailure unseals with the
@@ -321,7 +403,6 @@ describe("agentRunWorkflow onFailure (#2)", () => {
       expect(logged).not.toContain(plane.privateKey.privateKeyJwk.d);
       errorSpy.mockRestore();
     } finally {
-      delete process.env.WORKER_PAYLOAD_SEAL_KEY_FILE;
       resetPlaneKeyRingForTests();
     }
   });

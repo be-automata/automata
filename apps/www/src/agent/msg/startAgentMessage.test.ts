@@ -15,6 +15,11 @@ import { eq } from "drizzle-orm";
 import { startAgentMessage } from "./startAgentMessage";
 import { hasActiveDaemonToken, daemonRunKey } from "@/lib/daemon-token";
 import { sendDaemonMessage } from "@/agent/daemon";
+import { installTestPlaneKey } from "@/agent/hatchet/__fixtures__/plane-key";
+
+// #380 strict mode: a remote dispatch fails closed without a plane key, so
+// this file installs a test key (the remote-dispatch cases trigger for real).
+installTestPlaneKey("plane-start-agent-message");
 
 /**
  * Flag-on harness for the remote dispatch seam. Rather than mock the dispatch, we

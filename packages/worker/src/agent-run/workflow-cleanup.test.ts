@@ -320,13 +320,88 @@ const INPUT = {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let runFn: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let rawRunFn: any;
 let createEgressEventBatcher: typeof import("./workflow").createEgressEventBatcher;
 
+/**
+ * #380 strict mode: the run fn accepts sealed inputs only. This file's cases
+ * test cleanup, ordering and admission — not the seal — so `runFn` seals each
+ * plain test input on the fly with a file-level test ring (the same wire
+ * www sends): the plain secret fields move into the envelope, the self-heal
+ * token leaves the plan, and the AAD binds the rest. An input that already
+ * carries `sealedSecrets` passes through untouched; `rawRunFn` bypasses the
+ * wrapper for the strict-refusal cases.
+ */
+// Path and env are set at MODULE LOAD (not in beforeAll): a describe below
+// snapshots process.env when it is defined and restores that snapshot after
+// each case, so a var set later would be deleted. The key is written in
+// beforeAll (generation is async).
+// `.json`, never `.key`: a sandboxed test runner denies reads of *.key.
+const FILE_RING_PATH = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), "file-ring-")),
+  "payload-seal.json",
+);
+process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = FILE_RING_PATH;
+let filePlane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function sealForTest(input: any): Promise<any> {
+  if (input === null || typeof input !== "object" || "sealedSecrets" in input) {
+    return input;
+  }
+  const {
+    installationToken,
+    githubReadToken,
+    daemonToken,
+    repoEnv,
+    selfHeal,
+    ...rest
+  } = input;
+  let plan = selfHeal;
+  let selfHealToken: string | undefined;
+  if (selfHeal?.kind === "audit" && selfHeal.checkToken !== undefined) {
+    const { checkToken, ...p } = selfHeal;
+    plan = p;
+    selfHealToken = checkToken;
+  } else if (selfHeal?.kind === "fix" && selfHeal.gateToken !== undefined) {
+    const { gateToken, ...p } = selfHeal;
+    plan = p;
+    selfHealToken = gateToken;
+  }
+  const wire = { ...rest, ...(plan !== undefined ? { selfHeal: plan } : {}) };
+  const secrets: RunSecrets = {
+    installationToken,
+    daemonToken,
+    ...(githubReadToken !== undefined ? { githubReadToken } : {}),
+    ...(repoEnv !== undefined ? { repoEnv } : {}),
+    ...(selfHealToken !== undefined ? { selfHealToken } : {}),
+  };
+  return {
+    ...wire,
+    sealedSecrets: await sealRunSecrets(
+      filePlane.publicKey,
+      secrets,
+      sealBindingOf(wire),
+    ),
+  };
+}
+
 beforeAll(async () => {
+  filePlane = await generatePlaneKeyPair("plane-file");
+  fs.writeFileSync(
+    FILE_RING_PATH,
+    JSON.stringify({ keys: [filePlane.privateKey] }),
+    { mode: 0o600 },
+  );
+  process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = FILE_RING_PATH;
+  resetPlaneKeyRingForTests();
   const mod = await import("./workflow");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const def = (mod.agentRunWorkflow as any).definition;
-  runFn = def._tasks[0].fn;
+  rawRunFn = def._tasks[0].fn;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  runFn = async (input: any, ctx: any) =>
+    rawRunFn(await sealForTest(input), ctx);
   createEgressEventBatcher = mod.createEgressEventBatcher;
   // #371: the headroom gate is OFF for this file unless a describe installs a
   // controller — on a Linux runner the lazy boot decision would otherwise read
@@ -370,6 +445,11 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.WORKER_BOX_TRUST;
   delete process.env.WORKER_CREDENTIAL_BROKER;
+  // #386: cases reuse run ids; each case starts with no recorded terminal.
+  fs.rmSync(path.join(TEST_NAMESPACE_ROOT, "run-terminals"), {
+    recursive: true,
+    force: true,
+  });
 });
 
 function ctx() {
@@ -406,6 +486,36 @@ describe("agent-run run task — the run's lane is journaled first (UAT #229 F2)
     expect(lines.some((l) => l.includes("clone complete"))).toBe(false);
     expect(lines.join("\n")).not.toContain("inst-secret");
     expect(lines.join("\n")).not.toContain("daemon-tok");
+  });
+});
+
+describe("#386: a redelivered run that already reached a terminal is refused, not re-executed", () => {
+  it("the first attempt fails; a redelivery of the SAME workflow run id never provisions again", async () => {
+    provisionWorkdir.mockClear();
+    provisionWorkdir.mockRejectedValueOnce(new Error("clone failed"));
+    const first = { ...ctx(), workflowRunId: () => "run-ext-386" };
+    await expect(runFn(INPUT, first)).rejects.toThrow(/clone failed/);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+
+    const redelivered = { ...ctx(), workflowRunId: () => "run-ext-386" };
+    const err = await runFn(INPUT, redelivered).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NonRetryableError);
+    expect(String(err)).toMatch(/run-ext-386 already failed on this box/);
+    // Never re-executed: no second clone, so no admission, daemon or agent.
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("a different workflow run of the same thread (a re-review) still runs", async () => {
+    provisionWorkdir.mockClear();
+    provisionWorkdir.mockRejectedValue(new Error("clone failed"));
+    await runFn(INPUT, { ...ctx(), workflowRunId: () => "run-ext-a" }).catch(
+      () => undefined,
+    );
+    await runFn(INPUT, { ...ctx(), workflowRunId: () => "run-ext-b" }).catch(
+      () => undefined,
+    );
+    expect(provisionWorkdir).toHaveBeenCalledTimes(2);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
   });
 });
 
@@ -1195,12 +1305,16 @@ describe("#125 C4: queue-mode staleness self-check", () => {
   });
 
   it("other policies and legacy runs never ask", async () => {
-    for (const extra of [
+    for (const [i, extra] of [
       {},
       { supersedePolicy: "newest-wins" as const },
       { supersedePolicy: "complete-run-discard" as const },
-    ]) {
-      await runFn({ ...INPUT, prKey: "k", deliveryId: "d", ...extra }, ctx());
+    ].entries()) {
+      // Three distinct runs: each its own workflow run id (#386 ledger).
+      await runFn(
+        { ...INPUT, prKey: "k", deliveryId: "d", ...extra },
+        { ...ctx(), workflowRunId: () => `run-ext-q-${i}` },
+      );
     }
     expect(checkRunStaleness).not.toHaveBeenCalled();
   });
@@ -2228,7 +2342,8 @@ describe("#380: sealed run secrets through the run fn", () => {
   });
 
   afterEach(() => {
-    delete process.env.WORKER_PAYLOAD_SEAL_KEY_FILE;
+    // Back to the file-level ring the other describes seal with.
+    process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = FILE_RING_PATH;
     resetPlaneKeyRingForTests();
   });
 
@@ -2374,17 +2489,29 @@ describe("#380: sealed run secrets through the run fn", () => {
     expect(pullNextMessage).not.toHaveBeenCalled();
   });
 
-  it("the legacy plain-text input is still accepted in the rollout window and journaled as legacy", async () => {
+  /**
+   * Card: protects=strict worker (rollout step 4) — a plain-text input is
+   * refused before ANY side effect: no www call, no clone, no token revoke
+   * (nothing was unsealed), and the error names fields, never values;
+   * fails_when=the legacy shape is lifted or runs, or a value reaches the
+   * error; no_claim=the engine's retry policy for the refused task.
+   */
+  it("strict: the PR-1 plain-text input is refused before any www call, clone or revoke", async () => {
     pullNextMessage.mockResolvedValue(null);
     const c = sealedCtx();
-    await expect(runFn(INPUT, c)).resolves.toMatchObject({
-      outcome: "nothing-to-run",
-    });
-    const lines = c.log.mock.calls.map((call) => String(call[0]));
-    expect(lines.some((l) => l.endsWith("run secrets: legacy"))).toBe(true);
-    expect(revokerTokens).toEqual([
-      { installationToken: "inst-secret", daemonToken: "daemon-tok" },
-    ]);
+    const err = await rawRunFn(INPUT, c).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err?.message).toBe(
+      "payload-seal: strict mode refuses plain-text secret fields (installationToken, daemonToken)",
+    );
+    expect(err?.message).not.toContain("inst-secret");
+    expect(err?.message).not.toContain("daemon-tok");
+    expect(checkRunStaleness).not.toHaveBeenCalled();
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(pullNextMessage).not.toHaveBeenCalled();
+    expect(revokerTokens).toEqual([]);
   });
 });
 

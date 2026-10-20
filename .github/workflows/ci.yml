@@ -6,9 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# No job here writes to the repo or calls the API; keep the token read-only
+# (the repository default is write).
+permissions:
+  contents: read
+
+# A newer push supersedes a PR run, but a main run always finishes: a green
+# main run is what triggers migrate.yml, and with frequent merges cancelling
+# them meant no main run ever reached green. A queued main run is still
+# replaced by a newer one, so main runs at most one-running-one-pending.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ── Security gate: no CRITICAL advisory may reach production deps ───────────
