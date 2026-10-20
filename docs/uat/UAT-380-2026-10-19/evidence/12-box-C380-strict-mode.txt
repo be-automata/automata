@@ -3,3 +3,10 @@ checkout HEAD=d02eaa54e8e0b69cb471a63d7f7490f650226abc
 worker: active ActiveEnterTimestamp=Tue 2026-10-20 03:16:56 UTC
 2026-10-20T03:16:58+00:00 automata-exec-1 automata-worker[83463]: [worker-boot] payload seal: 1 key(s) usable (plane-2026-10) from /etc/automata/payload-seal.key — strict: sealed inputs only
 ## pre-merge check (03:13Z): engine non-terminal tasks of any age = 0; plain-text inputs dispatched since the cutover = 0; worker journal since the cutover = 56 sealed / 0 legacy
+
+## first run under strict mode — review for PR #411 (agent-run 9e180080-788d-4bfc-b961-1f6daf3f57c4), worker journal
+2026-10-20T03:20:20+00:00 run secrets: sealed (kid=plane-2026-10)
+2026-10-20T03:20:20+00:00 run start: lane=review pr=411 repo=be-automata/automata branch=docs/380-uat-strict-mode
+2026-10-20T03:20:41+00:00 thread-status: complete (terminal=true)
+2026-10-20T03:20:42+00:00 token.revoke {"kind":"installation","status":204}
+## runs refused or journaled legacy since the strict boot (03:16Z): 0
