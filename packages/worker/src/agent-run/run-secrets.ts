@@ -8,15 +8,16 @@ import {
 import type { AgentRunInput, SelfHealRunShape } from "./types";
 
 /**
- * What the engine hands the run fn (#380). The sealed shape is
- * `AgentRunInput` with `sealedSecrets`; the PR-1 rollout shape additionally
- * carries the three secrets in plain text (the control plane sends it only
- * while HATCHET_PAYLOAD_SEAL_KEY is empty). `resolveRunSecrets` is the ONE
- * place the two are told apart; after it, the run holds a clean
- * `AgentRunInput` and a separate `RunSecrets` that is passed explicitly to
- * every consumer and never logged.
+ * What the engine hands the run fn (#380). Since rollout step 4 (PR 2,
+ * strict mode) the ONLY accepted shape is `AgentRunInput` with
+ * `sealedSecrets`. The plain-text secret fields of the PR-1 rollout shape are
+ * still DECLARED here — the engine payload is untrusted input — so that
+ * `resolveRunSecrets` can refuse an input that carries any of them.
+ * `resolveRunSecrets` is the ONE place secrets are read; after it, the run
+ * holds a clean `AgentRunInput` and a separate `RunSecrets` that is passed
+ * explicitly to every consumer and never logged.
  */
-/** The self-heal plan as it arrives: the token is sealed, or (legacy) inside. */
+/** The self-heal plan as it arrives: without its token (the token is sealed). */
 export type SelfHealWireShape =
   | (Omit<Extract<SelfHealRunShape, { kind: "audit" }>, "checkToken"> & {
       checkToken?: string;
@@ -27,121 +28,92 @@ export type SelfHealWireShape =
 
 export type AgentRunWireInput = Omit<AgentRunInput, "selfHeal"> & {
   selfHeal?: SelfHealWireShape;
-  /** Legacy window only: the owner's env in plain text at the top level. */
+  /** Refused when present (the PR-1 plain-text shape). */
   repoEnv?: Record<string, string>;
 } & Partial<
     Pick<RunSecrets, "installationToken" | "githubReadToken" | "daemonToken">
   >;
 
-export type RunSecretsSource = "sealed" | "legacy";
+/** The plain-text secret fields a strict worker refuses, by name only. */
+function plainSecretFieldsOf(wire: AgentRunWireInput): string[] {
+  const found: string[] = [];
+  if (wire.installationToken !== undefined) found.push("installationToken");
+  if (wire.githubReadToken !== undefined) found.push("githubReadToken");
+  if (wire.daemonToken !== undefined) found.push("daemonToken");
+  if (wire.repoEnv !== undefined) found.push("repoEnv");
+  if (
+    wire.selfHeal?.kind === "audit" &&
+    wire.selfHeal.checkToken !== undefined
+  ) {
+    found.push("selfHeal.checkToken");
+  }
+  if (wire.selfHeal?.kind === "fix" && wire.selfHeal.gateToken !== undefined) {
+    found.push("selfHeal.gateToken");
+  }
+  return found;
+}
 
 /**
- * Unseal (or, in the rollout window, lift) the run's secrets and strip them
- * from the input. Throws a PayloadSealError (kid + failure class only) when
- * the envelope cannot be unsealed, and a plain Error when the input carries
- * no secrets at all or, in strict mode, plain-text secret fields.
+ * Unseal the run's secrets and strip them from the input. Strict (rollout
+ * step 4): an input without `sealedSecrets`, or one that ALSO carries any
+ * plain-text secret field, is refused — the plain fields would already sit in
+ * the engine row, so running it would hide a control-plane defect. Throws a
+ * PayloadSealError (kid + failure class only) when the envelope cannot be
+ * unsealed, and a plain Error naming FIELD NAMES only (never a value) for a
+ * refused shape.
  */
 export async function resolveRunSecrets({
   wire,
   keys,
-  strict = false,
 }: {
   wire: AgentRunWireInput;
   keys: readonly PlanePrivateKey[];
-  /** Rollout step 4 (PR 2): refuse the legacy plain-text shape. */
-  strict?: boolean;
-}): Promise<{
-  input: AgentRunInput;
-  secrets: RunSecrets;
-  source: RunSecretsSource;
-  /** Both shapes arrived: the plain-text fields were discarded (a www defect to report). */
-  legacyFieldsIgnored: boolean;
-}> {
+}): Promise<{ input: AgentRunInput; secrets: RunSecrets }> {
+  const plainFields = plainSecretFieldsOf(wire);
+  if (plainFields.length > 0) {
+    throw new Error(
+      `payload-seal: strict mode refuses plain-text secret fields (${plainFields.join(", ")})`,
+    );
+  }
   const {
-    installationToken,
-    githubReadToken,
-    daemonToken,
-    repoEnv,
+    installationToken: _installationToken,
+    githubReadToken: _githubReadToken,
+    daemonToken: _daemonToken,
+    repoEnv: _repoEnv,
     selfHeal,
     ...rest
   } = wire;
-  const legacySelfHealToken =
-    selfHeal === undefined
-      ? undefined
-      : selfHeal.kind === "audit"
-        ? selfHeal.checkToken
-        : selfHeal.gateToken;
-  if (rest.sealedSecrets !== undefined) {
-    // Shape, kid, tag and plaintext are all unsealRunSecrets' to judge —
-    // every failure is one PayloadSealError class.
-    const secrets = await unsealRunSecrets(
-      keys,
-      rest.sealedSecrets,
-      // The AAD covers the WHOLE input the worker is about to trust — the
-      // self-heal plan included (as it travelled: without its token).
-      sealBindingOf({
-        ...rest,
-        ...(selfHeal !== undefined ? { selfHeal } : {}),
-      }),
+  if (rest.sealedSecrets === undefined) {
+    throw new Error(
+      "payload-seal: input carries no sealedSecrets (strict mode refuses an unsealed input)",
     );
-    // Defence in depth: a token without a plan (or the reverse, caught in
-    // withSelfHealToken) is a forged input, never a run.
-    if (secrets.selfHealToken !== undefined && selfHeal === undefined) {
-      throw new Error(
-        "payload-seal: envelope carries a self-heal token but the input has no self-heal plan",
-      );
-    }
-    const input: AgentRunInput = {
+  }
+  // Shape, kid, tag and plaintext are all unsealRunSecrets' to judge — every
+  // failure is one PayloadSealError class.
+  const secrets = await unsealRunSecrets(
+    keys,
+    rest.sealedSecrets,
+    // The AAD covers the WHOLE input the worker is about to trust — the
+    // self-heal plan included (as it travelled: without its token).
+    sealBindingOf({
       ...rest,
-      ...(selfHeal !== undefined
-        ? { selfHeal: withSelfHealToken(selfHeal, secrets.selfHealToken) }
-        : {}),
-    };
-    return {
-      input,
-      secrets,
-      source: "sealed",
-      legacyFieldsIgnored:
-        installationToken !== undefined ||
-        githubReadToken !== undefined ||
-        daemonToken !== undefined ||
-        repoEnv !== undefined ||
-        legacySelfHealToken !== undefined,
-    };
-  }
-  if (strict) {
+      ...(selfHeal !== undefined ? { selfHeal } : {}),
+    }),
+  );
+  // Defence in depth: a token without a plan (or the reverse, caught in
+  // withSelfHealToken) is a forged input, never a run.
+  if (secrets.selfHealToken !== undefined && selfHeal === undefined) {
     throw new Error(
-      "payload-seal: input carries no sealedSecrets (strict mode refuses plain-text secret fields)",
+      "payload-seal: envelope carries a self-heal token but the input has no self-heal plan",
     );
   }
-  if (
-    typeof installationToken !== "string" ||
-    installationToken === "" ||
-    typeof daemonToken !== "string" ||
-    daemonToken === ""
-  ) {
-    throw new Error(
-      "payload-seal: input carries neither sealedSecrets nor the legacy plain-text secret fields",
-    );
-  }
-  const secrets: RunSecrets = {
-    installationToken,
-    ...(typeof githubReadToken === "string" && githubReadToken !== ""
-      ? { githubReadToken }
-      : {}),
-    daemonToken,
-    ...(repoEnv !== undefined ? { repoEnv } : {}),
-    ...(legacySelfHealToken !== undefined
-      ? { selfHealToken: legacySelfHealToken }
-      : {}),
-  };
   const input: AgentRunInput = {
     ...rest,
     ...(selfHeal !== undefined
-      ? { selfHeal: withSelfHealToken(selfHeal, legacySelfHealToken) }
+      ? { selfHeal: withSelfHealToken(selfHeal, secrets.selfHealToken) }
       : {}),
   };
-  return { input, secrets, source: "legacy", legacyFieldsIgnored: false };
+  return { input, secrets };
 }
 
 /** The in-memory plan: the wire shape with its (unsealed) token back in place. */

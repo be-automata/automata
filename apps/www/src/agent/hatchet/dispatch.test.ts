@@ -65,7 +65,8 @@ import {
   dispatchAgentRun,
   selfHealReadbackSettle,
   type AgentRunInput,
-  type LegacyAgentRunInput,
+  type AgentRunWireInput,
+  PlaneKeyMissingError,
   ScrubbedDispatchCause,
 } from "./dispatch";
 import { ThreadError } from "@/agent/error";
@@ -92,8 +93,8 @@ import {
 /**
  * #380: every dispatch under test is SEALED to a per-file plane key (the
  * public half goes into env.HATCHET_PAYLOAD_SEAL_KEY, the private half stays
- * in the fixture to open the envelopes and assert what travelled). The
- * legacy plain-text shape is exercised only by the explicit "key unset" case.
+ * in the fixture to open the envelopes and assert what travelled). There is
+ * no plain-text shape (strict); the "key unset" cases assert fail-closed.
  */
 const PLANE_KID = "plane-test";
 const plane = installTestPlaneKey(PLANE_KID);
@@ -105,8 +106,13 @@ describe("AgentRunInput carries no secret field (#380 AC 1, www side)", () => {
     expectTypeOf<AgentRunInput>().not.toHaveProperty("githubReadToken");
     expectTypeOf<AgentRunInput>().not.toHaveProperty("daemonToken");
     expectTypeOf<AgentRunInput>().toHaveProperty("sealedSecrets");
-    // The PR-1 legacy wire shape is the ONLY type that may carry them.
-    expectTypeOf<LegacyAgentRunInput>().toHaveProperty("installationToken");
+    // Strict (rollout step 4): what the trigger POSTs REQUIRES the envelope
+    // and has no plain-text secret field either.
+    expectTypeOf<
+      AgentRunWireInput["sealedSecrets"]
+    >().toEqualTypeOf<SealedRunSecrets>();
+    expectTypeOf<AgentRunWireInput>().not.toHaveProperty("installationToken");
+    expectTypeOf<AgentRunWireInput>().not.toHaveProperty("daemonToken");
   });
 });
 
@@ -1233,14 +1239,14 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     });
 
     /**
-     * Card: protects=in the legacy window an engine 4xx that echoes the
-     * request body carries repoEnv values JSON-ESCAPED; neither the raw nor
-     * the escaped form reaches the attempt log or the thrown cause;
-     * fails_when=only the raw value is scrubbed (a quote, backslash or
-     * newline in the value defeats it); no_claim=redactSecrets' own patterns.
+     * Card: protects=an engine 4xx that echoes the request body leaks no
+     * repoEnv value, raw or JSON-escaped, into the attempt log or the thrown
+     * cause (strict: the body carries it only sealed; the value scrub is
+     * defence in depth for an echo that ever carried it); fails_when=a value
+     * with a quote, backslash or newline reaches the log or the cause;
+     * no_claim=redactSecrets' own patterns.
      */
-    it("legacy window: a repoEnv value with a quote and a newline is scrubbed in its JSON-escaped form from an echoing 400", async () => {
-      setKey("");
+    it("an echoing 400 leaks no repoEnv value (raw or JSON-escaped) into the attempt log or the thrown cause", async () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const secret = 'pw"with\\slash\nand-newline-0123';
@@ -1319,9 +1325,11 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
   /**
    * #380 sealing at the dispatch boundary.
    * Cards:
-   *  - legacy when unset: protects=rollout step 1 (an empty key sends the
-   *    plain-text shape the dual worker still reads); fails_when=an empty
-   *    key seals, or throws; no_claim=PR 2's fail-closed (not yet shipped).
+   *  - fail closed when unset (AC 9): protects=rollout step 4 — with
+   *    HATCHET_ENABLED and an empty key nothing is minted, planned or
+   *    triggered, no daemon token survives, the thread fails with a typed
+   *    cause; fails_when=a plain-text payload is sent, a token is left live,
+   *    or the trigger fires; no_claim=none.
    *  - malformed key fails closed: protects=a bad HATCHET_PAYLOAD_SEAL_KEY
    *    never dispatches and never strands the thread; fails_when=the
    *    trigger fires, or the minted daemon token survives (retry would be
@@ -1333,12 +1341,46 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
   describe("#380: run secrets sealed to the plane key", () => {
     afterEach(() => plane.reinstall());
 
-    it("an unset key sends the PR-1 legacy shape (plain-text fields, no envelope)", async () => {
+    it("AC 9: an empty key fails the dispatch closed — no trigger, no live daemon token, typed cause, one alertable CONFIG line", async () => {
       setKey("");
-      const input = await dispatchAndRead(await orgTaskThread());
-      expect(input.sealedSecrets).toBeUndefined();
-      expect(input.installationToken).toBe("mock-github-token");
-      expect(input.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const t = await orgTaskThread();
+      const f = routedHatchetFetch("never");
+      vi.stubGlobal("fetch", f.mock);
+      let thrown: unknown;
+      try {
+        await dispatchAgentRun({
+          userId: user.id,
+          threadId: t.threadId,
+          threadChatId: t.threadChatId,
+          repoFullName: REPO,
+          branch: "feature",
+        });
+      } catch (e) {
+        thrown = e;
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      expect(thrown).toBeInstanceOf(ThreadError);
+      expect((thrown as ThreadError).message).toContain(
+        "Failed to dispatch the remote agent run.",
+      );
+      const cause = (thrown as ThreadError).cause as ScrubbedDispatchCause;
+      expect(cause.name).toBe(new PlaneKeyMissingError().name);
+      expect(cause.message).toBe(
+        "payload-seal: no plane key configured (HATCHET_PAYLOAD_SEAL_KEY is empty)",
+      );
+      expect(f.mock).not.toHaveBeenCalled();
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: daemonRunKey(t) }),
+      ).toBe(false);
+      const configLines = errorSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) =>
+          l.startsWith("[hatchet] CONFIG: HATCHET_PAYLOAD_SEAL_KEY is empty"),
+        );
+      expect(configLines).toHaveLength(1);
+      errorSpy.mockRestore();
     });
 
     it("a key pasted with a trailing newline (wrangler secret put) still seals", async () => {
@@ -1386,7 +1428,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
      *    no_claim=the PayloadSealError reason pass-through (unseal never
      *    runs in www; the class check is a type-level contract here).
      *  - scrubbed echo: protects=an engine 4xx that echoes the request body
-     *    (legacy window: plain-text tokens) reaches neither the log nor the
+     *    (strict: only ciphertext and non-secret fields) reaches neither the log nor the
      *    thrown cause; fails_when=the scrub is dropped from the attempt log
      *    or the catch, or the raw error is rethrown; no_claim=redactSecrets'
      *    own patterns (utils suite).
@@ -1420,8 +1462,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       expect((cause as Error).message).not.toContain("not-a-key");
     });
 
-    it("legacy window: an engine 400 that echoes the request body leaks no token into the attempt log or the thrown cause", async () => {
-      setKey("");
+    it("an engine 400 that echoes the (sealed) request body leaks no token into the attempt log or the thrown cause", async () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       const t = await orgTaskThread();
       let echoed = "";
@@ -1446,25 +1487,23 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       } finally {
         vi.unstubAllGlobals();
       }
-      const sent = JSON.parse(echoed).input as {
-        installationToken: string;
-        daemonToken: string;
-      };
-      expect(sent.installationToken).toBe("mock-github-token");
-      expect(sent.daemonToken).toMatch(/^[A-Za-z0-9_-]{64}$/);
+      const sentInput = JSON.parse(echoed).input as Record<string, unknown>;
+      expect("installationToken" in sentInput).toBe(false);
+      expect("daemonToken" in sentInput).toBe(false);
+      const secrets = await unsealInput(sentInput);
+      expect(secrets.installationToken).toBe("mock-github-token");
       const cause = (thrown as ThreadError).cause as ScrubbedDispatchCause;
       expect(cause).toBeInstanceOf(ScrubbedDispatchCause);
       expect(cause.message).toContain("Hatchet trigger failed: 400");
-      expect(cause.message).toContain("<redacted>");
-      expect(cause.message).not.toContain(sent.daemonToken);
-      expect(cause.message).not.toContain(sent.installationToken);
+      expect(cause.message).not.toContain(secrets.daemonToken);
+      expect(cause.message).not.toContain(secrets.installationToken);
       const logged = errorSpy.mock.calls.map((c) => JSON.stringify(c));
       expect(
         logged.some((l) => l.includes("[hatchet] trigger attempt failed")),
       ).toBe(true);
       for (const line of logged) {
-        expect(line).not.toContain(sent.daemonToken);
-        expect(line).not.toContain(sent.installationToken);
+        expect(line).not.toContain(secrets.daemonToken);
+        expect(line).not.toContain(secrets.installationToken);
       }
       errorSpy.mockRestore();
     });
@@ -1742,38 +1781,6 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     });
   });
 
-  /**
-   * Card: protects=rollout step 1 for self-heal — with no plane key the
-   * check token travels INSIDE the plan (`selfHeal.checkToken`), exactly
-   * where the pre-#380 worker reads it, and nowhere else; fails_when=the
-   * re-attach is skipped, the token lands at the top level, or it no longer
-   * matches the audit run's hash; no_claim=PR 2 strict mode.
-   */
-  it("legacy window (no plane key): the audit check token is re-attached inside the plan, matching the stored hash", async () => {
-    setKey("");
-    try {
-      await seedFinding();
-      const t = await auditThread();
-      const input = await dispatchAndRead(t);
-      expect(input.sealedSecrets).toBeUndefined();
-      expect("selfHealToken" in input).toBe(false);
-      const selfHeal = input.selfHeal as SelfHealAuditRunInput & {
-        checkToken?: string;
-      };
-      expect(selfHeal.kind).toBe("audit");
-      expect(selfHeal.checkToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      const [run] = await db
-        .select()
-        .from(auditRuns)
-        .where(eq(auditRuns.threadId, t.threadId));
-      expect(run?.checkTokenHash).toBe(
-        hashSelfHealToken(selfHeal.checkToken as string),
-      );
-    } finally {
-      plane.reinstall();
-    }
-  });
-
   it("flag off: an audit-stamped dispatch has no selfHeal key and no audit run", async () => {
     await setFlag(false);
     const t = await auditThread();
@@ -2047,9 +2054,10 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
    *    fails_when=the key is parsed after planSelfHealRun (attempt left in
    *    `dispatched` with no run), the trigger fires, or the token survives;
    *    no_claim=none.
-   *  - legacy gate re-attach: protects=with no plane key the gate token
-   *    travels inside the plan as the pre-#380 worker reads it; fails_when=
-   *    the re-attach is skipped or the hash no longer matches; no_claim=PR 2.
+   *  - empty key on a fix thread (AC 9): protects=the same fail-closed
+   *    guarantee for self-heal — nothing stranded in `dispatched`;
+   *    fails_when=the attempt advances or a token is left live;
+   *    no_claim=none.
    */
   it("a malformed plane key fails before the attempt is marked dispatched: no trigger, no breaker event, attempt still claimed", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2079,26 +2087,26 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     }
   });
 
-  it("legacy window (no plane key): the fix gate token is re-attached inside the plan, matching the stored hash", async () => {
+  it("an empty plane key fails a fix dispatch closed before the attempt is marked dispatched: no trigger, no breaker event, attempt still claimed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     setKey("");
     try {
       const attempt = await claim();
       const t = await fixThread(attempt.id);
-      const f = vi.fn(async () => ok("run-legacy-fix"));
+      const f = vi.fn(async () => ok("never"));
       vi.stubGlobal("fetch", f);
-      await dispatch(t);
-      vi.unstubAllGlobals();
-      const { input } = triggerBody(f);
-      expect(input.sealedSecrets).toBeUndefined();
-      expect("selfHealToken" in input).toBe(false);
-      const selfHeal = input.selfHeal as { kind: string; gateToken?: string };
-      expect(selfHeal.kind).toBe("fix");
-      expect(selfHeal.gateToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      const row = await readAttempt(attempt.id);
-      expect(row?.phase).toBe("dispatched");
-      expect(row?.gateTokenHash).toBe(
-        hashSelfHealToken(selfHeal.gateToken as string),
+      await expect(dispatch(t)).rejects.toThrow(
+        "Failed to dispatch the remote agent run.",
       );
+      vi.unstubAllGlobals();
+      expect(triggerCalls(f)).toHaveLength(0);
+      expect(await events()).toEqual([]);
+      const row = await readAttempt(attempt.id);
+      expect(row?.phase).toBe("claimed");
+      expect(row?.gateTokenHash).toBeNull();
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: daemonRunKey(t) }),
+      ).toBe(false);
     } finally {
       plane.reinstall();
     }

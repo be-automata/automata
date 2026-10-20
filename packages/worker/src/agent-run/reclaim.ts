@@ -8,6 +8,7 @@ import {
   slotIndexOfDir,
   workerRunDir,
 } from "./run-namespace";
+import { RUN_TERMINAL_LEDGER_DIR } from "./run-terminal-ledger";
 import { buildKillInvocation, type Invocation } from "./spawn-as-user";
 
 /**
@@ -116,12 +117,16 @@ function listPidFiles(dir: string): string[] {
   );
 }
 
-/** readdir the namespace root, [] when it does not exist — shared by both reapers. */
+/**
+ * readdir the namespace root, [] when it does not exist — shared by both
+ * reapers. The run-terminal ledger (#386) lives beside the worker dirs and is
+ * not one: it has no worker.lock and never holds a pidfile.
+ */
 function listWorkerDirs(root: string): fs.Dirent[] {
   try {
     return fs
       .readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory());
+      .filter((e) => e.isDirectory() && e.name !== RUN_TERMINAL_LEDGER_DIR);
   } catch {
     return [];
   }

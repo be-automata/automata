@@ -88,6 +88,7 @@ import {
   type BrokerHandoff,
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
+import { guardRunTerminal } from "./run-terminal-ledger";
 import {
   ensureRunNamespace,
   ensureSlotNamespace,
@@ -449,15 +450,34 @@ function wwwOptsFor(
 }
 
 /**
- * The ONE run task fn shared by every variant. Wraps `runAgentInner` with the
- * #125 C4 queue-mode staleness self-check and the #125 C1 cancel hook: when
- * the engine cancels THIS run (in-flight or pre-daemon during provision)
+ * The ONE run task fn shared by every variant: the #386 terminal guard
+ * (run-terminal-ledger.ts) around `runAgentAttempt`, which wraps
+ * `runAgentInner` with the #125 C4 queue-mode staleness self-check and the
+ * #125 C1 cancel hook: when the engine cancels THIS run (in-flight or pre-daemon during provision)
  * under a native policy, an explicit `superseded` terminal is posted to www
  * after teardown — `finally` runs on both return and throw, so exactly once.
  * Legacy runs (no supersedePolicy — non-review lanes) post nothing: the
  * control plane owns that terminal.
  */
 async function runAgent(
+  wire: AgentRunWireInput,
+  ctx: RunCtx,
+): Promise<AgentRunOutput> {
+  // #386: one terminal per workflow run id on this box. A run that already
+  // ended (returned or threw) and is redelivered after a graceful drain is
+  // refused here, before admission — never re-executed. A run that never ended
+  // (a worker crash mid-run, #152) has no entry and re-executes as before.
+  return guardRunTerminal(
+    {
+      root: loadWorkerConfig().runNamespaceRoot,
+      runId: ctx.workflowRunId?.() || "",
+      log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
+    },
+    () => runAgentAttempt(wire, ctx),
+  );
+}
+
+async function runAgentAttempt(
   wire: AgentRunWireInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
@@ -469,17 +489,12 @@ async function runAgent(
   // provisioning. A failure here throws a PayloadSealError naming only the
   // kid and the failure class; the task fails, nothing is posted (the daemon
   // token is inside the envelope), and www's sweep rule (iii) reconciles.
-  const { input, secrets, source, legacyFieldsIgnored } =
-    await resolveRunSecrets({
-      wire,
-      keys: planeKeysForRun(config.payloadSealKeyFile),
-    });
+  const { input, secrets } = await resolveRunSecrets({
+    wire,
+    keys: planeKeysForRun(config.payloadSealKeyFile),
+  });
   ctx.log(
-    `[agent-run ${input.threadId}] run secrets: ${source}` +
-      (source === "sealed" ? ` (kid=${input.sealedSecrets?.kid})` : "") +
-      (legacyFieldsIgnored
-        ? " — plain-text secret fields ALSO present and ignored (control-plane defect: the engine row holds them)"
-        : ""),
+    `[agent-run ${input.threadId}] run secrets: sealed (kid=${input.sealedSecrets?.kid})`,
   );
   // #380: both ghs_ tokens die with the run. runAgentInner revokes them after
   // the fix check and before the box lock release; this outer finally is the
@@ -502,7 +517,7 @@ async function runAgent(
   }
 }
 
-/** `runAgent` after the secrets are resolved: the staleness self-check + cancel hook. */
+/** `runAgentAttempt` after the secrets are resolved: the staleness self-check + cancel hook. */
 async function runAgentResolved(
   input: AgentRunInput,
   secrets: RunSecrets,
