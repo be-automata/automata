@@ -357,8 +357,8 @@ function thresholdEvaluation(
  * Evaluate the four engine-backed triggers over the last 7 complete UTC days.
  *
  * QUEUE WAIT. Each day's p90 of `startedAt − createdAt` over its STARTED run tasks, plus
- * `finishedAt − createdAt` for a run CANCELLED before it started (newest-wins supersede,
- * scheduleTimeout): those are the longest waits, and dropping them would hide a backlog
+ * `finishedAt − createdAt` for a run that ENDED without starting, under any terminal status
+ * (newest-wins supersede, a scheduling timeout): those are the longest waits, and dropping them would hide a backlog
  * exactly when there is one. A row still QUEUED is excluded (V7). ENGINE QUEUE ONLY: a run
  * deferred by the #371 headroom check or parked on a #205 box slot is already RUNNING on
  * the engine, so that wait is invisible here and counts as run time — a quiet trigger is
@@ -412,8 +412,9 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     // Clamped at 0: a sub-second clock skew between engine writers is "started at once".
     if (row.startedAtMs !== null) {
       waitsByDay[day]?.push(Math.max(0, row.startedAtMs - row.createdAtMs));
-    } else if (row.status === "CANCELLED" && row.finishedAtMs !== null) {
-      // Cancelled while still queued: its whole life was queue wait.
+    } else if (row.finishedAtMs !== null) {
+      // Ended without ever starting (supersede, or a scheduling timeout — whatever
+      // terminal status the engine gives it): its whole life was queue wait.
       waitsByDay[day]?.push(Math.max(0, row.finishedAtMs - row.createdAtMs));
     }
     if (row.repoFullName !== null && row.prNumber !== null) {
@@ -501,19 +502,21 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       busiestDay = { date: isoDay(dayStart), prs };
     }
   }
-  // Only the clients arm can be unknown (the attribution gate); it is never counted held then.
-  const clientsArm =
-    !attributionIncomplete && orgs.size > SCALE_CLIENTS_THRESHOLD;
+  // Tagged orgs are a LOWER bound on clients (unattributed time can only add more), so the
+  // clients arm is held whenever the tagged count already clears it; only a not-yet-held
+  // arm is unknown under the attribution gate.
+  const clientsArm = orgs.size > SCALE_CLIENTS_THRESHOLD;
+  const clientsArmUnknown = attributionIncomplete && !clientsArm;
   const prsArm = prsPerDayRaw > SCALE_PRS_PER_DAY_THRESHOLD;
   const armsHeld = [clientsArm, prsArm, input.questionnaire].filter(
     Boolean,
   ).length;
-  const unknownArmCount = attributionIncomplete ? 1 : 0;
+  const unknownArmCount = clientsArmUnknown ? 1 : 0;
   const compositeEvaluation = thresholdEvaluation(
     "scaleComposite",
     armsHeld,
     () =>
-      `scale composite: ${armsHeld} of 3 arms (clients ${orgs.size} > ${SCALE_CLIENTS_THRESHOLD}: ${attributionIncomplete ? "unknown" : clientsArm}; ` +
+      `scale composite: ${armsHeld} of 3 arms (clients ${orgs.size} > ${SCALE_CLIENTS_THRESHOLD}: ${clientsArmUnknown ? "unknown" : clientsArm}; ` +
       `PRs/day ${prsPerDay} > ${SCALE_PRS_PER_DAY_THRESHOLD}: ${prsArm}; ` +
       `questionnaire: ${input.questionnaire}; fires on ≥ ${SCALE_COMPOSITE_MIN_ARMS})`,
     armsHeld >= SCALE_COMPOSITE_MIN_ARMS,

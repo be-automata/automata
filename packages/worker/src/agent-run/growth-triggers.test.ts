@@ -238,6 +238,17 @@ describe("queue-wait p90", () => {
     );
   });
 
+  it("a run that ended without starting under a non-CANCELLED status still counts as wait", () => {
+    const rows = sevenDays({ waitS: 900 });
+    const queued = row({ day: 4, waitS: null });
+    rows[4] = {
+      ...queued,
+      status: "FAILED",
+      finishedAtMs: queued.createdAtMs + 1500 * 1000,
+    };
+    expect(evalRows(rows).stats?.queueWaitDailyP90S[4]).toBe(1500);
+  });
+
   it("excludes today's partial day and rows older than the window", () => {
     const rows = sevenDays({ waitS: 900 });
     rows.push(row({ day: 7, waitS: 10 })); // today
@@ -433,8 +444,23 @@ describe("attribution gate", () => {
     );
   });
 
+  it("composite: more than 5 tagged orgs hold the clients arm even while attribution is incomplete", () => {
+    // 6 tagged orgs + > 100 PRs/day + 10% unattributed run time: two arms are certainly held.
+    const tagged = Array.from({ length: 6 }, (_, i) =>
+      row({ day: 1, org: `org-${i}`, runS: 100 }),
+    );
+    const many = Array.from({ length: 7 * 101 }, (_, i) =>
+      row({ day: i % 7, org: "org-0", repo: "acme/app", pr: i, runS: 0 }),
+    );
+    const untagged = row({ day: 1, org: null, runS: 67 });
+    const r = evalRows([...tagged, ...many, untagged]);
+    expect(r.clientShare.verdict).toBe("unknown");
+    expect(r.scaleComposite).toMatchObject({ verdict: "over", value: 2 });
+  });
+
   it("composite: clients unknown + one other arm held → unknown, naming the arm", () => {
-    const r = evalRows([...clients(6), unattributed(600)], true);
+    // 4 tagged orgs (≤ 5) do not hold the arm; the unattributed time could hide more.
+    const r = evalRows([...clients(4), unattributed(600)], true);
     expect(r.scaleComposite).toMatchObject({ verdict: "unknown", value: 1 });
     expect(r.scaleComposite.reason).toMatch(/clients/);
     expect(r.scaleComposite.reason).toMatch(/attribution incomplete/);
