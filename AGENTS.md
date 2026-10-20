@@ -71,9 +71,9 @@ If you make a change to the db schema, you need to run the following command to 
 
 Test environments push the schema automatically.
 
-> **PRODUCTION DOES NOT.** Verified 2026-08-26: `.github/workflows/` contains only
-> `ci.yml`, which runs lint/typecheck/tests and has **no drizzle push step**. There is
-> no GitHub action that migrates the Neon production database when code lands on main.
+> **PRODUCTION IS NEVER PUSHED.** `drizzle-kit push` never touches the Neon production
+> database, and `ci.yml` (lint/typecheck/tests) does not migrate it. Production changes
+> only through `deploy/migrations/`, applied by the `migrate.yml` workflow below.
 >
 > A schema change still ships in two ordered steps: **its migration reaches prod FIRST,
 > then the worker is deployed**. The first step is now CI: `.github/workflows/migrate.yml`
