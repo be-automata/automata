@@ -356,7 +356,7 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 
 - `queue_wait_p90` — daily queue-wait p90 > 600 s on each of the last 7 complete UTC
   days → raise the cap, then resize CX43 (cap 6) / CX53 (cap 8). It measures the ENGINE
-  queue only: a run cancelled before it started counts its whole life as wait, but a run
+  queue only: a run that ended before it started (cancelled, timed out) counts its whole life as wait, but a run
   deferred by the #371 headroom check or parked on a #205 box slot is already running on
   the engine, so that wait is not seen (and counts as run time). A quiet trigger is not
   proof the box keeps up; read the `box.headroom_*` journal lines alongside it.
@@ -376,7 +376,7 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 | Knob                                 | Default | Notes                                                 |
 | :----------------------------------- | :------ | :---------------------------------------------------- |
 | `WORKER_ALERT_WEBHOOK_URL`           | unset   | Unset = OFF, silent, nothing else is read. See below. |
-| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30.                                             |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30, ceiling 86400 (one day).                    |
 | `WORKER_GROWTH_TRIGGER_SUSTAIN_S`    | 900     | Floor 60; must be ≥ 2 × interval.                     |
 | `WORKER_GROWTH_TRIGGER_RAM_FRACTION` | 0.70    | 0 < x < 1.                                            |
 | `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.              |

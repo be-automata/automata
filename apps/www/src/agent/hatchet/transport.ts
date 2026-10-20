@@ -156,8 +156,9 @@ export function buildRunMetadata({
 }
 
 /**
- * Flag-ON trigger extension. Absent → the legacy payload, byte-identical
- * (guarded by dispatch-golden.test.ts).
+ * Flag-ON trigger extension. Absent → the legacy `agent-run` workflow with the
+ * non-review metadata derived by buildRunMetadata (#373 OD-0), pinned by
+ * dispatch-golden.test.ts.
  */
 export type TriggerOpts = {
   workflowName?: string;

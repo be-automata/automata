@@ -36,7 +36,7 @@ const CLIENT_SHARE_MIN_ORGS = 2;
  * the per-org figures describe too little of the box to act on, so `client_share` and the
  * scale composite's clients arm read `unknown` instead of over/under.
  */
-export const ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION = 0.05;
+const ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION = 0.05;
 /** Scale-composite arm: distinct clients must exceed this. */
 const SCALE_CLIENTS_THRESHOLD = 5;
 /** Scale-composite arm: the 7-day average of distinct PRs per UTC day must exceed this (Q-2). */
@@ -241,7 +241,7 @@ export type RunsReading =
 
 interface RunWindowStats {
   windowDays: number;
-  /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no counted run (started, or cancelled while queued). */
+  /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no counted run (started, or ended without starting under any terminal status). */
   queueWaitDailyP90S: Array<number | null>;
   /** Distinct `orgId`s in the window. `u:<userId>` personal scopes count: each is its own tenant. */
   clients: number;
