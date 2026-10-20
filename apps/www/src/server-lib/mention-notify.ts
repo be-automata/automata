@@ -2,7 +2,9 @@ import { eq } from "drizzle-orm";
 import * as schema from "@terragon/shared/db/schema";
 import { MentionLaneStamp, ThreadErrorType } from "@terragon/shared";
 import { DB } from "@terragon/shared/db";
+import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import { effectiveShadow } from "@/lib/github-side-effects";
 import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 import {
   mentionReplyMarker,
@@ -40,12 +42,20 @@ export async function notifyMentionSourceOfFailure({
       .select({
         sourceType: schema.thread.sourceType,
         sourceMetadata: schema.thread.sourceMetadata,
+        organizationId: schema.thread.organizationId,
       })
       .from(schema.thread)
       .where(eq(schema.thread.id, threadId))
       .limit(1);
 
     if (row && isMentionLaneStamp(row.sourceMetadata)) {
+      // Same gate as the lane's intake and finish writer: a shadow-mode
+      // installation (or side effects off) never gets a visible comment.
+      const mode = await getOrganizationInstallationMode({
+        db,
+        organizationId: row.organizationId,
+      });
+      if (effectiveShadow(mode)) return;
       await notifyOrgLaneMention(row.sourceMetadata.mention, errorType);
       return;
     }

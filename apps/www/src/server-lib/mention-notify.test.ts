@@ -3,10 +3,12 @@ import { db } from "@/lib/db";
 import {
   createTestUser,
   createTestThread,
+  createTestOrg,
 } from "@terragon/shared/model/test-helpers";
 import { User } from "@terragon/shared";
 import { getOctokitForApp } from "@/lib/github";
 import { isAppMentioned } from "@/app/api/webhooks/github/utils";
+import * as schema from "@terragon/shared/db/schema";
 import { notifyMentionSourceOfFailure } from "./mention-notify";
 
 /**
@@ -267,5 +269,56 @@ describe("notifyMentionSourceOfFailure — the org-owned mention lane", () => {
     ]) {
       expect(isAppMentioned((call[0] as { body: string }).body)).toBe(false);
     }
+  });
+
+  it("posts nothing for a shadow-mode installation (or side effects off)", async () => {
+    vi.clearAllMocks();
+    const { user } = await createTestUser({ db });
+    const octokit = {
+      rest: {
+        pulls: { createReplyForReviewComment: vi.fn() },
+        issues: { createComment: vi.fn() },
+      },
+    };
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+    const organizationId = await createTestOrg({ db });
+    await db.insert(schema.githubInstallation).values({
+      installationId: `inst-${organizationId}`,
+      organizationId,
+      mode: "shadow",
+    });
+    const { threadId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId,
+        sourceType: "automation",
+        sourceMetadata: {
+          type: "automation-skill" as const,
+          skillName: "github-mention",
+          contentSha: "sha",
+          source: "db-version",
+          mention: {
+            repoFullName: "acme/widgets",
+            issueOrPrNumber: 4,
+            isPullRequest: true,
+            commentId: 77,
+            commenterLogin: "alice",
+            commentKind: "issue",
+          } as never,
+        },
+      },
+    });
+
+    await notifyMentionSourceOfFailure({
+      db,
+      threadId,
+      errorType: "unknown-error",
+    });
+
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(
+      octokit.rest.pulls.createReplyForReviewComment,
+    ).not.toHaveBeenCalled();
   });
 });
