@@ -20,6 +20,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  announcedOrgIds,
   buildSnapshot,
   buildWebhookBody,
   commitTransition,
@@ -74,6 +75,14 @@ export const GROWTH_SNAPSHOT_MODE = 0o640;
  * (ram_swap does not depend on the engine).
  */
 const GROWTH_ENGINE_READ_BUDGET_FRACTION = 0.5;
+/**
+ * The engine run window is re-read at most this often. The run signals are 7-COMPLETE-day
+ * figures that only move when a UTC day rolls over (V6), so re-paging up to 10 000 rows
+ * every tick buys nothing between rolls. The read is refreshed when the tick's window
+ * changed (a new UTC day) or when the last SUCCESSFUL read is at least this old; /proc is
+ * still sampled every tick.
+ */
+export const GROWTH_ENGINE_REFRESH_MS = 3_600_000;
 /** Every POST must finish within this fraction of the interval, so ticks cannot stack. */
 const GROWTH_TICK_BUDGET_FRACTION = 0.95;
 
@@ -459,7 +468,8 @@ interface GrowthEngineTarget {
 export type WriteSnapshot = (
   dir: string,
   snapshot: GrowthSnapshot,
-  options: Required<SnapshotWriteOptions>,
+  options: Required<Pick<SnapshotWriteOptions, "filename" | "mode">> &
+    Pick<SnapshotWriteOptions, "log">,
 ) => void;
 
 export interface GrowthTriggerDeps {
@@ -475,6 +485,17 @@ export interface GrowthTriggerDeps {
   writeSnapshot?: WriteSnapshot;
   /** The previous snapshot's text, or null when there is none. May throw. */
   readSnapshot?: (filePath: string) => string | null;
+  /**
+   * The engine's per-org concurrency cap (`registrationConfig.perOrgMaxRuns`): a queue
+   * wait that began with its org already at the cap is policy-held, not capacity, and is
+   * left out of the queue-wait p90. Absent: only the same-PR exclusion applies.
+   */
+  perOrgMaxRuns?: number;
+  /**
+   * How old the last successful engine read may get before a tick re-reads it. Defaults
+   * to GROWTH_ENGINE_REFRESH_MS; a test that changes the engine between ticks passes 0.
+   */
+  engineRefreshMs?: number;
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (handle: unknown) => void;
   log?: (line: string) => void;
@@ -521,9 +542,16 @@ function defaultReadSnapshot(filePath: string): string | null {
  * `WORKER_ALERT_WEBHOOK_URL` is unset (AC 1). A bad knob throws from
  * loadGrowthTriggerConfig (AC 7); the boot site decides to refuse.
  *
+ * `deps.resolveEngine` failing throws a FIXED-phrase Error naming only the cause's class:
+ * the boot site prints what arm throws, and a resolver's message could carry a URL.
+ *
  * Otherwise seeds the dedupe states from the existing snapshot (a restart does not
  * re-fire), arms an unref'd interval and fires one immediate tick. A tick:
- *   1. reads the run window (bounded by half the interval) and a /proc sample;
+ *   1. reads the run window (bounded by half the interval) when it is due — the tick's
+ *      window is not the cached one (a new UTC day), or the last successful read is
+ *      GROWTH_ENGINE_REFRESH_MS old; otherwise it re-evaluates the cached rows. An
+ *      unreadable read leaves the cache (and its age) as it was, so the next tick
+ *      retries, and evaluates `unknown`. A /proc sample is read every tick;
  *   2. evaluates every trigger (unreadable → `unknown`, logged once per streak; state
  *      unchanged);
  *   3. for each fire/clear transition POSTs the webhook and commits the transition only
@@ -542,7 +570,16 @@ export function armGrowthTriggers(
   const config = loadGrowthTriggerConfig(env);
   if (config === null) return null;
 
-  const engine = deps.resolveEngine();
+  let engine: GrowthEngineTarget;
+  try {
+    engine = deps.resolveEngine();
+  } catch (err) {
+    // Not the cause's message, and no `cause`: console.error prints both, and a resolver
+    // error can carry the engine URL or a credential-bearing value.
+    throw new Error(
+      `growth triggers: cannot resolve the engine target (${errorName(err)})`,
+    );
+  }
   const now = deps.now ?? Date.now;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const readText: ReadText =
@@ -561,6 +598,7 @@ export function armGrowthTriggers(
     deps.clearInterval ??
     ((h: unknown) => clearInterval(h as ReturnType<typeof setInterval>));
   const log = deps.log ?? ((line: string) => console.log(line));
+  const engineRefreshMs = deps.engineRefreshMs ?? GROWTH_ENGINE_REFRESH_MS;
 
   const intervalMs = config.intervalS * 1000;
   const sustainMs = config.sustainS * 1000;
@@ -592,6 +630,12 @@ export function armGrowthTriggers(
   }
 
   let memSamples: MemSample[] = [];
+  // The last SUCCESSFUL engine read: the window it covered and when it was taken.
+  let engineCache: {
+    windowStartMs: number;
+    readAtMs: number;
+    runs: RunsReading;
+  } | null = null;
   let inFlight = false;
   let skipLogged = false;
   // One `growth.trigger_unknown` per contiguous (trigger, reason) streak and one
@@ -612,8 +656,16 @@ export function armGrowthTriggers(
     // ONE window per tick, from the tick start: the read and the evaluation must agree
     // even when the tick crosses 00:00 UTC.
     const window = growthWindow(startMs);
-    const [runs, mem] = await Promise.all([
-      readRunWindow({
+    const cached = engineCache;
+    const engineDue =
+      cached === null ||
+      cached.windowStartMs !== window.startMs ||
+      // A clock that stepped back is not "fresh": re-read.
+      startMs < cached.readAtMs ||
+      startMs - cached.readAtMs >= engineRefreshMs;
+    const readRuns = async (): Promise<RunsReading> => {
+      if (!engineDue && cached !== null) return cached.runs;
+      const reading = await readRunWindow({
         apiUrl: engine.apiUrl,
         tenantId: engine.tenantId,
         token: engine.token,
@@ -622,7 +674,18 @@ export function armGrowthTriggers(
         deadlineMs: engineDeadlineMs,
         fetchImpl,
         now,
-      }),
+      });
+      if (reading.kind === "rows") {
+        engineCache = {
+          windowStartMs: window.startMs,
+          readAtMs: startMs,
+          runs: reading,
+        };
+      }
+      return reading;
+    };
+    const [runs, mem] = await Promise.all([
+      readRuns(),
       readMemSample(readText, startMs),
     ]);
 
@@ -639,6 +702,9 @@ export function armGrowthTriggers(
       nowMs,
       window,
       questionnaire: config.questionnaire,
+      ...(deps.perOrgMaxRuns === undefined
+        ? {}
+        : { perOrgMaxRuns: deps.perOrgMaxRuns }),
     });
     const ramSwap = evaluateRamSwap({
       samples: memSamples,
@@ -671,6 +737,9 @@ export function armGrowthTriggers(
         writeSnapshot(deps.snapshotDir, snapshot, {
           filename: GROWTH_SNAPSHOT_FILENAME,
           mode: GROWTH_SNAPSHOT_MODE,
+          // The writer's temp-file cleanup line goes to this driver's log.
+          log: ({ event, ...fields }) =>
+            logLine(log, String(event ?? "snapshot.log"), fields),
         });
       } catch (err) {
         logLine(log, "growth.snapshot_write_failed", {
@@ -714,6 +783,9 @@ export function armGrowthTriggers(
         boxId: deps.boxId,
         nowMs,
         state,
+        ...(id === "client_share" && state === "cleared"
+          ? { announcedOrgIds: announcedOrgIds(current, nowMs) }
+          : {}),
       });
       const remainingMs = deadlineMs - now();
       const result: WebhookResult =

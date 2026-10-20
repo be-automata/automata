@@ -29,8 +29,12 @@ const QUEUE_WAIT_P90_THRESHOLD_S = 600;
 const QUEUE_WAIT_PERCENTILE = 0.9;
 /** One client's share of ATTRIBUTED run time must exceed this (Q-1). */
 const CLIENT_SHARE_THRESHOLD = 0.4;
-/** ...and only when the window holds at least this many distinct orgs (Q-1). */
-const CLIENT_SHARE_MIN_ORGS = 2;
+/**
+ * ...and only when at least this many distinct orgs HOLD run time in the window (Q-1,
+ * owner decision): on a two-org box one client is always ≥ 50% of the time, so the split
+ * signal is only meaningful from three.
+ */
+const CLIENT_SHARE_MIN_ORGS = 3;
 /**
  * Attribution gate: above this fraction of UNATTRIBUTED run time (rows without `orgId`)
  * the per-org figures describe too little of the box to act on, so `client_share` and the
@@ -128,6 +132,13 @@ function nonEmptyString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+/**
+ * `additionalMetadata.prNumber`. www writes it as a decimal string (`"42"`); a NUMERIC
+ * value is accepted too when it is a positive safe integer, and is then the same PR as its
+ * decimal string (both key `repo#42`), so a writer that forgets to stringify is not a
+ * different PR. Anything else (a fraction, 0, a negative, NaN, a non-numeric string) is
+ * null: the row carries no PR.
+ */
 function parsePrNumber(value: unknown): number | null {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -218,6 +229,80 @@ function runTimeMs(row: RunRow): number | null {
   return d >= 0 ? d : null;
 }
 
+/**
+ * Execution intervals [startedAt, finishedAt) of one key's runs (a PR, or an org), as two
+ * sorted arrays so "how many were executing at t" is two binary searches instead of a
+ * scan. A run that has not finished is executing until +∞; a run that never started, or
+ * whose finishedAt precedes its startedAt, never executed.
+ */
+interface ExecutionIndex {
+  starts: number[];
+  ends: number[];
+}
+
+function executionInterval(row: RunRow): [number, number] | null {
+  if (row.startedAtMs === null) return null;
+  const end = row.finishedAtMs ?? Number.POSITIVE_INFINITY;
+  return end >= row.startedAtMs ? [row.startedAtMs, end] : null;
+}
+
+function buildExecutionIndexes(
+  rows: readonly RunRow[],
+  keyOf: (row: RunRow) => string | null,
+): Map<string, ExecutionIndex> {
+  const out = new Map<string, ExecutionIndex>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const interval = executionInterval(row);
+    if (key === null || interval === null) continue;
+    const index = out.get(key) ?? { starts: [], ends: [] };
+    index.starts.push(interval[0]);
+    index.ends.push(interval[1]);
+    out.set(key, index);
+  }
+  for (const index of out.values()) {
+    index.starts.sort((a, b) => a - b);
+    index.ends.sort((a, b) => a - b);
+  }
+  return out;
+}
+
+/** Count of values ≤ t in an ascending array. */
+function countAtOrBefore(sorted: readonly number[], t: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if ((sorted[mid] ?? Number.POSITIVE_INFINITY) <= t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Runs of `index` executing at `t` (startedAt ≤ t < finishedAt), OTHER than `self`: every
+ * interval with end ≤ t also has start ≤ t, so the difference of the two counts is the
+ * number of intervals that contain t.
+ */
+function executingAt(
+  index: ExecutionIndex | undefined,
+  t: number,
+  self: RunRow,
+): number {
+  if (index === undefined) return 0;
+  const count =
+    countAtOrBefore(index.starts, t) - countAtOrBefore(index.ends, t);
+  const own = executionInterval(self);
+  const selfExecuting = own !== null && own[0] <= t && t < own[1];
+  return count - (selfExecuting ? 1 : 0);
+}
+
+function prKey(row: RunRow): string | null {
+  return row.repoFullName !== null && row.prNumber !== null
+    ? `${row.repoFullName.toLowerCase()}#${row.prNumber}`
+    : null;
+}
+
 /** Nearest-rank percentile: the value at rank ceil(p·n) of the sorted series. Null on empty. */
 export function nearestRankPercentile(
   values: readonly number[],
@@ -245,6 +330,12 @@ interface RunWindowStats {
   windowDays: number;
   /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no counted run (started, or ended without starting under any terminal status). */
   queueWaitDailyP90S: Array<number | null>;
+  /**
+   * Waits left out of the p90 because they were held by POLICY, not capacity: at the
+   * run's createdAt another run of the same PR was executing, or its org was already at
+   * `perOrgMaxRuns` executing runs.
+   */
+  policyHeldRuns: number;
   /** Distinct `orgId`s in the window. `u:<userId>` personal scopes count: each is its own tenant. */
   clients: number;
   /** Run time of rows without `orgId` — never counted as an org (OD-0). */
@@ -270,6 +361,13 @@ interface RunSignalsInput {
   window?: GrowthWindow;
   /** `WORKER_ENTERPRISE_QUESTIONNAIRE=1`: the composite's manual arm. */
   questionnaire: boolean;
+  /**
+   * The engine's per-org concurrency cap (`WORKER_PER_ORG_MAX_RUNS`). When set, a wait
+   * that began while its org already had this many runs executing is policy-held and
+   * left out of the p90. Absent (or not a positive integer): that exclusion is off; the
+   * same-PR exclusion needs no input and always applies.
+   */
+  perOrgMaxRuns?: number;
 }
 
 export interface RunSignalsResult {
@@ -372,7 +470,12 @@ function thresholdEvaluation(
  * exactly when there is one. A row still QUEUED is excluded (V7). ENGINE QUEUE ONLY: a run
  * deferred by the #371 headroom check or parked on a #205 box slot is already RUNNING on
  * the engine, so that wait is invisible here and counts as run time — a quiet trigger is
- * not proof the box keeps up (follow-up: a worker-recorded admission time). The trigger
+ * not proof the box keeps up (follow-up: a worker-recorded admission time). POLICY-HELD
+ * waits are left out (counted in `policyHeldRuns`): a run created while another run of
+ * the same (repo, PR) was executing waits on the per-PR serialization, and one created
+ * while its org already had `perOrgMaxRuns` runs executing waits on the per-org cap —
+ * neither wait says the box lacks capacity, and a busy PR or tenant would otherwise fire
+ * a resize the box does not need. The trigger
  * is "> 10 min for 7 consecutive days", so its value is the streak's WEAKEST day, with an
  * empty day counting as 0: a day with no run tasks breaks the streak by definition.
  *
@@ -411,6 +514,35 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   }
 
   const window = input.window ?? growthWindow(input.nowMs);
+  const orgCap =
+    input.perOrgMaxRuns !== undefined &&
+    Number.isSafeInteger(input.perOrgMaxRuns) &&
+    input.perOrgMaxRuns >= 1
+      ? input.perOrgMaxRuns
+      : null;
+  // Built over EVERY row read, in the window or not: a run created before the window can
+  // still be executing when a windowed run is created.
+  const prExecutions = buildExecutionIndexes(input.runs.rows, prKey);
+  const orgExecutions =
+    orgCap === null
+      ? null
+      : buildExecutionIndexes(input.runs.rows, (r) => r.orgId);
+  const isPolicyHeld = (row: RunRow): boolean => {
+    const pr = prKey(row);
+    if (
+      pr !== null &&
+      executingAt(prExecutions.get(pr), row.createdAtMs, row) > 0
+    ) {
+      return true;
+    }
+    return (
+      orgCap !== null &&
+      orgExecutions !== null &&
+      row.orgId !== null &&
+      executingAt(orgExecutions.get(row.orgId), row.createdAtMs, row) >= orgCap
+    );
+  };
+  let policyHeldRuns = 0;
   const waitsByDay: number[][] = window.dayStartsMs.map(() => []);
   const prsByDay: Array<Set<string>> = window.dayStartsMs.map(() => new Set());
   const orgs = new Set<string>();
@@ -423,16 +555,18 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     const day = dayIndex(window, row.createdAtMs);
     if (day === null) continue;
     // Clamped at 0: a sub-second clock skew between engine writers is "started at once".
-    if (row.startedAtMs !== null) {
-      waitsByDay[day]?.push(Math.max(0, row.startedAtMs - row.createdAtMs));
-    } else if (row.finishedAtMs !== null) {
-      // Ended without ever starting (supersede, or a scheduling timeout — whatever
-      // terminal status the engine gives it): its whole life was queue wait.
-      waitsByDay[day]?.push(Math.max(0, row.finishedAtMs - row.createdAtMs));
+    // Ended without ever starting (supersede, or a scheduling timeout — whatever terminal
+    // status the engine gives it): its whole life was queue wait.
+    const waitEndMs = row.startedAtMs ?? row.finishedAtMs;
+    if (waitEndMs !== null) {
+      if (isPolicyHeld(row)) {
+        policyHeldRuns += 1;
+      } else {
+        waitsByDay[day]?.push(Math.max(0, waitEndMs - row.createdAtMs));
+      }
     }
-    if (row.repoFullName !== null && row.prNumber !== null) {
-      prsByDay[day]?.add(`${row.repoFullName.toLowerCase()}#${row.prNumber}`);
-    }
+    const pr = prKey(row);
+    if (pr !== null) prsByDay[day]?.add(pr);
     if (row.orgId !== null) orgs.add(row.orgId);
     const t = runTimeMs(row);
     if (t === null) continue;
@@ -441,7 +575,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     } else {
       attributedMs += t;
       // Only positive time makes an org a holder of box time (a run that started and
-      // ended in the same instant shares none), so the Q-1 two-org guard counts holders.
+      // ended in the same instant shares none), so the Q-1 minimum-orgs guard counts holders.
       if (t > 0) {
         orgTimeMs.set(row.orgId, (orgTimeMs.get(row.orgId) ?? 0) + t);
       }
@@ -465,6 +599,9 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       `queue-wait p90: weakest of the last ${GROWTH_WINDOW_DAYS} UTC days ${weakestDayS}s ` +
       `(threshold > ${QUEUE_WAIT_P90_THRESHOLD_S}s every day` +
       (emptyDays > 0 ? `; ${emptyDays} day(s) with no counted run` : "") +
+      (policyHeldRuns > 0
+        ? `; ${policyHeldRuns} policy-held wait(s) excluded (same PR executing, or org at its per-org cap)`
+        : "") +
       "; engine queue only, in-worker admission and box-slot waits not counted)",
   );
 
@@ -574,6 +711,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     stats: {
       windowDays: GROWTH_WINDOW_DAYS,
       queueWaitDailyP90S,
+      policyHeldRuns,
       clients: orgs.size,
       unattributed: {
         seconds: round(unattributedMs / 1000),
@@ -847,6 +985,18 @@ export function decideTransition(
 }
 
 /**
+ * client_share: the orgs whose announcement still holds at `nowMs` (a fire in the last
+ * GROWTH_REFIRE_MS named them), sorted. Its clear names these — the clients the operator
+ * was told to split — not whichever org happens to be on top when the share drops.
+ */
+export function announcedOrgIds(
+  state: TriggerDedupeState,
+  nowMs: number,
+): string[] {
+  return Object.keys(liveOrgFires(state.orgLastFiredAtMs, nowMs) ?? {}).sort();
+}
+
+/**
  * The state after the transition's side effect ran: `next` only when delivered, so a
  * failed fire or clear is retried next tick. A `none` transition's `next` is `state`
  * itself, so it needs no commit at all.
@@ -883,13 +1033,25 @@ export function buildWebhookBody(input: {
   boxId: string;
   nowMs: number;
   state: WebhookState;
+  /**
+   * client_share clears only: announcedOrgIds(state before the clear, nowMs). When
+   * non-empty the cleared text names them, so the clear answers the fires it ends.
+   */
+  announcedOrgIds?: readonly string[];
 }): GrowthWebhookBody {
   const { evaluation, boxId, nowMs, state } = input;
   const move = AUTHORIZED_MOVES[evaluation.trigger];
+  const announced =
+    state === "cleared" &&
+    evaluation.trigger === "client_share" &&
+    input.announcedOrgIds !== undefined &&
+    input.announcedOrgIds.length > 0
+      ? `no longer over for ${input.announcedOrgIds.join(", ")} (announced in the last 24 h); `
+      : "";
   const text =
     state === "fired"
       ? `[growth] ${evaluation.trigger} FIRED on ${boxId}: ${evaluation.summary}. Authorized move: ${move}`
-      : `[growth] ${evaluation.trigger} cleared on ${boxId}: ${evaluation.summary}`;
+      : `[growth] ${evaluation.trigger} cleared on ${boxId}: ${announced}${evaluation.summary}`;
   return {
     text: text.replace(/[\r\n]+/g, " "),
     trigger: evaluation.trigger,
@@ -1038,7 +1200,12 @@ export function dedupeStatesFromSnapshot(
       continue;
     }
     out[id] = {
-      firing: e.firing === true && lastFiredAtMs !== null,
+      // An explicit `lastFiredAt: null` with `firing: true` is the state the future-fire
+      // branch above seeds and the next snapshot writes back: keep it firing, or the
+      // pending clear is lost on the SECOND restart. A missing or junk `lastFiredAt`
+      // still seeds idle.
+      firing:
+        e.firing === true && (lastFiredAtMs !== null || e.lastFiredAt === null),
       lastFiredAtMs,
       ...orgField,
     };

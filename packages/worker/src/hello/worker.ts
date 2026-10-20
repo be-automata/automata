@@ -496,6 +496,7 @@ async function main() {
       },
       snapshotDir: registrationConfig.runNamespaceRoot,
       boxId: registrationConfig.boxId,
+      perOrgMaxRuns: registrationConfig.perOrgMaxRuns,
     });
   } catch (err) {
     console.error(

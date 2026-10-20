@@ -55,21 +55,34 @@ const METADATA_MAX_KEYS = 12;
 const METADATA_MAX_VALUE_CHARS = 256;
 
 /**
+ * An over-limit run metadata object, refused locally before any request is
+ * sent. DEFINITIVE: nothing reached the engine, and the same input would be
+ * refused again, so the trigger paths neither retry it nor read it back.
+ */
+export class RunMetadataLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunMetadataLimitError";
+  }
+}
+
+/**
  * Reject an over-limit metadata object AT DISPATCH (#127 AC5) — Hatchet's
  * additionalMetadata is unbounded engine-side, so the bound lives here.
+ * Throws RunMetadataLimitError.
  */
 export function validateRunMetadata(
   metadata: Record<string, string>,
 ): Record<string, string> {
   const keys = Object.keys(metadata);
   if (keys.length > METADATA_MAX_KEYS) {
-    throw new Error(
+    throw new RunMetadataLimitError(
       `Run metadata exceeds ${METADATA_MAX_KEYS} keys (${keys.length}): ${keys.join(", ")}`,
     );
   }
   for (const [key, value] of Object.entries(metadata)) {
     if (typeof value !== "string" || value.length > METADATA_MAX_VALUE_CHARS) {
-      throw new Error(
+      throw new RunMetadataLimitError(
         `Run metadata value for '${key}' exceeds ${METADATA_MAX_VALUE_CHARS} chars (or is not a string)`,
       );
     }

@@ -413,6 +413,35 @@ describe("dispatchAgentRun", () => {
     );
     vi.unstubAllGlobals();
   });
+
+  it("an over-limit repo name is refused before any fetch and is not retried", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(
+        dispatchAgentRun({
+          userId: user.id,
+          threadId,
+          threadChatId,
+          repoFullName: `be-automata/${"x".repeat(300)}`,
+          branch: "main",
+        }),
+      ).rejects.toThrow();
+      expect(fetchMock).not.toHaveBeenCalled();
+      const attempts = errors.mock.calls.filter(
+        ([line]) => line === "[hatchet] trigger attempt failed",
+      );
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.[1]).toMatchObject({
+        attempt: 1,
+        error: expect.stringContaining("exceeds 256 chars"),
+      });
+    } finally {
+      errors.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)", () => {
@@ -1986,6 +2015,69 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
       .where(eq(auditFixAttempts.id, id));
     return row;
   };
+
+  it("an over-limit metadata error is definitive: no POST, no read-back, no retry", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A finding on a repo whose name exceeds the 256-char metadata value limit.
+    const longRepo = `be-automata/${"x".repeat(300)}`;
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: longRepo,
+      patch: { selfHealMode: "on" },
+    });
+    findingId = (
+      await insertFinding({
+        db,
+        organizationId: orgId,
+        finding: {
+          repoFullName: longRepo,
+          fingerprint: FP,
+          audit: "security-audit",
+          ruleId: "supply.lockfile-missing",
+          severity: "high",
+          checkKind: "script",
+          title: "Lockfile missing",
+          subject: "pnpm-lock.yaml",
+          status: "open",
+          planFiles: ["package.json", "pnpm-lock.yaml"],
+          issueNumber,
+          autoFixLabeled: true,
+          fixReadyAt: new Date(Date.now() - 60_000),
+        },
+      })
+    ).id;
+    const attempt = await claim();
+    const t = await fixThread(attempt.id);
+    const f = vi.fn(async (url: string) =>
+      String(url).includes(TRIGGER) ? ok("never") : listing([]),
+    );
+    vi.stubGlobal("fetch", f);
+    await expect(
+      dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: longRepo,
+        branch: "main",
+      }),
+    ).rejects.toThrow();
+    vi.unstubAllGlobals();
+    expect(f).not.toHaveBeenCalled();
+    expect(triggerCalls(f)).toHaveLength(0);
+    expect(listCalls(f)).toHaveLength(0);
+    const attempts = errors.mock.calls.filter(
+      ([line]) => line === "[hatchet] self-heal trigger attempt failed",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.[1]).toMatchObject({ attempt: 1, ambiguous: false });
+    expect(
+      errors.mock.calls.some(([line]) =>
+        String(line).includes("read-back failed"),
+      ),
+    ).toBe(false);
+    expect((await events()).map((e) => e.outcome)).toEqual(["failure"]);
+  });
 
   it("a fix dispatch carries selfHeal.kind fix from the stamped attempt, bounded, and never logs the token", async () => {
     const spies = (["log", "warn", "error", "info", "debug"] as const).map(

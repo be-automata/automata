@@ -78,26 +78,42 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
  * `options.filename` defaults to the scheduling-health snapshot; #184 reuses the
  * writer for `box-budget.json`.
  *
- * `options.mode` (#373) is optional: when omitted the write is exactly what it always was
- * (process umask decides the permissions). When given, it is applied to the temp file
- * with an explicit chmod before the rename — `writeFileSync`'s own `mode` only takes
- * effect on creation and is filtered by the umask, so it alone would not guarantee
- * the bits the caller asked for.
+ * `options.mode` (#373) is optional: when omitted the permissions are what they always
+ * were (0666 filtered by the process umask, `writeFileSync`'s default). When given, it is
+ * applied to the temp file with an explicit fchmod before the rename — the creation mode
+ * is filtered by the umask, so it alone would not guarantee the bits the caller asked for.
  *
- * A failed write, chmod or rename unlinks the temp file before rethrowing (#373), so a
- * full disk or a bad target does not leave `<file>.tmp-<pid>` behind in the namespace
- * root. The ORIGINAL error is what propagates: a cleanup failure other than ENOENT is
- * not allowed to mask it (the next write reuses the same pid-suffixed name anyway).
+ * EXCLUSIVE TEMP FILE (#373). The temp file is created with O_CREAT|O_EXCL (`wx`) and
+ * written through that descriptor, so a file or symlink already sitting at
+ * `<file>.tmp-<pid>` is refused (EEXIST), never followed or truncated: the namespace root
+ * is shared with agent runs, and a planted symlink must not turn the snapshot write into
+ * a write of someone else's file.
+ *
+ * A failed open, write, chmod or rename unlinks the temp path before rethrowing (#373),
+ * so a full disk or a bad target does not leave `<file>.tmp-<pid>` behind in the
+ * namespace root — and a refused pre-existing entry is removed, so the next write can
+ * succeed (unlink(2) removes a symlink itself, never its target). The ORIGINAL error is
+ * what propagates: a cleanup failure other than ENOENT is logged through `options.log`
+ * (default: the JSON console logger) and is not allowed to mask it.
  */
 export interface SnapshotWriteOptions {
   filename?: string;
   mode?: number;
+  /** Receives `snapshot.tmp_cleanup_failed`; defaults to the JSON console logger. */
+  log?: Logger;
 }
+
+/** `writeFileSync`'s default creation mode, before the umask. */
+const DEFAULT_CREATE_MODE = 0o666;
 
 export function writeSnapshotAtomic<T extends object>(
   runNamespaceRoot: string,
   snapshot: T,
-  { filename = "scheduling-health.json", mode }: SnapshotWriteOptions = {},
+  {
+    filename = "scheduling-health.json",
+    mode,
+    log = defaultLogger,
+  }: SnapshotWriteOptions = {},
 ): void {
   try {
     fs.mkdirSync(runNamespaceRoot, { recursive: true });
@@ -107,12 +123,13 @@ export function writeSnapshotAtomic<T extends object>(
   const target = path.join(runNamespaceRoot, filename);
   const tmp = `${target}.tmp-${process.pid}`;
   try {
-    fs.writeFileSync(
-      tmp,
-      JSON.stringify(snapshot, null, 2),
-      mode === undefined ? undefined : { mode },
-    );
-    if (mode !== undefined) fs.chmodSync(tmp, mode);
+    const fd = fs.openSync(tmp, "wx", mode ?? DEFAULT_CREATE_MODE);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(snapshot, null, 2));
+      if (mode !== undefined) fs.fchmodSync(fd, mode);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(tmp, target);
   } catch (err) {
     try {
@@ -121,7 +138,7 @@ export function writeSnapshotAtomic<T extends object>(
       // ENOENT: the write never created it. Anything else: the original error wins.
       const code = errnoCode(unlinkErr);
       if (code !== "ENOENT") {
-        defaultLogger({
+        log({
           event: "snapshot.tmp_cleanup_failed",
           file: tmp,
           code: code ?? "unknown",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  announcedOrgIds,
   AUTHORIZED_MOVES,
   buildSnapshot,
   buildWebhookBody,
@@ -162,6 +163,46 @@ describe("parseRunRow", () => {
   });
 });
 
+describe("parseRunRow: numeric prNumber", () => {
+  const raw = (prNumber: unknown) => ({
+    actionId: "agent-run:run",
+    createdAt: "2026-10-15T10:00:00Z",
+    additionalMetadata: { repoFullName: "acme/app", prNumber },
+  });
+
+  it("accepts a positive safe integer as the same PR as its decimal string", () => {
+    expect(parseRunRow(raw(42))?.prNumber).toBe(42);
+    expect(parseRunRow(raw(42))?.prNumber).toBe(
+      parseRunRow(raw("42"))?.prNumber,
+    );
+  });
+
+  it("anything else numeric is null", () => {
+    for (const bad of [
+      42.5,
+      0,
+      -3,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      2 ** 60,
+    ]) {
+      expect(parseRunRow(raw(bad))?.prNumber).toBeNull();
+    }
+  });
+
+  it("a numeric and a string prNumber of one PR count as ONE PR per day", () => {
+    const a = parseRunRow({ ...raw(42), metadata: { id: "a" } });
+    const b = parseRunRow({ ...raw("42"), metadata: { id: "b" } });
+    if (a === null || b === null) throw new Error("rows parse");
+    const r = evaluateRunSignals({
+      runs: { kind: "rows", rows: [a, b] },
+      nowMs: NOW,
+      questionnaire: false,
+    });
+    expect(r.stats?.busiestDay).toEqual({ date: "2026-10-15", prs: 1 });
+  });
+});
+
 describe("growthWindow / nearestRankPercentile", () => {
   it("covers the last 7 complete UTC days and excludes today", () => {
     const w = growthWindow(NOW);
@@ -283,13 +324,13 @@ describe("queue-wait p90", () => {
 });
 
 describe("client share", () => {
-  it("one org at 100% never fires (≥ 2 orgs guard)", () => {
+  it("one org at 100% never fires (≥ 3 orgs guard)", () => {
     const r = evalRows(sevenDays({ org: "org-a", runS: 600 })).clientShare;
     expect(r.value).toBe(1);
     expect(r.verdict).toBe("under");
   });
 
-  it("fires when a client holds > 40% of attributed time with ≥ 2 orgs", () => {
+  it("fires when a client holds > 40% of attributed time with ≥ 3 orgs", () => {
     const rows = [
       row({ day: 0, org: "org-a", runS: 500 }),
       row({ day: 1, org: "org-b", runS: 300 }),
@@ -312,16 +353,39 @@ describe("client share", () => {
   });
 
   it("an exact tie goes to the lower orgId, whatever the row order", () => {
-    const a = () => row({ day: 0, org: "org-a", runS: 500 });
-    const b = () => row({ day: 1, org: "org-b", runS: 500 });
+    const a = () => row({ day: 0, org: "org-a", runS: 450 });
+    const b = () => row({ day: 1, org: "org-b", runS: 450 });
+    const c = () => row({ day: 2, org: "org-c", runS: 100 });
     for (const rows of [
-      [a(), b()],
-      [b(), a()],
+      [a(), b(), c()],
+      [c(), b(), a()],
     ]) {
       const r = evalRows(rows);
-      expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.5 });
+      expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.45 });
       expect(r.clientShare.verdict).toBe("over");
     }
+  });
+
+  it("two orgs never fire, even at 90/10 (Q-1: ≥ 3 orgs)", () => {
+    const r = evalRows([
+      row({ day: 0, org: "org-a", runS: 900 }),
+      row({ day: 1, org: "org-b", runS: 100 }),
+    ]).clientShare;
+    expect(r.value).toBe(0.9);
+    expect(r.verdict).toBe("under");
+    expect(r.summary).toContain("across 2 org(s) with run time");
+    expect(r.summary).toContain("with ≥ 3 orgs");
+  });
+
+  it("three orgs with one above 40% fire", () => {
+    const r = evalRows([
+      row({ day: 0, org: "org-a", runS: 410 }),
+      row({ day: 1, org: "org-b", runS: 300 }),
+      row({ day: 2, org: "org-c", runS: 290 }),
+    ]).clientShare;
+    expect(r.value).toBe(0.41);
+    expect(r.verdict).toBe("over");
+    expect(r.summary).toContain("across 3 org(s) with run time");
   });
 
   it("at exactly 40% it stays under", () => {
@@ -348,9 +412,10 @@ describe("client share", () => {
     const rows = [
       row({ day: 0, org: "u:user-1", runS: 900 }),
       row({ day: 1, org: "u:user-2", runS: 100 }),
+      row({ day: 2, org: "u:user-3", runS: 100 }),
     ];
     const r = evalRows(rows);
-    expect(r.stats?.clients).toBe(2);
+    expect(r.stats?.clients).toBe(3);
     expect(r.clientShare.verdict).toBe("over");
   });
 
@@ -365,6 +430,155 @@ describe("client share", () => {
     expect(r.clientShare.value).toBe(1);
     // org-b holds no run time, so the box is single-tenant in time: no split signal (Q-1).
     expect(r.clientShare.verdict).toBe("under");
+  });
+});
+
+describe("run time sanity", () => {
+  it("a row whose finishedAt precedes its startedAt holds no run time", () => {
+    const base = row({ day: 0, org: "org-a", runS: 100, status: "CANCELLED" });
+    const reversed: RunRow = {
+      ...base,
+      finishedAtMs: (base.startedAtMs ?? 0) - 1000,
+    };
+    const r = evalRows([
+      reversed,
+      row({ day: 1, org: "org-b", runS: 100 }),
+      row({ day: 2, org: null, runS: 0 }),
+    ]);
+    expect(r.supersedeWaste.value).toBe(0);
+    expect(r.stats?.unattributed).toEqual({ seconds: 0, fraction: 0 });
+    expect(r.clientShare.value).toBe(1);
+    expect(r.clientShare.summary).toContain("across 1 org(s) with run time");
+    // The org still dispatched, so it counts as a client.
+    expect(r.stats?.clients).toBe(2);
+  });
+});
+
+describe("queue-wait: policy-held waits are excluded", () => {
+  const AT = 3_600_000;
+  const evalWith = (rows: RunRow[], perOrgMaxRuns?: number) =>
+    evaluateRunSignals({
+      runs: { kind: "rows", rows },
+      nowMs: NOW,
+      questionnaire: false,
+      ...(perOrgMaxRuns === undefined ? {} : { perOrgMaxRuns }),
+    });
+
+  it("a run created while another run of the same PR is executing is policy-held", () => {
+    const rows = [
+      row({ day: 0, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 1 }),
+      // Created a minute in, while the first is executing; it waits for it to finish.
+      row({ day: 0, at: AT + MIN, waitS: 3600, repo: "ACME/app", pr: 1 }),
+    ];
+    const r = evalWith(rows);
+    expect(r.stats?.policyHeldRuns).toBe(1);
+    expect(r.stats?.queueWaitDailyP90S[0]).toBe(10);
+    expect(r.queueWait.summary).toContain("1 policy-held wait(s) excluded");
+  });
+
+  it("a still-running run of the same PR holds too; a finished one, another PR or no PR does not", () => {
+    const rows = [
+      // Executing, never finished.
+      row({ day: 1, at: AT, waitS: 10, runS: null, repo: "acme/app", pr: 2 }),
+      row({ day: 1, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 2 }),
+      // Finished BEFORE the next one was created: a capacity wait.
+      row({ day: 2, at: AT, waitS: 10, runS: 30, repo: "acme/app", pr: 3 }),
+      row({ day: 2, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 3 }),
+      // Same repo, different PR.
+      row({ day: 3, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 4 }),
+      row({ day: 3, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 5 }),
+      // No PR at all.
+      row({ day: 4, at: AT, waitS: 10, runS: 3600 }),
+      row({ day: 4, at: AT + MIN, waitS: 900 }),
+    ];
+    const r = evalWith(rows);
+    expect(r.stats?.policyHeldRuns).toBe(1);
+    expect(r.stats?.queueWaitDailyP90S.slice(1, 5)).toEqual([
+      10, 900, 900, 900,
+    ]);
+  });
+
+  it("a run's own execution never holds it (a zero wait is a capacity wait)", () => {
+    const r = evalWith(
+      [
+        row({
+          day: 0,
+          waitS: 0,
+          runS: 60,
+          repo: "acme/app",
+          pr: 7,
+          org: "org-a",
+        }),
+      ],
+      1,
+    );
+    expect(r.stats?.policyHeldRuns).toBe(0);
+    expect(r.stats?.queueWaitDailyP90S[0]).toBe(0);
+  });
+
+  it("with perOrgMaxRuns, a run created while its org is at the cap is policy-held", () => {
+    const rows = [
+      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
+      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
+      // org-a has 2 executing; another org's run executing does not count.
+      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-b" }),
+      row({ day: 0, at: AT + MIN, waitS: 1200, org: "org-a" }),
+    ];
+    expect(evalWith(rows, 2).stats?.policyHeldRuns).toBe(1);
+    expect(evalWith(rows, 2).stats?.queueWaitDailyP90S[0]).toBe(0);
+    // Below the cap: a capacity wait.
+    expect(evalWith(rows, 3).stats?.policyHeldRuns).toBe(0);
+    expect(evalWith(rows, 3).stats?.queueWaitDailyP90S[0]).toBe(1200);
+  });
+
+  it("without perOrgMaxRuns (or with a non-positive one) the org rule is off", () => {
+    const rows = [
+      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
+      row({ day: 0, at: AT + MIN, waitS: 1200, org: "org-a" }),
+    ];
+    for (const cap of [undefined, 0, -1, 1.5]) {
+      const r = evalWith(rows, cap);
+      expect(r.stats?.policyHeldRuns).toBe(0);
+      expect(r.queueWait.summary).not.toContain("policy-held");
+    }
+    expect(evalWith(rows, 1).stats?.policyHeldRuns).toBe(1);
+  });
+
+  it("an unattributed run is never org-held", () => {
+    const rows = [
+      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: null }),
+      row({ day: 0, at: AT + MIN, waitS: 1200, org: null }),
+    ];
+    expect(evalWith(rows, 1).stats?.policyHeldRuns).toBe(0);
+  });
+
+  it("a run that ended without starting while its PR was executing is policy-held", () => {
+    const rows = [
+      row({ day: 0, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 9 }),
+      {
+        ...row({ day: 0, at: AT + MIN, waitS: null, repo: "acme/app", pr: 9 }),
+        status: "CANCELLED",
+        finishedAtMs: DAY0 + AT + 30 * MIN,
+      },
+    ];
+    expect(evalWith(rows).stats?.policyHeldRuns).toBe(1);
+  });
+
+  it("policy-held waits cannot fire the trigger on their own", () => {
+    const rows = Array.from({ length: 7 }, (_, day) => [
+      row({
+        day,
+        at: AT,
+        waitS: 10,
+        runS: 3600,
+        repo: "acme/app",
+        pr: day + 1,
+      }),
+      row({ day, at: AT + MIN, waitS: 3600, repo: "acme/app", pr: day + 1 }),
+    ]).flat();
+    const r = evalWith(rows);
+    expect(r.stats?.policyHeldRuns).toBe(7);
+    expect(r.queueWait.verdict).toBe("under");
   });
 });
 
@@ -494,7 +708,7 @@ describe("attribution gate", () => {
     expect(r.clientShare.summary).toContain("across 1 org(s) with run time");
   });
 
-  it("client_share: an org with no run time does not satisfy the two-org guard", () => {
+  it("client_share: an org with no run time does not satisfy the minimum-orgs guard", () => {
     const solo = Array.from({ length: 10 }, () =>
       row({ day: 2, org: "org-a", runS: 100 }),
     );
@@ -1165,6 +1379,10 @@ describe("dedupe matrix", () => {
     lastFiredAtMs: T0 - HOUR,
     orgLastFiredAtMs: { "org-a": T0 - HOUR },
   };
+  const FIRING_NO_LAST: TriggerDedupeState = {
+    firing: true,
+    lastFiredAtMs: null,
+  };
   const EXTRA_CELLS: Array<
     [
       string,
@@ -1193,6 +1411,25 @@ describe("dedupe matrix", () => {
       "org-a",
       "none",
       FIRED_FOR_A,
+    ],
+    // The state a future-fire seed leaves (and the next snapshot writes back): firing
+    // with no hold.
+    [
+      "firing-no-lastFiredAt",
+      FIRING_NO_LAST,
+      "unknown",
+      undefined,
+      "none",
+      FIRING_NO_LAST,
+    ],
+    // Over is due (no hold), so the failed POST is a fire, not committed.
+    [
+      "firing-no-lastFiredAt",
+      FIRING_NO_LAST,
+      "post-failed",
+      undefined,
+      "fire",
+      FIRING_NO_LAST,
     ],
     // org-a is still held, so the state can only act by clearing; that POST fails.
     [
@@ -1279,6 +1516,58 @@ describe("webhook body", () => {
     });
     expect(body.state).toBe("cleared");
     expect(body.text).toContain("cleared");
+  });
+
+  it("a client_share clear names the orgs whose announcements still hold", () => {
+    const state: TriggerDedupeState = {
+      firing: true,
+      lastFiredAtMs: NOW - HOUR,
+      orgLastFiredAtMs: {
+        "org-b": NOW - HOUR,
+        "org-a": NOW - 2 * HOUR,
+        "org-old": NOW - GROWTH_REFIRE_MS - 1,
+      },
+    };
+    expect(announcedOrgIds(state, NOW)).toEqual(["org-a", "org-b"]);
+    expect(announcedOrgIds(INITIAL_DEDUPE_STATE, NOW)).toEqual([]);
+    const share: TriggerEvaluation = {
+      trigger: "client_share",
+      verdict: "under",
+      value: 0.35,
+      threshold: 0.4,
+      summary: "client share: org-c holds 35% of attributed run time",
+    };
+    const body = buildWebhookBody({
+      evaluation: share,
+      boxId: "box-1",
+      nowMs: NOW,
+      state: "cleared",
+      announcedOrgIds: announcedOrgIds(state, NOW),
+    });
+    expect(body.text).toBe(
+      "[growth] client_share cleared on box-1: no longer over for org-a, org-b " +
+        "(announced in the last 24 h); client share: org-c holds 35% of attributed run time",
+    );
+    expect(body.text).not.toContain("org-old");
+    // No live announcement, a fire, or another trigger: the text is unchanged.
+    expect(
+      buildWebhookBody({
+        evaluation: share,
+        boxId: "box-1",
+        nowMs: NOW,
+        state: "cleared",
+        announcedOrgIds: [],
+      }).text,
+    ).toBe(`[growth] client_share cleared on box-1: ${share.summary}`);
+    expect(
+      buildWebhookBody({
+        evaluation: { ...share, verdict: "over" },
+        boxId: "box-1",
+        nowMs: NOW,
+        state: "fired",
+        announcedOrgIds: ["org-a"],
+      }).text,
+    ).not.toContain("no longer over");
   });
 
   it("authorized moves are verbatim from the issue table", () => {
@@ -1421,6 +1710,59 @@ describe("snapshot", () => {
         {
           triggers: { ram_swap: { firing: true, lastFiredAt: "garbage" } },
         },
+        NOW,
+      ).ram_swap,
+    ).toEqual(INITIAL_DEDUPE_STATE);
+  });
+
+  it("a firing state with no hold survives a SECOND restart, and its clear is sent once", () => {
+    const first = dedupeStatesFromSnapshot(
+      {
+        triggers: {
+          ram_swap: {
+            firing: true,
+            lastFiredAt: new Date(NOW + HOUR).toISOString(),
+          },
+        },
+      },
+      NOW,
+    );
+    expect(first.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
+    const reseed = (
+      states: Record<GrowthTriggerId, TriggerDedupeState>,
+      atMs: number,
+    ) =>
+      dedupeStatesFromSnapshot(
+        JSON.parse(
+          JSON.stringify(
+            buildSnapshot({
+              nowMs: atMs,
+              boxId: "b",
+              evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+              states,
+              stats: null,
+            }),
+          ),
+        ),
+        atMs,
+      );
+    const second = reseed(first, NOW + MIN);
+    expect(second.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
+    const third = reseed(second, NOW + 2 * MIN);
+    expect(third.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
+
+    let s = third.ram_swap;
+    const actions: string[] = [];
+    for (const at of [NOW + 3 * MIN, NOW + 4 * MIN, NOW + 5 * MIN]) {
+      const t = decideTransition(s, "under", at);
+      actions.push(t.action);
+      s = commitTransition(s, t, true);
+    }
+    expect(actions).toEqual(["clear", "none", "none"]);
+    // A missing or junk lastFiredAt still seeds idle.
+    expect(
+      dedupeStatesFromSnapshot(
+        { triggers: { ram_swap: { firing: true } } },
         NOW,
       ).ram_swap,
     ).toEqual(INITIAL_DEDUPE_STATE);

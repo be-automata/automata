@@ -67,6 +67,7 @@ import {
   listAgentRunsForThread,
   workflowNameForPolicy,
   buildReviewRunMetadata,
+  RunMetadataLimitError,
   type TriggerOpts,
 } from "./transport";
 
@@ -110,7 +111,9 @@ export function generateTraceparent(): string {
  * Trigger the agent-run with a small bounded retry. Each failed attempt is logged
  * with the actual error; only the FINAL failure propagates (the caller then
  * revokes the token + fails the thread). A transient (cold first-dispatch, socket
- * blip) is absorbed silently.
+ * blip) is absorbed silently. An over-limit metadata object (RunMetadataLimitError)
+ * is definitive — refused before any request, and refused again on every retry —
+ * so it propagates after its first attempt.
  */
 async function triggerWithRetry(
   input: AgentRunWireInput,
@@ -134,6 +137,7 @@ async function triggerWithRetry(
         maxAttempts: TRIGGER_MAX_ATTEMPTS,
         error: scrub(error instanceof Error ? error.message : String(error)),
       });
+      if (error instanceof RunMetadataLimitError) break;
       if (attempt < TRIGGER_MAX_ATTEMPTS) {
         await sleep(TRIGGER_BACKOFF_MS * attempt);
       }
@@ -159,10 +163,12 @@ const HATCHET_DISPATCH_SCOPE_KEY = "*";
 
 /**
  * True when a failed trigger may still have created the run: a timeout or
- * abort, a network error, a 5xx, 408 or 429. A definitive 4xx or a missing
- * transport config cannot have created anything.
+ * abort, a network error, a 5xx, 408 or 429. A definitive 4xx, a missing
+ * transport config or an over-limit metadata object (refused before any
+ * request) cannot have created anything.
  */
 function isAmbiguousTriggerFailure(error: unknown): boolean {
+  if (error instanceof RunMetadataLimitError) return false;
   if (!(error instanceof Error)) return true;
   if (error.message.includes("are not all configured")) return false;
   const status = /^Hatchet trigger failed: (\d{3})/.exec(error.message)?.[1];

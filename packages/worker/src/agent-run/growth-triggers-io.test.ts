@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   armGrowthTriggers,
+  GROWTH_ENGINE_REFRESH_MS,
   GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS,
   GROWTH_RUNS_MAX_PAGES,
   GROWTH_RUNS_PAGE_LIMIT,
@@ -772,6 +773,8 @@ describe("armGrowthTriggers", () => {
 
   it("cleared is POSTed once when the trigger drops under", async () => {
     const h = harness();
+    // The engine answer changes between ticks: re-read it every tick.
+    h.deps.engineRefreshMs = 0;
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick;
     h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
@@ -861,6 +864,8 @@ describe("armGrowthTriggers", () => {
 
   it("logs trigger_unknown once per (trigger, reason) streak and trigger_known on recovery", async () => {
     const h = harness();
+    // The engine answer changes between ticks: re-read it every tick.
+    h.deps.engineRefreshMs = 0;
     h.setEngine(() => new Response("no", { status: 403 }));
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick;
@@ -903,6 +908,8 @@ describe("armGrowthTriggers", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const h = harness();
+      // The engine answer changes between ticks: re-read it every tick.
+      h.deps.engineRefreshMs = 0;
       // 15/16 of RAM in use on every sample.
       h.deps.readText = vi.fn(async (p: string) =>
         p === "/proc/meminfo"
@@ -946,6 +953,8 @@ describe("armGrowthTriggers", () => {
 
   it("an unknown tick leaves a firing trigger firing (no clear)", async () => {
     const h = harness();
+    // The engine answer changes between ticks: re-read it every tick.
+    h.deps.engineRefreshMs = 0;
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick;
     h.setEngine(() => new Response("no", { status: 403 }));
@@ -1130,10 +1139,11 @@ describe("armGrowthTriggers", () => {
 });
 
 describe("armGrowthTriggers (ship Step 9 decisions)", () => {
-  /** Two orgs, org-a dominant and all of its time CANCELLED: client_share and supersede_waste over. */
-  const TWO_ORGS = [
+  /** Three orgs (client_share's minimum), org-a dominant and all of its time CANCELLED: client_share and supersede_waste over. */
+  const THREE_ORGS = [
     rawRow({ status: "CANCELLED", runS: 600, orgId: "org-a", id: "r-a" }),
     rawRow({ runS: 100, orgId: "org-b", id: "r-b" }),
+    rawRow({ runS: 100, orgId: "org-c", id: "r-c" }),
   ];
 
   it("reads the engine bounded by until = 00:00 UTC today (the window end)", async () => {
@@ -1158,7 +1168,7 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
 
   it("a delivered transition is persisted before the tick ends: a crash mid-tick does not re-send it", async () => {
     const first = harness();
-    first.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
+    first.setEngine(() => jsonResponse(page(THREE_ORGS, 1, 1)));
     // Capture what is on disk the moment the SECOND POST goes out — the point at which a
     // process killed mid-tick would leave the file.
     let onDiskAtSecondPost: GrowthSnapshot | undefined;
@@ -1193,7 +1203,7 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     const second = harness({
       snapshotText: JSON.stringify(onDiskAtSecondPost),
     });
-    second.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
+    second.setEngine(() => jsonResponse(page(THREE_ORGS, 1, 1)));
     second.clock.ms = NOW + 60_000;
     const h2 = armGrowthTriggers(ENV_ON, second.deps);
     await h2?.firstTick;
@@ -1220,6 +1230,8 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
               orgId: "org-b",
               id: "r-b",
             }),
+            // A third, small org: client_share needs ≥ 3 orgs holding run time.
+            rawRow({ day: 1, runS: 50, orgId: "org-c", id: "r-c" }),
           ],
           1,
           1,
@@ -1233,7 +1245,8 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     const sequence: Array<"org-a" | "org-b"> = ["org-b", "org-a", "org-b"];
     for (const [i, org] of sequence.entries()) {
       leader = org;
-      h.clock.ms = NOW + (i + 1) * 300_000;
+      // An hour apart: each tick's engine read is due (GROWTH_ENGINE_REFRESH_MS).
+      h.clock.ms = NOW + (i + 1) * GROWTH_ENGINE_REFRESH_MS;
       await handle?.tick();
     }
     const shareFires = () =>
@@ -1248,7 +1261,7 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
       firing: true,
       orgLastFiredAt: {
         "org-a": new Date(NOW).toISOString(),
-        "org-b": new Date(NOW + 300_000).toISOString(),
+        "org-b": new Date(NOW + GROWTH_ENGINE_REFRESH_MS).toISOString(),
       },
     });
 
@@ -1307,6 +1320,8 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
 
   it("a tick with no transition ends the webhook_failed streak: the same outage later is logged again", async () => {
     const h = harness();
+    // The engine answer changes between ticks: re-read it every tick.
+    h.deps.engineRefreshMs = 0;
     h.setWebhookStatus(503);
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick; // supersede_waste over: fire fails (503), logged
@@ -1341,6 +1356,8 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
    */
   it("logs webhook_failed once per (trigger, state, reason) streak and webhook_recovered on the next delivery", async () => {
     const h = harness();
+    // The engine answer changes between ticks: re-read it every tick.
+    h.deps.engineRefreshMs = 0;
     let sinkUnreachable = false;
     const inner = h.deps.fetchImpl;
     if (inner === undefined) throw new Error("harness has a fetchImpl");
@@ -1398,25 +1415,31 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     handle?.stop();
   });
 
-  it("the default writer leaves the snapshot at 0640 even when the temp file pre-exists at 0600", async () => {
+  it("the default writer refuses a pre-existing temp file, cleans it, and the next tick writes 0640", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "growth-chmod-"));
     try {
       const target = path.join(root, GROWTH_SNAPSHOT_FILENAME);
-      // writeFileSync's `mode` applies only when it CREATES the file, so a leftover temp
-      // file (or a restrictive umask) keeps its mode unless the writer chmods it.
+      // A leftover (or planted) temp file: the writer creates its temp file exclusively,
+      // so this one is refused rather than truncated and reused.
       const tmp = `${target}.tmp-${process.pid}`;
       fs.writeFileSync(tmp, "stale", { mode: 0o600 });
-      fs.chmodSync(tmp, 0o600);
       const h = harness();
-      // Nothing fires, so the tick writes exactly once, through the pre-created temp file
-      // (a delivery would add a second write that creates the temp file afresh).
+      // Nothing fires, so each tick writes exactly once.
       h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
       delete h.deps.writeSnapshot;
       h.deps.snapshotDir = root;
       const handle = armGrowthTriggers(ENV_ON, h.deps);
       await handle?.firstTick;
-      handle?.stop();
       expect(h.posts).toHaveLength(0);
+      expect(
+        h.logs.filter((l) => l.startsWith("growth.snapshot_write_failed ")),
+      ).toEqual(['growth.snapshot_write_failed {"error":"EEXIST"}']);
+      expect(fs.existsSync(target)).toBe(false);
+      expect(fs.existsSync(tmp)).toBe(false);
+
+      h.clock.ms = NOW + 300_000;
+      await handle?.tick();
+      handle?.stop();
       expect(fs.statSync(target).mode & 0o777).toBe(GROWTH_SNAPSHOT_MODE);
       expect(fs.existsSync(tmp)).toBe(false);
       expect(
@@ -1432,8 +1455,9 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     h.deps.resolveEngine = vi.fn(() => {
       throw new Error("HATCHET_CLIENT_TOKEN is not set");
     });
+    // A fixed phrase naming only the cause's class: the boot site prints what arm throws.
     expect(() => armGrowthTriggers(ENV_ON, h.deps)).toThrow(
-      "HATCHET_CLIENT_TOKEN is not set",
+      "growth triggers: cannot resolve the engine target (Error)",
     );
     for (const name of [
       "setInterval",
@@ -1453,10 +1477,242 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
 // writeSnapshotAtomic (the writer the driver uses by default)
 // ---------------------------------------------------------------------------
 
+describe("armGrowthTriggers (final review: engine cache, per-org cap, clear text)", () => {
+  const engineReads = () => ENGINE_URLS.length;
+
+  it("a second tick within the hour evaluates the cached rows without a fetch", async () => {
+    const h = harness();
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    expect(engineReads()).toBe(1);
+    // Different engine data now — but the cached read is still fresh.
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    h.clock.ms = NOW + GROWTH_ENGINE_REFRESH_MS - 1;
+    const r = await handle?.tick();
+    expect(engineReads()).toBe(1);
+    // Evaluated from the cache: still WASTEFUL, so still over (and held, not re-sent).
+    expect(r?.snapshot?.triggers.supersede_waste).toMatchObject({
+      verdict: "over",
+      firing: true,
+    });
+    expect(h.posts).toHaveLength(1);
+    // /proc is still sampled every tick.
+    const readText = h.deps.readText;
+    if (readText === undefined) throw new Error("harness has a readText");
+    expect(
+      vi.mocked(readText).mock.calls.filter(([p]) => p === "/proc/meminfo"),
+    ).toHaveLength(2);
+    handle?.stop();
+  });
+
+  it("an hour after the last successful read the engine is read again", async () => {
+    const h = harness();
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    h.clock.ms = NOW + GROWTH_ENGINE_REFRESH_MS;
+    const r = await handle?.tick();
+    expect(engineReads()).toBe(2);
+    expect(r?.snapshot?.triggers.supersede_waste.verdict).toBe("under");
+    expect(h.posts.map((p) => p.state)).toEqual(["fired", "cleared"]);
+    handle?.stop();
+  });
+
+  it("a UTC day roll re-reads the engine at once, whatever the cache age", async () => {
+    const h = harness();
+    h.clock.ms = Date.parse("2026-10-19T23:59:00.000Z");
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    expect(engineReads()).toBe(1);
+    h.clock.ms = Date.parse("2026-10-20T00:01:00.000Z");
+    await handle?.tick();
+    expect(engineReads()).toBe(2);
+    expect(new URL(ENGINE_URLS[1] ?? "").searchParams.get("until")).toBe(
+      "2026-10-20T00:00:00.000Z",
+    );
+    handle?.stop();
+  });
+
+  it("an unreadable read keeps the old cache age, so the next tick retries", async () => {
+    const h = harness();
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    h.setEngine(() => new Response("no", { status: 503 }));
+    h.clock.ms = NOW + GROWTH_ENGINE_REFRESH_MS;
+    const failed = await handle?.tick();
+    expect(engineReads()).toBe(2);
+    expect(failed?.snapshot?.triggers.supersede_waste).toMatchObject({
+      verdict: "unknown",
+      reason: "engine read: http 503",
+      firing: true,
+    });
+    // One tick later — well inside an hour of the FAILED read — it is still due.
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    h.clock.ms = NOW + GROWTH_ENGINE_REFRESH_MS + 300_000;
+    const retried = await handle?.tick();
+    expect(engineReads()).toBe(3);
+    expect(retried?.snapshot?.triggers.supersede_waste.verdict).toBe("under");
+    // And that successful read is fresh again.
+    h.clock.ms = NOW + GROWTH_ENGINE_REFRESH_MS + 600_000;
+    await handle?.tick();
+    expect(engineReads()).toBe(3);
+    handle?.stop();
+  });
+
+  it("perOrgMaxRuns reaches the evaluator: a wait at the org cap leaves the p90", async () => {
+    const day0 = growthWindow(NOW).startMs + 3_600_000;
+    const at = (ms: number) => new Date(ms).toISOString();
+    const rows = [
+      {
+        actionId: "agent-run:run",
+        status: "COMPLETED",
+        createdAt: at(day0),
+        startedAt: at(day0),
+        finishedAt: at(day0 + 3_600_000),
+        additionalMetadata: { orgId: "org-a" },
+        metadata: { id: "busy" },
+      },
+      {
+        actionId: "agent-run:run",
+        status: "COMPLETED",
+        createdAt: at(day0 + 60_000),
+        startedAt: at(day0 + 3_600_000),
+        finishedAt: at(day0 + 3_660_000),
+        additionalMetadata: { orgId: "org-a" },
+        metadata: { id: "held" },
+      },
+    ];
+    const p90 = async (perOrgMaxRuns?: number) => {
+      const h = harness();
+      h.setEngine(() => jsonResponse(page(rows, 1, 1)));
+      if (perOrgMaxRuns !== undefined) h.deps.perOrgMaxRuns = perOrgMaxRuns;
+      const handle = armGrowthTriggers(ENV_ON, h.deps);
+      const r = await handle?.firstTick;
+      handle?.stop();
+      return r?.snapshot?.queueWaitDailyP90S?.[0];
+    };
+    expect(await p90()).toBe(3540);
+    expect(await p90(1)).toBe(0);
+    expect(await p90(2)).toBe(3540);
+  });
+
+  it("a client_share clear names the orgs it announced, not only the current top org", async () => {
+    const shareRows = (aS: number) => [
+      rawRow({ day: 1, runS: aS, orgId: "org-a", id: "r-a" }),
+      rawRow({ day: 1, runS: 300, orgId: "org-b", id: "r-b" }),
+      rawRow({ day: 1, runS: 300, orgId: "org-c", id: "r-c" }),
+    ];
+    const h = harness();
+    h.deps.engineRefreshMs = 0;
+    h.setEngine(() => jsonResponse(page(shareRows(900), 1, 1)));
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    // Balanced: org-a is still on top by a hair, org-b/org-c were never announced.
+    h.setEngine(() => jsonResponse(page(shareRows(301), 1, 1)));
+    h.clock.ms = NOW + 300_000;
+    await handle?.tick();
+    const share = h.posts.filter((p) => p.trigger === "client_share");
+    expect(share.map((p) => p.state)).toEqual(["fired", "cleared"]);
+    expect(share[1]?.text).toContain(
+      "no longer over for org-a (announced in the last 24 h)",
+    );
+    handle?.stop();
+  });
+});
+
 describe("writeSnapshotAtomic", () => {
   function tmpRoot(): string {
     return fs.mkdtempSync(path.join(os.tmpdir(), "growth-snap-"));
   }
+
+  it("a symlink at the temp path is refused, never followed, and the temp path is cleaned", () => {
+    const root = tmpRoot();
+    try {
+      const victim = path.join(root, "victim.txt");
+      fs.writeFileSync(victim, "do not touch", { mode: 0o600 });
+      const tmp = path.join(root, `snap.json.tmp-${process.pid}`);
+      fs.symlinkSync(victim, tmp);
+      let thrown: unknown;
+      try {
+        writeSnapshotAtomic(
+          root,
+          { a: 1 },
+          { filename: "snap.json", mode: 0o640 },
+        );
+      } catch (err) {
+        thrown = err;
+      }
+      expect((thrown as NodeJS.ErrnoException | undefined)?.code).toBe(
+        "EEXIST",
+      );
+      expect(fs.readFileSync(victim, "utf8")).toBe("do not touch");
+      expect(fs.statSync(victim).mode & 0o777).toBe(0o600);
+      expect(() => fs.lstatSync(tmp)).toThrow(/ENOENT/);
+      expect(fs.existsSync(path.join(root, "snap.json"))).toBe(false);
+      // The cleaned path lets the next write through, at the requested mode.
+      writeSnapshotAtomic(
+        root,
+        { a: 2 },
+        { filename: "snap.json", mode: 0o640 },
+      );
+      expect(fs.statSync(path.join(root, "snap.json")).mode & 0o777).toBe(
+        0o640,
+      );
+      expect(fs.readdirSync(root).sort()).toEqual(["snap.json", "victim.txt"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("mode 0640 holds under a restrictive umask, and the default mode is unchanged", () => {
+    const root = tmpRoot();
+    const previous = process.umask(0o077);
+    try {
+      writeSnapshotAtomic(root, { a: 1 }, { filename: "m.json", mode: 0o640 });
+      expect(fs.statSync(path.join(root, "m.json")).mode & 0o777).toBe(0o640);
+      writeSnapshotAtomic(root, { a: 1 }, { filename: "d.json" });
+      // writeFileSync's default: 0666 filtered by the umask.
+      expect(fs.statSync(path.join(root, "d.json")).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(path.join(root, "d.json"), "utf8")).toBe(
+        JSON.stringify({ a: 1 }, null, 2),
+      );
+    } finally {
+      process.umask(previous);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a cleanup failure goes to options.log when one is given", () => {
+    const root = tmpRoot();
+    const unlink = vi.spyOn(fs, "unlinkSync").mockImplementation(() => {
+      throw Object.assign(new Error("EPERM: unlink"), { code: "EPERM" });
+    });
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const lines: Array<Record<string, unknown>> = [];
+    try {
+      fs.mkdirSync(path.join(root, "busy.json"));
+      fs.writeFileSync(path.join(root, "busy.json", "x"), "x");
+      expect(() =>
+        writeSnapshotAtomic(
+          root,
+          { a: 1 },
+          { filename: "busy.json", log: (l) => lines.push(l) },
+        ),
+      ).toThrow();
+      expect(lines).toEqual([
+        {
+          event: "snapshot.tmp_cleanup_failed",
+          file: path.join(root, `busy.json.tmp-${process.pid}`),
+          code: "EPERM",
+        },
+      ]);
+      expect(consoleLog).not.toHaveBeenCalled();
+    } finally {
+      unlink.mockRestore();
+      consoleLog.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   /**
    * Extended by the /ship Step 7 coverage audit (the no-options call).

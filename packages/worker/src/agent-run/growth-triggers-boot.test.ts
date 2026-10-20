@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { armGrowthTriggers } from "./growth-triggers-io";
+
 /**
  * #373 AC 1 at the boot site. hello/worker.ts runs main() on import, so it cannot be
  * unit-tested; armGrowthTriggers' own null-when-unset contract is covered by
@@ -65,5 +67,35 @@ describe(`#373 growth triggers are wired in ${BOOT_FILE}`, () => {
 
   it("never logs the webhook URL at the boot site", () => {
     expect(armStatement()).not.toMatch(/WORKER_ALERT_WEBHOOK_URL/);
+  });
+
+  it("what arm throws — the error the FATAL line prints — cannot carry the webhook URL", () => {
+    const secretUrl =
+      "https://hooks.example.test/services/T000/B000/SECRET-BOOT-PATH";
+    let thrown: unknown;
+    try {
+      armGrowthTriggers(
+        { WORKER_ALERT_WEBHOOK_URL: secretUrl },
+        {
+          resolveEngine: () => {
+            throw new Error(
+              `cannot reach the engine configured next to ${secretUrl}`,
+            );
+          },
+          boxId: "box-boot",
+          snapshotDir: "/nonexistent/growth-boot",
+        },
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    const err = thrown as Error;
+    expect(err.message).not.toContain(secretUrl);
+    expect(String(err.stack)).not.toContain(secretUrl);
+    expect(err.cause).toBeUndefined();
+    expect(err.message).toBe(
+      "growth triggers: cannot resolve the engine target (Error)",
+    );
   });
 });

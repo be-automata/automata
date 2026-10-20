@@ -381,14 +381,22 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   deferred by the #371 headroom check or parked on a #205 box slot is already running on
   the engine, so that wait is not seen (and counts as run time). A quiet trigger is not
   proof the box keeps up; read the `box.headroom_*` journal lines alongside it.
+  POLICY-HELD waits are left out of the p90 (the alert text counts them as "policy-held
+  wait(s) excluded"): a run created while another run of the same repo and PR was
+  executing (startedAt ≤ its createdAt < finishedAt, or not finished yet) waits on
+  the per-PR serialization, and one created while its org already had
+  `WORKER_PER_ORG_MAX_RUNS` runs executing waits on the per-org cap. Neither says the box
+  lacks capacity.
 - `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
   window → add a second shared box on the same tenant.
-- `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split
-  that client to its own box. Reads `unknown` while more than 5 % of run time is
+- `client_share` — one client > 40 % of attributed run time (needs ≥ 3 orgs holding run
+  time: on a two-org box one org is always ≥ 50 %, so it never fires) → split that client
+  to its own box. Reads `unknown` while more than 5 % of run time is
   unattributed (see below). The 24 h hold is per org: each org over the threshold is
   announced once per 24 h, so a different org is announced as its own split, and two
   orgs trading the top spot are announced once each, not on every swap. An exact tie
-  goes to the lower orgId.
+  goes to the lower orgId. Its `cleared` text names the orgs announced in the last 24 h
+  (`no longer over for org-a, org-b`), not just whichever org is on top at the clear.
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
@@ -437,7 +445,12 @@ once per (trigger, state, reason) streak — a tick with no transition for that 
 ends the streak — and `growth.webhook_recovered` on the next delivery.
 
 The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
-`until` = 00:00 UTC today, so today's partial day is never paged in.
+`until` = 00:00 UTC today, so today's partial day is never paged in. Because the window
+only moves at 00:00 UTC, the engine is re-read at most hourly: a tick reads it when the
+window changed (the first tick of a new UTC day) or the last successful read is ≥ 3600 s
+old, and otherwise re-evaluates the cached rows. RAM/swap is still sampled every tick. A
+failed read leaves the cache's age as it was, so the next tick retries (and that tick's
+run triggers read `unknown`).
 
 State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
 atomically every tick, and again right after each delivered alert so a worker that dies
