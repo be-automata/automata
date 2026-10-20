@@ -16,6 +16,7 @@ import {
   type MentionReplyGitHub,
 } from "./mention-reply-finish";
 import { MENTION_SKILL_NAME, validateSkillBody } from "./review-skill";
+import { resolveBotLogin } from "./bot-login";
 
 /**
  * The mention lane's terminal writer: the agent emits one `json mention-reply`
@@ -351,6 +352,88 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
       },
     );
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  it("only the App's own comment carrying the marker counts as answered", async () => {
+    const stampMeta = {
+      organizationId: "o-1",
+      terminalCause: null,
+      sourceMetadata: {
+        type: "automation-skill",
+        skillName: MENTION_SKILL_NAME,
+        contentSha: "x",
+        source: "db-version",
+        mention: ISSUE_STAMP,
+      },
+    };
+    vi.mocked(getThreadMinimal).mockResolvedValue(stampMeta as never);
+    // Anyone can type the marker: a person's comment must not silence the App.
+    octokit.paginate.mockResolvedValueOnce([
+      { user: { login: "mallory" }, body: mentionReplyMarker(101) },
+    ] as never);
+    await handleMentionReplyAtFinish(args);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+
+    octokit.paginate.mockResolvedValueOnce([
+      { user: { login: resolveBotLogin() }, body: mentionReplyMarker(101) },
+    ] as never);
+    await handleMentionReplyAtFinish(args);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("a review thread: a marker from a person is ignored, the App's (GraphQL login, no [bot]) counts", async () => {
+    vi.mocked(getThreadMinimal).mockResolvedValue({
+      organizationId: "o-1",
+      terminalCause: null,
+      sourceMetadata: {
+        type: "automation-skill",
+        skillName: MENTION_SKILL_NAME,
+        contentSha: "x",
+        source: "db-version",
+        mention: REVIEW_STAMP,
+      },
+    } as never);
+    const thread = (login: string) => ({
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [
+              {
+                id: "th-1",
+                isResolved: false,
+                comments: {
+                  nodes: [
+                    {
+                      databaseId: 202,
+                      body: "@x do it",
+                      author: { login: "bob" },
+                    },
+                    {
+                      databaseId: 203,
+                      body: mentionReplyMarker(202),
+                      author: { login },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    octokit.graphql.mockResolvedValueOnce(thread("mallory") as never);
+    await handleMentionReplyAtFinish(args);
+    expect(
+      octokit.rest.pulls.createReplyForReviewComment,
+    ).toHaveBeenCalledTimes(1);
+    octokit.graphql.mockResolvedValueOnce(
+      thread(resolveBotLogin().replace(/\[bot\]$/, "")) as never,
+    );
+    await handleMentionReplyAtFinish(args);
+    expect(
+      octokit.rest.pulls.createReplyForReviewComment,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it("a shadow org posts nothing", async () => {

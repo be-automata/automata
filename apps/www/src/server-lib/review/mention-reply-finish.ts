@@ -17,19 +17,20 @@ import {
   createOctokitThreadClient,
   getPrHeadState,
 } from "./octokit-review-client";
-import {
-  THREAD_RESOLUTION_CLAIM_TTL_SECONDS,
-  threadResolutionClaimKey,
-} from "./review-thread-resolutions";
+import { claimThreadResolution } from "./review-thread-resolutions";
 import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
 } from "./execute-review-from-intent";
-import { isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
+import { isBotAuthor, isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { isMentionLaneStamp, MENTION_REPLY_KIND } from "./review-skill";
 import { buildTaggedFence } from "./tagged-fence";
+import {
+  mentionReplyMarker,
+  reviewReplyTargetId,
+} from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
 
 /**
@@ -49,17 +50,15 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
  *     marker below makes the whole effect idempotent);
  *   - no parseable block → one short notice reply, never silence.
  * Every reply carries the hidden marker `<!-- automata:mention-reply
- * comment=<id> -->`; a reply already carrying it means this mention was
- * answered and nothing is posted again.
+ * comment=<id> -->`; an App-authored comment already carrying it means this
+ * mention was answered and nothing is posted again. Only the App's own
+ * comments count: anyone can type the marker into a comment of their own.
  */
 
 export const MENTION_REPLY_NOTICE =
   "I couldn't complete this; a human should take a look.";
 
-/** The hidden idempotency marker of the reply to comment `commentId`. */
-export function mentionReplyMarker(commentId: number): string {
-  return `<!-- automata:mention-reply comment=${commentId} -->`;
-}
+export { mentionReplyMarker };
 
 const MENTION_REPLY_FENCE = buildTaggedFence(MENTION_REPLY_KIND);
 
@@ -123,10 +122,13 @@ export function parseMentionReply(text: string): ParseMentionReplyResult {
 
 /** The GitHub surface the writer needs, App-scoped. */
 export interface MentionReplyGitHub {
-  /** Bodies of the issue / PR conversation comments. */
+  /** Bodies of the App's own issue / PR conversation comments. */
   listIssueCommentBodies(issueNumber: number): Promise<string[]>;
   createIssueComment(issueNumber: number, body: string): Promise<void>;
-  /** Bodies of the review thread containing `commentId`, or null when not found. */
+  /**
+   * Bodies of the App's own comments in the review thread containing
+   * `commentId`, or null when the thread is not found.
+   */
   listReviewThreadBodies(
     prNumber: number,
     commentId: number,
@@ -238,7 +240,7 @@ export async function executeMentionReply({
     if (inThread) {
       await github.replyToReviewComment(
         stamp.issueOrPrNumber,
-        stamp.inReplyToId ?? stamp.commentId,
+        reviewReplyTargetId(stamp),
         body,
       );
     } else {
@@ -278,7 +280,9 @@ export function createOctokitMentionReplyClient(
         octokit.rest.issues.listComments,
         { owner, repo, issue_number: issueNumber, per_page: 100 },
       );
-      return comments.map((comment) => comment.body ?? "");
+      return comments
+        .filter((comment) => isBotAuthor(comment.user?.login))
+        .map((comment) => comment.body ?? "");
     },
     async createIssueComment(issueNumber, body) {
       await octokit.rest.issues.createComment({
@@ -290,7 +294,11 @@ export function createOctokitMentionReplyClient(
     },
     async listReviewThreadBodies(prNumber, commentId) {
       const thread = await threads.findThreadByCommentId(prNumber, commentId);
-      return thread ? thread.commentBodies : null;
+      return thread
+        ? thread.comments
+            .filter((comment) => isBotAuthor(comment.authorLogin))
+            .map((comment) => comment.body)
+        : null;
     },
     replyToReviewComment: (prNumber, commentId, body) =>
       threads.replyToReviewComment(prNumber, commentId, body),
@@ -410,17 +418,14 @@ async function runMentionReview({
   reviewIntentText: string;
 }): Promise<ReviewFromIntentOutcome> {
   const { repoFullName, issueOrPrNumber: prNumber } = stamp;
-  const {
-    headSha: currentHeadSha,
-    isDraft,
-    authorLogin,
-  } = await getPrHeadState(octokit, repoFullName, prNumber);
+  const [
+    { headSha: currentHeadSha, isDraft, authorLogin },
+    approveFloorPolicy,
+  ] = await Promise.all([
+    getPrHeadState(octokit, repoFullName, prNumber),
+    resolveApproveFloor({ db, organizationId, repoFullName }),
+  ]);
   const botLogin = resolveBotLogin();
-  const approveFloorPolicy = await resolveApproveFloor({
-    db,
-    organizationId,
-    repoFullName,
-  });
   return await executeReviewFromIntent({
     github: createOctokitReviewClient(octokit),
     repoFullName,
@@ -434,15 +439,7 @@ async function runMentionReview({
     readFileAtCommit: createFileAtCommitReader(octokit, repoFullName),
     threadResolutions: {
       client: createOctokitThreadClient(octokit, repoFullName),
-      claim: async (commit) => {
-        const { redis } = await import("@/lib/redis");
-        const taken = await redis.set(
-          threadResolutionClaimKey(threadId, commit),
-          "1",
-          { nx: true, ex: THREAD_RESOLUTION_CLAIM_TTL_SECONDS },
-        );
-        return taken === "OK";
-      },
+      claim: (commit) => claimThreadResolution(threadId, commit),
     },
     logger: {
       info: (message, meta) => logger.info(`review: ${message}`, meta),

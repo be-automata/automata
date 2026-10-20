@@ -9,8 +9,9 @@ import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { db } from "@/lib/db";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { effectiveShadow } from "@/lib/github-side-effects";
-import { runAutomation } from "@/server-lib/automations";
+import { isCrossRepoPull, runAutomation } from "@/server-lib/automations";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { replyToMention } from "@/server-lib/review/mention-target-reply";
 import { addEyesReactionToComment } from "./utils";
 import { requireAppAccess } from "./webhook-skip";
 
@@ -27,9 +28,13 @@ import { requireAppAccess } from "./webhook-skip";
  *     write, maintain or admin on the repo per the App-token permission API —
  *     fail-closed: any error is a denial. They need no platform account: the
  *     thread runs as the automation's owner, attributed by the stamp;
+ *   - one claim per comment: a redelivery answers nothing twice;
+ *   - a PR whose head lives in another repository (a fork) gets one short
+ *     reply and no thread: the run clones this repo at the head ref;
  *   - the thread is created through runAutomation (skill resolution, model
  *     pin, `automata:context` prefetch) with a `## Mention` block appended as
- *     untrusted content, and stamped so the finish writer replies as the App.
+ *     untrusted content, and stamped so the finish writer replies as the App;
+ *     when no thread starts, one short notice replies instead of silence.
  */
 
 /** Author associations the comment payload must carry (the cheap pre-filter). */
@@ -52,6 +57,15 @@ const DIFF_HUNK_LIMIT = 4000;
 const INSTRUCTION_LIMIT = 8000;
 /** A redelivered comment within this window starts no second thread. */
 const INTAKE_CLAIM_TTL_SECONDS = 24 * 60 * 60;
+
+/** The reply to a mention on a pull request whose head lives in a fork. */
+export const CROSS_REPO_MENTION_REPLY =
+  "This pull request's branch lives in another repository (a fork), so I " +
+  "can't work on it from here.";
+
+/** The reply when the mention was accepted but no run could be started. */
+export const MENTION_NOT_STARTED_REPLY =
+  "I couldn't start on this request. Mention me again to retry.";
 
 /** The one reply an authorised mention with no instruction gets. */
 export function emptyMentionReply(slug: string): string {
@@ -329,25 +343,68 @@ export async function handleOrgLaneMention(
     return true;
   }
 
-  if (mention.instruction === null) {
+  const stamp = buildMentionStamp(input);
+  // One redelivered webhook must not answer twice — the empty-mention reply
+  // included — so the claim comes before anything is posted.
+  if (!(await claimIntake(input))) {
+    log("skip: this comment was already handled (redelivery)", meta);
+    return true;
+  }
+  const reply = async (body: string, what: string) => {
     if (shadow) {
-      log("[shadow] empty mention — reply suppressed", meta);
-      return true;
+      log(`[shadow] ${what} — reply suppressed`, meta);
+      return;
     }
-    log("empty mention — replying with what to write", meta);
-    await postShortReply({
-      octokit,
-      owner,
-      repo,
-      input,
-      body: emptyMentionReply(slug),
-    });
+    log(`${what} — replying`, meta);
+    try {
+      await replyToMention({
+        octokit,
+        stamp,
+        // A review-thread reply already notifies its participants.
+        body:
+          stamp.commentKind === "issue"
+            ? `@${stamp.commenterLogin} ${body}`
+            : body,
+      });
+    } catch (error) {
+      console.error("[org-mention] short reply failed", {
+        ...meta,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  if (mention.instruction === null) {
+    await reply(emptyMentionReply(slug), "empty mention");
     return true;
   }
 
-  if (!(await claimIntake(input))) {
-    log("skip: this comment already started a thread (redelivery)", meta);
-    return true;
+  // Until a thread exists, a failed read must not strand the claim: release
+  // it and let the delivery fail, so a redelivery can retry the mention.
+  let branchName: string;
+  let prBaseBranchName: string | undefined;
+  try {
+    if (input.isPullRequest) {
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: input.issueOrPrNumber,
+      });
+      // The run clones THIS repo at the head ref: a head that lives in a
+      // fork would check out (and push to) a same-named branch here instead.
+      if (isCrossRepoPull(pr)) {
+        await reply(CROSS_REPO_MENTION_REPLY, "cross-repo pull request");
+        return true;
+      }
+      branchName = pr.head.ref;
+      prBaseBranchName = pr.base.ref;
+    } else {
+      const { data } = await octokit.rest.repos.get({ owner, repo });
+      branchName = data.default_branch;
+    }
+  } catch (error) {
+    await releaseIntake(input);
+    throw error;
   }
   if (!shadow) {
     await addEyesReactionToComment({
@@ -362,40 +419,8 @@ export async function handleOrgLaneMention(
     });
   }
 
-  let branchName: string;
-  let prBaseBranchName: string | undefined;
-  if (input.isPullRequest) {
-    const { data: pr } = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: input.issueOrPrNumber,
-    });
-    branchName = pr.head.ref;
-    prBaseBranchName = pr.base.ref;
-  } else {
-    const { data } = await octokit.rest.repos.get({ owner, repo });
-    branchName = data.default_branch;
-  }
-
-  const stamp: MentionLaneStamp = {
-    repoFullName,
-    issueOrPrNumber: input.issueOrPrNumber,
-    isPullRequest: input.isPullRequest,
-    commentId: comment.id,
-    commentKind: input.commentKind,
-    commenterLogin: comment.user.login,
-    ...(input.commentKind === "review_comment"
-      ? {
-          path: comment.path ?? undefined,
-          line: comment.line ?? null,
-          ...(comment.diffHunk
-            ? { diffHunk: clip(comment.diffHunk, DIFF_HUNK_LIMIT) }
-            : {}),
-          ...(comment.inReplyToId ? { inReplyToId: comment.inReplyToId } : {}),
-        }
-      : {}),
-  };
   const mentionBlock = renderMentionBlock(stamp, mention.instruction);
+  let threadId: string | undefined;
   try {
     const result = await runAutomation({
       userId: automation.userId,
@@ -412,12 +437,7 @@ export async function handleOrgLaneMention(
         stampExtra: { mention: stamp },
       },
     });
-    log(result ? "thread created" : "runAutomation created no thread", {
-      ...meta,
-      automationId: automation.id,
-      threadId: result?.threadId,
-      shadow,
-    });
+    threadId = result?.threadId;
   } catch (error) {
     console.error("[org-mention] runAutomation failed", {
       ...meta,
@@ -425,7 +445,43 @@ export async function handleOrgLaneMention(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  if (threadId === undefined) {
+    // No thread means no finish writer: answer now rather than leave the
+    // person on silence. No reply marker, so a thread that did start after
+    // all still posts its own answer.
+    await reply(MENTION_NOT_STARTED_REPLY, "no thread started");
+    return true;
+  }
+  log("thread created", {
+    ...meta,
+    automationId: automation.id,
+    threadId,
+    shadow,
+  });
   return true;
+}
+
+/** The stamp a mention-lane thread carries: the comment it answers. */
+export function buildMentionStamp(input: OrgMentionInput): MentionLaneStamp {
+  const { comment } = input;
+  return {
+    repoFullName: input.repoFullName,
+    issueOrPrNumber: input.issueOrPrNumber,
+    isPullRequest: input.isPullRequest,
+    commentId: comment.id,
+    commentKind: input.commentKind,
+    commenterLogin: comment.user.login,
+    ...(input.commentKind === "review_comment"
+      ? {
+          path: comment.path ?? undefined,
+          line: comment.line ?? null,
+          ...(comment.diffHunk
+            ? { diffHunk: clip(comment.diffHunk, DIFF_HUNK_LIMIT) }
+            : {}),
+          ...(comment.inReplyToId ? { inReplyToId: comment.inReplyToId } : {}),
+        }
+      : {}),
+  };
 }
 
 /** Append the mention block to the resolved skill message. */
@@ -439,18 +495,21 @@ export function appendMentionBlock(
   };
 }
 
+function intakeClaimKey(input: OrgMentionInput): string {
+  return `org-mention:${input.repoFullName.toLowerCase()}:${input.commentKind}:${input.comment.id}`;
+}
+
 /**
- * One redelivered webhook must not start a second thread. Fail-open: when the
+ * One redelivered webhook must not be handled twice. Fail-open: when the
  * claim store is unreachable a duplicate thread beats a lost mention.
  */
 async function claimIntake(input: OrgMentionInput): Promise<boolean> {
   try {
     const { redis } = await import("@/lib/redis");
-    const taken = await redis.set(
-      `org-mention:${input.repoFullName.toLowerCase()}:${input.commentKind}:${input.comment.id}`,
-      "1",
-      { nx: true, ex: INTAKE_CLAIM_TTL_SECONDS },
-    );
+    const taken = await redis.set(intakeClaimKey(input), "1", {
+      nx: true,
+      ex: INTAKE_CLAIM_TTL_SECONDS,
+    });
     return taken === "OK";
   } catch (error) {
     console.warn("[org-mention] intake claim unavailable — proceeding", {
@@ -462,40 +521,13 @@ async function claimIntake(input: OrgMentionInput): Promise<boolean> {
   }
 }
 
-type AppOctokit = Awaited<ReturnType<typeof getOctokitForApp>>;
-
-async function postShortReply({
-  octokit,
-  owner,
-  repo,
-  input,
-  body,
-}: {
-  octokit: AppOctokit;
-  owner: string;
-  repo: string;
-  input: OrgMentionInput;
-  body: string;
-}): Promise<void> {
+/** Best effort: a claim that cannot be released only expires. */
+async function releaseIntake(input: OrgMentionInput): Promise<void> {
   try {
-    if (input.commentKind === "review_comment") {
-      await octokit.rest.pulls.createReplyForReviewComment({
-        owner,
-        repo,
-        pull_number: input.issueOrPrNumber,
-        comment_id: input.comment.inReplyToId ?? input.comment.id,
-        body,
-      });
-    } else {
-      await octokit.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: input.issueOrPrNumber,
-        body: `@${input.comment.user.login} ${body}`,
-      });
-    }
+    const { redis } = await import("@/lib/redis");
+    await redis.del(intakeClaimKey(input));
   } catch (error) {
-    console.error("[org-mention] short reply failed", {
+    console.warn("[org-mention] intake claim release failed", {
       repoFullName: input.repoFullName,
       commentId: input.comment.id,
       error: error instanceof Error ? error.message : String(error),

@@ -19,6 +19,8 @@ import {
   type PullRequestReviewEvent,
 } from "./handlers";
 import {
+  CROSS_REPO_MENTION_REPLY,
+  MENTION_NOT_STARTED_REPLY,
   analyseMention,
   authorizeCommenter,
   emptyMentionReply,
@@ -172,7 +174,10 @@ describe("routing: org lane vs the legacy per-user path", () => {
         },
         pulls: {
           get: vi.fn(async () => ({
-            data: { head: { ref: "feature/x" }, base: { ref: "main" } },
+            data: {
+              head: { ref: "feature/x", repo: { full_name: "acme/same" } },
+              base: { ref: "main", repo: { full_name: "acme/same" } },
+            },
           })),
           createReplyForReviewComment: vi.fn(async () => ({ data: {} })),
         },
@@ -509,5 +514,85 @@ describe("routing: org lane vs the legacy per-user path", () => {
     } as unknown as PullRequestReviewEvent);
     expect(handleAppMention).not.toHaveBeenCalled();
     expect(runAutomation).not.toHaveBeenCalled();
+  });
+  it("a fork PR: one short reply, no thread, no reaction", async () => {
+    const { repoFullName } = await repoWithLane();
+    for (const head of [
+      { ref: "main", repo: { full_name: "mallory/widgets" } },
+      // A deleted fork: no head repo at all fails closed.
+      { ref: "main", repo: null },
+    ]) {
+      octokit.rest.pulls.get.mockResolvedValueOnce({
+        data: { head, base: { ref: "main", repo: { full_name: "acme/same" } } },
+      } as never);
+      await handleIssueCommentEvent(issueComment({ repoFullName }));
+    }
+    expect(runAutomation).not.toHaveBeenCalled();
+    expect(handleAppMention).not.toHaveBeenCalled();
+    expect(octokit.rest.reactions.createForIssueComment).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+    expect(
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0],
+    ).toMatchObject({ body: `@alice ${CROSS_REPO_MENTION_REPLY}` });
+  });
+
+  it("no thread started (runAutomation returned nothing or threw) → one notice, never silence", async () => {
+    const { repoFullName } = await repoWithLane();
+    vi.mocked(runAutomation).mockResolvedValueOnce(undefined);
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    vi.mocked(runAutomation).mockRejectedValueOnce(new Error("no credits"));
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(2);
+    for (const call of octokit.rest.issues.createComment.mock.calls) {
+      expect((call as unknown[])[0]).toMatchObject({
+        body: `@alice ${MENTION_NOT_STARTED_REPLY}`,
+      });
+    }
+  });
+
+  it("a failed PR read releases the claim: the delivery fails, a redelivery retries", async () => {
+    const { repoFullName } = await repoWithLane();
+    const event = issueComment({ repoFullName });
+    octokit.rest.pulls.get.mockRejectedValueOnce(new Error("502"));
+    await expect(handleIssueCommentEvent(event)).rejects.toThrow("502");
+    expect(runAutomation).not.toHaveBeenCalled();
+    await handleIssueCommentEvent(event);
+    expect(runAutomation).toHaveBeenCalledTimes(1);
+  });
+
+  it("a redelivered empty mention is answered once", async () => {
+    const { repoFullName } = await repoWithLane();
+    const event = issueComment({ repoFullName, body: "@test-app" });
+    await handleIssueCommentEvent(event);
+    await handleIssueCommentEvent(event);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("an empty review-comment mention replies in the thread (to its first comment), no @-prefix", async () => {
+    const { repoFullName } = await repoWithLane();
+    await handlePullRequestReviewCommentEvent({
+      action: "created",
+      installation: { id: installationId },
+      pull_request: { number: 9 },
+      comment: {
+        id: 7777,
+        in_reply_to_id: 7000,
+        body: "@test-app",
+        author_association: "MEMBER",
+        user: { login: "bob", id: 2, type: "User" },
+        path: "src/a.ts",
+        line: 1,
+        diff_hunk: "@@",
+      },
+      repository: { full_name: repoFullName },
+    } as unknown as PullRequestReviewCommentEvent);
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(octokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pull_number: 9,
+        comment_id: 7000,
+        body: emptyMentionReply(SLUG),
+      }),
+    );
   });
 });

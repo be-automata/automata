@@ -18,3 +18,21 @@ export function isPrAuthoredByBot(
   if (!authorLogin || !botLogin) return false;
   return authorLogin.toLowerCase() === botLogin.toLowerCase();
 }
+
+/**
+ * Whether `login` is the App bot. REST reports App logins as `<name>[bot]`
+ * while GraphQL drops the suffix, so both sides compare without it,
+ * case-insensitively.
+ */
+export function isBotAuthor(
+  login: string | null | undefined,
+  botLogin: string = resolveBotLogin(),
+): boolean {
+  const bare = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/\[bot\]$/, "");
+  if (!login || !botLogin) return false;
+  return bare(login) === bare(botLogin);
+}
