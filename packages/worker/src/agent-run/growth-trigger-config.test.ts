@@ -47,26 +47,83 @@ describe("loadGrowthTriggerConfig", () => {
     expect(GROWTH_TRIGGER_RAM_FRACTION_DEFAULT).toBe(0.7);
   });
 
-  it("accepts http and https; refuses other protocols and junk without echoing the URL", () => {
-    expect(
-      loadGrowthTriggerConfig({
-        WORKER_ALERT_WEBHOOK_URL: "http://ntfy.local/topic",
-      })?.webhookUrl,
-    ).toBe("http://ntfy.local/topic");
+  function refusal(url: string): string {
+    try {
+      loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: url });
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+    return "";
+  }
+
+  it("refuses other protocols and junk without echoing the URL", () => {
     for (const bad of [
       "ftp://hooks.example.com/SECRETTOKEN",
       "file:///etc/SECRETTOKEN",
       "not a url SECRETTOKEN",
     ]) {
-      let message = "";
-      try {
-        loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: bad });
-      } catch (e) {
-        message = e instanceof Error ? e.message : String(e);
-      }
+      const message = refusal(bad);
       expect(message).toMatch(/WORKER_ALERT_WEBHOOK_URL/);
       expect(message).not.toContain("SECRETTOKEN");
       expect(message).not.toContain("hooks.example.com");
+    }
+  });
+
+  it("accepts any https host", () => {
+    expect(load({})?.webhookUrl).toBe(SECRET_URL);
+    expect(
+      loadGrowthTriggerConfig({
+        WORKER_ALERT_WEBHOOK_URL: "https://203.0.113.9/topic",
+      })?.webhookUrl,
+    ).toBe("https://203.0.113.9/topic");
+  });
+
+  it("accepts http only for loopback hosts", () => {
+    for (const ok of [
+      "http://localhost:8080/topic",
+      "http://LOCALHOST/topic",
+      "http://127.0.0.1/topic",
+      "http://127.255.0.9:9/topic",
+      "http://[::1]:2586/topic",
+    ]) {
+      expect(
+        loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: ok })?.webhookUrl,
+      ).toBe(ok);
+    }
+  });
+
+  it("accepts http only for private IPv4 literals (10/8, 172.16/12, 192.168/16)", () => {
+    for (const ok of [
+      "http://10.0.0.5/topic",
+      "http://10.255.255.255/topic",
+      "http://172.16.0.1/topic",
+      "http://172.31.255.254/topic",
+      "http://192.168.1.20:80/topic",
+    ]) {
+      expect(
+        loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: ok })?.webhookUrl,
+      ).toBe(ok);
+    }
+  });
+
+  it("refuses http to a public or named host, naming the knob and the rule without the URL", () => {
+    for (const bad of [
+      "http://hooks.example.com/services/SECRETTOKEN",
+      "http://ntfy.local/SECRETTOKEN",
+      "http://172.15.0.1/SECRETTOKEN",
+      "http://172.32.0.1/SECRETTOKEN",
+      "http://192.169.0.1/SECRETTOKEN",
+      "http://11.0.0.1/SECRETTOKEN",
+      "http://8.8.8.8/SECRETTOKEN",
+      "http://[fd00::1]/SECRETTOKEN",
+      "http://localhost.example.com/SECRETTOKEN",
+    ]) {
+      const message = refusal(bad);
+      expect(message).toMatch(/^WORKER_ALERT_WEBHOOK_URL must use https:/);
+      expect(message).toMatch(/loopback/);
+      expect(message).not.toContain("SECRETTOKEN");
+      expect(message).not.toContain("hooks.example.com");
+      expect(message).not.toContain(new URL(bad).hostname);
     }
   });
 

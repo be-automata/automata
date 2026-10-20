@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION,
   AUTHORIZED_MOVES,
   buildSnapshot,
   buildWebhookBody,
@@ -367,6 +368,82 @@ describe("scale composite", () => {
 
   it("no PRs → busiestDay null", () => {
     expect(evalRows(clients(2)).stats?.busiestDay).toBeNull();
+  });
+});
+
+describe("attribution gate", () => {
+  /** org-a dominates three orgs: 800 / 1000 s of attributed time. */
+  const dominant = (): RunRow[] => [
+    row({ day: 0, org: "org-a", runS: 800 }),
+    row({ day: 1, org: "org-b", runS: 100 }),
+    row({ day: 2, org: "org-c", runS: 100 }),
+  ];
+  const clients = (n: number): RunRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      row({ day: 0, org: `org-${i}`, runS: 100 }),
+    );
+  const prs = (perDay: number): RunRow[] =>
+    Array.from({ length: 7 * perDay }, (_, i) =>
+      row({ day: i % 7, org: "org-0", repo: "acme/app", pr: i, runS: 1 }),
+    );
+  /** One unattributed row of `runS` seconds. */
+  const unattributed = (runS: number): RunRow =>
+    row({ day: 3, org: null, runS });
+
+  it("is 5%", () => {
+    expect(ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION).toBe(0.05);
+  });
+
+  it("high unattributed time makes client_share unknown even with a dominant org", () => {
+    // 100 s unattributed of 1100 s total: 9.1%.
+    const r = evalRows([...dominant(), unattributed(100)]);
+    expect(r.clientShare).toMatchObject({
+      verdict: "unknown",
+      value: 0.8,
+      reason: "attribution incomplete (9.1% of run time unattributed)",
+    });
+    expect(r.clientShare.summary).toContain("9.1% of run time unattributed");
+    expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.8 });
+    expect(r.stats?.unattributed).toEqual({ seconds: 100, fraction: 0.091 });
+  });
+
+  it("at or below 5% unattributed the share decides as before", () => {
+    // 50 s of 1050 s: 4.76%.
+    const r = evalRows([...dominant(), unattributed(50)]);
+    expect(r.clientShare.verdict).toBe("over");
+    expect(r.clientShare.reason).toBeUndefined();
+    expect(r.clientShare.summary).toContain("4.8% of run time unattributed");
+    expect(evalRows(dominant()).clientShare.summary).toContain(
+      "0% of run time unattributed",
+    );
+  });
+
+  it("composite: clients unknown + one other arm held → unknown, naming the arm", () => {
+    const r = evalRows([...clients(6), unattributed(600)], true);
+    expect(r.scaleComposite).toMatchObject({ verdict: "unknown", value: 1 });
+    expect(r.scaleComposite.reason).toMatch(/clients/);
+    expect(r.scaleComposite.reason).toMatch(/attribution incomplete/);
+  });
+
+  it("composite: clients unknown + two other arms held → over", () => {
+    const rows = [...prs(101), unattributed(600)];
+    expect(evalRows(rows, true).scaleComposite).toMatchObject({
+      verdict: "over",
+      value: 2,
+    });
+  });
+
+  it("composite: clients unknown and no other arm held → under", () => {
+    expect(
+      evalRows([...clients(6), unattributed(600)]).scaleComposite.verdict,
+    ).toBe("under");
+  });
+
+  it("composite with low unattributed time counts the clients arm as before", () => {
+    // 10 s unattributed of 610 s: 1.6%.
+    const r = evalRows([...clients(6), unattributed(10)], true);
+    expect(r.scaleComposite).toMatchObject({ verdict: "over", value: 2 });
+    expect(r.scaleComposite.reason).toBeUndefined();
   });
 });
 
@@ -828,8 +905,12 @@ describe("snapshot", () => {
       firing: false,
       lastFiredAt: null,
     });
+    // Half the run time is unattributed: the attribution gate holds client_share unknown
+    // while still reporting the share it observed.
     expect(snap.triggers.client_share).toMatchObject({
-      verdict: "under",
+      value: 1,
+      verdict: "unknown",
+      reason: "attribution incomplete (50% of run time unattributed)",
       firing: true,
       lastFiredAt: new Date(NOW - MIN).toISOString(),
     });

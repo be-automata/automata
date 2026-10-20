@@ -90,12 +90,44 @@ function parseWebhookUrl(v: string): string {
       "WORKER_ALERT_WEBHOOK_URL is not a valid URL (value withheld: it may be a secret)",
     );
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(
-      "WORKER_ALERT_WEBHOOK_URL must use http: or https: (value withheld: it may be a secret)",
-    );
+  if (url.protocol === "https:") return v;
+  if (url.protocol === "http:" && isLoopbackOrPrivateHost(url.hostname)) {
+    return v;
   }
-  return v;
+  throw new Error(
+    "WORKER_ALERT_WEBHOOK_URL must use https: (http: is allowed only for a loopback host " +
+      "— localhost, 127.0.0.0/8, ::1 — or a private IPv4 literal — 10/8, 172.16/12, " +
+      "192.168/16) (value withheld: it may be a secret)",
+  );
+}
+
+/** Dotted-quad IPv4 literal → its four octets, or null. */
+function ipv4Octets(host: string): [number, number, number, number] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m === null) return null;
+  const octets = m.slice(1).map(Number);
+  if (octets.some((o) => o > 255)) return null;
+  const [a = 0, b = 0, c = 0, d = 0] = octets;
+  return [a, b, c, d];
+}
+
+/**
+ * The plaintext exception: the webhook URL is a credential and the body names the box, so
+ * cleartext is acceptable only where it never crosses a network the box does not own.
+ * `URL` has already normalised the hostname (lower-cased, IPv6 in brackets, numeric IPv4
+ * forms such as `0x7f.1` rewritten to dotted quads), so only canonical forms are matched.
+ */
+function isLoopbackOrPrivateHost(hostname: string): boolean {
+  if (hostname === "localhost" || hostname === "[::1]") return true;
+  const ip = ipv4Octets(hostname);
+  if (ip === null) return false;
+  const [a, b] = ip;
+  return (
+    a === 127 ||
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
 }
 
 /**
