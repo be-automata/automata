@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { db } from "@/lib/db";
 import { waitUntil } from "@/lib/wait-until";
 
+import { logBlockActionAttribution } from "./block-action-attribution";
 import { handleAppMentionEvent } from "./handlers";
 import type { SlackRequestRoute } from "./route-fence";
 import { verifySlackSignature } from "./verify";
@@ -74,6 +76,14 @@ export async function handleSlackRequest({
   if (payload.type === "block_actions") {
     const action = payload.actions?.[0];
     console.log("[slack webhook] Received block action:", action?.action_id);
+    waitUntil(
+      logBlockActionAttribution({ db, payload, route }).catch((error) => {
+        console.error(
+          "[slack webhook] Error attributing block action",
+          error instanceof Error ? error.message : String(error),
+        );
+      }),
+    );
     if (action?.action_id === "retry_task_creation") {
       // Parse the stored retry data
       const retryData = JSON.parse(action.value);
