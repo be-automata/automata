@@ -47,6 +47,16 @@ vi.mock("./octokit-review-client", () => ({
     headSha: HEAD,
     isDraft: prDraft.value,
   })),
+  // The sweep verifies quotes exactly as the finish hook does; the reader
+  // itself is the executor's business (stubbed below).
+  createFileAtCommitReader: () => async () => ({ kind: "missing" as const }),
+}));
+// The sweep applies the repo's tolerance exactly as the finish hook does.
+vi.mock("./resolve-approve-floor", () => ({
+  resolveApproveFloor: vi.fn(async () => ({
+    blockSeverity: "info",
+    surfaceSeverity: "info",
+  })),
 }));
 // #224: the REAL guard, wrapped in a spy. The thing under test is the
 // composition — "does the filtered snapshot reach the primitive" — so a mock
@@ -181,6 +191,19 @@ describe("runReviewSweep — which terminal runs it may speak for", () => {
       );
     },
   );
+
+  it("hands the executor the repo's tolerance and a quote reader, like the finish hook", async () => {
+    selected.rows = [candidate()];
+    await runReviewSweep();
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.approveFloorPolicy).toEqual({
+      blockSeverity: "info",
+      surfaceSeverity: "info",
+    });
+    expect(typeof args.readFileAtCommit).toBe("function");
+    // Resolutions are finish-hook only: a lost one heals on the next push.
+    expect(args.threadResolutions).toBeUndefined();
+  });
 
   it("hands the executor the head the run was dispatched against", async () => {
     selected.rows = [candidate({ terminalCause: "timeout", reviewedSha: OLD })];

@@ -10,9 +10,11 @@ import { getOctokitForApp } from "@/lib/github";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import {
+  createFileAtCommitReader,
   createOctokitReviewClient,
   getPrHeadState,
 } from "./octokit-review-client";
+import { resolveApproveFloor } from "./resolve-approve-floor";
 import {
   executeReviewFromIntent,
   isDegradedComment,
@@ -203,6 +205,15 @@ export async function runReviewSweep(): Promise<void> {
         // a formal verdict 422s, so without it this backstop would fail the
         // same post again every hour for the whole lookback window.
         prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),
+        // The repo's tolerance and the quote check, exactly as the finish hook
+        // applies them: a backstopped verdict must not be judged more leniently
+        // than the one the hook would have posted.
+        approveFloorPolicy: await resolveApproveFloor({
+          db,
+          organizationId: c.organizationId ?? null,
+          repoFullName: c.repoFullName,
+        }),
+        readFileAtCommit: createFileAtCommitReader(octokit, c.repoFullName),
         // Both flags gate the NO-VERDICT notice ONLY — never a verdict. An
         // abandoned run (#125 C4 typed terminal) is deliberately still swept
         // rather than skipped outright: supersession marks a thread terminal

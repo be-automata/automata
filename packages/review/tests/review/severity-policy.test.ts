@@ -2,7 +2,7 @@
  * severity-policy — the pure approve-floor kernel.
  *
  * Table-driven tests over the neutral tier classifier, the two adapters, and
- * `applyApproveSeverityFloor` (only-act-on-approve invariant, draft cap, and
+ * `applyApproveSeverityFloor` (tighten-only invariant, comment raise, draft cap, and
  * policy overrides). node:test + node:assert/strict only.
  */
 
@@ -285,14 +285,52 @@ describe("severity-policy — applyApproveSeverityFloor", () => {
     assert.equal(out.verdict, "request_changes");
   });
 
-  test("INVARIANT: an LLM comment is never upgraded, even with critical findings", () => {
+  test("RAISE: an LLM comment carrying a blocking finding becomes request_changes", () => {
     const intent = {
       verdict: "comment" as const,
       comments: [{ severity: "critical" as const }],
     };
     const out = applyApproveSeverityFloor(intent, P);
+    assert.equal(out.verdict, "request_changes");
+    assert.notEqual(out, intent, "a changed verdict is a copy");
+  });
+
+  test("RAISE: a draft caps the raised comment back at comment", () => {
+    const intent = {
+      verdict: "comment" as const,
+      comments: [{ severity: "error" as const }],
+    };
+    const out = applyApproveSeverityFloor(intent, P, { isDraft: true });
     assert.equal(out.verdict, "comment");
-    assert.equal(out, intent, "non-approve returns the same object untouched");
+  });
+
+  test("RAISE: a comment whose findings sit below the block threshold is untouched", () => {
+    const intent = {
+      verdict: "comment" as const,
+      comments: [{ severity: "info" as const }],
+    };
+    const out = applyApproveSeverityFloor(intent, P);
+    assert.equal(out, intent, "same object, never turned into an approve");
+  });
+
+  test("RAISE: a suppressGating (unverified) blocker never raises a comment", () => {
+    const intent = {
+      verdict: "comment" as const,
+      comments: [{ severity: "critical" as const, suppressGating: true }],
+    };
+    const out = applyApproveSeverityFloor(intent, P);
+    assert.equal(out, intent);
+  });
+
+  test("RAISE under info tolerance: comment + one info finding → request_changes", () => {
+    const out = applyApproveSeverityFloor(
+      {
+        verdict: "comment" as const,
+        comments: [{ severity: "info" as const }],
+      },
+      toleranceToPolicy("info"),
+    );
+    assert.equal(out.verdict, "request_changes");
   });
 
   test("INVARIANT: an LLM request_changes is never touched, even with only info findings", () => {
@@ -533,18 +571,19 @@ describe("severity-policy — applyApproveSeverityFloor (per-tolerance)", () => 
     assert.equal(out.verdict, "request_changes");
   });
 
-  test("only-downgrade invariant holds under all three tolerances", () => {
+  test("tighten-only invariant holds under all three tolerances", () => {
     for (const t of BLOCK_TOLERANCES) {
       const policy = toleranceToPolicy(t);
-      // A comment / request_changes is never upgraded, whatever the tolerance.
+      // A comment carrying a blocker is raised, whatever the tolerance; a
+      // request_changes is never weakened.
       const comment = {
         verdict: "comment" as const,
         comments: [{ severity: "critical" as const }],
       };
       assert.equal(
         applyApproveSeverityFloor(comment, policy).verdict,
-        "comment",
-        `comment untouched (${t})`,
+        "request_changes",
+        `comment + critical raised (${t})`,
       );
       const rc = {
         verdict: "request_changes" as const,

@@ -13,6 +13,10 @@ import {
   DEFAULT_APPROVE_SEVERITY_POLICY,
   type ApproveSeverityPolicy,
 } from "@terragon/review/severity-policy";
+import type { FileAtCommit } from "@terragon/review/finding-verifier";
+import { applyVerifyBeforeBlock } from "@terragon/review/verify-before-block";
+import type { ReviewThreadClient } from "./octokit-review-client";
+import { applyThreadResolutions } from "./review-thread-resolutions";
 import {
   parseReviewIntent,
   toExecutorIntent,
@@ -178,6 +182,23 @@ export interface ExecuteReviewFromIntentOpts {
    * other PR is posted exactly as before.
    */
   prAuthoredByBot?: boolean;
+  /**
+   * verify-before-block's reader: a file at a commit (the GitHub contents API
+   * with the App token). When set, every finding that blocks under the floor
+   * policy must reproduce its quote at `intent.commit` or it is de-fanged
+   * before the floor runs. Absent = no verification (callers that predate it).
+   */
+  readFileAtCommit?: (path: string, sha: string) => Promise<FileAtCommit>;
+  /**
+   * Resolve the prior review threads the intent names, after the review is
+   * posted (or found already posted) at live HEAD. `claim(commit)` takes the
+   * per-(thread, commit) lease. Absent = resolutions are not applied (the
+   * hourly sweep, by design: a lost resolution heals on the next push).
+   */
+  threadResolutions?: {
+    client: ReviewThreadClient;
+    claim: (commit: string) => Promise<boolean>;
+  };
   logger?: ReviewLogger;
 }
 
@@ -214,17 +235,30 @@ export async function executeReviewFromIntent(
       commit: emitted.commit,
     });
   }
-  // Apply the per-repo approve-severity floor server-side BEFORE anything is
-  // posted — the load-bearing guarantee. `applyApproveSeverityFloor` only ever
-  // downgrades a too-generous `approve` (comment/request_changes pass through),
-  // recomputing the verdict from the findings' severities under this repo's
-  // tolerance. This runs identically for the fresh and stale paths so the
-  // effective verdict is consistent regardless of HEAD movement.
-  const execIntent = applyApproveSeverityFloor(
-    toExecutorIntent(emitted),
-    opts.approveFloorPolicy ?? DEFAULT_APPROVE_SEVERITY_POLICY,
-    { isDraft: opts.isDraft },
-  );
+  // Apply the per-repo severity floor server-side BEFORE anything is posted —
+  // the load-bearing guarantee. `applyApproveSeverityFloor` only ever TIGHTENS:
+  // a too-generous `approve` is recomputed from the findings' severities, a
+  // `comment` carrying a gating blocker is raised to `request_changes`, and a
+  // `request_changes` passes through. This runs identically for the fresh and
+  // stale paths so the effective verdict is consistent regardless of HEAD
+  // movement.
+  // Verify-before-block FIRST (legacy order): a blocking finding whose quote
+  // does not reproduce at the reviewed commit is de-fanged, so the floor below
+  // never lets a hallucination lower an approve or raise a comment.
+  const policy = opts.approveFloorPolicy ?? DEFAULT_APPROVE_SEVERITY_POLICY;
+  const reader = opts.readFileAtCommit;
+  const verifiedIntent = reader
+    ? await applyVerifyBeforeBlock(toExecutorIntent(emitted), {
+        policy,
+        readFile: (path) => reader(path, emitted.commit),
+        repo: repoFullName,
+        prNumber,
+        logger,
+      })
+    : toExecutorIntent(emitted);
+  const execIntent = applyApproveSeverityFloor(verifiedIntent, policy, {
+    isDraft: opts.isDraft,
+  });
   const effectiveVerdict = execIntent.verdict;
   const isStale = emitted.commit !== currentHeadSha;
 
@@ -421,6 +455,33 @@ export async function executeReviewFromIntent(
       botLogin,
       logger,
     });
+  }
+  // Thread resolutions ride the verdict at live HEAD: posted now, or already
+  // posted by an earlier execution of this same intent (so a crash between the
+  // post and the resolutions is finished by the redelivered run). Never on the
+  // stale path above, never on a notice. Best effort: never changes `outcome`.
+  if (
+    opts.threadResolutions &&
+    (outcome.outcome === "posted" || outcome.outcome === "skipped_existing")
+  ) {
+    try {
+      await applyThreadResolutions({
+        ...opts.threadResolutions,
+        prNumber,
+        commit: emitted.commit,
+        resolutions: emitted.resolvedThreads ?? [],
+        logger,
+      });
+    } catch (err) {
+      logger?.warn(
+        "review-from-intent: thread resolutions failed (best-effort)",
+        {
+          repoFullName,
+          prNumber,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
   if (postAsComment && outcome.outcome === "posted") {
     return {

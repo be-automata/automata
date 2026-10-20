@@ -6,21 +6,19 @@ import {
 
 import type { EnvSource } from "@/server-lib/env-audience";
 
-import { resolveTrackerConfigWithSources } from "./tracker-config";
-import { describeTrackerError } from "./youtrack-client";
-
-const TRACKER_KEYS = [
-  "YOUTRACK_URL",
-  "YOUTRACK_TOKEN",
-  "YOUTRACK_PROJECTS",
-  "AUTOMATA_TRACKER_WRITES",
-] as const;
+import {
+  resolveTrackerConfigWithSources,
+  TRACKER_CONFIG_KEYS,
+  TRACKER_CREDENTIAL_KEYS,
+} from "./tracker-config";
+import { describeTrackerError } from "./tracker-types";
 
 /**
  * What the post-merge audit would resolve for `repoFullName` in the org
  * `organizationSlug` — attributed to the org owner exactly like the audit
  * (mirror-intake.ts). Staff diagnostic: it reports where each tracker key came
- * from and never returns the token.
+ * from and never returns the token. The tracker kind shows in `sources`:
+ * JIRA_* keys win when JIRA_URL, JIRA_USERNAME and JIRA_API_TOKEN are all set.
  */
 export type TrackerConfigDiagnostic =
   | { status: "org_not_found" | "no_owner" }
@@ -75,14 +73,16 @@ export async function diagnoseTrackerConfig({
     };
   }
   const sources = Object.fromEntries(
-    TRACKER_KEYS.filter((key) => resolution.sources[key]).map((key) => [
+    TRACKER_CONFIG_KEYS.filter((key) => resolution.sources[key]).map((key) => [
       key,
       resolution.sources[key],
     ]),
   );
-  const urlSource = resolution.sources.YOUTRACK_URL;
-  const tokenSource = resolution.sources.YOUTRACK_TOKEN;
   const { config } = resolution;
+  // The resolved tracker's own keys; YouTrack's when none resolved.
+  const credentialKeys = TRACKER_CREDENTIAL_KEYS[config?.kind ?? "youtrack"];
+  const urlSource = resolution.sources[credentialKeys.url];
+  const tokenSource = resolution.sources[credentialKeys.token];
   return {
     status: config ? "configured" : "unconfigured",
     baseUrl: config?.baseUrl ?? null,

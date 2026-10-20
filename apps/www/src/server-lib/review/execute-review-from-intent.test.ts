@@ -490,6 +490,9 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
   });
 
   it("a `comment` WITH findings on a ready PR stays a review — it surfaces them", async () => {
+    // The finding sits BELOW the block threshold: a blocking one would be
+    // raised to request_changes by the floor (covered in
+    // review-thread-resolutions.test.ts); this case is about ADR-009 only.
     const github = makeGithub([]);
     const res = await executeReviewFromIntent({
       github,
@@ -503,7 +506,7 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
         commit: HEAD,
         summary: "One thing worth a look.",
         findings: [
-          { severity: "warning", path: "a.ts", line: 3, body: "untested" },
+          { severity: "info", path: "a.ts", line: 3, body: "untested" },
         ],
       }),
     });

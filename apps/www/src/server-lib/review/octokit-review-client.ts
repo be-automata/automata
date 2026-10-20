@@ -1,3 +1,4 @@
+import type { FileAtCommit } from "@terragon/review/finding-verifier";
 import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import type { ReviewWriterClient } from "./review-notice";
@@ -184,5 +185,275 @@ export async function getPrHeadState(
     headSha: data.head.sha,
     isDraft: data.draft === true,
     authorLogin: data.user?.login ?? null,
+  };
+}
+
+/**
+ * One retry for a transient read (a 5xx or a network error with no status):
+ * the verifier must not flip on a blip. A 4xx is an answer, not a blip — a
+ * retry would only repeat it.
+ */
+async function withOneRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const status = statusOf(err);
+    if (status !== undefined && status < 500) throw err;
+    return await fn();
+  }
+}
+
+function statusOf(err: unknown): number | undefined {
+  if (typeof err === "object" && err !== null && "status" in err) {
+    const status = (err as { status: unknown }).status;
+    return typeof status === "number" ? status : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * verify-before-block's reader (packages/review finding-verifier): a file AT
+ * the commit the agent reviewed, read raw through the contents API with the
+ * App token. 404 = the file is not there (the finding is unverified); any other
+ * failure after one retry, or binary content, = could not check (the finding
+ * keeps gating — an outage never changes a verdict).
+ */
+export function createFileAtCommitReader(
+  octokit: Octokit,
+  repoFullName: string,
+): (path: string, sha: string) => Promise<FileAtCommit> {
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  return async (path, sha) => {
+    try {
+      const response = await withOneRetry(() =>
+        octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+          owner,
+          repo,
+          path,
+          ref: sha,
+          mediaType: { format: "raw" },
+        }),
+      );
+      // The raw media type returns the file body as a string; Octokit's types
+      // only model the JSON shape, so narrow from unknown.
+      const data: unknown = response.data;
+      if (typeof data !== "string") {
+        return { kind: "unchecked", reason: "not a file" };
+      }
+      if (data.includes("\u0000")) {
+        return { kind: "unchecked", reason: "binary file" };
+      }
+      return { kind: "content", text: data };
+    } catch (err) {
+      if (statusOf(err) === 404) return { kind: "missing" };
+      return {
+        kind: "unchecked",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+}
+
+/** At most this many 100-thread pages are read per PR (500 threads). */
+export const REVIEW_THREAD_PAGE_LIMIT = 5;
+
+/** Comments read per thread (a thread's reply chain rarely nears it). */
+const REVIEW_THREAD_COMMENT_LIMIT = 100;
+
+const REVIEW_THREADS_QUERY = `
+  query ($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            isResolved
+            path
+            line
+            comments(first: ${REVIEW_THREAD_COMMENT_LIMIT}) {
+              totalCount
+              nodes { databaseId author { login } body }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface ReviewThreadsPage {
+  repository: {
+    pullRequest: {
+      reviewThreads: {
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        nodes: Array<{
+          id: string;
+          isResolved: boolean;
+          path: string | null;
+          line: number | null;
+          comments: {
+            totalCount: number;
+            nodes: Array<{
+              databaseId: number | null;
+              author: { login: string } | null;
+              body: string | null;
+            }>;
+          };
+        }>;
+      };
+    } | null;
+  } | null;
+}
+
+/** One review thread as {@link fetchReviewThreads} returns it. */
+export interface FetchedReviewThread {
+  id: string;
+  isResolved: boolean;
+  path: string | null;
+  line: number | null;
+  comments: Array<{
+    databaseId: number | null;
+    authorLogin: string | null;
+    body: string | null;
+  }>;
+  /** How many comments the thread has (may exceed `comments.length`). */
+  commentCount: number;
+}
+
+/**
+ * Every review thread on a PR (up to {@link REVIEW_THREAD_PAGE_LIMIT} pages),
+ * read with the App token. `truncated` = more threads exist than were read.
+ * The one thread read both the prompt prefetch and the terminal writer's
+ * thread resolutions go through.
+ */
+export async function fetchReviewThreads(
+  octokit: Octokit,
+  repoFullName: string,
+  prNumber: number,
+): Promise<{ threads: FetchedReviewThread[]; truncated: boolean }> {
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  const threads: FetchedReviewThread[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < REVIEW_THREAD_PAGE_LIMIT; page++) {
+    const result: ReviewThreadsPage = await octokit.graphql(
+      REVIEW_THREADS_QUERY,
+      { owner, repo, number: prNumber, cursor },
+    );
+    const connection = result.repository?.pullRequest?.reviewThreads;
+    if (!connection) break;
+    for (const node of connection.nodes) {
+      threads.push({
+        id: node.id,
+        isResolved: node.isResolved,
+        path: node.path,
+        line: node.line,
+        comments: node.comments.nodes.map((comment) => ({
+          databaseId: comment.databaseId,
+          authorLogin: comment.author?.login ?? null,
+          body: comment.body,
+        })),
+        commentCount: node.comments.totalCount,
+      });
+    }
+    if (!connection.pageInfo.hasNextPage) break;
+    if (page === REVIEW_THREAD_PAGE_LIMIT - 1) {
+      return { threads, truncated: true };
+    }
+    cursor = connection.pageInfo.endCursor;
+  }
+  return { threads, truncated: false };
+}
+
+/** The review-thread surface the terminal writer resolves threads through. */
+export interface ReviewThreadClient {
+  /** The PR's thread containing the comment `commentId`, or null. */
+  findThreadByCommentId(
+    prNumber: number,
+    commentId: number,
+  ): Promise<{
+    threadId: string;
+    isResolved: boolean;
+    commentBodies: string[];
+  } | null>;
+  replyToReviewComment(
+    prNumber: number,
+    commentId: number,
+    body: string,
+  ): Promise<void>;
+  resolveThread(threadId: string): Promise<void>;
+}
+
+/**
+ * The App-scoped implementation of {@link ReviewThreadClient}.
+ *
+ * One client serves one terminal execution, so a PR's threads are read ONCE
+ * ({@link fetchReviewThreads}) and every lookup is answered from that read —
+ * not one full scan per resolution. The client's own replies and resolves are
+ * applied to it, so a repeat lookup sees them exactly as a fresh read would.
+ * A failed read is not cached: the next lookup reads again.
+ */
+export function createOctokitThreadClient(
+  octokit: Octokit,
+  repoFullName: string,
+): ReviewThreadClient {
+  const [owner, repo] = parseRepoFullName(repoFullName);
+  const reads = new Map<number, Promise<FetchedReviewThread[]>>();
+
+  function threadsOf(prNumber: number): Promise<FetchedReviewThread[]> {
+    let read = reads.get(prNumber);
+    if (!read) {
+      read = fetchReviewThreads(octokit, repoFullName, prNumber).then(
+        ({ threads }) => threads,
+      );
+      read.catch(() => reads.delete(prNumber));
+      reads.set(prNumber, read);
+    }
+    return read;
+  }
+
+  const hasComment = (thread: FetchedReviewThread, commentId: number) =>
+    thread.comments.some((c) => c.databaseId === commentId);
+
+  return {
+    async findThreadByCommentId(prNumber, commentId) {
+      const thread = (await threadsOf(prNumber)).find((t) =>
+        hasComment(t, commentId),
+      );
+      return thread
+        ? {
+            threadId: thread.id,
+            isResolved: thread.isResolved,
+            commentBodies: thread.comments.map((c) => c.body ?? ""),
+          }
+        : null;
+    },
+
+    async replyToReviewComment(prNumber, commentId, body) {
+      await octokit.rest.pulls.createReplyForReviewComment({
+        owner,
+        repo,
+        pull_number: prNumber,
+        comment_id: commentId,
+        body,
+      });
+      const thread = (await reads.get(prNumber)?.catch(() => []))?.find((t) =>
+        hasComment(t, commentId),
+      );
+      thread?.comments.push({ databaseId: null, authorLogin: null, body });
+    },
+
+    async resolveThread(threadId) {
+      await octokit.graphql(
+        `mutation ($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`,
+        { threadId },
+      );
+      for (const read of reads.values()) {
+        const thread = (await read.catch(() => [])).find(
+          (t) => t.id === threadId,
+        );
+        if (thread) thread.isResolved = true;
+      }
+    },
   };
 }

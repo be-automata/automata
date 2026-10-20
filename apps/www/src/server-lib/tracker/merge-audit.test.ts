@@ -18,7 +18,8 @@ import {
   type TicketAuditResult,
 } from "./merge-audit";
 import type { MergeAuditCriterion } from "./parse-merge-audit-intent";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import { youTrackStagePolicy } from "./stage-policy";
+import type { TrackerIssue, TrackerLinkedIssue } from "./tracker-types";
 
 const criterion = (
   id: string,
@@ -371,7 +372,7 @@ describe("decideSiblingPromotion", () => {
 
   it("promotes a Backlog sibling whose only blocker just merged", () => {
     expect(
-      decideSiblingPromotion({
+      decideSiblingPromotion(youTrackStagePolicy, {
         mergedKey: "ACME-1",
         sibling: sibling("Backlog", [linked("ACME-1", "PR Merged")]),
       }),
@@ -379,7 +380,7 @@ describe("decideSiblingPromotion", () => {
   });
 
   it("promotes when every OTHER blocker is terminal", () => {
-    const decision = decideSiblingPromotion({
+    const decision = decideSiblingPromotion(youTrackStagePolicy, {
       mergedKey: "ACME-1",
       sibling: sibling("backlog", [
         linked("ACME-1", "In Progress"),
@@ -391,7 +392,7 @@ describe("decideSiblingPromotion", () => {
   });
 
   it("does not promote while another blocker is still unmerged", () => {
-    const decision = decideSiblingPromotion({
+    const decision = decideSiblingPromotion(youTrackStagePolicy, {
       mergedKey: "ACME-1",
       sibling: sibling("Backlog", [
         linked("ACME-1", "PR Merged"),
@@ -405,7 +406,7 @@ describe("decideSiblingPromotion", () => {
   it("a blocker at PR Merged or Staging (TF) counts as cleared", () => {
     for (const stage of ["PR Merged", "Staging (TF)"]) {
       expect(
-        decideSiblingPromotion({
+        decideSiblingPromotion(youTrackStagePolicy, {
           mergedKey: "ACME-2",
           sibling: sibling("Backlog", [
             linked("ACME-1", stage),
@@ -417,7 +418,7 @@ describe("decideSiblingPromotion", () => {
   });
 
   it("anti-vacuous guard: the merged key must be among the sibling's blockers", () => {
-    const decision = decideSiblingPromotion({
+    const decision = decideSiblingPromotion(youTrackStagePolicy, {
       mergedKey: "ACME-1",
       sibling: sibling("Backlog", [linked("ACME-2", "Done")]),
     });
@@ -427,7 +428,7 @@ describe("decideSiblingPromotion", () => {
 
   it("anti-vacuous guard also covers a sibling with no blockers at all", () => {
     expect(
-      decideSiblingPromotion({
+      decideSiblingPromotion(youTrackStagePolicy, {
         mergedKey: "ACME-1",
         sibling: sibling("Backlog", []),
       }).promote,
@@ -435,7 +436,7 @@ describe("decideSiblingPromotion", () => {
   });
 
   it("a wrong link direction never promotes", () => {
-    const decision = decideSiblingPromotion({
+    const decision = decideSiblingPromotion(youTrackStagePolicy, {
       mergedKey: "ACME-1",
       sibling: sibling("Backlog", [linked("ACME-1", "PR Merged")], "OUTWARD"),
     });
@@ -446,7 +447,7 @@ describe("decideSiblingPromotion", () => {
     "only a Backlog sibling is promoted (not %s)",
     (stage) => {
       expect(
-        decideSiblingPromotion({
+        decideSiblingPromotion(youTrackStagePolicy, {
           mergedKey: "ACME-1",
           sibling: sibling(stage, [linked("ACME-1", "PR Merged")]),
         }).promote,

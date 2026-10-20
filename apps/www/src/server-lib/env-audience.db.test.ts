@@ -129,6 +129,33 @@ describe("agent environment layering (global → organization → repository)", 
     expect(JSON.stringify(sandbox)).not.toContain("perm:org-token");
   });
 
+  it("never hands a Jira API token to an agent, from any layer", async () => {
+    await setGlobal({ JIRA_API_TOKEN: "jira-global-token" });
+    await setOrg({
+      JIRA_URL: "https://acme.atlassian.net",
+      JIRA_USERNAME: "bot@acme.example",
+      JIRA_API_TOKEN: "jira-org-token",
+    });
+    await setRepo({ JIRA_API_TOKEN: "jira-repo-token" });
+    const runEnv = await run();
+    expect(runEnv).toEqual({
+      JIRA_URL: "https://acme.atlassian.net",
+      JIRA_USERNAME: "bot@acme.example",
+    });
+
+    const sandbox = await getExecutionPlaneLayeredEnvironmentVariables({
+      db,
+      userId,
+      organizationId: orgId,
+      repoEnvironmentId,
+    });
+    for (const delivered of [JSON.stringify(runEnv), JSON.stringify(sandbox)]) {
+      expect(delivered).not.toContain("jira-global-token");
+      expect(delivered).not.toContain("jira-org-token");
+      expect(delivered).not.toContain("jira-repo-token");
+    }
+  });
+
   it("never hands an organization's Slack app credentials to an agent", async () => {
     await setOrg({
       SLACK_CLIENT_ID: "org-client",

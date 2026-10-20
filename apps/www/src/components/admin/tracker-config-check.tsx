@@ -23,8 +23,9 @@ export function TrackerConfigCheck() {
       <h2 className="text-base font-medium">Tracker config check</h2>
       <p className="text-xs text-muted-foreground">
         Resolves the post-merge audit&apos;s tracker settings for an org and
-        repository and shows which layer each key came from. The token is never
-        shown.
+        repository and shows which layer each key came from. The tracker is Jira
+        when JIRA_URL, JIRA_USERNAME and JIRA_API_TOKEN are all set, otherwise
+        YouTrack. The token is never shown.
       </p>
       <div className="flex gap-2">
         <Input
@@ -64,8 +65,9 @@ export function TrackerConfigCheck() {
         <>
           {"mixedLayers" in result && result.mixedLayers && (
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              YOUTRACK_URL and YOUTRACK_TOKEN come from different layers —
-              usually a stale repository override.
+              The tracker URL and token (YOUTRACK_URL / YOUTRACK_TOKEN, or
+              JIRA_URL / JIRA_API_TOKEN) come from different layers — usually a
+              stale repository override.
             </p>
           )}
           <pre className="text-xs bg-muted p-3 rounded-md overflow-auto">

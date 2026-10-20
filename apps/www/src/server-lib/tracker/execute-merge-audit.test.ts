@@ -13,7 +13,7 @@ import {
   type TrackerIssue,
   type TrackerLink,
   TrackerRequestError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 const PR_URL = "https://github.com/acme-inc/acme-core/pull/7";
 
@@ -81,6 +81,7 @@ function fakeTracker(issues: TrackerIssue[]) {
   const client: TrackerClient = {
     getIssue: vi.fn(async (key: string) => structuredClone(read(key))),
     getStage: vi.fn(async (key: string) => read(key).stage),
+    listStageTargets: vi.fn(async () => null),
     setStage: vi.fn(async (key: string, stage: string) => {
       commands.push({ key, command: `Stage ${stage}` });
       read(key).stage = stage;

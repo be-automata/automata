@@ -7,6 +7,7 @@ import { DBUserMessage } from "@terragon/shared/db/db-message";
 import { getRepoSkill } from "@terragon/shared/model/repo-skills";
 import type { ThreadSourceMetadata } from "@terragon/shared";
 import { effectiveShadow } from "@/lib/github-side-effects";
+import { TRACKER_SETUP_KEYS_TEXT } from "@/lib/tracker-env-keys";
 import { buildRepoOverrideFetcher } from "@/server-lib/review/repo-skill-override";
 import {
   renderSkillPlaceholders,
@@ -22,7 +23,7 @@ import {
   type MergedPrTrigger,
   trackerContextNotice,
 } from "@/server-lib/tracker/tracker-context";
-import { describeTrackerError } from "@/server-lib/tracker/youtrack-client";
+import { describeTrackerError } from "@/server-lib/tracker/tracker-types";
 import { WebhookSkip } from "./webhook-skip";
 
 /**
@@ -232,7 +233,7 @@ async function buildTrackerBlockSafely({
     });
     if (!config) {
       return trackerContextNotice(
-        "No tracker is configured for this repository. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the organization environment or on this repository's environment.",
+        `No tracker is configured for this repository. Set ${TRACKER_SETUP_KEYS_TEXT} on the organization environment or on this repository's environment.`,
       );
     }
     return await buildTrackerContextBlock({

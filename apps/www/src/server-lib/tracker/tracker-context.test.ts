@@ -10,7 +10,7 @@ import {
   type TrackerClient,
   type TrackerIssue,
   TrackerRequestError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 const issue: TrackerIssue = {
   key: "ACME-1",
@@ -33,6 +33,7 @@ const tracker = (getIssue: TrackerClient["getIssue"]): TrackerClient => ({
   getIssue,
   getStage: vi.fn(),
   setStage: vi.fn(),
+  listStageTargets: vi.fn(async () => null),
   addComment: vi.fn(),
   issueUrl: (key) => `https://yt.example.com/issue/${key}`,
 });

@@ -1,4 +1,4 @@
-import { ISSUE_KEY_SOURCE } from "./youtrack-client";
+import { ISSUE_KEY_SOURCE } from "./tracker-types";
 
 /**
  * Server-side ticket-key extraction for the post-merge audit (ADR-008).

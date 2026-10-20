@@ -99,6 +99,84 @@ const MARKER_PREFIX = "<!-- automata:";
 const SECTION_BEGIN = /^<!-- automata:if ([^\r\n]*?) -->[ \t]*\r?$/;
 const SECTION_END = /^<!-- automata:endif -->[ \t]*\r?$/;
 
+/**
+ * Control-plane context a review agent cannot fetch itself: it holds no GitHub
+ * credential (ADR-004), so the PR view, the prior reviews and the unresolved
+ * review threads are read by the control plane with the App token when the
+ * thread is created (prefetch-review-context.ts).
+ *
+ * A skill asks for them with ONE whole-line directive,
+ * `<!-- automata:context <fetcher> [<fetcher> …] -->`; the rendered blocks
+ * replace that line. Unlike the section markers it is CONTENT, not a marker:
+ * every render keeps it, so the substitution happens after rendering and the
+ * fetched (untrusted) text is never itself section- or placeholder-processed.
+ * A body without the directive is rendered byte-identical.
+ */
+export const REVIEW_CONTEXT_FETCHERS = [
+  "pr-view",
+  "prior-reviews",
+  "review-threads",
+] as const;
+
+export type ReviewContextFetcher = (typeof REVIEW_CONTEXT_FETCHERS)[number];
+
+const CONTEXT_DIRECTIVE = /^<!-- automata:context ([^\r\n]*?) -->[ \t]*\r?$/;
+
+function isContextFetcher(value: string): value is ReviewContextFetcher {
+  return (REVIEW_CONTEXT_FETCHERS as readonly string[]).includes(value);
+}
+
+/** The fetchers a directive's argument names, or the reason it is invalid. */
+function parseContextFetchers(
+  argument: string,
+): { fetchers: ReviewContextFetcher[] } | { error: string } {
+  const names = argument.split(/\s+/).filter((name) => name.length > 0);
+  if (names.length === 0) {
+    return { error: '"context" names no fetcher' };
+  }
+  const fetchers: ReviewContextFetcher[] = [];
+  for (const name of names) {
+    if (!isContextFetcher(name)) {
+      return {
+        error: `unknown context fetcher "${name}" (allowed: ${REVIEW_CONTEXT_FETCHERS.join(", ")})`,
+      };
+    }
+    if (fetchers.includes(name)) {
+      return { error: `context fetcher "${name}" is named twice` };
+    }
+    fetchers.push(name);
+  }
+  return { fetchers };
+}
+
+/**
+ * The fetchers the body's context directive asks for, or null when it has
+ * none. Assumes a body the validator accepted (at most one directive).
+ */
+export function findReviewContextDirective(
+  body: string,
+): ReviewContextFetcher[] | null {
+  if (!body.includes(MARKER_PREFIX)) return null;
+  for (const line of body.split("\n")) {
+    const match = CONTEXT_DIRECTIVE.exec(line);
+    if (!match) continue;
+    const parsed = parseContextFetchers(match[1] ?? "");
+    return "fetchers" in parsed ? parsed.fetchers : null;
+  }
+  return null;
+}
+
+/** Replace the body's context directive line with `rendered`. */
+export function substituteReviewContext(
+  body: string,
+  rendered: string,
+): string {
+  return body
+    .split("\n")
+    .map((line) => (CONTEXT_DIRECTIVE.test(line) ? rendered : line))
+    .join("\n");
+}
+
 type SectionScan =
   | { error: string }
   | {
@@ -120,8 +198,26 @@ function scanReviewModeSections(body: string): SectionScan {
   const conditions: (ReviewModeSectionCondition | null)[] = [];
   const markers: boolean[] = [];
   let open: ReviewModeSectionCondition | null = null;
+  let contextSeen = false;
   for (const [index, line] of lines.entries()) {
     const lineNo = index + 1;
+    const context = CONTEXT_DIRECTIVE.exec(line);
+    if (context) {
+      const parsed = parseContextFetchers(context[1] ?? "");
+      if ("error" in parsed) {
+        return { error: `line ${lineNo}: ${parsed.error}` };
+      }
+      if (contextSeen) {
+        return {
+          error: `line ${lineNo}: a second "context" directive (only one is allowed)`,
+        };
+      }
+      contextSeen = true;
+      // Content, not a marker: kept by every render (see CONTEXT_DIRECTIVE).
+      conditions.push(open);
+      markers.push(false);
+      continue;
+    }
     const begin = SECTION_BEGIN.exec(line);
     if (begin) {
       const condition = begin[1] ?? "";
@@ -151,7 +247,7 @@ function scanReviewModeSections(body: string): SectionScan {
     }
     if (line.trimStart().startsWith(MARKER_PREFIX)) {
       return {
-        error: `line ${lineNo}: unrecognised review-mode marker (only whole-line "if <condition>" and "endif" exist)`,
+        error: `line ${lineNo}: unrecognised review-mode marker (only whole-line "if <condition>", "endif" and "context <fetcher>…" exist)`,
       };
     }
     conditions.push(open);
@@ -466,11 +562,19 @@ export function assertAuditFixSkillContract(
  * (non-empty) without touching any surface, and a skill with a machine-parsed
  * output contract (github-ops) can pin it here.
  */
+/**
+ * The Flutter PR-review skill (ported from the legacy orchestrator). Same
+ * emit-only verdict contract as github-ops, so the same validator: a Flutter
+ * body without the fenced-json verdict must never be dispatched either.
+ */
+export const FLUTTER_REVIEW_SKILL_NAME = "flutter-pr-review";
+
 const SKILL_VALIDATORS: Record<
   string,
   (body: string, sourceLabel: string) => void
 > = {
   "github-ops": assertReviewSkillContract,
+  [FLUTTER_REVIEW_SKILL_NAME]: assertReviewSkillContract,
   [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
   [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
   [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,

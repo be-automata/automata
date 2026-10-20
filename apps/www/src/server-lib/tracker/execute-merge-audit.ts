@@ -1,16 +1,13 @@
+import { TRACKER_SETUP_KEYS_TEXT } from "@/lib/tracker-env-keys";
+
 import { extractTicketKeys } from "./extract-ticket-keys";
 import {
-  type AllowedStageTarget,
-  ALLOWED_STAGE_TARGETS,
-  canonicalStage,
-  decidePrimaryTransition,
   decideSiblingPromotion,
   isBlockerNotice,
-  isClearedIssue,
   isMergeRecord,
-  isTerminalIssue,
   linksOf,
   type LinkedTicketAction,
+  inlineCode,
   mergeAuditMarker,
   renderBlockerNotice,
   renderNoticeComment,
@@ -23,13 +20,20 @@ import {
   type MergeAuditIntent,
   parseMergeAuditIntent,
 } from "./parse-merge-audit-intent";
+import {
+  PROMOTION_TARGET,
+  type ResolvedStage,
+  stagePolicyFor,
+  type TrackerStagePolicy,
+} from "./stage-policy";
 import type { TrackerConfig } from "./tracker-config";
 import {
   describeTrackerError,
   type TrackerClient,
   type TrackerIssue,
   type TrackerLinkedIssue,
-} from "./youtrack-client";
+  TrackerTransitionError,
+} from "./tracker-types";
 
 /**
  * The control-plane executor for the post-merge audit (ADR-008). Called from
@@ -105,25 +109,59 @@ export type MergeAuditOutcome =
   | { outcome: "no_ticket" }
   | { outcome: "tracker_unconfigured" };
 
+/** A policy target and the concrete stage this tracker will be asked for. */
+interface StageMove extends ResolvedStage {
+  /** The policy's own name for the target — what the allowlist holds. */
+  target: string;
+}
+
+/**
+ * Pick the concrete stage for a policy target. A tracker that moves by
+ * transitions (Jira) is asked which stages are reachable and the policy picks
+ * one — possibly a fallback short of the target; none → a typed error, and
+ * nothing is written. A tracker that takes any name (YouTrack) gets the
+ * target as is, with no request.
+ *
+ * The runtime allowlist check keeps the policy's closed set of targets true
+ * for any caller.
+ */
+async function resolveStageMove(
+  policy: TrackerStagePolicy,
+  tracker: TrackerClient,
+  key: string,
+  target: string,
+): Promise<StageMove> {
+  if (!policy.allowedTargets.includes(target)) {
+    throw new Error(`stage target not allowed: ${String(target)}`);
+  }
+  const resolved = policy.resolveTarget(
+    target,
+    await tracker.listStageTargets(key),
+  );
+  if (resolved === null) {
+    throw new TrackerTransitionError(target);
+  }
+  return { target, ...resolved };
+}
+
 /**
  * The ONLY place a stage is written, and it always reads the result back: the
  * command API accepts text a workflow then rejects or ignores, so "applied"
- * means the tracker now reports the target — not that the request returned.
- *
- * The target type is already the closed allowlist; the runtime check keeps
- * that true for any future caller that reaches here through a widened type.
+ * means the tracker now reports the requested stage — not that the request
+ * returned.
  */
 async function applyStage(
+  policy: TrackerStagePolicy,
   tracker: TrackerClient,
   key: string,
-  target: AllowedStageTarget,
+  move: StageMove,
 ): Promise<{ applied: boolean; stageAfter: string | null }> {
-  if (!ALLOWED_STAGE_TARGETS.includes(target)) {
-    throw new Error(`stage target not allowed: ${String(target)}`);
+  if (!policy.allowedTargets.includes(move.target)) {
+    throw new Error(`stage target not allowed: ${String(move.target)}`);
   }
-  await tracker.setStage(key, target);
+  await tracker.setStage(key, move.stage);
   const stageAfter = await tracker.getStage(key);
-  return { applied: canonicalStage(stageAfter) === target, stageAfter };
+  return { applied: policy.reached(stageAfter, move.stage), stageAfter };
 }
 
 /** An intent that parses AND is about this PR — not the skill's example. */
@@ -142,6 +180,7 @@ function parseUsableIntent(
 }
 
 interface AuditContext {
+  policy: TrackerStagePolicy;
   tracker: TrackerClient;
   prUrl: string;
   live: boolean;
@@ -150,11 +189,11 @@ interface AuditContext {
 
 /** One ticket that depended on the merged one: notify its owner, or promote it. */
 async function probeDependant(
-  { tracker, prUrl, live }: AuditContext,
+  { policy, tracker, prUrl, live }: AuditContext,
   mergedKey: string,
   dependant: TrackerLinkedIssue,
 ): Promise<Pick<LinkedTicketAction, "stage" | "action">> {
-  if (isTerminalIssue(dependant)) {
+  if (policy.isTerminalIssue(dependant)) {
     return { stage: dependant.stage, action: "Skipped (already resolved)" };
   }
   const sibling = await tracker.getIssue(dependant.key);
@@ -164,7 +203,7 @@ async function probeDependant(
   ) {
     return { stage, action: "Already notified" };
   }
-  const promotion = decideSiblingPromotion({ mergedKey, sibling });
+  const promotion = decideSiblingPromotion(policy, { mergedKey, sibling });
   if (!promotion.promote) {
     if (live) {
       await tracker.addComment(
@@ -177,18 +216,27 @@ async function probeDependant(
       action: `${live ? "Notified" : "Would notify"} — ${promotion.reason}`,
     };
   }
+  const target = PROMOTION_TARGET;
   if (!live) {
-    return { stage, action: "Would promote → To Do (final blocker merged)" };
+    return {
+      stage,
+      action: `Would promote → ${target} (final blocker merged)`,
+    };
   }
-  const { applied } = await applyStage(tracker, sibling.key, "To Do");
+  const { applied } = await applyStage(
+    policy,
+    tracker,
+    sibling.key,
+    await resolveStageMove(policy, tracker, sibling.key, target),
+  );
   if (!applied) {
-    return { stage, action: "Promotion to To Do did not apply" };
+    return { stage, action: `Promotion to ${target} did not apply` };
   }
   await tracker.addComment(
     sibling.key,
     renderPromotionComment(mergedKey, prUrl),
   );
-  return { stage, action: "Promoted → To Do (final blocker merged)" };
+  return { stage, action: `Promoted → ${target} (final blocker merged)` };
 }
 
 /**
@@ -201,7 +249,7 @@ async function probeDependants(
 ): Promise<LinkedTicketAction[]> {
   const dependants = [
     ...new Map(
-      linksOf(issue, "Depend", "OUTWARD")
+      linksOf(issue, context.policy.dependLinkType, "OUTWARD")
         .filter((dependant) => dependant.key !== issue.key)
         .map((dependant) => [dependant.key, dependant]),
     ).values(),
@@ -275,15 +323,15 @@ async function auditTicket(
   issue: TrackerIssue,
   { intent, mergedBy }: { intent: MergeAuditIntent; mergedBy: string | null },
 ): Promise<TicketOutcome> {
-  const { tracker, prUrl, live, logger } = context;
+  const { policy, tracker, prUrl, live, logger } = context;
   const audit =
     intent.tickets.find(
       (ticket) => ticket.key.trim().toUpperCase() === issue.key,
     ) ?? null;
-  const openSubtasks = linksOf(issue, "Subtask", "OUTWARD").filter(
-    (child) => !isClearedIssue(child),
+  const openSubtasks = linksOf(issue, policy.subtaskLinkType, "OUTWARD").filter(
+    (child) => !policy.isClearedIssue(child),
   );
-  const decision = decidePrimaryTransition({
+  const decision = policy.decidePrimaryTransition({
     stage: issue.stage,
     resolved: issue.resolved,
     audit,
@@ -303,7 +351,7 @@ async function auditTicket(
       key: child.key,
       relation: "subtask",
       stage: child.stage,
-      action: "Open — holds this ticket short of PR Merged",
+      action: `Open — holds this ticket short of ${policy.mergedTarget}`,
     })),
     errors: [],
   };
@@ -313,12 +361,38 @@ async function auditTicket(
     result.errors.push(detail);
   };
 
-  if (decision.target !== null && live) {
+  // The concrete stage, in shadow mode too, so the comment says what a live
+  // run would request. A fallback (Jira with no QA status) is reported as the
+  // stage it is, and never completes the ticket.
+  let move: StageMove | null = null;
+  if (decision.target !== null) {
     try {
-      const { applied, stageAfter } = await applyStage(
+      move = await resolveStageMove(
+        policy,
         tracker,
         issue.key,
         decision.target,
+      );
+      result.decision = {
+        target: move.stage,
+        note: move.fallback
+          ? `${decision.note} No \`${decision.target}\` transition exists; ${live ? "moved" : "would move"} to ${inlineCode(move.stage)} instead.`
+          : decision.note,
+      };
+    } catch (error) {
+      recordFailure("stage move failed", error);
+    }
+  }
+  const completes =
+    move !== null && !move.fallback && move.target === policy.mergedTarget;
+
+  if (move !== null && live) {
+    try {
+      const { applied, stageAfter } = await applyStage(
+        policy,
+        tracker,
+        issue.key,
+        move,
       );
       result.stageAfter = stageAfter;
       result.transitionApplied = applied;
@@ -327,9 +401,10 @@ async function auditTicket(
     }
   }
 
-  // Dependants are probed only by the merge that takes the ticket to
-  // `PR Merged` — a later release PR naming the same key stays quiet.
-  if (decision.target === "PR Merged" && (!live || result.transitionApplied)) {
+  // Dependants are probed only by the merge that completes the ticket
+  // (`PR Merged` on YouTrack) — a later release PR naming the same key stays
+  // quiet, and so does a move that fell back short of the merged target.
+  if (completes && (!live || result.transitionApplied)) {
     result.linked.push(...(await probeDependants(context, issue)));
   }
 
@@ -391,7 +466,7 @@ export async function executeMergeAudit({
 
   if (config === null || tracker === null) {
     return await postNotice(
-      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.",
+      `The post-merge audit is enabled for this repository, but no tracker is configured. Set ${TRACKER_SETUP_KEYS_TEXT} on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.`,
       { outcome: "tracker_unconfigured" },
     );
   }
@@ -423,7 +498,13 @@ export async function executeMergeAudit({
   }
 
   const live = config.writes === "live";
-  const context: AuditContext = { tracker, prUrl: pr.htmlUrl, live, logger };
+  const context: AuditContext = {
+    policy: stagePolicyFor(config.kind),
+    tracker,
+    prUrl: pr.htmlUrl,
+    live,
+    logger,
+  };
 
   // Reads are independent; the write chains run one ticket at a time, because
   // a PR can name two tickets that are linked to each other.

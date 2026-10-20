@@ -6,7 +6,13 @@ const validIntent = {
   commit: "abc123",
   summary: "Two issues found.",
   findings: [
-    { severity: "error", path: "src/a.ts", line: 10, body: "off-by-one", quote: "i <= n" },
+    {
+      severity: "error",
+      path: "src/a.ts",
+      line: 10,
+      body: "off-by-one",
+      quote: "i <= n",
+    },
     { path: "src/b.ts", line: 3, body: "nit" },
   ],
   severityFloor: "error",
@@ -28,9 +34,15 @@ describe("parseReviewIntent", () => {
   });
 
   it("prefers the LAST json block (an earlier example is ignored)", () => {
-    const example = fenced({ verdict: "approve", commit: "OLD", summary: "example" });
+    const example = fenced({
+      verdict: "approve",
+      commit: "OLD",
+      summary: "example",
+    });
     const real = fenced(validIntent);
-    const res = parseReviewIntent(`${example}\n...then the real one...\n${real}`);
+    const res = parseReviewIntent(
+      `${example}\n...then the real one...\n${real}`,
+    );
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.intent.commit).toBe("abc123");
   });
@@ -72,7 +84,10 @@ describe("parseReviewIntent", () => {
 describe("parseReviewIntent — unable_to_review (ADR-009)", () => {
   it("reads a well-formed unable intent as NO verdict, attributed to the agent", () => {
     const res = parseReviewIntent(
-      fenced({ verdict: "unable_to_review", reason: "no diff: base ref missing" }),
+      fenced({
+        verdict: "unable_to_review",
+        reason: "no diff: base ref missing",
+      }),
     );
     expect(res).toEqual({
       ok: false,
@@ -83,7 +98,11 @@ describe("parseReviewIntent — unable_to_review (ADR-009)", () => {
 
   it("carries the commit when the agent could name one", () => {
     const res = parseReviewIntent(
-      fenced({ verdict: "unable_to_review", reason: "truncated", commit: "abc" }),
+      fenced({
+        verdict: "unable_to_review",
+        reason: "truncated",
+        commit: "abc",
+      }),
     );
     expect(res).toEqual({
       ok: false,
@@ -132,5 +151,63 @@ describe("toExecutorIntent", () => {
     if (!res.ok) return;
     const exec = toExecutorIntent(res.intent);
     expect(exec.comments).toBeUndefined();
+  });
+});
+
+describe("parseReviewIntent — legacy key aliases and resolvedThreads", () => {
+  const fence = (obj: unknown) =>
+    `done\n\n\`\`\`json\n${JSON.stringify(obj)}\n\`\`\`\n`;
+
+  it("accepts the legacy `body` / `comments` names so no finding is dropped", () => {
+    const r = parseReviewIntent(
+      fence({
+        verdict: "request_changes",
+        commit: "abc",
+        body: "Two issues.",
+        comments: [{ path: "a.ts", line: 1, body: "x", severity: "warning" }],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.intent.summary).toBe("Two issues.");
+    expect(r.intent.findings).toHaveLength(1);
+  });
+
+  it("the current names win when both are present", () => {
+    const r = parseReviewIntent(
+      fence({
+        verdict: "approve",
+        commit: "abc",
+        summary: "current",
+        body: "legacy",
+        findings: [],
+        comments: [{ path: "a.ts", line: 1, body: "x" }],
+      }),
+    );
+    expect(r.ok && r.intent.summary).toBe("current");
+    expect(r.ok && r.intent.findings).toEqual([]);
+  });
+
+  it("carries resolvedThreads and rejects a malformed entry", () => {
+    const ok = parseReviewIntent(
+      fence({
+        verdict: "approve",
+        commit: "abc",
+        summary: "s",
+        resolvedThreads: [{ inlineCommentId: 111, reply: "Verified: x" }],
+      }),
+    );
+    expect(ok.ok && ok.intent.resolvedThreads).toEqual([
+      { inlineCommentId: 111, reply: "Verified: x" },
+    ]);
+    const bad = parseReviewIntent(
+      fence({
+        verdict: "approve",
+        commit: "abc",
+        summary: "s",
+        resolvedThreads: [{ inlineCommentId: "111", reply: "" }],
+      }),
+    );
+    expect(bad.ok).toBe(false);
   });
 });

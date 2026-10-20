@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { buildTaggedFence } from "./tagged-fence";
+import { MAX_THREAD_RESOLUTIONS } from "./review-thread-resolutions";
 import type {
   ReviewIntent,
   ReviewIntentComment,
@@ -35,6 +36,20 @@ export const emittedReviewIntentSchema = z.object({
   findings: z.array(findingSchema).optional(),
   /** Informational: the resolved approve-severity floor (server already applied it). */
   severityFloor: z.string().optional(),
+  /**
+   * Prior review threads the agent verified addressed. The terminal writer
+   * replies once and resolves each (review-thread-resolutions.ts); `inlineCommentId`
+   * is the `comment_id` the prefetched `<review_threads>` block carried.
+   */
+  resolvedThreads: z
+    .array(
+      z.object({
+        inlineCommentId: z.number().int().positive(),
+        reply: z.string().min(1).max(2000),
+      }),
+    )
+    .max(MAX_THREAD_RESOLUTIONS)
+    .optional(),
 });
 
 export type EmittedReviewIntent = z.infer<typeof emittedReviewIntentSchema>;
@@ -174,6 +189,7 @@ export function parseReviewIntent(
       reason: `intent JSON parse failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+  raw = withLegacyKeyAliases(raw);
   // Tried first and only on a well-formed block: a malformed `unable_to_review`
   // falls through to the verdict schema and is reported as a parse failure.
   const unable = unableToReviewIntentSchema.safeParse(raw);
@@ -196,6 +212,29 @@ export function parseReviewIntent(
     };
   }
   return { ok: true, intent: parsed.data };
+}
+
+/**
+ * The skills ported from the legacy orchestrator keep its partials verbatim,
+ * and those still call the review text `body` and the findings `comments` (the
+ * old `emit_review` names). zod drops unknown keys, so an agent that followed
+ * that wording would lose every finding silently. Accept both legacy names as
+ * aliases; the current names win when both are present.
+ */
+function withLegacyKeyAliases(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return raw;
+  }
+  const record = raw as Record<string, unknown>;
+  return {
+    ...record,
+    ...(record.findings === undefined && Array.isArray(record.comments)
+      ? { findings: record.comments }
+      : {}),
+    ...(record.summary === undefined && typeof record.body === "string"
+      ? { summary: record.body }
+      : {}),
+  };
 }
 
 /** Map the emitted (wire) intent to the executor's ReviewIntent. */

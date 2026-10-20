@@ -226,6 +226,20 @@ async function handlePullRequestAutomation(
     );
     return;
   }
+  // Bot senders (legacy-orchestrator parity): a push or an opening done by a
+  // bot — dependabot, or this App pushing its own branch — is not reviewed.
+  // Keyed on the SENDER, not the PR author: a human pushing to a bot's branch
+  // is still reviewed. ready_for_review is always a human act and stays in.
+  if (
+    config.filter.excludeBotSenders &&
+    event.sender?.type === "Bot" &&
+    (event.action === "opened" || event.action === "synchronize")
+  ) {
+    console.log(
+      `Skipping automation ${automation.id} for PR #${prNumber} in ${repoFullName}: ${event.action} sent by bot ${event.sender.login}`,
+    );
+    return;
+  }
   // Draft-PR gate. Drafts are skipped by DEFAULT; a repo or org opts in via
   // the dashboard (or, legacy, the automation's includeDraftPRs filter).
   // Resolved live so a dashboard change applies to the next webhook.

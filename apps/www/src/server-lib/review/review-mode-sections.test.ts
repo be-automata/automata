@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  FLUTTER_REVIEW_SKILL_NAME,
   REVIEW_MODE_SECTION_CONDITIONS,
   assertReviewSkillContract,
+  findReviewContextDirective,
   findReviewModeSectionError,
   hasReviewModeSections,
   renderReviewModeSections,
+  substituteReviewContext,
   validateSkillBody,
 } from "./review-skill";
 import { renderSkillPlaceholders } from "./resolve-review-skill";
@@ -204,5 +207,72 @@ describe("renderSkillPlaceholders and review-mode sections", () => {
     expect(
       renderSkillPlaceholders(body, { ...vars, reviewPrompt: CLASSIC }),
     ).toBe("Repo acme/widgets\nClassic develop\nEnd");
+  });
+});
+
+/**
+ * The `automata:context` directive: content, not a marker. It asks the control
+ * plane for prefetched review context, survives every render, and is the only
+ * other `automata:` line the grammar accepts.
+ */
+describe("automata:context directive", () => {
+  const DIRECTIVE =
+    "<!-- automata:context pr-view prior-reviews review-threads -->";
+
+  it("is kept by every render and leaves the rest of the body untouched", () => {
+    const body = `## Trigger Context\n${DIRECTIVE}\n\n${CONTRACT}`;
+    expect(findReviewModeSectionError(body)).toBeUndefined();
+    for (const prompt of [undefined, CLASSIC, ORCH_TESTS, ORCH_NO_TESTS]) {
+      expect(renderReviewModeSections(body, prompt)).toBe(body);
+    }
+    expect(hasReviewModeSections(body)).toBe(false);
+  });
+
+  it("reports the fetchers it names, in order", () => {
+    expect(
+      findReviewContextDirective(
+        `A\n<!-- automata:context review-threads pr-view -->\nB`,
+      ),
+    ).toEqual(["review-threads", "pr-view"]);
+    expect(findReviewContextDirective(`A\n${CONTRACT}`)).toBeNull();
+  });
+
+  it("rejects an unknown fetcher, a repeated fetcher, an empty list and a second directive", () => {
+    expect(
+      findReviewModeSectionError("<!-- automata:context pr-diff -->"),
+    ).toMatch(/unknown context fetcher "pr-diff"/);
+    expect(
+      findReviewModeSectionError("<!-- automata:context pr-view pr-view -->"),
+    ).toMatch(/named twice/);
+    expect(findReviewModeSectionError("<!-- automata:context  -->")).toMatch(
+      /names no fetcher/,
+    );
+    expect(findReviewModeSectionError(`${DIRECTIVE}\nX\n${DIRECTIVE}`)).toMatch(
+      /second "context" directive/,
+    );
+  });
+
+  it("is validated for github-ops and flutter-pr-review alike", () => {
+    const good = `${DIRECTIVE}\n${CONTRACT}`;
+    expect(() => validateSkillBody("github-ops", good, "t")).not.toThrow();
+    expect(() =>
+      validateSkillBody(FLUTTER_REVIEW_SKILL_NAME, good, "t"),
+    ).not.toThrow();
+    expect(() =>
+      validateSkillBody(FLUTTER_REVIEW_SKILL_NAME, DIRECTIVE, "t"),
+    ).toThrow(/no fenced-json verdict contract/);
+    expect(() =>
+      validateSkillBody(
+        FLUTTER_REVIEW_SKILL_NAME,
+        `<!-- automata:context nope -->\n${CONTRACT}`,
+        "t",
+      ),
+    ).toThrow(/unknown context fetcher/);
+  });
+
+  it("is replaced in place by the rendered context", () => {
+    const body = `A\n${DIRECTIVE}\nB`;
+    expect(substituteReviewContext(body, "CTX")).toBe("A\nCTX\nB");
+    expect(substituteReviewContext("A\nB", "CTX")).toBe("A\nB");
   });
 });

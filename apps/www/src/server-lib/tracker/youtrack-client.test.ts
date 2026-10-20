@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { createYouTrackClient, parseTrackerIssue } from "./youtrack-client";
 import {
-  createYouTrackClient,
   normalizeTrackerBaseUrl,
-  parseTrackerIssue,
   TrackerConfigError,
   TrackerRequestError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 const BASE = "https://acme.youtrack.cloud";
 const TOKEN = "perm:secret-token";

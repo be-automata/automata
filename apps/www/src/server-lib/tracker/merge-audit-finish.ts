@@ -9,7 +9,7 @@ import {
 } from "./execute-merge-audit";
 import { createTrackerClient } from "./tracker-client";
 import { resolveTrackerConfig, type TrackerConfig } from "./tracker-config";
-import { describeTrackerError } from "./youtrack-client";
+import { describeTrackerError } from "./tracker-types";
 
 /**
  * Thread-finish glue for the post-merge audit (ADR-008): binds the pure
@@ -128,7 +128,7 @@ export async function runMergeAuditAtFinish({
       repoFullName,
     });
   } catch (error) {
-    // An invalid YOUTRACK_URL reads as "not configured": the executor then
+    // An invalid YOUTRACK_URL / JIRA_URL reads as "not configured": the executor then
     // says so on the PR instead of the audit silently vanishing.
     console.error("[merge-audit] tracker config invalid", {
       repoFullName,
