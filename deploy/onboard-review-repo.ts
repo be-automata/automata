@@ -236,6 +236,15 @@ async function main(parsed: RunArgs) {
   if (!desired) {
     throw new Error("unreachable: a configure run without a built automation");
   }
+  // Refuse BEFORE any write: failing here after the settings upsert would
+  // leave the repo half-configured.
+  if (existing && existing.userId !== ownerUserId) {
+    fail(
+      `Automation '${name}' (${existing.id}) is owned by user ${existing.userId}, ` +
+        `not the org owner ${ownerUserId}. Its runs would use that user's ` +
+        `credentials; reassign or delete it in the dashboard, then re-run.`,
+    );
+  }
 
   const settingsPatch = buildReviewSettingsPatch(parsed);
   const currentSettings = await getRepoReviewSetting({
@@ -279,13 +288,6 @@ async function main(parsed: RunArgs) {
       console.log(`Created automation ${created.id}.`);
     }
   } else {
-    if (existing.userId !== ownerUserId) {
-      fail(
-        `Automation '${name}' (${existing.id}) is owned by user ${existing.userId}, ` +
-          `not the org owner ${ownerUserId}. Its runs would use that user's ` +
-          `credentials; reassign or delete it in the dashboard, then re-run.`,
-      );
-    }
     const updates = {
       triggerType: desired.triggerType,
       triggerConfig: desired.triggerConfig,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { buildTaggedFence } from "./tagged-fence";
+import { MAX_THREAD_RESOLUTIONS } from "./review-thread-resolutions";
 import type {
   ReviewIntent,
   ReviewIntentComment,
@@ -47,7 +48,7 @@ export const emittedReviewIntentSchema = z.object({
         reply: z.string().min(1).max(2000),
       }),
     )
-    .max(50)
+    .max(MAX_THREAD_RESOLUTIONS)
     .optional(),
 });
 

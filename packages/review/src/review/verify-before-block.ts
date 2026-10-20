@@ -22,6 +22,7 @@ import {
   type FloorVerdict,
 } from "./severity-policy";
 import {
+  isRepoRelativePath,
   verifyFindingQuote,
   type FileAtCommit,
   type FileAtCommitReader,
@@ -59,39 +60,36 @@ export interface VerifyBeforeBlockOpts {
 }
 
 /**
- * Read each distinct path once, at most `VERIFY_READ_CONCURRENCY` at a time.
- * A reader that throws is treated as "could not check" — the post must never
- * fail because one file read did.
+ * Read each distinct path once, `VERIFY_READ_CONCURRENCY` at a time. A reader
+ * that throws is treated as "could not check" — the post must never fail
+ * because one file read did.
  */
-function cachedReader(
+async function readAll(
   readFile: FileAtCommitReader,
   paths: readonly string[],
-): FileAtCommitReader {
-  const cache = new Map<string, FileAtCommit>();
-  const safeRead = async (path: string): Promise<FileAtCommit> => {
-    try {
-      return await readFile(path);
-    } catch (err) {
-      return {
-        kind: "unchecked",
-        reason: err instanceof Error ? err.message : String(err),
-      };
-    }
-  };
-  const queue = [...new Set(paths)];
-  const workers = Array.from(
-    { length: Math.min(VERIFY_READ_CONCURRENCY, queue.length) },
-    async () => {
-      for (let path = queue.shift(); path !== undefined; path = queue.shift()) {
-        cache.set(path, await safeRead(path));
-      }
-    },
-  );
-  const warmed = Promise.all(workers);
-  return async (path) => {
-    await warmed;
-    return cache.get(path) ?? (await safeRead(path));
-  };
+): Promise<Map<string, FileAtCommit>> {
+  const files = new Map<string, FileAtCommit>();
+  const unique = [...new Set(paths)];
+  for (let i = 0; i < unique.length; i += VERIFY_READ_CONCURRENCY) {
+    await Promise.all(
+      unique.slice(i, i + VERIFY_READ_CONCURRENCY).map(async (path) => {
+        try {
+          files.set(path, await readFile(path));
+        } catch (err) {
+          files.set(path, {
+            kind: "unchecked",
+            reason: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+  }
+  return files;
+}
+
+/** Whether verifyFindingQuote would read this finding's file at all. */
+function needsRead(c: ReviewIntentComment): boolean {
+  return (c.quote ?? "").trim().length > 0 && isRepoRelativePath(c.path);
 }
 
 /** Run the pass over `intent`; returns the (possibly de-fanged) intent. */
@@ -106,10 +104,12 @@ export async function applyVerifyBeforeBlock<T extends VerifiableIntent>(
   );
   if (blocking.length === 0) return intent;
 
-  const readFile = cachedReader(
+  const files = await readAll(
     opts.readFile,
-    blocking.map((c) => c.path),
+    blocking.filter(needsRead).map((c) => c.path),
   );
+  const readFile: FileAtCommitReader = async (path) =>
+    files.get(path) ?? { kind: "unchecked", reason: "not read" };
   const results = new Map<ReviewIntentComment, FindingVerificationResult>();
   for (const c of blocking) {
     results.set(
@@ -120,10 +120,12 @@ export async function applyVerifyBeforeBlock<T extends VerifiableIntent>(
       ),
     );
   }
+  if ([...results.values()].every((v) => v.result === "verified")) {
+    return intent;
+  }
 
   let downgraded = 0;
   let gatingBlockers = 0;
-  let changed = false;
   const checked = comments.map((c): ReviewIntentComment => {
     const verification = results.get(c);
     if (!verification) return c;
@@ -131,7 +133,6 @@ export async function applyVerifyBeforeBlock<T extends VerifiableIntent>(
       gatingBlockers++;
       return c;
     }
-    changed = true;
     if (verification.result === "unchecked") {
       gatingBlockers++;
       logger?.warn("verify-before-block: quote not checked; finding kept", {
@@ -164,7 +165,6 @@ export async function applyVerifyBeforeBlock<T extends VerifiableIntent>(
     };
   });
 
-  if (!changed) return intent;
   const verdict =
     intent.verdict === "request_changes" &&
     downgraded > 0 &&

@@ -93,8 +93,8 @@ export function threadsAsOf(
 
 /**
  * The prompt production sends, assembled the same three ways:
- *   1. the skill's placeholders are rendered (resolve-review-skill.ts
- *      renderSkillPlaceholders: only `{{repoFullName}}` and `{{baseBranch}}`),
+ *   1. the skill's placeholders are rendered by production's own
+ *      resolve-review-skill.ts `renderSkillPlaceholders` (injected),
  *   2. the context directive is replaced by the rendered context LAST
  *      (automations.ts; `substituteContext` is review-skill.ts's, injected),
  *      and the event line is joined to the skill with ONE space, then trimmed
@@ -111,12 +111,21 @@ export function buildReplayPrompt(args: {
   event: "opened" | "synchronize" | "ready_for_review";
   renderedContext: string;
   toleranceDirective: string;
+  /**
+   * Render the skill's sections and placeholders for `repoFullName` /
+   * `baseBranch` (resolve-review-skill.ts `renderSkillPlaceholders`, injected).
+   */
+  renderPlaceholders: (
+    body: string,
+    vars: { repoFullName: string; baseBranch: string },
+  ) => string;
   /** Replace the context directive with `context`; null when the body has none. */
   substituteContext: (body: string, context: string) => string | null;
 }): string {
-  const rendered = args.flattenedSkill
-    .replaceAll("{{repoFullName}}", args.repoFullName)
-    .replaceAll("{{baseBranch}}", args.baseRef);
+  const rendered = args.renderPlaceholders(args.flattenedSkill, {
+    repoFullName: args.repoFullName,
+    baseBranch: args.baseRef,
+  });
   const skillText = args.substituteContext(rendered, args.renderedContext);
   if (skillText === null) {
     throw new Error(

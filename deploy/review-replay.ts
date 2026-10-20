@@ -53,6 +53,7 @@ import {
   findReviewContextDirective,
   substituteReviewContext,
 } from "../apps/www/src/server-lib/review/review-skill";
+import { renderSkillPlaceholders } from "../apps/www/src/server-lib/review/resolve-review-skill";
 import { applyVerifyBeforeBlock } from "../packages/review/src/review/verify-before-block";
 import type { FileAtCommit } from "../packages/review/src/review/finding-verifier";
 import {
@@ -248,6 +249,9 @@ function runPrompt(argv: string[]): void {
     toleranceDirective: buildReviewToleranceDirective(
       toleranceToPolicy(tolerance),
     ),
+    // No review mode: production renders sections only for `github-ops`, and
+    // a ported review skill (the only kind replayed) is rendered verbatim.
+    renderPlaceholders: (body, vars) => renderSkillPlaceholders(body, vars),
     substituteContext: (body, context) =>
       findReviewContextDirective(body) === null
         ? null

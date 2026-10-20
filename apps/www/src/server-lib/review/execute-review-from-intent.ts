@@ -235,12 +235,13 @@ export async function executeReviewFromIntent(
       commit: emitted.commit,
     });
   }
-  // Apply the per-repo approve-severity floor server-side BEFORE anything is
-  // posted — the load-bearing guarantee. `applyApproveSeverityFloor` only ever
-  // downgrades a too-generous `approve` (comment/request_changes pass through),
-  // recomputing the verdict from the findings' severities under this repo's
-  // tolerance. This runs identically for the fresh and stale paths so the
-  // effective verdict is consistent regardless of HEAD movement.
+  // Apply the per-repo severity floor server-side BEFORE anything is posted —
+  // the load-bearing guarantee. `applyApproveSeverityFloor` only ever TIGHTENS:
+  // a too-generous `approve` is recomputed from the findings' severities, a
+  // `comment` carrying a gating blocker is raised to `request_changes`, and a
+  // `request_changes` passes through. This runs identically for the fresh and
+  // stale paths so the effective verdict is consistent regardless of HEAD
+  // movement.
   // Verify-before-block FIRST (legacy order): a blocking finding whose quote
   // does not reproduce at the reviewed commit is de-fanged, so the floor below
   // never lets a hallucination lower an approve or raise a comment.
@@ -459,20 +460,16 @@ export async function executeReviewFromIntent(
   // posted by an earlier execution of this same intent (so a crash between the
   // post and the resolutions is finished by the redelivered run). Never on the
   // stale path above, never on a notice. Best effort: never changes `outcome`.
-  const resolutions = emitted.resolvedThreads ?? [];
   if (
     opts.threadResolutions &&
-    resolutions.length > 0 &&
     (outcome.outcome === "posted" || outcome.outcome === "skipped_existing")
   ) {
-    const { client, claim } = opts.threadResolutions;
     try {
       await applyThreadResolutions({
-        client,
-        claim: () => claim(emitted.commit),
+        ...opts.threadResolutions,
         prNumber,
         commit: emitted.commit,
-        resolutions,
+        resolutions: emitted.resolvedThreads ?? [],
         logger,
       });
     } catch (err) {

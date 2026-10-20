@@ -35,6 +35,13 @@ const SKILL = `Review {{repoFullName}} against origin/{{baseBranch}}.\n## Trigge
 const TOLERANCE_NOTE = "## Repository review tolerance: `info`";
 const substitute = (body: string, context: string): string | null =>
   body.includes(DIRECTIVE) ? body.replace(DIRECTIVE, context) : null;
+const renderPlaceholders = (
+  body: string,
+  vars: { repoFullName: string; baseBranch: string },
+): string =>
+  body
+    .replaceAll("{{repoFullName}}", vars.repoFullName)
+    .replaceAll("{{baseBranch}}", vars.baseBranch);
 
 describe("buildReplayPrompt", () => {
   test("placeholders, context last, one-space join, trimmed, tolerance after ---", () => {
@@ -46,6 +53,7 @@ describe("buildReplayPrompt", () => {
       event: "synchronize",
       renderedContext: "CTX {{baseBranch}}",
       toleranceDirective: TOLERANCE_NOTE,
+      renderPlaceholders,
       substituteContext: substitute,
     });
     const expectedSkill = SKILL.replace("{{repoFullName}}", "acme/widgets")
@@ -75,6 +83,7 @@ describe("buildReplayPrompt", () => {
           event: "opened",
           renderedContext: "",
           toleranceDirective: TOLERANCE_NOTE,
+          renderPlaceholders,
           substituteContext: substitute,
         }),
       /no automata:context directive/,
