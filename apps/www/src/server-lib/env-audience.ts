@@ -45,6 +45,8 @@ export const CONTROL_PLANE_ONLY_ENV_KEYS: ReadonlySet<string> = new Set([
   // The post-merge audit's tracker token: every tracker write is performed by
   // the control plane, so the agent has no use for it.
   "YOUTRACK_TOKEN",
+  // The same token for an org whose tracker is Jira.
+  "JIRA_API_TOKEN",
 ]);
 
 /**

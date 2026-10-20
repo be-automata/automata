@@ -485,6 +485,10 @@ export function OrganizationEnvironmentUI(
         this organization, except control-plane keys such as{" "}
         <code className="bg-muted px-1 py-0.5 rounded text-xs">
           YOUTRACK_TOKEN
+        </code>{" "}
+        and{" "}
+        <code className="bg-muted px-1 py-0.5 rounded text-xs">
+          JIRA_API_TOKEN
         </code>
         , which never reach an agent.
       </p>

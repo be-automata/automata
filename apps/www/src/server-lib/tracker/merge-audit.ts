@@ -4,7 +4,7 @@ import type {
   MergeAuditCriterion,
   MergeAuditTicket,
 } from "./parse-merge-audit-intent";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import type { TrackerIssue, TrackerLinkedIssue } from "./tracker-types";
 
 /**
  * Pure policy + rendering for the post-merge audit (ADR-008). No I/O.
@@ -156,7 +156,7 @@ export function formatScore(score: AuditScore): string {
 // ---------------------------------------------------------------------------
 
 export interface TransitionDecision {
-  target: AllowedStageTarget | null;
+  target: string | null;
   /** One line explaining the decision, shown in both comments. */
   note: string;
 }
@@ -235,20 +235,25 @@ export function decidePrimaryTransition({
  * blockers. That also makes the rule safe against a mis-read link direction —
  * if the relation were the other way round, the guard fails and nothing moves.
  */
-export function decideSiblingPromotion({
-  mergedKey,
-  sibling,
-}: {
-  mergedKey: string;
-  sibling: TrackerIssue;
-}): { promote: boolean; reason: string } {
-  if (canonicalStage(sibling.stage) !== "Backlog") {
+/** The tracker vocabulary the promotion rule reads — a stage policy. */
+export interface SiblingPromotionVocabulary {
+  /** Link type whose INWARD side lists the sibling's blockers. */
+  readonly dependLinkType: string;
+  isBacklog(stage: string | null): boolean;
+  isClearedIssue(issue: TrackerLinkedIssue): boolean;
+}
+
+export function decideSiblingPromotion(
+  { dependLinkType, isBacklog, isClearedIssue }: SiblingPromotionVocabulary,
+  { mergedKey, sibling }: { mergedKey: string; sibling: TrackerIssue },
+): { promote: boolean; reason: string } {
+  if (!isBacklog(sibling.stage)) {
     return {
       promote: false,
       reason: `in ${inlineCode(sibling.stage ?? "unknown")}, not \`Backlog\``,
     };
   }
-  const blockers = linksOf(sibling, "Depend", "INWARD");
+  const blockers = linksOf(sibling, dependLinkType, "INWARD");
   if (!blockers.some((blocker) => blocker.key === mergedKey)) {
     return {
       promote: false,
@@ -352,7 +357,7 @@ function tableCell(text: string, maxLength: number): string {
 }
 
 /** Tracker- or agent-supplied text shown as inline code. */
-function inlineCode(text: string): string {
+export function inlineCode(text: string): string {
   return `\`${sanitizeInline(text, 40).replace(/`/g, "'")}\``;
 }
 

@@ -1,5 +1,7 @@
+import { createJiraClient } from "./jira-client";
 import type { TrackerConfig } from "./tracker-config";
-import { createYouTrackClient, type TrackerClient } from "./youtrack-client";
+import { createYouTrackClient } from "./youtrack-client";
+import { type TrackerClient } from "./tracker-types";
 
 /**
  * The one place a tracker client is constructed from a repo's config. A second
@@ -17,9 +19,18 @@ export function createTrackerClient(
         token: config.token,
         timeoutMs: options.timeoutMs,
       });
+    case "jira":
+      return createJiraClient({
+        baseUrl: config.baseUrl,
+        username: config.username,
+        token: config.token,
+        timeoutMs: options.timeoutMs,
+      });
     default: {
-      const exhaustive: never = config.kind;
-      throw new Error(`Unsupported tracker kind: ${String(exhaustive)}`);
+      const exhaustive: never = config;
+      throw new Error(
+        `Unsupported tracker kind: ${String((exhaustive as TrackerConfig).kind)}`,
+      );
     }
   }
 }
