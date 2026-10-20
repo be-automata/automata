@@ -377,7 +377,10 @@ function thresholdEvaluation(
  * KNOWN arms; over at ≥ SCALE_COMPOSITE_MIN_ARMS held; unknown when the unknown arms could
  * still reach it; under otherwise. No single arm justifies the per-run sandbox path.
  *
- * SUPERSEDE WASTE. CANCELLED run time ÷ all run time.
+ * SUPERSEDE WASTE. CANCELLED run time ÷ all run time. Same engine-side blind spot as queue
+ * wait: a run deferred by #371 or parked on a #205 box slot is RUNNING on the engine, so
+ * if it is superseded while waiting its wait counts as waste although no agent compute ran
+ * — on a busy box the ratio can read a capacity backlog as waste (follow-up #409).
  */
 export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   if (input.runs.kind === "unreadable") {
@@ -545,7 +548,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     wasteRaw,
     (waste) =>
       `supersede waste: ${round(waste * 100, 1)}% of run time was CANCELLED ` +
-      `(threshold > ${SUPERSEDE_WASTE_THRESHOLD * 100}%)`,
+      `(threshold > ${SUPERSEDE_WASTE_THRESHOLD * 100}%; includes in-worker admission and box-slot wait)`,
   );
 
   return {

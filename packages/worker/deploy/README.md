@@ -368,7 +368,10 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
-  supersede policy.
+  supersede policy. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
+  while deferred by #371 or parked on a #205 box slot counts that wait as waste although
+  no agent compute ran. On a busy box, check `queue_wait_p90` and the `box.headroom_*`
+  lines before reading a high ratio as a policy problem (follow-up #409).
 
 | Knob                                 | Default | Notes                                                 |
 | :----------------------------------- | :------ | :---------------------------------------------------- |
