@@ -180,7 +180,7 @@ function isAmbiguousTriggerFailure(error: unknown): boolean {
  * listing lags the trigger), and still nothing means exactly one retry. A read-back that
  * fails ends the dispatch (never a blind retry). Every outcome records one
  * hatchet_dispatch breaker event. Review and plain task dispatches never come
- * here: they keep triggerWithRetry, byte-identical.
+ * here: they keep triggerWithRetry (same metadata derivation, #373 OD-0).
  */
 async function triggerSelfHealBounded({
   input,
@@ -451,7 +451,8 @@ export function hatchetDispatchEnabled(thread: {
 
 /**
  * The review-dispatch plan (#165: exactly two dispatch modes exist). `null`
- * for a non-review run — legacy `agent-run` payload, no trigger opts, no
+ * for a non-review run — legacy `agent-run` workflow (its metadata derived
+ * by triggerAgentRun, #373 OD-0), no trigger opts, no
  * fence stamp, no run tracking. Non-null for a review run — every field is
  * present together, so "is this a review plan" is ONE predicate everywhere.
  */
