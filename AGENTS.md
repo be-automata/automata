@@ -77,9 +77,10 @@ Test environments push the schema automatically.
 >
 > A schema change still ships in two ordered steps: **its migration reaches prod FIRST,
 > then the worker is deployed**. The first step is now CI: `.github/workflows/migrate.yml`
-> runs `deploy/migrate.ts --apply --no-contract` and then `assert-schema-ready` whenever
-> migration files land on main, using the `PROD_DATABASE_URL` secret of the GitHub
-> `production` environment. A `migrate:contract` file is never auto-applied (the deployed
+> runs `deploy/migrate.ts --apply --no-contract` and then `assert-schema-ready` after every
+> green CI run on main (on that exact commit; a no-op when nothing is pending), using the
+> `PROD_DATABASE_URL` secret of the GitHub `production` environment. A failed run opens a
+> `migrate-failure` issue. A `migrate:contract` file is never auto-applied (the deployed
 > revision may still read what it drops): deploy first, then run the workflow by hand with
 > `allow_contract`. The www/worker deploy itself is still manual.
 >
