@@ -6,6 +6,10 @@
   "exports": {
     "./severity-policy": "./src/review/severity-policy.ts",
     "./diff-review-parser": "./src/review/diff-review-parser.ts",
+    "./finding-verifier": "./src/review/finding-verifier.ts",
+    "./verify-before-block": "./src/review/verify-before-block.ts",
+    "./context/render": "./src/review/context/render.ts",
+    "./context/untrusted": "./src/review/context/untrusted.ts",
     "./state/types": "./src/review/state/types.ts",
     "./state/break-glass-matcher": "./src/review/state/break-glass-matcher.ts",
     "./state/review-reconciler": "./src/review/state/review-reconciler.ts",

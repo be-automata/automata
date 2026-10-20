@@ -35,6 +35,20 @@ export const emittedReviewIntentSchema = z.object({
   findings: z.array(findingSchema).optional(),
   /** Informational: the resolved approve-severity floor (server already applied it). */
   severityFloor: z.string().optional(),
+  /**
+   * Prior review threads the agent verified addressed. The terminal writer
+   * replies once and resolves each (review-thread-resolutions.ts); `inlineCommentId`
+   * is the `comment_id` the prefetched `<review_threads>` block carried.
+   */
+  resolvedThreads: z
+    .array(
+      z.object({
+        inlineCommentId: z.number().int().positive(),
+        reply: z.string().min(1).max(2000),
+      }),
+    )
+    .max(50)
+    .optional(),
 });
 
 export type EmittedReviewIntent = z.infer<typeof emittedReviewIntentSchema>;

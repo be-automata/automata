@@ -1,3 +1,5 @@
+import { clip, fence } from "@terragon/review/context/untrusted";
+
 import type { TicketKeyExtraction } from "./extract-ticket-keys";
 import {
   describeTrackerError,
@@ -37,16 +39,6 @@ export interface MergedPrTrigger {
   htmlUrl?: string | null;
   mergedBy?: string | null;
   mergeCommitSha?: string | null;
-}
-
-function fence(content: string): string {
-  return content.replace(/<\/?user_content/gi, (tag) => tag.replace("<", "< "));
-}
-
-function clip(text: string, maxLength: number): string {
-  return text.length > maxLength
-    ? `${text.slice(0, maxLength)}\n… (truncated)`
-    : text;
 }
 
 /** Header fields sit outside the fence, so they must stay on one line. */

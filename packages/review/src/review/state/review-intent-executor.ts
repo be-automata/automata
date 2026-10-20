@@ -39,6 +39,12 @@ export interface ReviewIntentComment {
   severity?: Severity;
   /** Verbatim source line(s) at `path:line` (verify-before-block). */
   quote?: string;
+  /**
+   * Set by verify-before-block on a finding whose quote did not reproduce: it
+   * is still shown (annotated) but excluded from the severity floor. Never
+   * posted to GitHub — only path, line, severity and body are rendered.
+   */
+  suppressGating?: boolean;
 }
 
 export interface ReviewIntent {
