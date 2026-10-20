@@ -11,6 +11,7 @@ import {
   dedupeStatesFromSnapshot,
   evaluateRamSwap,
   evaluateRunSignals,
+  formatHours,
   GROWTH_REFIRE_MS,
   GROWTH_TRIGGER_IDS,
   growthWindow,
@@ -454,131 +455,50 @@ describe("run time sanity", () => {
   });
 });
 
-describe("queue-wait: policy-held waits are excluded", () => {
-  const AT = 3_600_000;
-  const evalWith = (rows: RunRow[], perOrgMaxRuns?: number) =>
-    evaluateRunSignals({
-      runs: { kind: "rows", rows },
-      nowMs: NOW,
-      questionnaire: false,
-      ...(perOrgMaxRuns === undefined ? {} : { perOrgMaxRuns }),
-    });
-
-  it("a run created while another run of the same PR is executing is policy-held", () => {
-    const rows = [
-      row({ day: 0, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 1 }),
-      // Created a minute in, while the first is executing; it waits for it to finish.
-      row({ day: 0, at: AT + MIN, waitS: 3600, repo: "ACME/app", pr: 1 }),
-    ];
-    const r = evalWith(rows);
-    expect(r.stats?.policyHeldRuns).toBe(1);
-    expect(r.stats?.queueWaitDailyP90S[0]).toBe(10);
-    expect(r.queueWait.summary).toContain("1 policy-held wait(s) excluded");
+describe("formatHours", () => {
+  it("formats the refire window and fractional hours", () => {
+    expect(formatHours(GROWTH_REFIRE_MS)).toBe("24 h");
+    expect(formatHours(90 * MIN)).toBe("1.5 h");
   });
+});
 
-  it("a still-running run of the same PR holds too; a finished one, another PR or no PR does not", () => {
-    const rows = [
-      // Executing, never finished.
-      row({ day: 1, at: AT, waitS: 10, runS: null, repo: "acme/app", pr: 2 }),
-      row({ day: 1, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 2 }),
-      // Finished BEFORE the next one was created: a capacity wait.
-      row({ day: 2, at: AT, waitS: 10, runS: 30, repo: "acme/app", pr: 3 }),
-      row({ day: 2, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 3 }),
-      // Same repo, different PR.
-      row({ day: 3, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 4 }),
-      row({ day: 3, at: AT + MIN, waitS: 900, repo: "acme/app", pr: 5 }),
-      // No PR at all.
-      row({ day: 4, at: AT, waitS: 10, runS: 3600 }),
-      row({ day: 4, at: AT + MIN, waitS: 900 }),
-    ];
-    const r = evalWith(rows);
-    expect(r.stats?.policyHeldRuns).toBe(1);
-    expect(r.stats?.queueWaitDailyP90S.slice(1, 5)).toEqual([
-      10, 900, 900, 900,
-    ]);
-  });
+describe("queue-wait: policy waits are included (owner decision, cycle 4)", () => {
+  const WAIT_S = 3.5 * 3600;
 
-  it("a run's own execution never holds it (a zero wait is a capacity wait)", () => {
-    const r = evalWith(
-      [
+  it("a saturated single-org box (every run waits 3.5 h on all 7 days) fires queue_wait", () => {
+    // Mirrors the reviewer's `saturate` probe: one org, one busy PR, runs created an hour
+    // apart while earlier ones still execute, so each waits on the per-org cap and the
+    // per-PR key as much as on box capacity. The engine rows cannot tell those apart, so
+    // the waits count and the box reads saturated.
+    const rows = Array.from({ length: 7 }, (_, day) =>
+      Array.from({ length: 4 }, (_, i) =>
         row({
-          day: 0,
-          waitS: 0,
-          runS: 60,
-          repo: "acme/app",
-          pr: 7,
+          day,
+          at: i * HOUR,
+          waitS: WAIT_S,
+          runS: 2 * 3600,
           org: "org-a",
+          repo: "acme/app",
+          pr: 1,
         }),
-      ],
-      1,
+      ),
+    ).flat();
+    const r = evalRows(rows);
+    expect(r.stats?.queueWaitDailyP90S).toEqual(Array(7).fill(WAIT_S));
+    expect(r.queueWait.value).toBe(WAIT_S);
+    expect(r.queueWait.verdict).toBe("over");
+    expect(r.queueWait.summary).toContain(
+      "per-org cap and per-PR waits included",
     );
-    expect(r.stats?.policyHeldRuns).toBe(0);
-    expect(r.stats?.queueWaitDailyP90S[0]).toBe(0);
+    expect(r.stats).not.toHaveProperty("policyHeldRuns");
   });
 
-  it("with perOrgMaxRuns, a run created while its org is at the cap is policy-held", () => {
+  it("a wait behind a run of the same PR still executing counts like any other", () => {
     const rows = [
-      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
-      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
-      // org-a has 2 executing; another org's run executing does not count.
-      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-b" }),
-      row({ day: 0, at: AT + MIN, waitS: 1200, org: "org-a" }),
+      row({ day: 0, at: HOUR, waitS: 10, runS: 3600, repo: "acme/app", pr: 1 }),
+      row({ day: 0, at: HOUR + MIN, waitS: 3600, repo: "ACME/app", pr: 1 }),
     ];
-    expect(evalWith(rows, 2).stats?.policyHeldRuns).toBe(1);
-    expect(evalWith(rows, 2).stats?.queueWaitDailyP90S[0]).toBe(0);
-    // Below the cap: a capacity wait.
-    expect(evalWith(rows, 3).stats?.policyHeldRuns).toBe(0);
-    expect(evalWith(rows, 3).stats?.queueWaitDailyP90S[0]).toBe(1200);
-  });
-
-  it("without perOrgMaxRuns (or with a non-positive one) the org rule is off", () => {
-    const rows = [
-      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: "org-a" }),
-      row({ day: 0, at: AT + MIN, waitS: 1200, org: "org-a" }),
-    ];
-    for (const cap of [undefined, 0, -1, 1.5]) {
-      const r = evalWith(rows, cap);
-      expect(r.stats?.policyHeldRuns).toBe(0);
-      expect(r.queueWait.summary).not.toContain("policy-held");
-    }
-    expect(evalWith(rows, 1).stats?.policyHeldRuns).toBe(1);
-  });
-
-  it("an unattributed run is never org-held", () => {
-    const rows = [
-      row({ day: 0, at: AT, waitS: 0, runS: 3600, org: null }),
-      row({ day: 0, at: AT + MIN, waitS: 1200, org: null }),
-    ];
-    expect(evalWith(rows, 1).stats?.policyHeldRuns).toBe(0);
-  });
-
-  it("a run that ended without starting while its PR was executing is policy-held", () => {
-    const rows = [
-      row({ day: 0, at: AT, waitS: 10, runS: 3600, repo: "acme/app", pr: 9 }),
-      {
-        ...row({ day: 0, at: AT + MIN, waitS: null, repo: "acme/app", pr: 9 }),
-        status: "CANCELLED",
-        finishedAtMs: DAY0 + AT + 30 * MIN,
-      },
-    ];
-    expect(evalWith(rows).stats?.policyHeldRuns).toBe(1);
-  });
-
-  it("policy-held waits cannot fire the trigger on their own", () => {
-    const rows = Array.from({ length: 7 }, (_, day) => [
-      row({
-        day,
-        at: AT,
-        waitS: 10,
-        runS: 3600,
-        repo: "acme/app",
-        pr: day + 1,
-      }),
-      row({ day, at: AT + MIN, waitS: 3600, repo: "acme/app", pr: day + 1 }),
-    ]).flat();
-    const r = evalWith(rows);
-    expect(r.stats?.policyHeldRuns).toBe(7);
-    expect(r.queueWait.verdict).toBe("under");
+    expect(evalRows(rows).stats?.queueWaitDailyP90S[0]).toBe(3600);
   });
 });
 
@@ -1685,88 +1605,95 @@ describe("snapshot", () => {
     });
   });
 
-  it("round-trips dedupe state through the snapshot; junk seeds the initial state", () => {
-    const snap = buildSnapshot({
-      nowMs: NOW,
-      boxId: "b",
-      evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
-      states: {
-        ...dedupeStatesFromSnapshot(null, NOW),
-        ram_swap: { firing: true, lastFiredAtMs: NOW - MIN },
-      },
-      stats: null,
-    });
-    const seeded = dedupeStatesFromSnapshot(
-      JSON.parse(JSON.stringify(snap)),
-      NOW,
-    );
-    expect(seeded.ram_swap).toEqual({ firing: true, lastFiredAtMs: NOW - MIN });
-    expect(seeded.queue_wait_p90).toEqual(INITIAL_DEDUPE_STATE);
-    expect(dedupeStatesFromSnapshot(null, NOW).ram_swap).toEqual(
-      INITIAL_DEDUPE_STATE,
-    );
-    expect(
-      dedupeStatesFromSnapshot(
-        {
-          triggers: { ram_swap: { firing: true, lastFiredAt: "garbage" } },
+  it.each([...GROWTH_TRIGGER_IDS])(
+    "%s: round-trips dedupe state through the snapshot; junk seeds the initial state",
+    (id) => {
+      const snap = buildSnapshot({
+        nowMs: NOW,
+        boxId: "b",
+        evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+        states: {
+          ...dedupeStatesFromSnapshot(null, NOW),
+          [id]: { firing: true, lastFiredAtMs: NOW - MIN },
         },
+        stats: null,
+      });
+      const seeded = dedupeStatesFromSnapshot(
+        JSON.parse(JSON.stringify(snap)),
         NOW,
-      ).ram_swap,
-    ).toEqual(INITIAL_DEDUPE_STATE);
-  });
+      );
+      expect(seeded[id]).toEqual({ firing: true, lastFiredAtMs: NOW - MIN });
+      for (const other of GROWTH_TRIGGER_IDS) {
+        if (other !== id) {
+          expect(seeded[other], other).toEqual(INITIAL_DEDUPE_STATE);
+        }
+      }
+      expect(dedupeStatesFromSnapshot(null, NOW)[id]).toEqual(
+        INITIAL_DEDUPE_STATE,
+      );
+      expect(
+        dedupeStatesFromSnapshot(
+          { triggers: { [id]: { firing: true, lastFiredAt: "garbage" } } },
+          NOW,
+        )[id],
+      ).toEqual(INITIAL_DEDUPE_STATE);
+    },
+  );
 
-  it("a firing state with no hold survives a SECOND restart, and its clear is sent once", () => {
-    const first = dedupeStatesFromSnapshot(
-      {
-        triggers: {
-          ram_swap: {
-            firing: true,
-            lastFiredAt: new Date(NOW + HOUR).toISOString(),
+  it.each([...GROWTH_TRIGGER_IDS])(
+    "%s: a firing state with no hold survives a SECOND restart, and its clear is sent once",
+    (id) => {
+      const first = dedupeStatesFromSnapshot(
+        {
+          triggers: {
+            [id]: {
+              firing: true,
+              lastFiredAt: new Date(NOW + HOUR).toISOString(),
+            },
           },
         },
-      },
-      NOW,
-    );
-    expect(first.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
-    const reseed = (
-      states: Record<GrowthTriggerId, TriggerDedupeState>,
-      atMs: number,
-    ) =>
-      dedupeStatesFromSnapshot(
-        JSON.parse(
-          JSON.stringify(
-            buildSnapshot({
-              nowMs: atMs,
-              boxId: "b",
-              evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
-              states,
-              stats: null,
-            }),
-          ),
-        ),
-        atMs,
-      );
-    const second = reseed(first, NOW + MIN);
-    expect(second.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
-    const third = reseed(second, NOW + 2 * MIN);
-    expect(third.ram_swap).toEqual({ firing: true, lastFiredAtMs: null });
-
-    let s = third.ram_swap;
-    const actions: string[] = [];
-    for (const at of [NOW + 3 * MIN, NOW + 4 * MIN, NOW + 5 * MIN]) {
-      const t = decideTransition(s, "under", at);
-      actions.push(t.action);
-      s = commitTransition(s, t, true);
-    }
-    expect(actions).toEqual(["clear", "none", "none"]);
-    // A missing or junk lastFiredAt still seeds idle.
-    expect(
-      dedupeStatesFromSnapshot(
-        { triggers: { ram_swap: { firing: true } } },
         NOW,
-      ).ram_swap,
-    ).toEqual(INITIAL_DEDUPE_STATE);
-  });
+      );
+      expect(first[id]).toEqual({ firing: true, lastFiredAtMs: null });
+      const reseed = (
+        states: Record<GrowthTriggerId, TriggerDedupeState>,
+        atMs: number,
+      ) =>
+        dedupeStatesFromSnapshot(
+          JSON.parse(
+            JSON.stringify(
+              buildSnapshot({
+                nowMs: atMs,
+                boxId: "b",
+                evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+                states,
+                stats: null,
+              }),
+            ),
+          ),
+          atMs,
+        );
+      const second = reseed(first, NOW + MIN);
+      expect(second[id]).toEqual({ firing: true, lastFiredAtMs: null });
+      const third = reseed(second, NOW + 2 * MIN);
+      expect(third[id]).toEqual({ firing: true, lastFiredAtMs: null });
+
+      let s = third[id];
+      const actions: string[] = [];
+      for (const at of [NOW + 3 * MIN, NOW + 4 * MIN, NOW + 5 * MIN]) {
+        const t = decideTransition(s, "under", at);
+        actions.push(t.action);
+        s = commitTransition(s, t, true);
+      }
+      expect(actions).toEqual(["clear", "none", "none"]);
+      // A missing or junk lastFiredAt still seeds idle.
+      expect(
+        dedupeStatesFromSnapshot({ triggers: { [id]: { firing: true } } }, NOW)[
+          id
+        ],
+      ).toEqual(INITIAL_DEDUPE_STATE);
+    },
+  );
 
   it("a lastFiredAt after the seed time seeds no hold but keeps firing, so a pending clear is not dropped", () => {
     const seeded = dedupeStatesFromSnapshot(

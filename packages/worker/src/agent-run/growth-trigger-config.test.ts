@@ -132,10 +132,21 @@ describe("loadGrowthTriggerConfig", () => {
       /WORKER_GROWTH_TRIGGER_INTERVAL_S=29 is below the floor of 30 s/,
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "30.5" })).toThrow(
-      /WORKER_GROWTH_TRIGGER_INTERVAL_S/,
+      'WORKER_GROWTH_TRIGGER_INTERVAL_S must be an integer >= 30 and <= 86400, got "30.5"',
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "abc" })).toThrow(
       /WORKER_GROWTH_TRIGGER_INTERVAL_S/,
+    );
+  });
+
+  it("an unbounded knob's integer error names only the floor", () => {
+    expect(() =>
+      load({
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "30",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "60.5",
+      }),
+    ).toThrow(
+      'WORKER_GROWTH_TRIGGER_SUSTAIN_S must be an integer >= 60, got "60.5"',
     );
   });
 
@@ -154,7 +165,7 @@ describe("loadGrowthTriggerConfig", () => {
       }),
     ).toThrow(
       "WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s " +
-        "(one day: a slower tick could not hold the 24 h dedupe window it serves)",
+        "(a slower tick could not hold the 24 h dedupe window it serves)",
     );
   });
 

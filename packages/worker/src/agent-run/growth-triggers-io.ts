@@ -486,12 +486,6 @@ export interface GrowthTriggerDeps {
   /** The previous snapshot's text, or null when there is none. May throw. */
   readSnapshot?: (filePath: string) => string | null;
   /**
-   * The engine's per-org concurrency cap (`registrationConfig.perOrgMaxRuns`): a queue
-   * wait that began with its org already at the cap is policy-held, not capacity, and is
-   * left out of the queue-wait p90. Absent: only the same-PR exclusion applies.
-   */
-  perOrgMaxRuns?: number;
-  /**
    * How old the last successful engine read may get before a tick re-reads it. Defaults
    * to GROWTH_ENGINE_REFRESH_MS; a test that changes the engine between ticks passes 0.
    */
@@ -702,9 +696,6 @@ export function armGrowthTriggers(
       nowMs,
       window,
       questionnaire: config.questionnaire,
-      ...(deps.perOrgMaxRuns === undefined
-        ? {}
-        : { perOrgMaxRuns: deps.perOrgMaxRuns }),
     });
     const ramSwap = evaluateRamSwap({
       samples: memSamples,

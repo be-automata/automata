@@ -52,6 +52,11 @@ const SUPERSEDE_WASTE_THRESHOLD = 0.2;
 /** A trigger that stays over re-fires at most once per this window. */
 export const GROWTH_REFIRE_MS = DAY_MS;
 
+/** A millisecond duration as whole-or-fractional hours for operator text: `24 h`, `1.5 h`. */
+export function formatHours(ms: number): string {
+  return `${Math.round((ms / 3_600_000) * 100) / 100} h`;
+}
+
 export type GrowthTriggerId =
   | "queue_wait_p90"
   | "ram_swap"
@@ -229,74 +234,6 @@ function runTimeMs(row: RunRow): number | null {
   return d >= 0 ? d : null;
 }
 
-/**
- * Execution intervals [startedAt, finishedAt) of one key's runs (a PR, or an org), as two
- * sorted arrays so "how many were executing at t" is two binary searches instead of a
- * scan. A run that has not finished is executing until +∞; a run that never started, or
- * whose finishedAt precedes its startedAt, never executed.
- */
-interface ExecutionIndex {
-  starts: number[];
-  ends: number[];
-}
-
-function executionInterval(row: RunRow): [number, number] | null {
-  if (row.startedAtMs === null) return null;
-  const end = row.finishedAtMs ?? Number.POSITIVE_INFINITY;
-  return end >= row.startedAtMs ? [row.startedAtMs, end] : null;
-}
-
-function buildExecutionIndexes(
-  rows: readonly RunRow[],
-  keyOf: (row: RunRow) => string | null,
-): Map<string, ExecutionIndex> {
-  const out = new Map<string, ExecutionIndex>();
-  for (const row of rows) {
-    const key = keyOf(row);
-    const interval = executionInterval(row);
-    if (key === null || interval === null) continue;
-    const index = out.get(key) ?? { starts: [], ends: [] };
-    index.starts.push(interval[0]);
-    index.ends.push(interval[1]);
-    out.set(key, index);
-  }
-  for (const index of out.values()) {
-    index.starts.sort((a, b) => a - b);
-    index.ends.sort((a, b) => a - b);
-  }
-  return out;
-}
-
-/** Count of values ≤ t in an ascending array. */
-function countAtOrBefore(sorted: readonly number[], t: number): number {
-  let lo = 0;
-  let hi = sorted.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if ((sorted[mid] ?? Number.POSITIVE_INFINITY) <= t) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-/**
- * Runs of `index` executing at `t` (startedAt ≤ t < finishedAt), OTHER than `self`: every
- * interval with end ≤ t also has start ≤ t, so the difference of the two counts is the
- * number of intervals that contain t.
- */
-function executingAt(
-  index: ExecutionIndex | undefined,
-  t: number,
-  self: RunRow,
-): number {
-  if (index === undefined) return 0;
-  const count =
-    countAtOrBefore(index.starts, t) - countAtOrBefore(index.ends, t);
-  const own = executionInterval(self);
-  const selfExecuting = own !== null && own[0] <= t && t < own[1];
-  return count - (selfExecuting ? 1 : 0);
-}
-
 function prKey(row: RunRow): string | null {
   return row.repoFullName !== null && row.prNumber !== null
     ? `${row.repoFullName.toLowerCase()}#${row.prNumber}`
@@ -330,12 +267,6 @@ interface RunWindowStats {
   windowDays: number;
   /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no counted run (started, or ended without starting under any terminal status). */
   queueWaitDailyP90S: Array<number | null>;
-  /**
-   * Waits left out of the p90 because they were held by POLICY, not capacity: at the
-   * run's createdAt another run of the same PR was executing, or its org was already at
-   * `perOrgMaxRuns` executing runs.
-   */
-  policyHeldRuns: number;
   /** Distinct `orgId`s in the window. `u:<userId>` personal scopes count: each is its own tenant. */
   clients: number;
   /** Run time of rows without `orgId` — never counted as an org (OD-0). */
@@ -361,13 +292,6 @@ interface RunSignalsInput {
   window?: GrowthWindow;
   /** `WORKER_ENTERPRISE_QUESTIONNAIRE=1`: the composite's manual arm. */
   questionnaire: boolean;
-  /**
-   * The engine's per-org concurrency cap (`WORKER_PER_ORG_MAX_RUNS`). When set, a wait
-   * that began while its org already had this many runs executing is policy-held and
-   * left out of the p90. Absent (or not a positive integer): that exclusion is off; the
-   * same-PR exclusion needs no input and always applies.
-   */
-  perOrgMaxRuns?: number;
 }
 
 export interface RunSignalsResult {
@@ -470,13 +394,12 @@ function thresholdEvaluation(
  * exactly when there is one. A row still QUEUED is excluded (V7). ENGINE QUEUE ONLY: a run
  * deferred by the #371 headroom check or parked on a #205 box slot is already RUNNING on
  * the engine, so that wait is invisible here and counts as run time — a quiet trigger is
- * not proof the box keeps up (follow-up: a worker-recorded admission time). POLICY-HELD
- * waits are left out (counted in `policyHeldRuns`): a run created while another run of
- * the same (repo, PR) was executing waits on the per-PR serialization, and one created
- * while its org already had `perOrgMaxRuns` runs executing waits on the per-org cap —
- * neither wait says the box lacks capacity, and a busy PR or tenant would otherwise fire
- * a resize the box does not need. The trigger
- * is "> 10 min for 7 consecutive days", so its value is the streak's WEAKEST day, with an
+ * not proof the box keeps up (follow-up: a worker-recorded admission time). POLICY WAITS
+ * ARE INCLUDED: the engine rows do not say why a run waited, so a wait behind the per-org
+ * cap (`WORKER_PER_ORG_MAX_RUNS`) or the per-PR maxRuns key counts like a wait for box
+ * capacity. On a single-tenant box (or a busy PR) the p90 can therefore rise from policy
+ * rather than capacity — check the per-org cap before acting on "raise the cap". The
+ * trigger is "> 10 min for 7 consecutive days", so its value is the streak's WEAKEST day, with an
  * empty day counting as 0: a day with no run tasks breaks the streak by definition.
  *
  * CLIENT SHARE. Org run time ÷ ATTRIBUTED run time; unattributed time is reported, never
@@ -514,35 +437,6 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   }
 
   const window = input.window ?? growthWindow(input.nowMs);
-  const orgCap =
-    input.perOrgMaxRuns !== undefined &&
-    Number.isSafeInteger(input.perOrgMaxRuns) &&
-    input.perOrgMaxRuns >= 1
-      ? input.perOrgMaxRuns
-      : null;
-  // Built over EVERY row read, in the window or not: a run created before the window can
-  // still be executing when a windowed run is created.
-  const prExecutions = buildExecutionIndexes(input.runs.rows, prKey);
-  const orgExecutions =
-    orgCap === null
-      ? null
-      : buildExecutionIndexes(input.runs.rows, (r) => r.orgId);
-  const isPolicyHeld = (row: RunRow): boolean => {
-    const pr = prKey(row);
-    if (
-      pr !== null &&
-      executingAt(prExecutions.get(pr), row.createdAtMs, row) > 0
-    ) {
-      return true;
-    }
-    return (
-      orgCap !== null &&
-      orgExecutions !== null &&
-      row.orgId !== null &&
-      executingAt(orgExecutions.get(row.orgId), row.createdAtMs, row) >= orgCap
-    );
-  };
-  let policyHeldRuns = 0;
   const waitsByDay: number[][] = window.dayStartsMs.map(() => []);
   const prsByDay: Array<Set<string>> = window.dayStartsMs.map(() => new Set());
   const orgs = new Set<string>();
@@ -559,11 +453,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     // status the engine gives it): its whole life was queue wait.
     const waitEndMs = row.startedAtMs ?? row.finishedAtMs;
     if (waitEndMs !== null) {
-      if (isPolicyHeld(row)) {
-        policyHeldRuns += 1;
-      } else {
-        waitsByDay[day]?.push(Math.max(0, waitEndMs - row.createdAtMs));
-      }
+      waitsByDay[day]?.push(Math.max(0, waitEndMs - row.createdAtMs));
     }
     const pr = prKey(row);
     if (pr !== null) prsByDay[day]?.add(pr);
@@ -599,10 +489,8 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       `queue-wait p90: weakest of the last ${GROWTH_WINDOW_DAYS} UTC days ${weakestDayS}s ` +
       `(threshold > ${QUEUE_WAIT_P90_THRESHOLD_S}s every day` +
       (emptyDays > 0 ? `; ${emptyDays} day(s) with no counted run` : "") +
-      (policyHeldRuns > 0
-        ? `; ${policyHeldRuns} policy-held wait(s) excluded (same PR executing, or org at its per-org cap)`
-        : "") +
-      "; engine queue only, in-worker admission and box-slot waits not counted)",
+      "; engine queue only, in-worker admission and box-slot waits not counted" +
+      "; per-org cap and per-PR waits included, check the per-org cap before raising the global cap)",
   );
 
   // Client share. An exact tie on run time goes to the lexicographically lower orgId, so
@@ -711,7 +599,6 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     stats: {
       windowDays: GROWTH_WINDOW_DAYS,
       queueWaitDailyP90S,
-      policyHeldRuns,
       clients: orgs.size,
       unattributed: {
         seconds: round(unattributedMs / 1000),
@@ -1046,7 +933,7 @@ export function buildWebhookBody(input: {
     evaluation.trigger === "client_share" &&
     input.announcedOrgIds !== undefined &&
     input.announcedOrgIds.length > 0
-      ? `no longer over for ${input.announcedOrgIds.join(", ")} (announced in the last 24 h); `
+      ? `no longer over for ${input.announcedOrgIds.join(", ")} (announced in the last ${formatHours(GROWTH_REFIRE_MS)}); `
       : "";
   const text =
     state === "fired"

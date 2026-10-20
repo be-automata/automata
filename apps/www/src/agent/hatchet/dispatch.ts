@@ -185,7 +185,9 @@ function isAmbiguousTriggerFailure(error: unknown): boolean {
  * the read-back); nothing found is read once more after a 2 s settle (the
  * listing lags the trigger), and still nothing means exactly one retry. A read-back that
  * fails ends the dispatch (never a blind retry). Every outcome records one
- * hatchet_dispatch breaker event. Review and plain task dispatches never come
+ * hatchet_dispatch breaker event, except an over-limit metadata refusal
+ * (RunMetadataLimitError): nothing was sent, so it records none and is only
+ * logged. Review and plain task dispatches never come
  * here: they keep triggerWithRetry (same metadata derivation, #373 OD-0).
  */
 async function triggerSelfHealBounded({
@@ -289,6 +291,20 @@ async function triggerSelfHealBounded({
         return { externalId: live.externalId };
       }
     }
+  }
+  if (lastError instanceof RunMetadataLimitError) {
+    // Refused before any request: nothing reached the engine, so this says nothing about
+    // Hatchet's health. Recording it as dispatch_lost would let an over-limit metadata
+    // value trip the hatchet_dispatch breaker; no breaker event is written.
+    console.error(
+      "[hatchet] self-heal trigger refused: run metadata over limit — nothing sent, no breaker event",
+      {
+        threadId,
+        threadChatId,
+        error: scrub(lastError.message),
+      },
+    );
+    throw lastError;
   }
   await record("failure", "dispatch_lost");
   throw lastError instanceof Error ? lastError : new Error(String(lastError));

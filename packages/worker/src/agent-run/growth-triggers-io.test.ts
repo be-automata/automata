@@ -1477,7 +1477,7 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
 // writeSnapshotAtomic (the writer the driver uses by default)
 // ---------------------------------------------------------------------------
 
-describe("armGrowthTriggers (final review: engine cache, per-org cap, clear text)", () => {
+describe("armGrowthTriggers (final review: engine cache, clear text)", () => {
   const engineReads = () => ENGINE_URLS.length;
 
   it("a second tick within the hour evaluates the cached rows without a fetch", async () => {
@@ -1559,41 +1559,53 @@ describe("armGrowthTriggers (final review: engine cache, per-org cap, clear text
     handle?.stop();
   });
 
-  it("perOrgMaxRuns reaches the evaluator: a wait at the org cap leaves the p90", async () => {
-    const day0 = growthWindow(NOW).startMs + 3_600_000;
-    const at = (ms: number) => new Date(ms).toISOString();
-    const rows = [
-      {
-        actionId: "agent-run:run",
-        status: "COMPLETED",
-        createdAt: at(day0),
-        startedAt: at(day0),
-        finishedAt: at(day0 + 3_600_000),
-        additionalMetadata: { orgId: "org-a" },
-        metadata: { id: "busy" },
-      },
-      {
-        actionId: "agent-run:run",
-        status: "COMPLETED",
-        createdAt: at(day0 + 60_000),
-        startedAt: at(day0 + 3_600_000),
-        finishedAt: at(day0 + 3_660_000),
-        additionalMetadata: { orgId: "org-a" },
-        metadata: { id: "held" },
-      },
-    ];
-    const p90 = async (perOrgMaxRuns?: number) => {
+  it("a tick whose start is before the cached read time (clock stepped back) refetches", async () => {
+    const h = harness();
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    expect(engineReads()).toBe(1);
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    // Same UTC day, so the window is unchanged, and well inside the refresh age.
+    h.clock.ms = NOW - 60_000;
+    const r = await handle?.tick();
+    expect(engineReads()).toBe(2);
+    expect(r?.snapshot?.triggers.supersede_waste.verdict).toBe("under");
+    handle?.stop();
+  });
+
+  it("the snapshot writer's tmp-cleanup failure reaches the driver's log as its event with fields", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "growth-log-"));
+    try {
+      // A DIRECTORY at the temp path: the exclusive open refuses it (EEXIST) and the
+      // cleanup unlink fails with something other than ENOENT (EPERM / EISDIR).
+      const tmp = path.join(
+        root,
+        `${GROWTH_SNAPSHOT_FILENAME}.tmp-${process.pid}`,
+      );
+      fs.mkdirSync(tmp);
       const h = harness();
-      h.setEngine(() => jsonResponse(page(rows, 1, 1)));
-      if (perOrgMaxRuns !== undefined) h.deps.perOrgMaxRuns = perOrgMaxRuns;
+      h.deps.snapshotDir = root;
+      h.deps.writeSnapshot = writeSnapshotAtomic;
       const handle = armGrowthTriggers(ENV_ON, h.deps);
-      const r = await handle?.firstTick;
+      await handle?.firstTick;
       handle?.stop();
-      return r?.snapshot?.queueWaitDailyP90S?.[0];
-    };
-    expect(await p90()).toBe(3540);
-    expect(await p90(1)).toBe(0);
-    expect(await p90(2)).toBe(3540);
+      const cleanup = h.logs.find((l) =>
+        l.startsWith("snapshot.tmp_cleanup_failed "),
+      );
+      expect(cleanup).toBeDefined();
+      const fields = JSON.parse(
+        (cleanup ?? "").slice("snapshot.tmp_cleanup_failed ".length),
+      ) as Record<string, unknown>;
+      expect(fields).toEqual({ file: tmp, code: expect.any(String) });
+      expect(fields.code).not.toBe("ENOENT");
+      expect(fields).not.toHaveProperty("event");
+      // The original error still surfaces as the driver's own line.
+      expect(h.logs).toContain(
+        'growth.snapshot_write_failed {"error":"EEXIST"}',
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("a client_share clear names the orgs it announced, not only the current top org", async () => {

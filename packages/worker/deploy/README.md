@@ -381,12 +381,13 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   deferred by the #371 headroom check or parked on a #205 box slot is already running on
   the engine, so that wait is not seen (and counts as run time). A quiet trigger is not
   proof the box keeps up; read the `box.headroom_*` journal lines alongside it.
-  POLICY-HELD waits are left out of the p90 (the alert text counts them as "policy-held
-  wait(s) excluded"): a run created while another run of the same repo and PR was
-  executing (startedAt ≤ its createdAt < finishedAt, or not finished yet) waits on
-  the per-PR serialization, and one created while its org already had
-  `WORKER_PER_ORG_MAX_RUNS` runs executing waits on the per-org cap. Neither says the box
-  lacks capacity.
+  POLICY WAITS ARE INCLUDED: the engine rows do not say why a run waited, so a wait
+  behind the per-org cap (`WORKER_PER_ORG_MAX_RUNS`) or a PR's per-PR maxRuns key counts
+  the same as a wait for box capacity. On a single-tenant box, or one busy PR, the p90
+  can therefore rise from policy rather than capacity. Check the per-org caps before
+  acting on "raise the cap": when `WORKER_PER_ORG_MAX_RUNS` is below
+  `WORKER_GLOBAL_MAX_RUNS` and one org holds the queue, raising the global cap moves
+  nothing.
 - `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
   window → add a second shared box on the same tenant.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 3 orgs holding run

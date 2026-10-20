@@ -71,6 +71,16 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
   };
 }
 
+export interface SnapshotWriteOptions {
+  filename?: string;
+  mode?: number;
+  /** Receives `snapshot.tmp_cleanup_failed`; defaults to the JSON console logger. */
+  log?: Logger;
+}
+
+/** `writeFileSync`'s default creation mode, before the umask. */
+const DEFAULT_CREATE_MODE = 0o666;
+
 /**
  * Write-temp-then-rename so a reader never observes a partial snapshot file.
  * Throws on write/rename failure — the caller decides (the maintenance tick
@@ -96,16 +106,6 @@ function emptySnapshot(engineReachable: boolean): SchedulingHealthSnapshot {
  * what propagates: a cleanup failure other than ENOENT is logged through `options.log`
  * (default: the JSON console logger) and is not allowed to mask it.
  */
-export interface SnapshotWriteOptions {
-  filename?: string;
-  mode?: number;
-  /** Receives `snapshot.tmp_cleanup_failed`; defaults to the JSON console logger. */
-  log?: Logger;
-}
-
-/** `writeFileSync`'s default creation mode, before the umask. */
-const DEFAULT_CREATE_MODE = 0o666;
-
 export function writeSnapshotAtomic<T extends object>(
   runNamespaceRoot: string,
   snapshot: T,

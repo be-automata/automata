@@ -17,10 +17,12 @@
 
 import { isIP } from "node:net";
 
+import { formatHours, GROWTH_REFIRE_MS } from "./growth-triggers";
+
 export const GROWTH_TRIGGER_INTERVAL_DEFAULT_S = 300;
 const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
-/** One day: a slower tick could not hold the 24 h dedupe window it serves. */
-export const GROWTH_TRIGGER_INTERVAL_CEILING_S = 86_400;
+/** The dedupe window itself (GROWTH_REFIRE_MS): a slower tick could not hold the window it serves. */
+export const GROWTH_TRIGGER_INTERVAL_CEILING_S = GROWTH_REFIRE_MS / 1000;
 export const GROWTH_TRIGGER_SUSTAIN_DEFAULT_S = 900;
 const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
 export const GROWTH_TRIGGER_RAM_FRACTION_DEFAULT = 0.7;
@@ -53,8 +55,12 @@ function parseCadenceKnob(spec: {
   if (!v) return spec.defaultValue;
   const n = Number(v);
   if (!Number.isInteger(n)) {
+    const bounds =
+      spec.ceiling === undefined
+        ? `>= ${spec.floor}`
+        : `>= ${spec.floor} and <= ${spec.ceiling.value}`;
     throw new Error(
-      `${spec.name} must be an integer >= ${spec.floor}, got ${JSON.stringify(v)}`,
+      `${spec.name} must be an integer ${bounds}, got ${JSON.stringify(v)}`,
     );
   }
   if (n < spec.floor) {
@@ -141,7 +147,7 @@ export function loadGrowthTriggerConfig(
     floor: GROWTH_TRIGGER_INTERVAL_FLOOR_S,
     ceiling: {
       value: GROWTH_TRIGGER_INTERVAL_CEILING_S,
-      hint: "one day: a slower tick could not hold the 24 h dedupe window it serves",
+      hint: `a slower tick could not hold the ${formatHours(GROWTH_REFIRE_MS)} dedupe window it serves`,
     },
     floorHint:
       "WORKER_GROWTH_TRIGGER_SUSTAIN_S must also be ≥ 2 × the interval",

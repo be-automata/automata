@@ -2016,7 +2016,7 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     return row;
   };
 
-  it("an over-limit metadata error is definitive: no POST, no read-back, no retry", async () => {
+  it("an over-limit metadata error is definitive: no POST, no read-back, no retry, and no breaker failure", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     // A finding on a repo whose name exceeds the 256-char metadata value limit.
     const longRepo = `be-automata/${"x".repeat(300)}`;
@@ -2076,7 +2076,19 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
         String(line).includes("read-back failed"),
       ),
     ).toBe(false);
-    expect((await events()).map((e) => e.outcome)).toEqual(["failure"]);
+    // Nothing was sent: not a hatchet_dispatch failure, so no dispatch_lost event (and
+    // no event of any kind), only the distinct log line.
+    expect(await events()).toEqual([]);
+    const refused = errors.mock.calls.filter(([line]) =>
+      String(line).startsWith(
+        "[hatchet] self-heal trigger refused: run metadata over limit",
+      ),
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.[1]).toMatchObject({
+      threadId: t.threadId,
+      threadChatId: t.threadChatId,
+    });
   });
 
   it("a fix dispatch carries selfHeal.kind fix from the stamped attempt, bounded, and never logs the token", async () => {
