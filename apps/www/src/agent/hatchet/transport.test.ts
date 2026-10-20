@@ -9,12 +9,12 @@ import {
   validateRunMetadata,
   buildRunMetadata,
   buildReviewRunMetadata,
-  resolveNonReviewRunLane,
 } from "./transport";
 import {
   SUPERSEDE_POLICIES,
   type SupersedePolicy,
 } from "@terragon/shared/model/repo-review-settings";
+import { resolveRunDisplayLane } from "@terragon/utils/run-lane";
 
 const CONFIG = {
   apiUrl: "https://tunnel.example.com/",
@@ -30,6 +30,7 @@ const INPUT = {
   daemonCallbackUrl: "https://www.example.com",
   installationToken: "inst-tok",
   daemonToken: "daemon-tok",
+  orgId: "org_1",
 };
 
 describe("triggerAgentRun (Hatchet REST v1)", () => {
@@ -58,10 +59,35 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
     const body = JSON.parse(init.body);
     expect(body.workflowName).toBe("agent-run");
     expect(body.input).toEqual(INPUT);
+    // #373 OD-0: no opts metadata → the non-review metadata derived from the input.
     expect(body.additionalMetadata).toEqual({
       threadId: "thr_1",
       threadChatId: "tc_1",
+      orgId: "org_1",
+      lane: "task",
+      repoFullName: "be-automata/automata",
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("derives the default lane from the input (pr, self-heal)", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ run: { metadata: { id: "r" } } }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await triggerAgentRun({ ...INPUT, prNumber: 42 }, CONFIG);
+    await triggerAgentRun(
+      { ...INPUT, selfHeal: { kind: "fix" as const }, prNumber: 42 },
+      CONFIG,
+    );
+    const metas = fetchMock.mock.calls.map(
+      ([, init]) => JSON.parse(init.body).additionalMetadata,
+    );
+    expect(metas[0]).toMatchObject({ lane: "pr", prNumber: "42" });
+    expect(metas[1]).toMatchObject({ lane: "self-heal-fix", prNumber: "42" });
     vi.unstubAllGlobals();
   });
 
@@ -232,18 +258,6 @@ describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
 describe("non-review run metadata (#373 OD-0)", () => {
   const IDS = { threadId: "thr_1", threadChatId: "tc_1" };
 
-  it("resolves the worker's display lanes from the input", () => {
-    expect(resolveNonReviewRunLane({})).toBe("task");
-    expect(resolveNonReviewRunLane({ prNumber: 12 })).toBe("pr");
-    expect(resolveNonReviewRunLane({ selfHeal: { kind: "audit" } })).toBe(
-      "self-heal-audit",
-    );
-    // A self-heal plan wins over a PR number.
-    expect(
-      resolveNonReviewRunLane({ selfHeal: { kind: "fix" }, prNumber: 3 }),
-    ).toBe("self-heal-fix");
-  });
-
   it("task: org, lane and the normalized repo; no PR key", () => {
     expect(
       buildRunMetadata({
@@ -265,7 +279,7 @@ describe("non-review run metadata (#373 OD-0)", () => {
       buildRunMetadata({
         ...IDS,
         orgId: "org_1",
-        lane: resolveNonReviewRunLane({ prNumber: 200 }),
+        lane: resolveRunDisplayLane({ prNumber: 200 }),
         repoFullName: "be-automata/automata",
         prNumber: 200,
       }),
@@ -285,7 +299,7 @@ describe("non-review run metadata (#373 OD-0)", () => {
           buildRunMetadata({
             ...IDS,
             orgId,
-            lane: resolveNonReviewRunLane({ selfHeal: { kind } }),
+            lane: resolveRunDisplayLane({ selfHeal: { kind } }),
             repoFullName: "be-automata/automata",
           }),
         ).toEqual({

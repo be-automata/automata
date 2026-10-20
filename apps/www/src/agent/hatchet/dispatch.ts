@@ -67,8 +67,6 @@ import {
   listAgentRunsForThread,
   workflowNameForPolicy,
   buildReviewRunMetadata,
-  buildRunMetadata,
-  resolveNonReviewRunLane,
   type TriggerOpts,
 } from "./transport";
 
@@ -189,15 +187,12 @@ async function triggerSelfHealBounded({
   threadId,
   threadChatId,
   organizationId,
-  additionalMetadata,
   scrub = redactSecrets,
 }: {
   input: AgentRunWireInput;
   threadId: string;
   threadChatId: string;
   organizationId: string;
-  /** #373 OD-0: the non-review run metadata (orgId, lane, repo, PR). */
-  additionalMetadata: Record<string, string>;
   /** #380: blanks this dispatch's own secret values in every log line here. */
   scrub?: (text: string) => string;
 }): Promise<{ externalId: string | undefined }> {
@@ -229,7 +224,6 @@ async function triggerSelfHealBounded({
   for (let attempt = 1; attempt <= SELF_HEAL_TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
       const result = await triggerAgentRun(input, config, {
-        additionalMetadata,
         signal: AbortSignal.timeout(SELF_HEAL_TRIGGER_TIMEOUT_MS),
       });
       await record("success", "dispatch_visible");
@@ -1161,17 +1155,10 @@ export async function dispatchAgentRun({
     // read-back before its one retry, so an ambiguous engine answer never
     // starts a second agent.
     // #373 OD-0: every non-review lane names its org and lane in the run
-    // metadata (the worker's growth triggers attribute run time by it). The
-    // lane comes from the input, so a self-heal run stamps self-heal-* on
-    // either trigger path. Review runs keep their plan's metadata.
-    const runMetadata = buildRunMetadata({
-      threadId,
-      threadChatId,
-      orgId,
-      lane: resolveNonReviewRunLane(input),
-      repoFullName,
-      prNumber,
-    });
+    // metadata (the worker's growth triggers attribute run time by it):
+    // triggerAgentRun derives it from the input when no plan metadata is
+    // given, so a self-heal run stamps self-heal-* on either trigger path.
+    // Review runs keep their plan's metadata.
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({
@@ -1179,14 +1166,13 @@ export async function dispatchAgentRun({
             threadId,
             threadChatId,
             organizationId: selfHealOrgId,
-            additionalMetadata: runMetadata,
             scrub,
           })
         : await triggerWithRetry(
             wireInput,
             threadId,
             threadChatId,
-            plan?.triggerOpts ?? { additionalMetadata: runMetadata },
+            plan?.triggerOpts,
             scrub,
           );
 

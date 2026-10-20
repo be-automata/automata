@@ -9,12 +9,17 @@ import {
   type SupersedePolicy,
   type SupersedeSnapshot,
 } from "@terragon/shared/model/repo-review-settings";
+import {
+  resolveRunDisplayLane,
+  type RunDisplayLane,
+  type RunDisplayLaneInput,
+} from "@terragon/utils/run-lane";
 
 /**
  * #125/#127: which registered workflow VARIANT each supersede policy dispatches
  * to. STRUCTURALLY DUPLICATED (not imported) by the worker's variant table
- * (packages/worker/src/agent-run/workflow.ts, landing in C1/#126) — the planes share no imports
- * (composability invariant), so a drift between the two tables is caught by
+ * (packages/worker/src/agent-run/workflow.ts, landing in C1/#126) — neither plane imports
+ * the other (composability invariant), so a drift between the two tables is caught by
  * C3's E2E, not the type system. The legacy 'agent-run' workflow carries NO
  * per-PR entry and serves NON-REVIEW lanes only (#165): every review dispatch
  * routes to a policy variant, and every policy is engine-owned — www owns no
@@ -114,35 +119,10 @@ export function buildReviewRunMetadata({
 }
 
 /**
- * The lane a NON-review run belongs to (#373 OD-0). The values are the worker's
- * display taxonomy (packages/worker/src/agent-run/run-lane.ts
- * formatRunStartLine) — structurally duplicated, not imported (the planes share
- * no imports). Review runs are `review`, stamped by buildReviewRunMetadata.
- */
-export type NonReviewRunLane =
-  | "self-heal-audit"
-  | "self-heal-fix"
-  | "pr"
-  | "task";
-
-/**
- * Resolve the non-review lane from the wire input: a self-heal plan wins
- * (`self-heal-<kind>`), then a PR number (`pr`, e.g. an @-mention on a PR),
- * else `task`. Derived from the input itself so every trigger path — the
- * bounded self-heal one and the plain retry one — stamps the same lane.
- */
-export function resolveNonReviewRunLane(input: {
-  selfHeal?: { kind: "audit" | "fix" };
-  prNumber?: number;
-}): NonReviewRunLane {
-  if (input.selfHeal !== undefined) return `self-heal-${input.selfHeal.kind}`;
-  if (input.prNumber !== undefined) return "pr";
-  return "task";
-}
-
-/**
  * Build the metadata for a NON-review dispatch (#373 OD-0): the run's ids plus
- * `orgId` and `lane`, and `repoFullName` / `prNumber` when known, so the
+ * `orgId` and `lane` (the display taxonomy shared with the worker's run-start
+ * line through `@terragon/utils/run-lane`; review runs are `review`, stamped
+ * by buildReviewRunMetadata), and `repoFullName` / `prNumber` when known, so the
  * worker's growth-trigger evaluator can attribute run time to a client. The
  * repo is normalized exactly as the review path does; a value that is not
  * known is omitted, never sent as an empty string. Validated against the same
@@ -159,7 +139,7 @@ export function buildRunMetadata({
   threadId: string;
   threadChatId: string;
   orgId: string;
-  lane: NonReviewRunLane;
+  lane: RunDisplayLane;
   repoFullName?: string;
   prNumber?: number;
 }): Record<string, string> {
@@ -214,7 +194,10 @@ function requireHatchetConfig(
  * POST the v1 stable trigger. `input` is the reference-only workflow input; the
  * caller guarantees it holds no long-lived secret. `additionalMetadata` carries
  * the ids for traceability (the REST v1 trigger has no idempotency-key field —
- * double-dispatch is guarded by the caller). Returns the created run's externalId.
+ * double-dispatch is guarded by the caller); absent from `opts`, it is the
+ * non-review metadata (#373 OD-0) derived from the input itself, so every
+ * non-review trigger path stamps the same org, lane, repo and PR. Returns the
+ * created run's externalId.
  *
  * The v1 stable trigger responds with a `V1WorkflowRunDetails` body, whose run id
  * lives at `run.metadata.id` — NOT a top-level `externalId` (the old cast to
@@ -226,7 +209,12 @@ function requireHatchetConfig(
  * so the caller reads back with listAgentRunsForThread before retrying.
  */
 export async function triggerAgentRun<
-  T extends { threadId: string; threadChatId: string },
+  T extends RunDisplayLaneInput & {
+    threadId: string;
+    threadChatId: string;
+    orgId: string;
+    repoFullName: string;
+  },
 >(
   input: T,
   config: HatchetTriggerConfig,
@@ -247,10 +235,16 @@ export async function triggerAgentRun<
       body: JSON.stringify({
         workflowName: opts?.workflowName ?? "agent-run",
         input,
-        additionalMetadata: opts?.additionalMetadata ?? {
-          threadId: input.threadId,
-          threadChatId: input.threadChatId,
-        },
+        additionalMetadata:
+          opts?.additionalMetadata ??
+          buildRunMetadata({
+            threadId: input.threadId,
+            threadChatId: input.threadChatId,
+            orgId: input.orgId,
+            lane: resolveRunDisplayLane(input),
+            repoFullName: input.repoFullName,
+            prNumber: input.prNumber,
+          }),
       }),
       // TMO-01: the caller's deadline. Absent → no key, so the legacy request
       // stays byte-identical.
