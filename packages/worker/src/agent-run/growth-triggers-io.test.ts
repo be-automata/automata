@@ -70,6 +70,8 @@ interface RowOpts {
   actionId?: string;
   /** Engine run id (`metadata.id`); absent → the row has no id. */
   id?: string;
+  /** `additionalMetadata.lane`; absent → the row carries no lane. */
+  lane?: string;
 }
 
 /** A raw engine row inside the 7-complete-day window of NOW. */
@@ -84,7 +86,10 @@ function rawRow(opts: RowOpts = {}): Record<string, unknown> {
     createdAt: new Date(created).toISOString(),
     startedAt: new Date(started).toISOString(),
     finishedAt: new Date(finished).toISOString(),
-    additionalMetadata: opts.orgId ? { orgId: opts.orgId } : {},
+    additionalMetadata: {
+      ...(opts.orgId ? { orgId: opts.orgId } : {}),
+      ...(opts.lane ? { lane: opts.lane } : {}),
+    },
     ...(opts.id !== undefined ? { metadata: { id: opts.id } } : {}),
   };
 }
@@ -595,8 +600,8 @@ interface Harness {
   setWebhookStatus: (status: number) => void;
 }
 
-/** Engine rows that put supersede waste over (one CANCELLED run, all of the time). */
-const WASTEFUL = [rawRow({ status: "CANCELLED", runS: 600 })];
+/** Engine rows that put supersede waste over (one CANCELLED review run, all of the time). */
+const WASTEFUL = [rawRow({ status: "CANCELLED", runS: 600, lane: "review" })];
 const CLEAN = [rawRow({ status: "COMPLETED", runS: 600 })];
 
 function harness(opts: { snapshotText?: string | null } = {}): Harness {
@@ -1017,6 +1022,56 @@ describe("armGrowthTriggers", () => {
     handle?.stop();
   });
 
+  it("logs one snapshot_write_failed per same-error streak and one recovered line", async () => {
+    const h = harness();
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    let failWith: string | null = "EACCES";
+    h.deps.writeSnapshot = vi.fn(() => {
+      if (failWith !== null) {
+        throw Object.assign(new Error(`${failWith} ${SNAPSHOT_DIR}`), {
+          code: failWith,
+        });
+      }
+    });
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    await handle?.tick();
+    await handle?.tick();
+    const failed = () =>
+      h.logs.filter((l) => l.startsWith("growth.snapshot_write_failed "));
+    const recovered = () =>
+      h.logs.filter((l) => l.startsWith("growth.snapshot_write_recovered "));
+    // Three failing persists with the same code: one line.
+    expect(h.deps.writeSnapshot).toHaveBeenCalledTimes(3);
+    expect(failed()).toEqual([
+      'growth.snapshot_write_failed {"error":"EACCES"}',
+    ]);
+
+    // A different code starts a new streak.
+    failWith = "ENOSPC";
+    await handle?.tick();
+    await handle?.tick();
+    expect(failed()).toEqual([
+      'growth.snapshot_write_failed {"error":"EACCES"}',
+      'growth.snapshot_write_failed {"error":"ENOSPC"}',
+    ]);
+    expect(recovered()).toHaveLength(0);
+
+    // The first success logs one recovered line; later successes log nothing.
+    failWith = null;
+    await handle?.tick();
+    await handle?.tick();
+    expect(recovered()).toEqual([
+      'growth.snapshot_write_recovered {"after":"ENOSPC"}',
+    ]);
+
+    // A failure after recovery is a new incident, even with an earlier code.
+    failWith = "EACCES";
+    await handle?.tick();
+    expect(failed()).toHaveLength(3);
+    handle?.stop();
+  });
+
   it("an unexpected throw inside the tick becomes growth.tick_error", async () => {
     const h = harness();
     // Arm's seed read of the clock falls back to the initial states (logged); the
@@ -1141,7 +1196,13 @@ describe("armGrowthTriggers", () => {
 describe("armGrowthTriggers (ship Step 9 decisions)", () => {
   /** Three orgs (client_share's minimum), org-a dominant and all of its time CANCELLED: client_share and supersede_waste over. */
   const THREE_ORGS = [
-    rawRow({ status: "CANCELLED", runS: 600, orgId: "org-a", id: "r-a" }),
+    rawRow({
+      status: "CANCELLED",
+      runS: 600,
+      orgId: "org-a",
+      id: "r-a",
+      lane: "review",
+    }),
     rawRow({ runS: 100, orgId: "org-b", id: "r-b" }),
     rawRow({ runS: 100, orgId: "org-c", id: "r-c" }),
   ];

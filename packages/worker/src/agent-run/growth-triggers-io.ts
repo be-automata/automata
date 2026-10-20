@@ -640,6 +640,10 @@ export function armGrowthTriggers(
   // `growth.webhook_recovered` on the first delivery after it: a sink that is down for a
   // day must not write a line per trigger per tick.
   const webhookFailureLogged = new Map<GrowthTriggerId, string>();
+  // One `growth.snapshot_write_failed` per contiguous streak of the same error (errno
+  // code, else error name), and one `growth.snapshot_write_recovered` on the first write
+  // after it: a read-only snapshot dir must not write a line per persist per tick.
+  let snapshotFailureLogged: string | null = null;
 
   const runTick = async (): Promise<GrowthSnapshot> => {
     const startMs = now();
@@ -732,10 +736,18 @@ export function armGrowthTriggers(
           log: ({ event, ...fields }) =>
             logLine(log, String(event ?? "snapshot.log"), fields),
         });
+        if (snapshotFailureLogged !== null) {
+          logLine(log, "growth.snapshot_write_recovered", {
+            after: snapshotFailureLogged,
+          });
+          snapshotFailureLogged = null;
+        }
       } catch (err) {
-        logLine(log, "growth.snapshot_write_failed", {
-          error: errnoCode(err) ?? errorName(err),
-        });
+        const error = errnoCode(err) ?? errorName(err);
+        if (snapshotFailureLogged !== error) {
+          snapshotFailureLogged = error;
+          logLine(log, "growth.snapshot_write_failed", { error });
+        }
       }
       return snapshot;
     };

@@ -364,11 +364,11 @@ pnpm --filter @terragon/daemon run build
 ## Zombie / leaked-worker guard
 
 Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim reaps a
-dead sibling worker's orphaned daemons. Worker liveness (gap #7) is closed by two
-pieces: the #215 engine-liveness watchdog restarts a worker that stops heartbeating
-(`WORKER_LIVENESS_STALE_S`), and the #373 growth-trigger evaluator below does the
-alerting, so a box that is falling behind pages someone before queued runs hit their
-`scheduleTimeout`.
+dead sibling worker's orphaned daemons. The #215 engine-liveness watchdog restarts a
+wedged worker that stops heartbeating (`WORKER_LIVENESS_STALE_S`). The #373 growth
+triggers below alert on capacity signals, but they run inside the worker process and
+need days of data, so they cannot page on a dead worker. Gap #7 (alerting on a silently
+dead unit before queued runs hit their `scheduleTimeout`) stays open.
 
 ### Growth triggers (#373)
 
@@ -401,7 +401,8 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
-  supersede policy. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
+  supersede policy. Only review-lane cancels count (`lane=review`): user Stops, self-heal
+  cancels and laneless pre-#373 rows are excluded from the numerator. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
   while deferred by #371 or parked on a #205 box slot counts that wait as waste although
   no agent compute ran. On a busy box, check `queue_wait_p90` and the `box.headroom_*`
   lines before reading a high ratio as a policy problem (follow-up #409).

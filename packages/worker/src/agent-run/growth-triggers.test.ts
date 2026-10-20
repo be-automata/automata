@@ -48,6 +48,7 @@ interface RowSpec {
   pr?: number | null;
   status?: string;
   id?: string | null;
+  lane?: RunRow["lane"];
 }
 
 let rowSeq = 0;
@@ -69,6 +70,7 @@ function row(spec: RowSpec): RunRow {
     orgId: spec.org === undefined ? "org-a" : spec.org,
     repoFullName: spec.repo ?? null,
     prNumber: spec.pr ?? null,
+    lane: spec.lane ?? null,
   };
 }
 
@@ -110,7 +112,22 @@ describe("parseRunRow", () => {
       orgId: "org-1",
       repoFullName: "acme/app",
       prNumber: 42,
+      lane: "pr",
     });
+  });
+
+  it("parses lane as a known display lane; absent or unknown values are null", () => {
+    const withLane = (lane: unknown) =>
+      parseRunRow({
+        ...base,
+        additionalMetadata: { ...base.additionalMetadata, lane },
+      })?.lane;
+    expect(withLane("review")).toBe("review");
+    expect(withLane("self-heal-fix")).toBe("self-heal-fix");
+    expect(withLane("bogus")).toBeNull();
+    expect(withLane(7)).toBeNull();
+    expect(withLane(undefined)).toBeNull();
+    expect(parseRunRow({ ...base, additionalMetadata: {} })?.lane).toBeNull();
   });
 
   it("takes the id from metadata.id, falling back to taskExternalId, else null", () => {
@@ -687,10 +704,16 @@ describe("attribution gate", () => {
 });
 
 describe("supersede waste", () => {
-  it("fires when CANCELLED run time > 20% of all run time", () => {
+  it("fires when review-lane CANCELLED run time > 20% of all run time", () => {
     const rows = [
       row({ day: 0, runS: 700 }),
-      row({ day: 1, runS: 300, status: "CANCELLED", org: null }),
+      row({
+        day: 1,
+        runS: 300,
+        status: "CANCELLED",
+        org: null,
+        lane: "review",
+      }),
     ];
     const r = evalRows(rows).supersedeWaste;
     expect(r.value).toBe(0.3);
@@ -700,7 +723,7 @@ describe("supersede waste", () => {
   it("compares the unrounded ratio: 0.2004 fires though it reports 0.2", () => {
     const r = evalRows([
       row({ day: 0, runS: 7996 }),
-      row({ day: 1, runS: 2004, status: "CANCELLED" }),
+      row({ day: 1, runS: 2004, status: "CANCELLED", lane: "review" }),
     ]).supersedeWaste;
     expect(r.value).toBe(0.2);
     expect(r.verdict).toBe("over");
@@ -710,13 +733,47 @@ describe("supersede waste", () => {
     expect(
       evalRows([
         row({ day: 0, runS: 800 }),
-        row({ day: 1, runS: 200, status: "CANCELLED" }),
+        row({ day: 1, runS: 200, status: "CANCELLED", lane: "review" }),
       ]).supersedeWaste.verdict,
     ).toBe("under");
     expect(evalRows([]).supersedeWaste).toMatchObject({
       verdict: "under",
       value: 0,
     });
+  });
+
+  it("counts only review-lane cancels; the denominator stays all run time", () => {
+    for (const lane of [
+      "task",
+      "self-heal-fix",
+      "self-heal-audit",
+      "pr",
+    ] as const) {
+      const r = evalRows([
+        row({ day: 0, runS: 100 }),
+        row({ day: 1, runS: 900, status: "CANCELLED", lane }),
+      ]).supersedeWaste;
+      expect(r).toMatchObject({ verdict: "under", value: 0 });
+    }
+    const review = evalRows([
+      row({ day: 0, runS: 100, lane: "task" }),
+      row({ day: 1, runS: 600, status: "CANCELLED", lane: "task" }),
+      row({ day: 2, runS: 300, status: "CANCELLED", lane: "review" }),
+    ]).supersedeWaste;
+    // 300 s of review cancels over 1000 s of run time across every lane.
+    expect(review.value).toBe(0.3);
+    expect(review.verdict).toBe("over");
+    expect(review.summary).toContain(
+      "review-lane cancels only: user Stops and self-heal cancels are excluded",
+    );
+  });
+
+  it("a CANCELLED row with no lane (pre-#373 dispatch) is not supersede waste", () => {
+    const r = evalRows([
+      row({ day: 0, runS: 100 }),
+      row({ day: 1, runS: 900, status: "CANCELLED", lane: null }),
+    ]).supersedeWaste;
+    expect(r).toMatchObject({ verdict: "under", value: 0 });
   });
 });
 

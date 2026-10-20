@@ -19,6 +19,8 @@
  * (AC 3, V5). A blind evaluator must never announce that a condition went away.
  */
 
+import type { RunDisplayLane } from "@terragon/utils/run-lane";
+
 /** One UTC day, milliseconds. */
 export const DAY_MS = 86_400_000;
 /** The run-signal window: the last 7 COMPLETE UTC days; today's partial day is excluded (V6). */
@@ -47,7 +49,7 @@ const SCALE_CLIENTS_THRESHOLD = 5;
 const SCALE_PRS_PER_DAY_THRESHOLD = 100;
 /** Scale composite fires when at least this many of its three arms hold ("any two"). */
 const SCALE_COMPOSITE_MIN_ARMS = 2;
-/** CANCELLED run time over all run time must exceed this (#372 AC 9). */
+/** REVIEW-lane CANCELLED run time over all run time must exceed this (#372 AC 9). */
 const SUPERSEDE_WASTE_THRESHOLD = 0.2;
 /** A trigger that stays over re-fires at most once per this window. */
 export const GROWTH_REFIRE_MS = DAY_MS;
@@ -121,6 +123,11 @@ export interface RunRow {
   orgId: string | null;
   repoFullName: string | null;
   prNumber: number | null;
+  /**
+   * `additionalMetadata.lane` (#373 OD-0). Null when absent — rows dispatched before the
+   * #373 www deploy carry none — or not one of the known display lanes.
+   */
+  lane: RunDisplayLane | null;
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -151,6 +158,24 @@ function parsePrNumber(value: unknown): number | null {
   if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return null;
   const n = Number(value.trim());
   return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+const RUN_DISPLAY_LANES: ReadonlySet<string> = new Set<RunDisplayLane>([
+  "review",
+  "pr",
+  "task",
+  "self-heal-audit",
+  "self-heal-fix",
+]);
+
+function isRunDisplayLane(value: unknown): value is RunDisplayLane {
+  return typeof value === "string" && RUN_DISPLAY_LANES.has(value);
+}
+
+/** `additionalMetadata.lane`: a known display lane, else null (an unknown value never throws). */
+function parseLane(value: unknown): RunDisplayLane | null {
+  const trimmed = nonEmptyString(value);
+  return isRunDisplayLane(trimmed) ? trimmed : null;
 }
 
 /**
@@ -191,6 +216,7 @@ export function parseRunRow(raw: unknown): RunRow | null {
     orgId: nonEmptyString(meta.orgId),
     repoFullName: nonEmptyString(meta.repoFullName),
     prNumber: parsePrNumber(meta.prNumber),
+    lane: parseLane(meta.lane),
   };
 }
 
@@ -413,7 +439,11 @@ function thresholdEvaluation(
  * KNOWN arms; over at ≥ SCALE_COMPOSITE_MIN_ARMS held; unknown when the unknown arms could
  * still reach it; under otherwise. No single arm justifies the per-run sandbox path.
  *
- * SUPERSEDE WASTE. CANCELLED run time ÷ all run time. Same engine-side blind spot as queue
+ * SUPERSEDE WASTE. CANCELLED run time of REVIEW-lane rows ÷ all run time (the spec's "of
+ * all run time": the denominator is every lane). Only the review lane is superseded by the
+ * engine's per-PR strategy; a CANCELLED task, PR or self-heal row is a user Stop or a
+ * self-heal cancel, not supersession, and a row with no lane (dispatched before the #373
+ * www deploy) cannot be placed, so neither counts as waste. Same engine-side blind spot as queue
  * wait: a run deferred by #371 or parked on a #205 box slot is RUNNING on the engine, so
  * if it is superseded while waiting its wait counts as waste although no agent compute ran
  * — on a busy box the ratio can read a capacity backlog as waste (follow-up #409).
@@ -443,7 +473,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   const orgTimeMs = new Map<string, number>();
   let attributedMs = 0;
   let unattributedMs = 0;
-  let cancelledMs = 0;
+  let reviewCancelledMs = 0;
 
   for (const row of input.runs.rows) {
     const day = dayIndex(window, row.createdAtMs);
@@ -470,7 +500,8 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
         orgTimeMs.set(row.orgId, (orgTimeMs.get(row.orgId) ?? 0) + t);
       }
     }
-    if (row.status === "CANCELLED") cancelledMs += t;
+    if (row.status === "CANCELLED" && row.lane === "review")
+      reviewCancelledMs += t;
   }
 
   // Queue wait.
@@ -582,13 +613,14 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     : compositeEvaluation;
 
   // Supersede waste.
-  const wasteRaw = totalMs > 0 ? cancelledMs / totalMs : 0;
+  const wasteRaw = totalMs > 0 ? reviewCancelledMs / totalMs : 0;
   const supersedeWaste = thresholdEvaluation(
     "supersedeWaste",
     wasteRaw,
     (waste) =>
       `supersede waste: ${round(waste * 100, 1)}% of run time was CANCELLED ` +
-      `(threshold > ${SUPERSEDE_WASTE_THRESHOLD * 100}%; includes in-worker admission and box-slot wait)`,
+      `(threshold > ${SUPERSEDE_WASTE_THRESHOLD * 100}%; review-lane cancels only: user Stops and self-heal cancels are excluded; ` +
+      "includes in-worker admission and box-slot wait)",
   );
 
   return {
