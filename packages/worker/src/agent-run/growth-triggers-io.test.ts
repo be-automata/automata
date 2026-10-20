@@ -88,13 +88,22 @@ function rawRow(opts: RowOpts = {}): Record<string, unknown> {
   };
 }
 
+/**
+ * One collection-route body in the ENGINE'S REAL SHAPE (measured on the box's hatchet-lite,
+ * 2026-10-19): `next_page` is always `current_page + 1`, the last page included, and an
+ * empty window reports `num_pages: 0`. Only `num_pages` says where the data ends.
+ */
 function page(
   rows: unknown[],
   current: number,
-  next: number | null,
+  numPages: number,
 ): Record<string, unknown> {
   return {
-    pagination: { current_page: current, next_page: next, num_pages: 99 },
+    pagination: {
+      current_page: current,
+      next_page: current + 1,
+      num_pages: numPages,
+    },
     rows,
   };
 }
@@ -146,9 +155,9 @@ describe("readRunWindow", () => {
       rawRow({ actionId: "agent-run:on-failure-task" }),
     ];
     const fetchImpl = engineFetch((offset) => {
-      if (offset === 0) return jsonResponse(page(full, 1, 2));
+      if (offset === 0) return jsonResponse(page(full, 1, 3));
       if (offset === 200) return jsonResponse(page(full, 2, 3));
-      return jsonResponse(page(last, 3, null));
+      return jsonResponse(page(last, 3, 3));
     });
     const r = await readRunWindow({
       ...base,
@@ -166,13 +175,9 @@ describe("readRunWindow", () => {
     );
   });
 
-  it("stops on a full page whose next_page is missing or not past current_page", async () => {
+  it("stops when current_page reaches num_pages, even on a full page whose next_page points past it", async () => {
     const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
-    for (const body of [
-      page(full, 1, 1),
-      page(full, 2, null),
-      { pagination: { current_page: 1, next_page: "2" }, rows: full },
-    ]) {
+    for (const body of [page(full, 1, 1), page(full, 2, 2)]) {
       const fetchImpl = engineFetch(() => jsonResponse(body));
       const r = await readRunWindow({
         ...base,
@@ -188,9 +193,9 @@ describe("readRunWindow", () => {
     const hundred = (from: number) =>
       Array.from({ length: 100 }, (_, i) => rawRow({ id: `run-${from + i}` }));
     const fetchImpl = engineFetch((offset) => {
-      if (offset === 0) return jsonResponse(page(hundred(0), 1, 2));
+      if (offset === 0) return jsonResponse(page(hundred(0), 1, 3));
       if (offset === 100) return jsonResponse(page(hundred(100), 2, 3));
-      return jsonResponse(page(hundred(200).slice(0, 7), 3, null));
+      return jsonResponse(page(hundred(200).slice(0, 7), 3, 3));
     });
     const r = await readRunWindow({
       ...base,
@@ -226,24 +231,35 @@ describe("readRunWindow", () => {
     }
   });
 
-  it("an empty page that still claims more pages → unreadable", async () => {
-    const fetchImpl = engineFetch(() => jsonResponse(page([], 1, 2)));
+  it("the engine's real last page (next_page = current + 1) on a one-page window ends the read", async () => {
+    const few = Array.from({ length: 22 }, () => rawRow());
+    const fetchImpl = engineFetch(() => jsonResponse(page(few, 1, 1)));
     const r = await readRunWindow({
       ...base,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    expect(r).toEqual({
-      kind: "unreadable",
-      reason: "engine read: empty page claims more pages",
-    });
+    expect(r.kind).toBe("rows");
+    if (r.kind === "rows") expect(r.rows).toHaveLength(22);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("an empty page ends the read: an empty window (num_pages 0), or one that shrank", async () => {
+    for (const body of [page([], 1, 0), page([], 2, 5)]) {
+      const fetchImpl = engineFetch(() => jsonResponse(body));
+      const r = await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      expect(r).toEqual({ kind: "rows", rows: [] });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("hits the page cap → unreadable 'page cap'", async () => {
     const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
     const fetchImpl = engineFetch((offset) => {
       const p = offset / GROWTH_RUNS_PAGE_LIMIT + 1;
-      return jsonResponse(page(full, p, p + 1));
+      return jsonResponse(page(full, p, 1000));
     });
     const r = await readRunWindow({
       ...base,
@@ -309,7 +325,7 @@ describe("readRunWindow", () => {
     const fetchImpl = engineFetch((offset) =>
       offset === 0
         ? jsonResponse(page(full, 1, 2))
-        : jsonResponse(page(second, 2, null)),
+        : jsonResponse(page(second, 2, 2)),
     );
     const r = await readRunWindow({
       ...base,
@@ -374,7 +390,7 @@ describe("readRunWindow", () => {
   });
 
   it("past the deadline → unreadable without a request", async () => {
-    const fetchImpl = engineFetch(() => jsonResponse(page([], 1, null)));
+    const fetchImpl = engineFetch(() => jsonResponse(page([], 1, 0)));
     const r = await readRunWindow({
       ...base,
       deadlineMs: NOW,
@@ -582,7 +598,7 @@ function harness(opts: { snapshotText?: string | null } = {}): Harness {
   const writes: Harness["writes"] = [];
   const intervalFns: Array<() => void> = [];
   let engine: () => Response | Promise<Response> = () =>
-    jsonResponse(page(WASTEFUL, 1, null));
+    jsonResponse(page(WASTEFUL, 1, 1));
   let webhookStatus = 200;
 
   const fetchImpl = vi.fn(
@@ -750,7 +766,7 @@ describe("armGrowthTriggers", () => {
     const h = harness();
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick;
-    h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
     h.clock.ms = NOW + 300_000;
     await handle?.tick();
     h.clock.ms = NOW + 600_000;
@@ -857,7 +873,7 @@ describe("armGrowthTriggers", () => {
     ).toHaveLength(5);
     expect(lines("growth.trigger_known", "supersede_waste")).toHaveLength(0);
 
-    h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
     h.clock.ms = NOW + 900_000;
     await handle?.tick();
     h.clock.ms = NOW + 1_200_000;
@@ -885,7 +901,7 @@ describe("armGrowthTriggers", () => {
           ? "MemTotal:       16000000 kB\nMemAvailable:    1000000 kB\n"
           : VMSTAT,
       );
-      h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+      h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
       const handle = armGrowthTriggers(ENV_ON, h.deps);
       await handle?.firstTick;
       for (const k of [1, 2]) {
@@ -953,14 +969,14 @@ describe("armGrowthTriggers", () => {
       h.logs.filter((l) => l.startsWith("growth.tick_skipped ")),
     ).toHaveLength(1);
 
-    release(jsonResponse(page(CLEAN, 1, null)));
+    release(jsonResponse(page(CLEAN, 1, 1)));
     const first = await handle?.firstTick;
     expect(first?.skipped).toBe(false);
     expect(h.writes).toHaveLength(1);
     expect(h.posts).toHaveLength(0);
 
     // Not in flight any more: the next tick runs.
-    h.setEngine(() => jsonResponse(page(CLEAN, 1, null)));
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
     const next = await handle?.tick();
     expect(next?.skipped).toBe(false);
     handle?.stop();

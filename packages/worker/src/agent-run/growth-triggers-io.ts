@@ -142,9 +142,15 @@ interface ReadRunWindowInput {
 interface RunsPage {
   rows: unknown[];
   /**
-   * The engine's own paging verdict, when the body carries a `pagination` object with a
-   * numeric `current_page`: true iff `next_page` is a number past it. Null when pagination
-   * is absent, and only then does the reader fall back to the short-page stop.
+   * The engine's own paging verdict, when the body carries a `pagination` object with
+   * numeric `current_page` and `num_pages`: true iff `current_page < num_pages`. Null when
+   * pagination is absent, and only then does the reader fall back to the short-page stop.
+   *
+   * NOT `next_page`: measured on the box's engine (hatchet-lite, 2026-10-19) it is always
+   * `current_page + 1`, the last page included (last page {current_page 4, next_page 5,
+   * num_pages 4}; empty window {current_page 1, next_page 2, num_pages 0}) — trusting it
+   * read every window as "more pages" and ended every read unreadable (roborev job 745).
+   * apps/www's transport reader pages on `num_pages` for the same reason.
    */
   hasMore: boolean | null;
 }
@@ -160,14 +166,14 @@ function parseRunsPage(body: unknown): RunsPage | null {
   if (!Array.isArray(b.rows)) return null;
   const p =
     typeof b.pagination === "object" && b.pagination !== null
-      ? (b.pagination as { current_page?: unknown; next_page?: unknown })
+      ? (b.pagination as { current_page?: unknown; num_pages?: unknown })
       : {};
   const currentPage = finiteNumber(p.current_page);
-  const nextPage = finiteNumber(p.next_page);
+  const numPages = finiteNumber(p.num_pages);
   return {
     rows: b.rows,
     hasMore:
-      currentPage === null ? null : nextPage !== null && nextPage > currentPage,
+      currentPage === null || numPages === null ? null : currentPage < numPages,
   };
 }
 
@@ -230,11 +236,11 @@ async function fetchRunsPage(
 
 /**
  * Offset-paginated read of every run task created since `sinceMs` (V7). When the body
- * carries `pagination` with a numeric `current_page`, the engine decides: the read goes on
- * while `next_page` is a number past `current_page`, whatever the page size — an engine
+ * carries `pagination` with numeric `current_page` and `num_pages`, the engine decides:
+ * the read goes on while `current_page < num_pages`, whatever the page size — an engine
  * that caps `limit` below GROWTH_RUNS_PAGE_LIMIT returns short pages that are NOT the
- * end. Only without pagination does a short page end the read. A page with no rows that
- * still claims more is `unreadable`: the offset could not advance. More than
+ * end. Only without pagination does a short page end the read. A page with no rows ends
+ * the read (an empty window, or a collection that shrank between pages). More than
  * GROWTH_RUNS_MAX_PAGES pages → `unreadable` "page cap": a partial window would silently
  * understate every run signal.
  *
@@ -293,15 +299,11 @@ export async function readRunWindow(
       else rowsById.set(row.id, row);
     }
 
-    const more = parsed.hasMore ?? parsed.rows.length >= GROWTH_RUNS_PAGE_LIMIT;
+    const more =
+      parsed.rows.length > 0 &&
+      (parsed.hasMore ?? parsed.rows.length >= GROWTH_RUNS_PAGE_LIMIT);
     if (!more) {
       return { kind: "rows", rows: [...rowsById.values(), ...anonymousRows] };
-    }
-    if (parsed.rows.length === 0) {
-      return {
-        kind: "unreadable",
-        reason: "engine read: empty page claims more pages",
-      };
     }
     offset += parsed.rows.length;
   }
