@@ -75,13 +75,17 @@ Test environments push the schema automatically.
 > `ci.yml`, which runs lint/typecheck/tests and has **no drizzle push step**. There is
 > no GitHub action that migrates the Neon production database when code lands on main.
 >
-> A schema change therefore ships in two ordered manual steps: **apply its migration to
-> prod FIRST (`deploy/migrate.ts --apply`, below), then deploy the worker**. Merging
-> schema-dependent code without the migration leaves production running code that reads
-> columns which do not exist.
+> A schema change still ships in two ordered steps: **its migration reaches prod FIRST,
+> then the worker is deployed**. The first step is now CI: `.github/workflows/migrate.yml`
+> runs `deploy/migrate.ts --apply --no-contract` and then `assert-schema-ready` whenever
+> migration files land on main, using the `PROD_DATABASE_URL` secret of the GitHub
+> `production` environment. A `migrate:contract` file is never auto-applied (the deployed
+> revision may still read what it drops): deploy first, then run the workflow by hand with
+> `allow_contract`. The www/worker deploy itself is still manual.
 >
 > The prod `DATABASE_URL` is a write-only Cloudflare Worker secret (`wrangler secret list`
-> shows names only), so whoever runs the migration needs it out of band.
+> shows names only); CI holds its own copy as the environment secret, scoped to the
+> migrate steps only.
 >
 > **The ordering is enforced, not just documented.** Run the gate before every
 > deploy — it exits non-zero if the deployed schema is missing a column this

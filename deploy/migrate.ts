@@ -8,10 +8,13 @@
  *     DATABASE_URL=... pnpm exec tsx deploy/migrate.ts --mark-applied <id>...
  *                                                                      # record without running
  *     [--dir deploy/migrations]                                        # another directory
+ *     [--no-contract]   refuse (exit 2, nothing applied) when a pending file is
+ *                       marked `migrate:contract`; the CI auto-apply uses it
  *
  *   Exit: 0 = plan clean (and applied, with --apply); 1 = drift (an applied
  *         file was edited), an orphan ledger row, a failed migration, an unset
- *         or pooler DATABASE_URL, or an unreachable database. Fails closed.
+ *         or pooler DATABASE_URL, or an unreachable database; 2 = --no-contract
+ *         and a pending contract file. Fails closed.
  *
  * Files apply in filename order. Each transactional file runs inside one
  * BEGIN … COMMIT together with its ledger row, under `lock_timeout` 5s and
@@ -46,6 +49,7 @@ import {
 
 interface CliArgs {
   apply: boolean;
+  noContract: boolean;
   markApplied: string[];
   dir: string;
 }
@@ -56,14 +60,21 @@ const DEFAULT_DIR = path.join(
 );
 
 const USAGE =
-  "usage: tsx deploy/migrate.ts [--apply] [--mark-applied <id>...] [--dir <dir>]";
+  "usage: tsx deploy/migrate.ts [--apply] [--mark-applied <id>...] [--dir <dir>] [--no-contract]";
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { apply: false, markApplied: [], dir: DEFAULT_DIR };
+  const args: CliArgs = {
+    apply: false,
+    noContract: false,
+    markApplied: [],
+    dir: DEFAULT_DIR,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--apply") {
       args.apply = true;
+    } else if (arg === "--no-contract") {
+      args.noContract = true;
     } else if (arg === "--dir") {
       const value = argv[i + 1];
       if (!value) {
@@ -121,6 +132,8 @@ function printPlan(plan: MigrationPlan): void {
     const flags = [
       file.headers.baseline ? "baseline" : null,
       file.headers.noTransaction ? "no-transaction" : null,
+      file.headers.expand ? "expand" : null,
+      file.headers.contract ? "contract" : null,
     ].filter((flag): flag is string => flag !== null);
     console.log(
       `  pending  ${file.id}${flags.length ? ` [${flags.join(", ")}]` : ""}`,
@@ -144,6 +157,17 @@ async function main(argv: string[]): Promise<number> {
     printPlan(plan);
     if (planProblems(plan).length > 0) {
       return 1;
+    }
+    // A contract file removes what the previous revision may still read, and
+    // a www/worker deploy is a separate manual step that can lag main. So the
+    // unattended path refuses it; a person applies it after the deploy.
+    const contracts = plan.pending.filter((file) => file.headers.contract);
+    if (args.noContract && contracts.length > 0) {
+      console.error(
+        `refusing: pending contract migration(s) ${contracts.map((f) => f.id).join(", ")}; ` +
+          "deploy the code that no longer reads the removed schema, then apply without --no-contract",
+      );
+      return 2;
     }
     if (!args.apply) {
       if (args.markApplied.length === 0 && plan.pending.length > 0) {

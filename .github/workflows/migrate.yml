@@ -1,0 +1,95 @@
+name: Migrate production
+
+# Applies deploy/migrations to the production database when they land on main,
+# so a merged schema change never waits on someone holding the DB URL.
+#
+#   push to main  (migration files, the runner, or this workflow changed)
+#     → dry run → apply --no-contract → assert-schema-ready
+#   workflow_dispatch
+#     → same, and `allow_contract: true` also applies `migrate:contract` files
+#
+# A contract file drops schema the deployed revision may still read, and the
+# www/worker deploy is a separate manual step that can lag main, so the
+# unattended run refuses it (deploy/migrate.ts exits 2). Deploy the code that
+# no longer reads the removed schema, then run this workflow by hand with
+# allow_contract.
+#
+# Setup (once):
+#   Settings → Environments → `production`; add required reviewers there if a
+#   human should approve each run.
+#   gh secret set PROD_DATABASE_URL --env production
+#     The direct Neon host (not `-pooler.`): the runner holds a session
+#     advisory lock that a pooler cannot keep.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/migrations/**
+      - deploy/migrate.ts
+      - deploy/assert-schema-ready.ts
+      - packages/migrate/**
+      - .github/workflows/migrate.yml
+  workflow_dispatch:
+    inputs:
+      allow_contract:
+        description: "Also apply migrate:contract files (only after the code that stops reading the removed schema is deployed)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One run at a time, never cancelled mid-apply: a second merge queues behind
+# the first (the runner's advisory lock is the database-side backstop).
+concurrency:
+  group: migrate-production
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    # DATABASE_URL is set per step, never job-wide: `pnpm install` runs
+    # third-party install scripts, and they must not see the production URL.
+    steps:
+      - name: Require the database secret
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::PROD_DATABASE_URL is not set on the production environment (gh secret set PROD_DATABASE_URL --env production)"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Plan (dry run)
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: pnpm exec tsx deploy/migrate.ts
+      - name: Apply
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          ALLOW_CONTRACT: ${{ inputs.allow_contract }}
+        # Decided in shell: an Actions expression `x && '' || y` always yields y
+        # ('' is falsy), which would silently ignore allow_contract.
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$ALLOW_CONTRACT" = "true" ]; then
+            pnpm exec tsx deploy/migrate.ts --apply
+          else
+            pnpm exec tsx deploy/migrate.ts --apply --no-contract
+          fi
+      - name: Assert the schema this revision needs is present
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: pnpm exec tsx deploy/assert-schema-ready.ts
