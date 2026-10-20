@@ -78,32 +78,19 @@ describe("loadGrowthTriggerConfig", () => {
     ).toBe("https://203.0.113.9/topic");
   });
 
-  it("accepts http only for loopback hosts", () => {
-    for (const ok of [
-      "http://localhost:8080/topic",
-      "http://LOCALHOST/topic",
-      "http://127.0.0.1/topic",
-      "http://127.255.0.9:9/topic",
-      "http://[::1]:2586/topic",
-    ]) {
-      expect(
-        loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: ok })?.webhookUrl,
-      ).toBe(ok);
-    }
-  });
-
-  it("accepts http only for private IPv4 literals (10/8, 172.16/12, 192.168/16)", () => {
-    for (const ok of [
-      "http://10.0.0.5/topic",
-      "http://10.255.255.255/topic",
-      "http://172.16.0.1/topic",
-      "http://172.31.255.254/topic",
-      "http://192.168.1.20:80/topic",
-    ]) {
-      expect(
-        loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: ok })?.webhookUrl,
-      ).toBe(ok);
-    }
+  it.each([
+    ["a loopback literal", "http://127.0.0.1/topic"],
+    ["a loopback literal", "http://127.255.0.9:9/topic"],
+    ["a loopback literal", "http://[::1]:2586/topic"],
+    ["a private IPv4 literal", "http://10.0.0.5/topic"],
+    ["a private IPv4 literal", "http://10.255.255.255/topic"],
+    ["a private IPv4 literal", "http://172.16.0.1/topic"],
+    ["a private IPv4 literal", "http://172.31.255.254/topic"],
+    ["a private IPv4 literal", "http://192.168.1.20:80/topic"],
+  ])("accepts http to %s (%s)", (_kind, ok) => {
+    expect(
+      loadGrowthTriggerConfig({ WORKER_ALERT_WEBHOOK_URL: ok })?.webhookUrl,
+    ).toBe(ok);
   });
 
   it("refuses http to a public or named host, naming the knob and the rule without the URL", () => {
@@ -117,6 +104,8 @@ describe("loadGrowthTriggerConfig", () => {
       "http://8.8.8.8/SECRETTOKEN",
       "http://[fd00::1]/SECRETTOKEN",
       "http://localhost.example.com/SECRETTOKEN",
+      "http://localhost:8080/SECRETTOKEN",
+      "http://LOCALHOST/SECRETTOKEN",
     ]) {
       const message = refusal(bad);
       expect(message).toMatch(/^WORKER_ALERT_WEBHOOK_URL must use https:/);

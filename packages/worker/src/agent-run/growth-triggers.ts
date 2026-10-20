@@ -271,6 +271,23 @@ export interface RunSignalsResult {
   stats: RunWindowStats | null;
 }
 
+/**
+ * An evaluation that was computed but cannot be trusted this tick (the attribution
+ * gate): keeps the observed value for the snapshot, unlike unknownEvaluation, which is
+ * for an input that could not be read at all.
+ */
+function asUnknown(
+  evaluation: TriggerEvaluation,
+  reason: string,
+): TriggerEvaluation {
+  return {
+    ...evaluation,
+    verdict: "unknown",
+    reason,
+    summary: `${evaluation.summary} — unknown: ${reason}`,
+  };
+}
+
 function unknownEvaluation(
   trigger: GrowthTriggerId,
   threshold: number,
@@ -440,7 +457,8 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   const maxShareRaw = topOrg?.share ?? 0;
   const totalMs = attributedMs + unattributedMs;
   const unattributedFractionRaw = totalMs > 0 ? unattributedMs / totalMs : 0;
-  const unattributedPct = round(unattributedFractionRaw * 100, 1);
+  // Two decimals, so a gate tripped at 5.04 % never reads as "5 %" in the reason.
+  const unattributedPct = round(unattributedFractionRaw * 100, 2);
   const attributionIncomplete =
     unattributedFractionRaw > ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION;
   const attributionReason = `attribution incomplete (${unattributedPct}% of run time unattributed)`;
@@ -452,16 +470,14 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
         ? `client share: no attributed run time in the last ${GROWTH_WINDOW_DAYS} UTC days`
         : `client share: ${topClient.orgId} holds ${round(maxShare * 100, 1)}% of attributed run time ` +
           `across ${orgs.size} org(s) (threshold > ${CLIENT_SHARE_THRESHOLD * 100}% with ≥ ${CLIENT_SHARE_MIN_ORGS} orgs)`) +
-      `; ${unattributedPct}% of run time unattributed`,
+      // The gate's reason already states the figure; say it once.
+      (attributionIncomplete
+        ? ""
+        : `; ${unattributedPct}% of run time unattributed`),
     orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShareRaw > CLIENT_SHARE_THRESHOLD,
   );
-  const clientShare: TriggerEvaluation = attributionIncomplete
-    ? {
-        ...clientShareEvaluation,
-        verdict: "unknown",
-        reason: attributionReason,
-        summary: `${clientShareEvaluation.summary} — unknown: ${attributionReason}`,
-      }
+  const clientShare = attributionIncomplete
+    ? asUnknown(clientShareEvaluation, attributionReason)
     : clientShareEvaluation;
 
   // Scale composite.
@@ -477,39 +493,31 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       busiestDay = { date: isoDay(dayStart), prs };
     }
   }
-  // null = the arm cannot be judged this tick (only clients, under the attribution gate).
-  const arms: Record<
-    "clients" | "prsPerDay" | "questionnaire",
-    boolean | null
-  > = {
-    clients: attributionIncomplete ? null : orgs.size > SCALE_CLIENTS_THRESHOLD,
-    prsPerDay: prsPerDayRaw > SCALE_PRS_PER_DAY_THRESHOLD,
-    questionnaire: input.questionnaire,
-  };
-  const armsHeld = Object.values(arms).filter((a) => a === true).length;
-  const unknownArms = Object.entries(arms)
-    .filter(([, a]) => a === null)
-    .map(([name]) => name);
+  // Only the clients arm can be unknown (the attribution gate); it is never counted held then.
+  const clientsArm =
+    !attributionIncomplete && orgs.size > SCALE_CLIENTS_THRESHOLD;
+  const prsArm = prsPerDayRaw > SCALE_PRS_PER_DAY_THRESHOLD;
+  const armsHeld = [clientsArm, prsArm, input.questionnaire].filter(
+    Boolean,
+  ).length;
+  const unknownArmCount = attributionIncomplete ? 1 : 0;
   const compositeEvaluation = thresholdEvaluation(
     "scaleComposite",
     armsHeld,
     () =>
-      `scale composite: ${armsHeld} of 3 arms (clients ${orgs.size} > ${SCALE_CLIENTS_THRESHOLD}: ${arms.clients ?? "unknown"}; ` +
-      `PRs/day ${prsPerDay} > ${SCALE_PRS_PER_DAY_THRESHOLD}: ${arms.prsPerDay}; ` +
-      `questionnaire: ${arms.questionnaire}; fires on ≥ ${SCALE_COMPOSITE_MIN_ARMS})`,
+      `scale composite: ${armsHeld} of 3 arms (clients ${orgs.size} > ${SCALE_CLIENTS_THRESHOLD}: ${attributionIncomplete ? "unknown" : clientsArm}; ` +
+      `PRs/day ${prsPerDay} > ${SCALE_PRS_PER_DAY_THRESHOLD}: ${prsArm}; ` +
+      `questionnaire: ${input.questionnaire}; fires on ≥ ${SCALE_COMPOSITE_MIN_ARMS})`,
     armsHeld >= SCALE_COMPOSITE_MIN_ARMS,
   );
   const compositeUndecided =
     armsHeld < SCALE_COMPOSITE_MIN_ARMS &&
-    armsHeld + unknownArms.length >= SCALE_COMPOSITE_MIN_ARMS;
-  const compositeReason = `arm(s) ${unknownArms.join(", ")} unknown: ${attributionReason}`;
-  const scaleComposite: TriggerEvaluation = compositeUndecided
-    ? {
-        ...compositeEvaluation,
-        verdict: "unknown",
-        reason: compositeReason,
-        summary: `${compositeEvaluation.summary} — unknown: ${compositeReason}`,
-      }
+    armsHeld + unknownArmCount >= SCALE_COMPOSITE_MIN_ARMS;
+  const scaleComposite = compositeUndecided
+    ? asUnknown(
+        compositeEvaluation,
+        `arm(s) clients unknown: ${attributionReason}`,
+      )
     : compositeEvaluation;
 
   // Supersede waste.

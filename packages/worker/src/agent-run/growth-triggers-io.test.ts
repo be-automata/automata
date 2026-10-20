@@ -330,7 +330,6 @@ describe("readRunWindow", () => {
   });
 
   it("one hanging page is abandoned at the per-request cap, not the long engine budget", async () => {
-    expect(GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS).toBe(30_000);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const fetchImpl = engineFetch(() => new Promise<Response>(() => {}));

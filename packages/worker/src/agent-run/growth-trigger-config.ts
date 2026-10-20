@@ -15,6 +15,8 @@
  * here ever echoes it.
  */
 
+import { isIP } from "node:net";
+
 export const GROWTH_TRIGGER_INTERVAL_DEFAULT_S = 300;
 const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
 /** One day: a slower tick could not hold the 24 h dedupe window it serves. */
@@ -95,20 +97,10 @@ function parseWebhookUrl(v: string): string {
     return v;
   }
   throw new Error(
-    "WORKER_ALERT_WEBHOOK_URL must use https: (http: is allowed only for a loopback host " +
-      "— localhost, 127.0.0.0/8, ::1 — or a private IPv4 literal — 10/8, 172.16/12, " +
+    "WORKER_ALERT_WEBHOOK_URL must use https: (http: is allowed only for a loopback literal " +
+      "— 127.0.0.0/8, ::1 — or a private IPv4 literal — 10/8, 172.16/12, " +
       "192.168/16) (value withheld: it may be a secret)",
   );
-}
-
-/** Dotted-quad IPv4 literal → its four octets, or null. */
-function ipv4Octets(host: string): [number, number, number, number] | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (m === null) return null;
-  const octets = m.slice(1).map(Number);
-  if (octets.some((o) => o > 255)) return null;
-  const [a = 0, b = 0, c = 0, d = 0] = octets;
-  return [a, b, c, d];
 }
 
 /**
@@ -116,12 +108,13 @@ function ipv4Octets(host: string): [number, number, number, number] | null {
  * cleartext is acceptable only where it never crosses a network the box does not own.
  * `URL` has already normalised the hostname (lower-cased, IPv6 in brackets, numeric IPv4
  * forms such as `0x7f.1` rewritten to dotted quads), so only canonical forms are matched.
+ * Literals only, never a name — not even `localhost`: a name goes through the resolver
+ * (`/etc/hosts`, then DNS), so it could send the credential somewhere off the box.
  */
 function isLoopbackOrPrivateHost(hostname: string): boolean {
-  if (hostname === "localhost" || hostname === "[::1]") return true;
-  const ip = ipv4Octets(hostname);
-  if (ip === null) return false;
-  const [a, b] = ip;
+  if (hostname === "[::1]") return true;
+  if (isIP(hostname) !== 4) return false;
+  const [a = -1, b = -1] = hostname.split(".").map(Number);
   return (
     a === 127 ||
     a === 10 ||

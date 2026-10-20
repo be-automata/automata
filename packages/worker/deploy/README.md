@@ -375,10 +375,10 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 | `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.              |
 
 `WORKER_ALERT_WEBHOOK_URL` must be `https:`. Plain `http:` is accepted only when the
-host is loopback (`localhost`, `127.0.0.0/8`, `::1`) or a private IPv4 literal
+host is a loopback literal (`127.0.0.0/8`, `::1`) or a private IPv4 literal
 (`10/8`, `172.16/12`, `192.168/16`) — the URL is a credential and must not cross a
-network in cleartext. A hostname such as `ntfy.local` is refused over `http:` even if it
-resolves privately: use https, or the IP literal.
+network in cleartext. Any hostname, `localhost` included, is refused over `http:`: a name
+goes through the resolver. Use https, or the IP literal.
 
 A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
 The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
@@ -390,8 +390,8 @@ is not recorded and is retried next tick.
 State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
 atomically every tick). `/tmp` is cleared at reboot, so a trigger may re-fire once after
 a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
-`unattributed`; the client signals are meaningful only once 7 complete days of tagged
-runs exist. The attribution gate enforces that: while more than 5 % of the window's run
+`unattributed`; the client signals are meaningful only once the window holds 7 complete
+UTC days of tagged runs — up to 8 calendar days after the www deploy. The attribution gate enforces that: while more than 5 % of the window's run
 time is unattributed, `client_share` and the scale composite's clients arm read
 `unknown` (the share and the unattributed figures are still in the snapshot). The
 composite then fires only if the other two arms hold, and reads `unknown` when the

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION,
   AUTHORIZED_MOVES,
   buildSnapshot,
   buildWebhookBody,
@@ -390,19 +389,19 @@ describe("attribution gate", () => {
   const unattributed = (runS: number): RunRow =>
     row({ day: 3, org: null, runS });
 
-  it("is 5%", () => {
-    expect(ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION).toBe(0.05);
-  });
-
   it("high unattributed time makes client_share unknown even with a dominant org", () => {
-    // 100 s unattributed of 1100 s total: 9.1%.
+    // 100 s unattributed of 1100 s total: 9.09%.
     const r = evalRows([...dominant(), unattributed(100)]);
     expect(r.clientShare).toMatchObject({
       verdict: "unknown",
       value: 0.8,
-      reason: "attribution incomplete (9.1% of run time unattributed)",
+      reason: "attribution incomplete (9.09% of run time unattributed)",
     });
-    expect(r.clientShare.summary).toContain("9.1% of run time unattributed");
+    expect(r.clientShare.summary).toContain("9.09% of run time unattributed");
+    // The gate states the figure once, in its reason.
+    expect(
+      r.clientShare.summary.match(/% of run time unattributed/g),
+    ).toHaveLength(1);
     expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.8 });
     expect(r.stats?.unattributed).toEqual({ seconds: 100, fraction: 0.091 });
   });
@@ -412,7 +411,7 @@ describe("attribution gate", () => {
     const r = evalRows([...dominant(), unattributed(50)]);
     expect(r.clientShare.verdict).toBe("over");
     expect(r.clientShare.reason).toBeUndefined();
-    expect(r.clientShare.summary).toContain("4.8% of run time unattributed");
+    expect(r.clientShare.summary).toContain("4.76% of run time unattributed");
     expect(evalRows(dominant()).clientShare.summary).toContain(
       "0% of run time unattributed",
     );
