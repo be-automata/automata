@@ -11,7 +11,7 @@ import {
   TRACKER_CONFIG_KEYS,
   TRACKER_CREDENTIAL_KEYS,
 } from "./tracker-config";
-import { describeTrackerError } from "./youtrack-client";
+import { describeTrackerError } from "./tracker-types";
 
 /**
  * What the post-merge audit would resolve for `repoFullName` in the org

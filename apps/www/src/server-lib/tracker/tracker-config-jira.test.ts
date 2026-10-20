@@ -8,7 +8,7 @@ import {
 
 import { createTrackerClient } from "./tracker-client";
 import { parseTrackerConfig } from "./tracker-config";
-import { TrackerConfigError } from "./youtrack-client";
+import { TrackerConfigError } from "./tracker-types";
 
 const vars = (record: Record<string, string>) =>
   Object.entries(record).map(([key, value]) => ({ key, value }));

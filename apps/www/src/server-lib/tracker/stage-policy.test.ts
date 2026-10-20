@@ -7,7 +7,7 @@ import {
   stagePolicyFor,
   youTrackStagePolicy,
 } from "./stage-policy";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import type { TrackerIssue, TrackerLinkedIssue } from "./tracker-types";
 
 const complete = { taskComplete: true };
 const remaining = { taskComplete: false, remaining: "EP-4 pending" };

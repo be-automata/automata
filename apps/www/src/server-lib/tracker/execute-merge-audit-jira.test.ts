@@ -11,7 +11,7 @@ import {
   type TrackerIssue,
   TrackerRequestError,
   TrackerTransitionError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 const PR_URL = "https://github.com/acme-inc/acme-core/pull/7";
 const DEFAULT_WORKFLOW = [
@@ -285,6 +285,20 @@ describe("executeMergeAudit with a Jira tracker", () => {
     expect(body).toContain(
       "No `Ready for QA` transition exists; moved to `In Review` instead.",
     );
+  });
+
+  it("shadow: reports the fallback stage and does not claim the dependant", async () => {
+    const { tracker, comments } = await run({
+      issues: blockedPair(),
+      writes: "off",
+      workflow: ["Backlog", "To Do", "In Progress", "In Review", "Done"],
+    });
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    const body = comments.upserts[0]!.body;
+    expect(body).toContain(
+      "No `Ready for QA` transition exists; would move to `In Review` instead.",
+    );
+    expect(body).not.toContain("Would promote");
   });
 
   it("live: a case variant of the QA status is the target, not a fallback", async () => {

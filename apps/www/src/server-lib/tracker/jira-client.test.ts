@@ -3,16 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createJiraClient,
   flattenAdf,
-  JIRA_SUBTASK_LINK,
   parseJiraIssue,
   toJiraWikiText,
 } from "./jira-client";
+import { JIRA_SUBTASK_LINK } from "./stage-policy";
 import {
   describeTrackerError,
   TrackerConfigError,
   TrackerRequestError,
   TrackerTransitionError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 const BASE = "https://acme.atlassian.net";
 

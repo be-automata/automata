@@ -23,6 +23,10 @@ export const JIRA_REQUIRED_KEYS = [
   "JIRA_API_TOKEN",
 ] as const;
 
+/** The keys that configure a tracker, as named in "not configured" notices. */
+export const TRACKER_SETUP_KEYS_TEXT =
+  "`YOUTRACK_URL` and `YOUTRACK_TOKEN` (or, for Jira, `JIRA_URL`, `JIRA_USERNAME` and `JIRA_API_TOKEN`)";
+
 /** True when `isSet` reports every Jira key, selecting Jira over YouTrack. */
 export function selectsJira(isSet: (key: string) => boolean): boolean {
   return JIRA_REQUIRED_KEYS.every(isSet);

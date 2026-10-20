@@ -1,6 +1,7 @@
 import { createJiraClient } from "./jira-client";
 import type { TrackerConfig } from "./tracker-config";
-import { createYouTrackClient, type TrackerClient } from "./youtrack-client";
+import { createYouTrackClient } from "./youtrack-client";
+import { type TrackerClient } from "./tracker-types";
 
 /**
  * The one place a tracker client is constructed from a repo's config. A second

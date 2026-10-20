@@ -8,7 +8,7 @@ import {
 import { selectsJira, TRACKER_CONFIG_KEYS } from "@/lib/tracker-env-keys";
 
 import { normalizeProjects } from "./extract-ticket-keys";
-import { normalizeTrackerBaseUrl } from "./youtrack-client";
+import { normalizeTrackerBaseUrl } from "./tracker-types";
 
 /**
  * Tracker configuration (ADR-008), read from the ORGANIZATION environment

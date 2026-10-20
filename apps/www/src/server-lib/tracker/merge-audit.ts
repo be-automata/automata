@@ -4,7 +4,7 @@ import type {
   MergeAuditCriterion,
   MergeAuditTicket,
 } from "./parse-merge-audit-intent";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import type { TrackerIssue, TrackerLinkedIssue } from "./tracker-types";
 
 /**
  * Pure policy + rendering for the post-merge audit (ADR-008). No I/O.

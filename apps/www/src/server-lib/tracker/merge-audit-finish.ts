@@ -9,7 +9,7 @@ import {
 } from "./execute-merge-audit";
 import { createTrackerClient } from "./tracker-client";
 import { resolveTrackerConfig, type TrackerConfig } from "./tracker-config";
-import { describeTrackerError } from "./youtrack-client";
+import { describeTrackerError } from "./tracker-types";
 
 /**
  * Thread-finish glue for the post-merge audit (ADR-008): binds the pure

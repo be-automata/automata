@@ -5,7 +5,7 @@ import {
   describeTrackerError,
   type TrackerClient,
   type TrackerIssue,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 /**
  * Builds the two context blocks appended to the post-merge skill body at

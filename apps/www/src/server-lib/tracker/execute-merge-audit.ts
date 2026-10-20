@@ -1,3 +1,5 @@
+import { TRACKER_SETUP_KEYS_TEXT } from "@/lib/tracker-env-keys";
+
 import { extractTicketKeys } from "./extract-ticket-keys";
 import {
   decideSiblingPromotion,
@@ -31,7 +33,7 @@ import {
   type TrackerIssue,
   type TrackerLinkedIssue,
   TrackerTransitionError,
-} from "./youtrack-client";
+} from "./tracker-types";
 
 /**
  * The control-plane executor for the post-merge audit (ADR-008). Called from
@@ -107,43 +109,59 @@ export type MergeAuditOutcome =
   | { outcome: "no_ticket" }
   | { outcome: "tracker_unconfigured" };
 
+/** A policy target and the concrete stage this tracker will be asked for. */
+interface StageMove extends ResolvedStage {
+  /** The policy's own name for the target — what the allowlist holds. */
+  target: string;
+}
+
+/**
+ * Pick the concrete stage for a policy target. A tracker that moves by
+ * transitions (Jira) is asked which stages are reachable and the policy picks
+ * one — possibly a fallback short of the target; none → a typed error, and
+ * nothing is written. A tracker that takes any name (YouTrack) gets the
+ * target as is, with no request.
+ *
+ * The runtime allowlist check keeps the policy's closed set of targets true
+ * for any caller.
+ */
+async function resolveStageMove(
+  policy: TrackerStagePolicy,
+  tracker: TrackerClient,
+  key: string,
+  target: string,
+): Promise<StageMove> {
+  if (!policy.allowedTargets.includes(target)) {
+    throw new Error(`stage target not allowed: ${String(target)}`);
+  }
+  const resolved = policy.resolveTarget(
+    target,
+    await tracker.listStageTargets(key),
+  );
+  if (resolved === null) {
+    throw new TrackerTransitionError(target);
+  }
+  return { target, ...resolved };
+}
+
 /**
  * The ONLY place a stage is written, and it always reads the result back: the
  * command API accepts text a workflow then rejects or ignores, so "applied"
- * means the tracker now reports the target — not that the request returned.
- *
- * The runtime allowlist check keeps the policy's closed set of targets true
- * for any caller. A tracker that moves by transitions (Jira) is asked which
- * stages are reachable, and the policy picks the concrete one — or none, and
- * nothing is written.
+ * means the tracker now reports the requested stage — not that the request
+ * returned.
  */
 async function applyStage(
   policy: TrackerStagePolicy,
   tracker: TrackerClient,
   key: string,
-  target: string,
-): Promise<{
-  applied: boolean;
-  stageAfter: string | null;
-  requested: ResolvedStage;
-}> {
-  if (!policy.allowedTargets.includes(target)) {
-    throw new Error(`stage target not allowed: ${String(target)}`);
+  move: StageMove,
+): Promise<{ applied: boolean; stageAfter: string | null }> {
+  if (!policy.allowedTargets.includes(move.target)) {
+    throw new Error(`stage target not allowed: ${String(move.target)}`);
   }
-  const available = tracker.listStageTargets
-    ? await tracker.listStageTargets(key)
-    : null;
-  const requested = policy.resolveTarget(target, available);
-  if (requested === null) {
-    throw new TrackerTransitionError(target);
-  }
-  await tracker.setStage(key, requested.stage);
+  await tracker.setStage(key, move.stage);
   const stageAfter = await tracker.getStage(key);
-  return {
-    applied: policy.reached(stageAfter, requested.stage),
-    stageAfter,
-    requested,
-  };
+  return { applied: policy.reached(stageAfter, move.stage), stageAfter };
 }
 
 /** An intent that parses AND is about this PR — not the skill's example. */
@@ -205,7 +223,12 @@ async function probeDependant(
       action: `Would promote → ${target} (final blocker merged)`,
     };
   }
-  const { applied } = await applyStage(policy, tracker, sibling.key, target);
+  const { applied } = await applyStage(
+    policy,
+    tracker,
+    sibling.key,
+    await resolveStageMove(policy, tracker, sibling.key, target),
+  );
   if (!applied) {
     return { stage, action: `Promotion to ${target} did not apply` };
   }
@@ -338,31 +361,41 @@ async function auditTicket(
     result.errors.push(detail);
   };
 
-  // Live: true only once the tracker reads back the merged target itself — a
-  // fallback stage (Jira with no QA status) leaves the ticket short of it.
-  let reachedMergedTarget = false;
-  if (decision.target !== null && live) {
+  // The concrete stage, in shadow mode too, so the comment says what a live
+  // run would request. A fallback (Jira with no QA status) is reported as the
+  // stage it is, and never completes the ticket.
+  let move: StageMove | null = null;
+  if (decision.target !== null) {
     try {
-      const { applied, stageAfter, requested } = await applyStage(
+      move = await resolveStageMove(
         policy,
         tracker,
         issue.key,
         decision.target,
       );
+      result.decision = {
+        target: move.stage,
+        note: move.fallback
+          ? `${decision.note} No \`${decision.target}\` transition exists; ${live ? "moved" : "would move"} to ${inlineCode(move.stage)} instead.`
+          : decision.note,
+      };
+    } catch (error) {
+      recordFailure("stage move failed", error);
+    }
+  }
+  const completes =
+    move !== null && !move.fallback && move.target === policy.mergedTarget;
+
+  if (move !== null && live) {
+    try {
+      const { applied, stageAfter } = await applyStage(
+        policy,
+        tracker,
+        issue.key,
+        move,
+      );
       result.stageAfter = stageAfter;
       result.transitionApplied = applied;
-      reachedMergedTarget =
-        applied &&
-        !requested.fallback &&
-        decision.target === policy.mergedTarget;
-      if (requested.fallback) {
-        // The workflow has no transition into the target itself; the policy
-        // chose its fallback. Report the stage actually requested.
-        result.decision = {
-          target: requested.stage,
-          note: `${decision.note} No \`${decision.target}\` transition exists; moved to ${inlineCode(requested.stage)} instead.`,
-        };
-      }
     } catch (error) {
       recordFailure("stage move failed", error);
     }
@@ -371,7 +404,7 @@ async function auditTicket(
   // Dependants are probed only by the merge that completes the ticket
   // (`PR Merged` on YouTrack) — a later release PR naming the same key stays
   // quiet, and so does a move that fell back short of the merged target.
-  if (live ? reachedMergedTarget : decision.target === policy.mergedTarget) {
+  if (completes && (!live || result.transitionApplied)) {
     result.linked.push(...(await probeDependants(context, issue)));
   }
 
@@ -433,7 +466,7 @@ export async function executeMergeAudit({
 
   if (config === null || tracker === null) {
     return await postNotice(
-      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` (or, for Jira, `JIRA_URL`, `JIRA_USERNAME` and `JIRA_API_TOKEN`) on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.",
+      `The post-merge audit is enabled for this repository, but no tracker is configured. Set ${TRACKER_SETUP_KEYS_TEXT} on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.`,
       { outcome: "tracker_unconfigured" },
     );
   }

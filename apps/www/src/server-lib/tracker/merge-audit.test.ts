@@ -19,7 +19,7 @@ import {
 } from "./merge-audit";
 import type { MergeAuditCriterion } from "./parse-merge-audit-intent";
 import { youTrackStagePolicy } from "./stage-policy";
-import type { TrackerIssue, TrackerLinkedIssue } from "./youtrack-client";
+import type { TrackerIssue, TrackerLinkedIssue } from "./tracker-types";
 
 const criterion = (
   id: string,

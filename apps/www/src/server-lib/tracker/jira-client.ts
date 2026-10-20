@@ -14,13 +14,16 @@
  * requested name, and writes nothing when none does.
  */
 
+import { JIRA_SUBTASK_LINK } from "./stage-policy";
 import {
   asArray,
   assertIssueKey,
   asString,
   createTrackerRequest,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   isRecord,
   normalizeTrackerBaseUrl,
+  sameName,
   type TrackerClient,
   type TrackerComment,
   type TrackerIssue,
@@ -29,15 +32,10 @@ import {
   type TrackerLinkedIssue,
   TrackerRequestError,
   TrackerTransitionError,
-} from "./youtrack-client";
-
-const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+} from "./tracker-types";
 
 const ISSUE_FIELDS =
   "summary,description,status,issuelinks,subtasks,comment" as const;
-
-/** Canonical link-type name the audit policy reads for Jira sub-tasks. */
-export const JIRA_SUBTASK_LINK = "Subtask";
 
 /** ADF nesting is bounded so a hostile document cannot blow the stack. */
 const MAX_ADF_DEPTH = 32;
@@ -317,11 +315,6 @@ export function toJiraWikiText(text: string): string {
     /(?<!\\)\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)/g,
     "[$1|$2]",
   );
-}
-
-/** Jira status names compare trimmed and case-insensitively. */
-export function sameName(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
 export function createJiraClient({

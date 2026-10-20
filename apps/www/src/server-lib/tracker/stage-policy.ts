@@ -1,4 +1,3 @@
-import { JIRA_SUBTASK_LINK, sameName } from "./jira-client";
 import {
   ALLOWED_STAGE_TARGETS,
   canonicalStage,
@@ -12,7 +11,7 @@ import {
 } from "./merge-audit";
 import type { MergeAuditTicket } from "./parse-merge-audit-intent";
 import type { TrackerKind } from "./tracker-config";
-import type { TrackerLinkedIssue } from "./youtrack-client";
+import { sameName, type TrackerLinkedIssue } from "./tracker-types";
 
 /**
  * Per-tracker stage vocabulary for the post-merge audit (ADR-008). Pure.
@@ -98,6 +97,9 @@ export const youTrackStagePolicy: TrackerStagePolicy = {
  * fixed board. On merge: complete work → `Ready for QA`; work remaining →
  * a review state. Never `Done` — QA and release are human calls.
  */
+/** Canonical link-type name the audit policy reads for Jira sub-tasks. */
+export const JIRA_SUBTASK_LINK = "Subtask";
+
 export const JIRA_READY_FOR_QA = "Ready for QA";
 export const JIRA_CODE_REVIEW = "Code Review";
 
