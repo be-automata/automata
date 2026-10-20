@@ -1238,8 +1238,28 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     handle?.stop();
   });
 
+  /**
+   * Extended by the /ship Step 7 coverage audit (second pass): a new reason in the same
+   * state is a new streak (the sinkUnreachable rows).
+   * Value: protects=webhook_failed streaks are keyed by reason as well as state, so a sink
+   * going from 503 to unreachable is logged again; fails_when=the streak key drops the
+   * reason (state-only) and the second failure mode is never logged; why_new=the rest of
+   * this test changes only the state (fired → cleared); seam=none; no_claim=a real network
+   * failure (the injected fetch throws a TypeError)
+   */
   it("logs webhook_failed once per (trigger, state, reason) streak and webhook_recovered on the next delivery", async () => {
     const h = harness();
+    let sinkUnreachable = false;
+    const inner = h.deps.fetchImpl;
+    if (inner === undefined) throw new Error("harness has a fetchImpl");
+    h.deps.fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (sinkUnreachable && urlOf(input) === WEBHOOK_URL) {
+          throw new TypeError("fetch failed");
+        }
+        return inner(input, init);
+      },
+    ) as unknown as typeof fetch;
     h.setWebhookStatus(503);
     const handle = armGrowthTriggers(ENV_ON, h.deps);
     await handle?.firstTick;
@@ -1252,6 +1272,18 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     expect(h.posts).toHaveLength(3); // retried every tick (V2) ...
     expect(events("growth.webhook_failed")).toHaveLength(1); // ... logged once
     expect(events("growth.webhook_recovered")).toHaveLength(0);
+
+    // Same state, new reason (503 → unreachable): a new streak, logged once more.
+    sinkUnreachable = true;
+    for (const ms of [700_000, 800_000]) {
+      h.clock.ms = NOW + ms;
+      await handle?.tick();
+    }
+    sinkUnreachable = false;
+    expect(events("growth.webhook_failed")).toHaveLength(2);
+    expect(events("growth.webhook_failed")[1]).toContain(
+      '"reason":"request failed (TypeError)"',
+    );
 
     h.setWebhookStatus(200);
     h.clock.ms = NOW + 900_000;
@@ -1269,8 +1301,8 @@ describe("armGrowthTriggers (ship Step 9 decisions)", () => {
     h.clock.ms = NOW + 1_500_000;
     await handle?.tick();
     const failed = events("growth.webhook_failed");
-    expect(failed).toHaveLength(2);
-    expect(failed[1]).toContain('"state":"cleared"');
+    expect(failed).toHaveLength(3);
+    expect(failed[2]).toContain('"state":"cleared"');
     handle?.stop();
   });
 
