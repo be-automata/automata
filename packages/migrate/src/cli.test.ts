@@ -100,6 +100,38 @@ describe("deploy/migrate.ts", () => {
     expect(orphan.stderr).toContain("orphan: ledger row 002");
   });
 
+  it("--no-contract refuses a pending contract file and applies nothing", async () => {
+    const db = await freshDb();
+    const dir = migrationsDir({
+      "001.sql": "CREATE TABLE a (id bigint);",
+      "002.sql": "-- migrate:contract\nALTER TABLE a DROP COLUMN id;",
+    });
+
+    const refused = runCli(["--apply", "--no-contract", "--dir", dir], db.url);
+    expect(refused.status).toBe(2);
+    expect(refused.stdout).toContain("pending  002 [contract]");
+    expect(refused.stderr).toContain(
+      "refusing: pending contract migration(s) 002",
+    );
+    const c = await db.connect();
+    expect(await readLedger(c)).toHaveLength(0);
+
+    const applied = runCli(["--apply", "--dir", dir], db.url);
+    expect(applied.status).toBe(0);
+    expect(await readLedger(c)).toHaveLength(2);
+  });
+
+  it("--no-contract still applies expand-only plans", async () => {
+    const db = await freshDb();
+    const dir = migrationsDir({
+      "001.sql": "-- migrate:expand\nCREATE TABLE a (id bigint);",
+    });
+    const result = runCli(["--apply", "--no-contract", "--dir", dir], db.url);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("pending  001 [expand]");
+    expect(result.stdout).toContain("applied 1 migration(s)");
+  });
+
   it("--mark-applied writes mode='marked' and refuses unknown ids", async () => {
     const db = await freshDb();
     const dir = migrationsDir({
