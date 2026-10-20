@@ -253,6 +253,19 @@ describe("readRunWindow", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(GROWTH_RUNS_MAX_PAGES);
   });
 
+  it("releases the body of a non-ok engine response", async () => {
+    const cancel = vi.fn();
+    const fetchImpl = engineFetch(
+      () => new Response(new ReadableStream({ cancel }), { status: 503 }),
+    );
+    const r = await readRunWindow({
+      ...base,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(r).toEqual({ kind: "unreadable", reason: "engine read: http 503" });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [
       "403",
@@ -456,6 +469,21 @@ describe("postWebhook", () => {
     expect(url).toBe(WEBHOOK_URL);
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual(body);
+  });
+
+  it("releases the response body it never reads, on every status", async () => {
+    for (const status of [200, 302, 500]) {
+      const cancel = vi.fn();
+      const stream = new ReadableStream({ cancel });
+      const r = await postWebhook(
+        WEBHOOK_URL,
+        body,
+        5000,
+        (async () => new Response(stream, { status })) as typeof fetch,
+      );
+      expect(r.delivered).toBe(status === 200);
+      expect(cancel).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("non-2xx, throw and timeout are not delivered and never echo the URL", async () => {

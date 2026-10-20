@@ -355,7 +355,11 @@ An in-process evaluator that checks five signals every interval and POSTs a webh
 when one crosses its threshold. Each trigger authorizes exactly one move:
 
 - `queue_wait_p90` — daily queue-wait p90 > 600 s on each of the last 7 complete UTC
-  days → raise the cap, then resize CX43 (cap 6) / CX53 (cap 8).
+  days → raise the cap, then resize CX43 (cap 6) / CX53 (cap 8). It measures the ENGINE
+  queue only: a run cancelled before it started counts its whole life as wait, but a run
+  deferred by the #371 headroom check or parked on a #205 box slot is already running on
+  the engine, so that wait is not seen (and counts as run time). A quiet trigger is not
+  proof the box keeps up; read the `box.headroom_*` journal lines alongside it.
 - `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
   window → add a second shared box on the same tenant.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split

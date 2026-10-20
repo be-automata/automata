@@ -222,6 +222,22 @@ describe("queue-wait p90", () => {
     expect(evalRows(rows).queueWait.verdict).toBe("under");
   });
 
+  it("a run cancelled before it started counts its whole life as queue wait", () => {
+    const rows = sevenDays({ waitS: 900 });
+    const queued = row({ day: 2, waitS: null });
+    rows[2] = {
+      ...queued,
+      status: "CANCELLED",
+      finishedAtMs: queued.createdAtMs + 1200 * 1000,
+    };
+    const r = evalRows(rows);
+    expect(r.stats?.queueWaitDailyP90S[2]).toBe(1200);
+    expect(r.queueWait.verdict).toBe("over");
+    expect(r.queueWait.summary).toContain(
+      "engine queue only, in-worker admission and box-slot waits not counted",
+    );
+  });
+
   it("excludes today's partial day and rows older than the window", () => {
     const rows = sevenDays({ waitS: 900 });
     rows.push(row({ day: 7, waitS: 10 })); // today

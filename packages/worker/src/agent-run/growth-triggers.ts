@@ -356,8 +356,13 @@ function thresholdEvaluation(
 /**
  * Evaluate the four engine-backed triggers over the last 7 complete UTC days.
  *
- * QUEUE WAIT. Each day's p90 of `startedAt − createdAt` over its STARTED run tasks (a
- * QUEUED row without `startedAt` is excluded — a documented limitation, V7). The trigger
+ * QUEUE WAIT. Each day's p90 of `startedAt − createdAt` over its STARTED run tasks, plus
+ * `finishedAt − createdAt` for a run CANCELLED before it started (newest-wins supersede,
+ * scheduleTimeout): those are the longest waits, and dropping them would hide a backlog
+ * exactly when there is one. A row still QUEUED is excluded (V7). ENGINE QUEUE ONLY: a run
+ * deferred by the #371 headroom check or parked on a #205 box slot is already RUNNING on
+ * the engine, so that wait is invisible here and counts as run time — a quiet trigger is
+ * not proof the box keeps up (follow-up: a worker-recorded admission time). The trigger
  * is "> 10 min for 7 consecutive days", so its value is the streak's WEAKEST day, with an
  * empty day counting as 0: a day with no run tasks breaks the streak by definition.
  *
@@ -404,9 +409,12 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   for (const row of input.runs.rows) {
     const day = dayIndex(window, row.createdAtMs);
     if (day === null) continue;
+    // Clamped at 0: a sub-second clock skew between engine writers is "started at once".
     if (row.startedAtMs !== null) {
-      // Clamped at 0: a sub-second clock skew between engine writers is "started at once".
       waitsByDay[day]?.push(Math.max(0, row.startedAtMs - row.createdAtMs));
+    } else if (row.status === "CANCELLED" && row.finishedAtMs !== null) {
+      // Cancelled while still queued: its whole life was queue wait.
+      waitsByDay[day]?.push(Math.max(0, row.finishedAtMs - row.createdAtMs));
     }
     if (row.repoFullName !== null && row.prNumber !== null) {
       prsByDay[day]?.add(`${row.repoFullName.toLowerCase()}#${row.prNumber}`);
@@ -439,7 +447,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       `queue-wait p90: weakest of the last ${GROWTH_WINDOW_DAYS} UTC days ${weakestDayS}s ` +
       `(threshold > ${QUEUE_WAIT_P90_THRESHOLD_S}s every day` +
       (emptyDays > 0 ? `; ${emptyDays} day(s) with no started run` : "") +
-      ")",
+      "; engine queue only, in-worker admission and box-slot waits not counted)",
   );
 
   // Client share.

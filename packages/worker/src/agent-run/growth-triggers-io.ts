@@ -209,6 +209,7 @@ async function fetchRunsPage(
     };
   }
   if (!res.ok) {
+    await discardBody(res);
     return { kind: "unreadable", reason: `engine read: http ${res.status}` };
   }
   let body: unknown;
@@ -356,6 +357,19 @@ export async function readMemSample(
 // Webhook sink
 // ---------------------------------------------------------------------------
 
+/**
+ * Cancel a response body this module will not read. Under undici an unread body keeps
+ * its connection out of the pool until garbage collection — a slow leak on a long-lived
+ * worker whose sink or engine keeps answering errors. Never throws.
+ */
+async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // Already consumed or errored: nothing left to release.
+  }
+}
+
 type WebhookResult =
   | { delivered: true; status: number }
   | { delivered: false; status?: number; reason: string };
@@ -398,6 +412,8 @@ export async function postWebhook(
           : `request failed (${name})`,
     };
   }
+  // The sink's reply is never read; release it so the connection returns to the pool.
+  await discardBody(res);
   if (
     res.type === "opaqueredirect" ||
     (res.status >= 300 && res.status < 400)
