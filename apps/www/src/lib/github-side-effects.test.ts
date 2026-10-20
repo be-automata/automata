@@ -1,4 +1,4 @@
-import { describe, it, vi, beforeEach, expect } from "vitest";
+import { describe, it, vi, beforeAll, beforeEach, expect } from "vitest";
 
 // Mutable env mock so we can flip the kill-switch per test. github-side-effects
 // reads env.GITHUB_SIDE_EFFECTS_ENABLED on each call, so the getter re-evaluates.
@@ -11,9 +11,19 @@ vi.mock("@terragon/env/apps-www", () => ({
   },
 }));
 
-import { effectiveShadow, githubSideEffectsEnabled } from "./github-side-effects";
+// The test setup's import graph can load this module (with the real env)
+// before the mock above applies, so evaluate a fresh copy under the mock.
+let effectiveShadow: typeof import("./github-side-effects").effectiveShadow;
+let githubSideEffectsEnabled: typeof import("./github-side-effects").githubSideEffectsEnabled;
 
 describe("github side-effects kill-switch", () => {
+  beforeAll(async () => {
+    vi.resetModules();
+    ({ effectiveShadow, githubSideEffectsEnabled } = await import(
+      "./github-side-effects"
+    ));
+  });
+
   beforeEach(() => {
     mockEnv.sideEffectsEnabled = true;
   });
