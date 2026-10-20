@@ -8,8 +8,11 @@ import {
   type ReviewContextBlock,
   type ReviewThreadData,
 } from "@terragon/review/context/render";
-import { getOctokitForApp } from "@/lib/github";
+import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import type { ReviewContextFetcher } from "./review-skill";
+import { fetchReviewThreads } from "./octokit-review-client";
+
+export { REVIEW_THREAD_PAGE_LIMIT } from "./octokit-review-client";
 
 /**
  * The control-plane half of a skill's `<!-- automata:context … -->` directive
@@ -24,53 +27,6 @@ import type { ReviewContextFetcher } from "./review-skill";
  */
 
 type Octokit = Awaited<ReturnType<typeof getOctokitForApp>>;
-
-/** At most this many 100-thread pages are read (500 threads). */
-export const REVIEW_THREAD_PAGE_LIMIT = 5;
-
-const REVIEW_THREADS_QUERY = `
-  query ($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-    repository(owner: $owner, name: $repo) {
-      pullRequest(number: $number) {
-        reviewThreads(first: 100, after: $cursor) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            isResolved
-            path
-            line
-            comments(first: 10) {
-              totalCount
-              nodes { databaseId author { login } body }
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-interface ReviewThreadsPage {
-  repository: {
-    pullRequest: {
-      reviewThreads: {
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-        nodes: Array<{
-          isResolved: boolean;
-          path: string | null;
-          line: number | null;
-          comments: {
-            totalCount: number;
-            nodes: Array<{
-              databaseId: number | null;
-              author: { login: string } | null;
-              body: string | null;
-            }>;
-          };
-        }>;
-      };
-    } | null;
-  } | null;
-}
 
 async function fetchPrView(
   octokit: Octokit,
@@ -101,41 +57,32 @@ async function fetchPriorReviews(
   return renderPriorReviews(reviews.map(priorReviewFromRest));
 }
 
-async function fetchReviewThreads(
+/** Comments shown per thread in the `<review_threads>` block. */
+const THREAD_COMMENTS_SHOWN = 10;
+
+async function fetchThreadsBlock(
   octokit: Octokit,
   owner: string,
   repo: string,
   prNumber: number,
 ): Promise<string> {
-  const threads: ReviewThreadData[] = [];
-  let cursor: string | null = null;
-  let truncated = false;
-  for (let page = 0; page < REVIEW_THREAD_PAGE_LIMIT; page++) {
-    const result: ReviewThreadsPage = await octokit.graphql(
-      REVIEW_THREADS_QUERY,
-      { owner, repo, number: prNumber, cursor },
-    );
-    const connection = result.repository?.pullRequest?.reviewThreads;
-    if (!connection) break;
-    for (const node of connection.nodes) {
-      threads.push({
-        isResolved: node.isResolved,
-        path: node.path,
-        line: node.line,
-        comments: node.comments.nodes.map((comment) => ({
-          databaseId: comment.databaseId,
-          authorLogin: comment.author?.login ?? null,
-          body: comment.body,
-        })),
-        commentsTruncated:
-          node.comments.totalCount > node.comments.nodes.length,
-      });
-    }
-    if (!connection.pageInfo.hasNextPage) break;
-    cursor = connection.pageInfo.endCursor;
-    truncated = page === REVIEW_THREAD_PAGE_LIMIT - 1;
-  }
-  return renderReviewThreads(threads, { truncated });
+  const { threads, truncated } = await fetchReviewThreads(
+    octokit,
+    `${owner}/${repo}`,
+    prNumber,
+  );
+  return renderReviewThreads(
+    threads.map(
+      (thread): ReviewThreadData => ({
+        isResolved: thread.isResolved,
+        path: thread.path,
+        line: thread.line,
+        comments: thread.comments.slice(0, THREAD_COMMENTS_SHOWN),
+        commentsTruncated: thread.commentCount > THREAD_COMMENTS_SHOWN,
+      }),
+    ),
+    { truncated },
+  );
 }
 
 const FETCHERS: Record<
@@ -149,7 +96,7 @@ const FETCHERS: Record<
 > = {
   "pr-view": fetchPrView,
   "prior-reviews": fetchPriorReviews,
-  "review-threads": fetchReviewThreads,
+  "review-threads": fetchThreadsBlock,
 };
 
 /**
@@ -167,10 +114,7 @@ export async function prefetchReviewContext({
   prNumber: number;
   fetchers: readonly ReviewContextFetcher[];
 }): Promise<string> {
-  const [owner, repo] = repoFullName.split("/");
-  if (!owner || !repo) {
-    throw new Error(`Invalid repository full name: ${repoFullName}`);
-  }
+  const [owner, repo] = parseRepoFullName(repoFullName);
   const blocks = await Promise.all(
     fetchers.map(async (name): Promise<ReviewContextBlock> => {
       try {
@@ -207,12 +151,9 @@ export async function prefetchReviewContextForPr({
   prNumber: number;
   fetchers: readonly ReviewContextFetcher[];
 }): Promise<string> {
-  const [owner, repo] = repoFullName.split("/");
   let octokit: Octokit;
   try {
-    if (!owner || !repo) {
-      throw new Error(`Invalid repository full name: ${repoFullName}`);
-    }
+    const [owner, repo] = parseRepoFullName(repoFullName);
     octokit = await getOctokitForApp({ owner, repo });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

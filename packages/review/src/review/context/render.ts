@@ -23,6 +23,11 @@ const THREAD_COMMENT_MAX_CHARS = 1000;
 
 const SECTION_SEPARATOR = "\n\n---\n\n";
 
+/** Keep the first `max` characters, marking a cut with a bare `…` (legacy shape). */
+function clipWithEllipsis(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 export interface PrViewData {
   number: number;
   title: string;
@@ -172,10 +177,7 @@ export function renderPriorReviews(
     );
     const body = (r.body ?? "").trim();
     if (body.length > 0) {
-      const clipped =
-        body.length > PRIOR_REVIEW_BODY_MAX_CHARS
-          ? `${body.slice(0, PRIOR_REVIEW_BODY_MAX_CHARS)}…`
-          : body;
+      const clipped = clipWithEllipsis(body, PRIOR_REVIEW_BODY_MAX_CHARS);
       lines.push("    asks: |");
       for (const bl of clipped.split("\n")) lines.push(`      ${bl}`);
     }
@@ -220,10 +222,7 @@ export function renderReviewThreads(
       for (const c of t.comments) {
         const who = c.authorLogin ?? "unknown";
         const body = (c.body ?? "").trim();
-        const clipped =
-          body.length > THREAD_COMMENT_MAX_CHARS
-            ? `${body.slice(0, THREAD_COMMENT_MAX_CHARS)}…`
-            : body;
+        const clipped = clipWithEllipsis(body, THREAD_COMMENT_MAX_CHARS);
         for (const bl of `@${who}: ${clipped}`.split("\n")) {
           lines.push(`      ${bl}`);
         }

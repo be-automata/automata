@@ -22,7 +22,7 @@ export interface ThreadResolution {
   reply: string;
 }
 
-/** The most resolutions one intent may carry (the schema enforces it too). */
+/** The most resolutions one intent may carry (parse-review-intent enforces it). */
 export const MAX_THREAD_RESOLUTIONS = 50;
 
 /** Each GitHub call gets this long; 50 × (lookup + reply + resolve) fits the lease. */
@@ -75,8 +75,8 @@ export async function applyThreadResolutions({
   callTimeoutMs = THREAD_RESOLUTION_CALL_TIMEOUT_MS,
 }: {
   client: ReviewThreadClient;
-  /** Take the (thread, commit) claim; false = another execution holds it. */
-  claim: () => Promise<boolean>;
+  /** Take the (thread, commit) claim for `commit`; false = another execution holds it. */
+  claim: (commit: string) => Promise<boolean>;
   prNumber: number;
   /** The commit the review was posted at (the intent's `commit`). */
   commit: string;
@@ -92,7 +92,7 @@ export async function applyThreadResolutions({
     failed: 0,
   };
   if (resolutions.length === 0) return tally;
-  if (!(await claim())) {
+  if (!(await claim(commit))) {
     logger?.info("thread-resolutions: claim held elsewhere; skipping", {
       prNumber,
       commit,
@@ -101,7 +101,7 @@ export async function applyThreadResolutions({
   }
   tally.claimed = true;
 
-  for (const entry of resolutions.slice(0, MAX_THREAD_RESOLUTIONS)) {
+  for (const entry of resolutions) {
     const commentId = entry.inlineCommentId;
     try {
       const thread = await withTimeout(

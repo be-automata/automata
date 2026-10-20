@@ -56,6 +56,8 @@ import {
   listSkillVersions,
 } from "../packages/shared/src/model/repo-skills";
 import { loadReviewSkillBody } from "./lib/review-skill-file";
+// Key-order-insensitive (jsonb-round-trip-stable) comparison of actions.
+import { stableStringify } from "./lib/onboard-review-repo-args";
 import { validateSkillBody } from "../apps/www/src/server-lib/review/review-skill";
 
 // Dogfooding pilot defaults (BeAutomata org, our own platform repo).
@@ -151,22 +153,6 @@ for (const [skillName, body] of Object.entries(SKILL_BODIES)) {
     );
     process.exit(1);
   }
-}
-
-/**
- * JSON.stringify with recursively sorted object keys — jsonb-round-trip-stable,
- * so semantically equal actions compare equal regardless of key order.
- */
-function stableStringify(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v !== null && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(
-          Object.entries(v as Record<string, unknown>).sort(([a], [b]) =>
-            a < b ? -1 : a > b ? 1 : 0,
-          ),
-        )
-      : v,
-  );
 }
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";

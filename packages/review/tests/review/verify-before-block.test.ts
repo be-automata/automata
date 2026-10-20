@@ -65,6 +65,29 @@ describe("verify-before-block", () => {
     assert.equal(out, intent);
   });
 
+  test("a finding with no quote or an escaping path is never read (and is still de-fanged)", async () => {
+    const r = reader({ "a.ts": { kind: "content", text: FILE } });
+    const out = await applyVerifyBeforeBlock(
+      asIntent({
+        verdict: "request_changes" as const,
+        comments: [
+          { path: "a.ts", line: 1, body: "x", severity: "error" as const },
+          {
+            path: "../etc/passwd",
+            line: 1,
+            body: "y",
+            severity: "error" as const,
+            quote: "root",
+          },
+        ],
+      }),
+      { ...base, policy: WARNING, readFile: r.readFile },
+    );
+    assert.deepEqual(r.reads, []);
+    assert.equal(out.verdict, "comment");
+    assert.ok((out.comments ?? []).every((c) => c.suppressGating === true));
+  });
+
   test("unverified blocker → info + annotation + suppressGating; sole blocker turns request_changes into comment", async () => {
     const r = reader({ "a.ts": { kind: "content", text: FILE } });
     const out = await applyVerifyBeforeBlock(
