@@ -1,9 +1,10 @@
 import {
+  priorReviewFromRest,
+  prViewFromRest,
   renderPrView,
   renderPriorReviews,
   renderReviewContext,
   renderReviewThreads,
-  type PrViewData,
   type ReviewContextBlock,
   type ReviewThreadData,
 } from "@terragon/review/context/render";
@@ -71,13 +72,6 @@ interface ReviewThreadsPage {
   } | null;
 }
 
-/** REST `mergeable` (true/false/null) in gh's casing. */
-function ghMergeable(mergeable: boolean | null | undefined): string {
-  if (mergeable === true) return "MERGEABLE";
-  if (mergeable === false) return "CONFLICTING";
-  return "UNKNOWN";
-}
-
 async function fetchPrView(
   octokit: Octokit,
   owner: string,
@@ -89,24 +83,7 @@ async function fetchPrView(
     repo,
     pull_number: prNumber,
   });
-  const pr: PrViewData = {
-    number: data.number,
-    title: data.title,
-    state: data.merged ? "MERGED" : data.state.toUpperCase(),
-    isDraft: data.draft === true,
-    authorLogin: data.user?.login ?? null,
-    labels: data.labels.map((label) => label.name ?? "").filter(Boolean),
-    url: data.html_url,
-    headRefName: data.head.ref,
-    baseRefName: data.base.ref,
-    additions: data.additions ?? null,
-    deletions: data.deletions ?? null,
-    changedFiles: data.changed_files ?? null,
-    mergeable: ghMergeable(data.mergeable),
-    mergeStateStatus: (data.mergeable_state ?? "unknown").toUpperCase(),
-    body: data.body ?? null,
-  };
-  return renderPrView(pr);
+  return renderPrView(prViewFromRest(data));
 }
 
 async function fetchPriorReviews(
@@ -121,14 +98,7 @@ async function fetchPriorReviews(
     pull_number: prNumber,
     per_page: 100,
   });
-  return renderPriorReviews(
-    reviews.map((review) => ({
-      authorLogin: review.user?.login ?? null,
-      state: review.state,
-      commitId: review.commit_id ?? null,
-      body: review.body ?? null,
-    })),
-  );
+  return renderPriorReviews(reviews.map(priorReviewFromRest));
 }
 
 async function fetchReviewThreads(

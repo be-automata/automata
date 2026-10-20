@@ -67,6 +67,70 @@ export interface ReviewThreadData {
   commentsTruncated?: boolean;
 }
 
+/** The REST pull-request fields the PR view reads (GitHub `GET /pulls/{n}`). */
+export interface RestPullRequestLike {
+  number: number;
+  title: string;
+  state: string;
+  merged?: boolean | null;
+  draft?: boolean | null;
+  user?: { login: string } | null;
+  labels: ReadonlyArray<{ name?: string | null }>;
+  html_url: string;
+  head: { ref: string };
+  base: { ref: string };
+  additions?: number | null;
+  deletions?: number | null;
+  changed_files?: number | null;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
+  body?: string | null;
+}
+
+/** REST pull request → the PR view, in gh's casing (OPEN/MERGED, MERGEABLE/CONFLICTING/UNKNOWN). */
+export function prViewFromRest(pr: RestPullRequestLike): PrViewData {
+  const mergeable =
+    pr.mergeable === true
+      ? "MERGEABLE"
+      : pr.mergeable === false
+        ? "CONFLICTING"
+        : "UNKNOWN";
+  return {
+    number: pr.number,
+    title: pr.title,
+    state: pr.merged ? "MERGED" : pr.state.toUpperCase(),
+    isDraft: pr.draft === true,
+    authorLogin: pr.user?.login ?? null,
+    labels: pr.labels.map((label) => label.name ?? "").filter(Boolean),
+    url: pr.html_url,
+    headRefName: pr.head.ref,
+    baseRefName: pr.base.ref,
+    additions: pr.additions ?? null,
+    deletions: pr.deletions ?? null,
+    changedFiles: pr.changed_files ?? null,
+    mergeable,
+    mergeStateStatus: (pr.mergeable_state ?? "unknown").toUpperCase(),
+    body: pr.body ?? null,
+  };
+}
+
+/** The REST review fields the prior-reviews block reads (GitHub `GET /pulls/{n}/reviews`). */
+export interface RestReviewLike {
+  user?: { login: string } | null;
+  state: string;
+  commit_id?: string | null;
+  body?: string | null;
+}
+
+export function priorReviewFromRest(review: RestReviewLike): PriorReviewData {
+  return {
+    authorLogin: review.user?.login ?? null,
+    state: review.state,
+    commitId: review.commit_id ?? null,
+    body: review.body ?? null,
+  };
+}
+
 /** gh's non-TTY `pr view` shape: `key:\tvalue` lines, `--`, then the body. */
 export function renderPrView(pr: PrViewData): string {
   const fields: Array<[string, string | number | null]> = [
