@@ -2,7 +2,7 @@
 
 The defect dimensions above find *bugs*. On a large diff they are not enough: the failure mode of a big PR is rarely a null check, it is **machinery that did not need to exist** — a helper that duplicates one three files over, an abstraction introduced for a single caller, a loop that re-reads what it already has. Those are invisible hunk-by-hunk, because each hunk looks fine.
 
-Apply these four **only** when the diff is large — use **>10 changed files or >400 changed lines** as the trigger (the `gh pr diff` output in Trigger Context tells you both). On a small diff they are noise; skip them silently. These lenses judge quality, not correctness: a correctness bug you notice while applying them is reported under the defect dimensions, not here.
+Apply these four **only** when the diff is large — use **>10 changed files or >400 changed lines** as the trigger (the PR view in Trigger Context — `additions`, `deletions`, `changedFiles` — tells you both). On a small diff they are noise; skip them silently. These lenses judge quality, not correctness: a correctness bug you notice while applying them is reported under the defect dimensions, not here.
 
 The four definitions below are Claude Code's `/simplify` skill, verbatim (the angles its four parallel cleanup agents take). For each finding give the `path:line`, a one-line summary, and the concrete cost — what is duplicated, wasted, or harder to maintain — plus the named replacement.
 

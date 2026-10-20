@@ -75,6 +75,16 @@ byte-pin) is NOT one of these files and is unchanged.
 - **B10. Customer names scrubbed.** The only customer PR reference sat in the
   Flutter delegation subsection that B6 removed.
 
+- **B11. Large-diff trigger source.** `_shared/simplify-lenses.md` said "the
+  `gh pr diff` output in Trigger Context tells you both"; there is no diff block
+  here, so it now names the PR view's `additions`, `deletions` and
+  `changedFiles`, which carry the same counts. (Added after the first port.)
+
+The partials still call the review text `body` and the findings `comments`
+(the legacy names). The intent parser accepts both as aliases
+(`parse-review-intent.ts`, `withLegacyKeyAliases`), so following that wording
+never drops a finding.
+
 ## Unchanged by rule
 
 The six (TypeScript) and eight (Flutter) review dimensions, the Dart/Flutter
