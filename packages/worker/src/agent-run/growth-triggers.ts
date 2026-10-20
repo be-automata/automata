@@ -474,7 +474,9 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
   const unattributedPct = round(unattributedFractionRaw * 100, 2);
   const attributionIncomplete =
     unattributedFractionRaw > ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION;
-  const attributionReason = `attribution incomplete (${unattributedPct}% of run time unattributed)`;
+  // A FIXED phrase: the reason keys the once-per-streak unknown log, so a live figure here
+  // would re-log every tick of the warm-up. The figure is in the summary and the snapshot.
+  const attributionReason = `attribution incomplete (more than ${ATTRIBUTION_MAX_UNATTRIBUTED_FRACTION * 100}% of run time unattributed)`;
   const clientShareEvaluation = thresholdEvaluation(
     "clientShare",
     maxShareRaw,
@@ -483,10 +485,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
         ? `client share: no attributed run time in the last ${GROWTH_WINDOW_DAYS} UTC days`
         : `client share: ${topClient.orgId} holds ${round(maxShare * 100, 1)}% of attributed run time ` +
           `across ${orgTimeMs.size} org(s) with run time (threshold > ${CLIENT_SHARE_THRESHOLD * 100}% with ≥ ${CLIENT_SHARE_MIN_ORGS} orgs)`) +
-      // The gate's reason already states the figure; say it once.
-      (attributionIncomplete
-        ? ""
-        : `; ${unattributedPct}% of run time unattributed`),
+      `; ${unattributedPct}% of run time unattributed`,
     // Orgs that HOLD run time: an org whose only runs ended before starting shares no box
     // time, so it cannot make a single-tenant box look shared (Q-1). The composite's
     // clients arm still counts every org that dispatched.

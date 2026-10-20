@@ -423,15 +423,19 @@ describe("attribution gate", () => {
     expect(r.clientShare).toMatchObject({
       verdict: "unknown",
       value: 0.8,
-      reason: "attribution incomplete (9.09% of run time unattributed)",
+      reason: "attribution incomplete (more than 5% of run time unattributed)",
     });
-    expect(r.clientShare.summary).toContain("9.09% of run time unattributed");
-    // The gate states the figure once, in its reason.
-    expect(
-      r.clientShare.summary.match(/% of run time unattributed/g),
-    ).toHaveLength(1);
+    expect(r.clientShare.summary).toContain("; 9.09% of run time unattributed");
     expect(r.stats?.topClient).toEqual({ orgId: "org-a", share: 0.8 });
     expect(r.stats?.unattributed).toEqual({ seconds: 100, fraction: 0.091 });
+  });
+
+  it("the gate's reason is stable while the unattributed figure moves, so the unknown log stays once per streak", () => {
+    const a = evalRows([...dominant(), unattributed(100)]);
+    const b = evalRows([...dominant(), unattributed(300)]);
+    expect(a.clientShare.summary).not.toBe(b.clientShare.summary);
+    expect(a.clientShare.reason).toBe(b.clientShare.reason);
+    expect(a.scaleComposite.reason).toBe(b.scaleComposite.reason);
   });
 
   it("at or below 5% unattributed the share decides as before", () => {
@@ -975,7 +979,7 @@ describe("snapshot", () => {
     expect(snap.triggers.client_share).toMatchObject({
       value: 1,
       verdict: "unknown",
-      reason: "attribution incomplete (50% of run time unattributed)",
+      reason: "attribution incomplete (more than 5% of run time unattributed)",
       firing: true,
       lastFiredAt: new Date(NOW - MIN).toISOString(),
     });
