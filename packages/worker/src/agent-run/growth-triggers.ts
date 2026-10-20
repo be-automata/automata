@@ -478,12 +478,16 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       (topClient === null
         ? `client share: no attributed run time in the last ${GROWTH_WINDOW_DAYS} UTC days`
         : `client share: ${topClient.orgId} holds ${round(maxShare * 100, 1)}% of attributed run time ` +
-          `across ${orgs.size} org(s) (threshold > ${CLIENT_SHARE_THRESHOLD * 100}% with ≥ ${CLIENT_SHARE_MIN_ORGS} orgs)`) +
+          `across ${orgTimeMs.size} org(s) with run time (threshold > ${CLIENT_SHARE_THRESHOLD * 100}% with ≥ ${CLIENT_SHARE_MIN_ORGS} orgs)`) +
       // The gate's reason already states the figure; say it once.
       (attributionIncomplete
         ? ""
         : `; ${unattributedPct}% of run time unattributed`),
-    orgs.size >= CLIENT_SHARE_MIN_ORGS && maxShareRaw > CLIENT_SHARE_THRESHOLD,
+    // Orgs that HOLD run time: an org whose only runs ended before starting shares no box
+    // time, so it cannot make a single-tenant box look shared (Q-1). The composite's
+    // clients arm still counts every org that dispatched.
+    orgTimeMs.size >= CLIENT_SHARE_MIN_ORGS &&
+      maxShareRaw > CLIENT_SHARE_THRESHOLD,
   );
   const clientShare = attributionIncomplete
     ? asUnknown(clientShareEvaluation, attributionReason)

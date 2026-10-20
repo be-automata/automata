@@ -327,7 +327,8 @@ describe("client share", () => {
     const r = evalRows(rows);
     expect(r.stats?.clients).toBe(2);
     expect(r.clientShare.value).toBe(1);
-    expect(r.clientShare.verdict).toBe("over");
+    // org-b holds no run time, so the box is single-tenant in time: no split signal (Q-1).
+    expect(r.clientShare.verdict).toBe("under");
   });
 });
 
@@ -442,6 +443,20 @@ describe("attribution gate", () => {
     expect(evalRows(dominant()).clientShare.summary).toContain(
       "0% of run time unattributed",
     );
+  });
+
+  it("client_share: an org with no run time does not satisfy the two-org guard", () => {
+    const solo = Array.from({ length: 10 }, () =>
+      row({ day: 2, org: "org-a", runS: 100 }),
+    );
+    const neverRan = {
+      ...row({ day: 2, org: "org-b", waitS: null }),
+      status: "CANCELLED",
+    };
+    const r = evalRows([...solo, neverRan]);
+    expect(r.clientShare.verdict).toBe("under");
+    expect(r.clientShare.summary).toContain("across 1 org(s) with run time");
+    expect(r.stats?.clients).toBe(2);
   });
 
   it("composite: more than 5 tagged orgs hold the clients arm even while attribution is incomplete", () => {
