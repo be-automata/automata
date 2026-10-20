@@ -263,27 +263,21 @@ async function main() {
     process.exit(1);
   }
 
-  // #380: the plane's seal key ring. Rollout step 1: an absent file is
-  // logged and tolerated (legacy plain-text inputs only); a file that is
-  // present but unparseable, or holds a key that fails its own seal→unseal
-  // probe, refuses boot BEFORE registration — a worker that registered with a
-  // broken ring would fail every sealed run at its first step. Step 4 (PR 2)
-  // flips `required` to true. The kid list printed here is what rollout step
-  // 3 compares against the kid www logs at dispatch.
+  // #380: the plane's seal key ring — MANDATORY since rollout step 4 (PR 2,
+  // strict mode). A missing file, an unparseable one, or a key that fails its
+  // own seal→unseal probe refuses boot BEFORE registration: every input is
+  // sealed and plain-text inputs are refused, so a worker without a usable
+  // ring would fail every run at its first step. The kid list printed here is
+  // what an operator compares against the kid www logs at dispatch.
   try {
     const { payloadSealKeyFile } = loadWorkerConfig();
-    const ring = await loadPlaneKeysAtBoot({
-      path: payloadSealKeyFile,
-      required: false,
-    });
+    const ring = await loadPlaneKeysAtBoot({ path: payloadSealKeyFile });
     console.log(
-      ring.present
-        ? `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${payloadSealKeyFile}`
-        : `[worker-boot] payload seal: no key file at ${payloadSealKeyFile} — legacy plain-text inputs only (rollout step 1)`,
+      `[worker-boot] payload seal: ${ring.kids.length} key(s) usable (${ring.kids.join(", ")}) from ${payloadSealKeyFile} — strict: sealed inputs only`,
     );
   } catch (err) {
     console.error(
-      "[worker-boot] FATAL: payload seal key file is unusable — refusing to start",
+      "[worker-boot] FATAL: payload seal key file is missing or unusable — refusing to start (strict mode; see packages/worker/deploy/README.md › Payload seal key)",
       err,
     );
     process.exit(1);

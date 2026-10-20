@@ -16,12 +16,11 @@ import type { AgentRunInput } from "./types";
  *
  * Cards:
  *  - sealed: protects=the unsealed RunSecrets + an input with NO secret
- *    field; fails_when=a plain-text field survives beside the envelope or
- *    the AAD is not the input's threadChatId; no_claim=the crypto vectors
- *    (utils suite).
- *  - legacy window: protects=the PR-1 plain-text shape is lifted, strict
- *    refuses it; fails_when=strict accepts plain text or an empty token is
- *    lifted; no_claim=none.
+ *    field; fails_when=the AAD does not bind the input or a missing ring
+ *    falls back to anything; no_claim=the crypto vectors (utils suite).
+ *  - strict: protects=rollout step 4 — no plain-text secret field is ever
+ *    lifted or ignored, and an unsealed input never runs; fails_when=a plain
+ *    field is accepted or its value reaches the error; no_claim=none.
  *  - AC 1 type test: protects=AgentRunInput has no installationToken /
  *    githubReadToken / daemonToken; fails_when=one is re-added to the
  *    type; no_claim=the www side (its own test).
@@ -47,39 +46,20 @@ const BASE: AgentRunInput = {
   orgId: "org-1",
 };
 
-describe("resolveRunSecrets", () => {
-  it("sealed: unseals with the ring, strips every plain-text field, keeps the envelope on the input", async () => {
+describe("resolveRunSecrets (strict, rollout step 4)", () => {
+  it("sealed: unseals with the ring, returns a clean input and the secrets", async () => {
     const plane = await generatePlaneKeyPair("plane-a");
     const sealedSecrets = await sealRunSecrets(
       plane.publicKey,
       SECRETS,
       sealBindingOf(BASE),
     );
-    // A hostile/legacy sender that puts BOTH on the wire: the plain-text
-    // fields are discarded, the envelope wins.
-    const wire: AgentRunWireInput = {
-      ...BASE,
-      sealedSecrets,
-      installationToken: "ghs_SHOULD_BE_IGNORED",
-      daemonToken: "SHOULD_BE_IGNORED",
-    };
-    const out = await resolveRunSecrets({ wire, keys: [plane.privateKey] });
-    expect(out.source).toBe("sealed");
-    expect(out.legacyFieldsIgnored).toBe(true);
-    expect(out.secrets).toEqual(SECRETS);
-    // A leak of only the read token is a defect too.
-    const readOnlyLeak = await resolveRunSecrets({
-      wire: { ...BASE, sealedSecrets, githubReadToken: "ghs_LEAKED" },
-      keys: [plane.privateKey],
-    });
-    expect(readOnlyLeak.legacyFieldsIgnored).toBe(true);
-    const clean = await resolveRunSecrets({
+    const out = await resolveRunSecrets({
       wire: { ...BASE, sealedSecrets },
       keys: [plane.privateKey],
     });
-    expect(clean.legacyFieldsIgnored).toBe(false);
+    expect(out.secrets).toEqual(SECRETS);
     expect(out.input).toEqual({ ...BASE, sealedSecrets });
-    expect(JSON.stringify(out.input)).not.toContain("SHOULD_BE_IGNORED");
     expect(containsRunSecret(JSON.stringify(out.input), SECRETS)).toBe(false);
   });
 
@@ -114,38 +94,65 @@ describe("resolveRunSecrets", () => {
         keys: [plane.privateKey],
       }),
     ).rejects.toThrow("reason=malformed");
-  });
-
-  it("legacy window: plain-text fields are lifted when no envelope is present; strict refuses them", async () => {
-    const wire: AgentRunWireInput = { ...BASE, ...SECRETS };
-    const out = await resolveRunSecrets({ wire, keys: [] });
-    expect(out.source).toBe("legacy");
-    expect(out.secrets).toEqual(SECRETS);
-    expect(out.input).toEqual(BASE);
-    // An empty read token is "absent", never an empty string downstream.
-    const noRead = await resolveRunSecrets({
-      wire: { ...BASE, ...SECRETS, githubReadToken: "" },
-      keys: [],
-    });
-    expect(noRead.secrets).toEqual({
-      installationToken: SECRETS.installationToken,
-      daemonToken: SECRETS.daemonToken,
-    });
+    // A missing ring (no key file) is an empty key list: unknown-kid, never a fallback.
     await expect(
-      resolveRunSecrets({ wire, keys: [], strict: true }),
-    ).rejects.toThrow("strict mode refuses plain-text secret fields");
+      resolveRunSecrets({ wire: { ...BASE, sealedSecrets }, keys: [] }),
+    ).rejects.toThrow("reason=unknown-kid");
   });
 
-  it("neither shape ⇒ refused", async () => {
-    await expect(resolveRunSecrets({ wire: BASE, keys: [] })).rejects.toThrow(
-      "neither sealedSecrets nor the legacy",
+  /**
+   * Card: protects=AC 9 / strict worker — an input that carries ANY plain-text
+   * secret field (alone, or beside a valid envelope) is refused, and the
+   * error names fields, never values; fails_when=a plain field is lifted,
+   * silently discarded, or its value reaches the message; no_claim=www's
+   * fail-closed dispatch (its own test).
+   */
+  it("strict: any plain-text secret field is refused — alone or beside a valid envelope — naming the field, never the value", async () => {
+    const plane = await generatePlaneKeyPair("plane-a");
+    const sealedSecrets = await sealRunSecrets(
+      plane.publicKey,
+      SECRETS,
+      sealBindingOf(BASE),
     );
-    await expect(
-      resolveRunSecrets({
-        wire: { ...BASE, installationToken: "x" },
-        keys: [],
-      }),
-    ).rejects.toThrow("neither sealedSecrets nor the legacy");
+    const cases: Array<[AgentRunWireInput, string]> = [
+      [
+        { ...BASE, ...SECRETS },
+        "installationToken, githubReadToken, daemonToken",
+      ],
+      [
+        { ...BASE, sealedSecrets, installationToken: "ghs_SHOULD_NOT_RUN" },
+        "installationToken",
+      ],
+      [
+        { ...BASE, sealedSecrets, githubReadToken: "ghs_SHOULD_NOT_RUN" },
+        "githubReadToken",
+      ],
+      [
+        { ...BASE, sealedSecrets, daemonToken: "SHOULD_NOT_RUN" },
+        "daemonToken",
+      ],
+      [{ ...BASE, sealedSecrets, repoEnv: { K: "SHOULD_NOT_RUN" } }, "repoEnv"],
+    ];
+    for (const [wire, named] of cases) {
+      const err = await resolveRunSecrets({
+        wire,
+        keys: [plane.privateKey],
+      }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toBe(
+        `payload-seal: strict mode refuses plain-text secret fields (${named})`,
+      );
+      expect(err?.message).not.toContain("SHOULD_NOT_RUN");
+      expect(containsRunSecret(String(err?.message), SECRETS)).toBe(false);
+    }
+  });
+
+  it("strict: an input with no envelope and no plain field is refused", async () => {
+    await expect(resolveRunSecrets({ wire: BASE, keys: [] })).rejects.toThrow(
+      "payload-seal: input carries no sealedSecrets (strict mode refuses an unsealed input)",
+    );
   });
 });
 

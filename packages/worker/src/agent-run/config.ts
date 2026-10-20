@@ -197,9 +197,9 @@ export interface WorkerConfig {
   /**
    * #380: the plane's seal key ring (`{"keys":[…]}`, see
    * payload-seal-keys.ts). Every run unseals its `sealedSecrets` with it.
-   * Default /etc/automata/payload-seal.key. Rollout step 1: an absent file is
-   * tolerated (legacy plain-text inputs only); a present-but-unusable file
-   * refuses boot. Step 4 (PR 2) makes it mandatory.
+   * Default /etc/automata/payload-seal.key. MANDATORY (strict, rollout step
+   * 4): a missing or unusable file refuses boot, and a run that cannot read
+   * it is refused — there is no plain-text fallback.
    */
   payloadSealKeyFile: string;
 

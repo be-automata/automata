@@ -102,11 +102,13 @@ describe.skipIf(!itEnabled)(
         ctx.log(m);
       };
       try {
-        const { input, secrets, source } = await resolveRunSecrets({
+        const { input, secrets } = await resolveRunSecrets({
           wire,
           keys: [plane.privateKey],
         });
-        log(`[agent-run ${input.threadId}] run secrets: ${source}`);
+        log(
+          `[agent-run ${input.threadId}] run secrets: sealed (kid=${input.sealedSecrets?.kid})`,
+        );
         seen.set(wire.threadId, { input, secrets });
         return { threadId: input.threadId, outcome: "completed" };
       } catch (e) {
