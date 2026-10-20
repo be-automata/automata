@@ -427,7 +427,11 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
       unattributedMs += t;
     } else {
       attributedMs += t;
-      orgTimeMs.set(row.orgId, (orgTimeMs.get(row.orgId) ?? 0) + t);
+      // Only positive time makes an org a holder of box time (a run that started and
+      // ended in the same instant shares none), so the Q-1 two-org guard counts holders.
+      if (t > 0) {
+        orgTimeMs.set(row.orgId, (orgTimeMs.get(row.orgId) ?? 0) + t);
+      }
     }
     if (row.status === "CANCELLED") cancelledMs += t;
   }

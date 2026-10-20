@@ -445,6 +445,15 @@ describe("attribution gate", () => {
     );
   });
 
+  it("client_share: a zero-length run does not make its org a holder of box time", () => {
+    const solo = Array.from({ length: 10 }, () =>
+      row({ day: 2, org: "org-a", runS: 100 }),
+    );
+    const r = evalRows([...solo, row({ day: 2, org: "org-b", runS: 0 })]);
+    expect(r.clientShare.verdict).toBe("under");
+    expect(r.clientShare.summary).toContain("across 1 org(s) with run time");
+  });
+
   it("client_share: an org with no run time does not satisfy the two-org guard", () => {
     const solo = Array.from({ length: 10 }, () =>
       row({ day: 2, org: "org-a", runS: 100 }),
