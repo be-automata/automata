@@ -24,6 +24,13 @@ import { normalizeTrackerBaseUrl } from "./youtrack-client";
  *   AUTOMATA_TRACKER_WRITES `live` enables tracker writes; anything else is
  *                           shadow (all reads, PR comment only, zero writes)
  *
+ * Jira instead of YouTrack: when JIRA_URL, JIRA_USERNAME and JIRA_API_TOKEN
+ * are all set the tracker is Jira, otherwise the YouTrack keys above apply.
+ *   JIRA_URL                https origin of the site (`https://acme.atlassian.net`)
+ *   JIRA_USERNAME           Atlassian account email the API token belongs to
+ *   JIRA_API_TOKEN          API token (control-plane only, like YOUTRACK_TOKEN)
+ *   JIRA_PROJECTS           comma-separated project keys; empty = generic matching
+ *
  * The personal GLOBAL environment is deliberately NOT consulted: it is
  * user-scoped with no org fence, so one person owning two orgs would leak a
  * token across them. `getControlPlaneTrackerEnvironment` never reads it.
@@ -31,12 +38,55 @@ import { normalizeTrackerBaseUrl } from "./youtrack-client";
 
 export type TrackerWriteMode = "off" | "live";
 
-export interface TrackerConfig {
-  kind: "youtrack";
+interface TrackerConfigBase {
   baseUrl: string;
   token: string;
   projects: string[];
   writes: TrackerWriteMode;
+}
+
+export interface YouTrackTrackerConfig extends TrackerConfigBase {
+  kind: "youtrack";
+}
+
+export interface JiraTrackerConfig extends TrackerConfigBase {
+  kind: "jira";
+  /** Atlassian account email; Basic auth is `username:token`. */
+  username: string;
+}
+
+export type TrackerConfig = YouTrackTrackerConfig | JiraTrackerConfig;
+
+export type TrackerKind = TrackerConfig["kind"];
+
+/** Every key the tracker config reads, for diagnostics. Names only. */
+export const TRACKER_CONFIG_KEYS = [
+  "YOUTRACK_URL",
+  "YOUTRACK_TOKEN",
+  "YOUTRACK_PROJECTS",
+  "JIRA_URL",
+  "JIRA_USERNAME",
+  "JIRA_API_TOKEN",
+  "JIRA_PROJECTS",
+  "AUTOMATA_TRACKER_WRITES",
+] as const;
+
+/** The URL and token keys of each tracker kind. */
+export const TRACKER_CREDENTIAL_KEYS: Record<
+  TrackerKind,
+  { url: string; token: string }
+> = {
+  youtrack: { url: "YOUTRACK_URL", token: "YOUTRACK_TOKEN" },
+  jira: { url: "JIRA_URL", token: "JIRA_API_TOKEN" },
+};
+
+/** True when the Jira keys select Jira as the tracker. */
+function selectsJira(lookup: ReadonlyMap<string, string>): boolean {
+  return (
+    !!lookup.get("JIRA_URL") &&
+    !!lookup.get("JIRA_USERNAME") &&
+    !!lookup.get("JIRA_API_TOKEN")
+  );
 }
 
 export function parseTrackerConfig(
@@ -45,6 +95,22 @@ export function parseTrackerConfig(
   const lookup = new Map(
     variables.map((variable) => [variable.key, variable.value.trim()]),
   );
+  const writes: TrackerWriteMode =
+    lookup.get("AUTOMATA_TRACKER_WRITES") === "live" ? "live" : "off";
+  if (selectsJira(lookup)) {
+    return {
+      kind: "jira",
+      // Invalid → TrackerConfigError, exactly like YOUTRACK_URL below.
+      baseUrl: normalizeTrackerBaseUrl(lookup.get("JIRA_URL") ?? ""),
+      username: lookup.get("JIRA_USERNAME") ?? "",
+      token: lookup.get("JIRA_API_TOKEN") ?? "",
+      projects: normalizeProjects(
+        (lookup.get("JIRA_PROJECTS") ?? "").split(","),
+      ),
+      writes,
+    };
+  }
+
   const rawUrl = lookup.get("YOUTRACK_URL");
   const token = lookup.get("YOUTRACK_TOKEN");
   if (!rawUrl || !token) return null;
@@ -61,7 +127,7 @@ export function parseTrackerConfig(
     baseUrl,
     token,
     projects,
-    writes: lookup.get("AUTOMATA_TRACKER_WRITES") === "live" ? "live" : "off",
+    writes,
   };
 }
 

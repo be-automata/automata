@@ -1,16 +1,10 @@
 import { extractTicketKeys } from "./extract-ticket-keys";
 import {
-  type AllowedStageTarget,
-  ALLOWED_STAGE_TARGETS,
-  canonicalStage,
-  decidePrimaryTransition,
-  decideSiblingPromotion,
   isBlockerNotice,
-  isClearedIssue,
   isMergeRecord,
-  isTerminalIssue,
   linksOf,
   type LinkedTicketAction,
+  inlineCode,
   mergeAuditMarker,
   renderBlockerNotice,
   renderNoticeComment,
@@ -23,12 +17,14 @@ import {
   type MergeAuditIntent,
   parseMergeAuditIntent,
 } from "./parse-merge-audit-intent";
+import { stagePolicyFor, type TrackerStagePolicy } from "./stage-policy";
 import type { TrackerConfig } from "./tracker-config";
 import {
   describeTrackerError,
   type TrackerClient,
   type TrackerIssue,
   type TrackerLinkedIssue,
+  TrackerTransitionError,
 } from "./youtrack-client";
 
 /**
@@ -110,20 +106,34 @@ export type MergeAuditOutcome =
  * command API accepts text a workflow then rejects or ignores, so "applied"
  * means the tracker now reports the target — not that the request returned.
  *
- * The target type is already the closed allowlist; the runtime check keeps
- * that true for any future caller that reaches here through a widened type.
+ * The runtime allowlist check keeps the policy's closed set of targets true
+ * for any caller. A tracker that moves by transitions (Jira) is asked which
+ * stages are reachable, and the policy picks the concrete one — or none, and
+ * nothing is written.
  */
 async function applyStage(
+  policy: TrackerStagePolicy,
   tracker: TrackerClient,
   key: string,
-  target: AllowedStageTarget,
-): Promise<{ applied: boolean; stageAfter: string | null }> {
-  if (!ALLOWED_STAGE_TARGETS.includes(target)) {
+  target: string,
+): Promise<{ applied: boolean; stageAfter: string | null; requested: string }> {
+  if (!policy.allowedTargets.includes(target)) {
     throw new Error(`stage target not allowed: ${String(target)}`);
   }
-  await tracker.setStage(key, target);
+  const available = tracker.listStageTargets
+    ? await tracker.listStageTargets(key)
+    : null;
+  const requested = policy.resolveTarget(target, available);
+  if (requested === null) {
+    throw new TrackerTransitionError(target);
+  }
+  await tracker.setStage(key, requested);
   const stageAfter = await tracker.getStage(key);
-  return { applied: canonicalStage(stageAfter) === target, stageAfter };
+  return {
+    applied: policy.reached(stageAfter, requested),
+    stageAfter,
+    requested,
+  };
 }
 
 /** An intent that parses AND is about this PR — not the skill's example. */
@@ -142,6 +152,7 @@ function parseUsableIntent(
 }
 
 interface AuditContext {
+  policy: TrackerStagePolicy;
   tracker: TrackerClient;
   prUrl: string;
   live: boolean;
@@ -150,11 +161,11 @@ interface AuditContext {
 
 /** One ticket that depended on the merged one: notify its owner, or promote it. */
 async function probeDependant(
-  { tracker, prUrl, live }: AuditContext,
+  { policy, tracker, prUrl, live }: AuditContext,
   mergedKey: string,
   dependant: TrackerLinkedIssue,
 ): Promise<Pick<LinkedTicketAction, "stage" | "action">> {
-  if (isTerminalIssue(dependant)) {
+  if (policy.isTerminalIssue(dependant)) {
     return { stage: dependant.stage, action: "Skipped (already resolved)" };
   }
   const sibling = await tracker.getIssue(dependant.key);
@@ -164,7 +175,7 @@ async function probeDependant(
   ) {
     return { stage, action: "Already notified" };
   }
-  const promotion = decideSiblingPromotion({ mergedKey, sibling });
+  const promotion = policy.decideSiblingPromotion({ mergedKey, sibling });
   if (!promotion.promote) {
     if (live) {
       await tracker.addComment(
@@ -177,18 +188,22 @@ async function probeDependant(
       action: `${live ? "Notified" : "Would notify"} — ${promotion.reason}`,
     };
   }
+  const target = policy.promotionTarget;
   if (!live) {
-    return { stage, action: "Would promote → To Do (final blocker merged)" };
+    return {
+      stage,
+      action: `Would promote → ${target} (final blocker merged)`,
+    };
   }
-  const { applied } = await applyStage(tracker, sibling.key, "To Do");
+  const { applied } = await applyStage(policy, tracker, sibling.key, target);
   if (!applied) {
-    return { stage, action: "Promotion to To Do did not apply" };
+    return { stage, action: `Promotion to ${target} did not apply` };
   }
   await tracker.addComment(
     sibling.key,
     renderPromotionComment(mergedKey, prUrl),
   );
-  return { stage, action: "Promoted → To Do (final blocker merged)" };
+  return { stage, action: `Promoted → ${target} (final blocker merged)` };
 }
 
 /**
@@ -201,7 +216,7 @@ async function probeDependants(
 ): Promise<LinkedTicketAction[]> {
   const dependants = [
     ...new Map(
-      linksOf(issue, "Depend", "OUTWARD")
+      linksOf(issue, context.policy.dependLinkType, "OUTWARD")
         .filter((dependant) => dependant.key !== issue.key)
         .map((dependant) => [dependant.key, dependant]),
     ).values(),
@@ -275,15 +290,15 @@ async function auditTicket(
   issue: TrackerIssue,
   { intent, mergedBy }: { intent: MergeAuditIntent; mergedBy: string | null },
 ): Promise<TicketOutcome> {
-  const { tracker, prUrl, live, logger } = context;
+  const { policy, tracker, prUrl, live, logger } = context;
   const audit =
     intent.tickets.find(
       (ticket) => ticket.key.trim().toUpperCase() === issue.key,
     ) ?? null;
-  const openSubtasks = linksOf(issue, "Subtask", "OUTWARD").filter(
-    (child) => !isClearedIssue(child),
+  const openSubtasks = linksOf(issue, policy.subtaskLinkType, "OUTWARD").filter(
+    (child) => !policy.isClearedIssue(child),
   );
-  const decision = decidePrimaryTransition({
+  const decision = policy.decidePrimaryTransition({
     stage: issue.stage,
     resolved: issue.resolved,
     audit,
@@ -303,7 +318,7 @@ async function auditTicket(
       key: child.key,
       relation: "subtask",
       stage: child.stage,
-      action: "Open — holds this ticket short of PR Merged",
+      action: policy.openSubtaskAction,
     })),
     errors: [],
   };
@@ -315,21 +330,34 @@ async function auditTicket(
 
   if (decision.target !== null && live) {
     try {
-      const { applied, stageAfter } = await applyStage(
+      const { applied, stageAfter, requested } = await applyStage(
+        policy,
         tracker,
         issue.key,
         decision.target,
       );
       result.stageAfter = stageAfter;
       result.transitionApplied = applied;
+      if (requested !== decision.target) {
+        // The workflow has no transition into the target itself; the policy
+        // chose its fallback. Report the stage actually requested.
+        result.decision = {
+          target: requested,
+          note: `${decision.note} No \`${decision.target}\` transition exists; moved to ${inlineCode(requested)} instead.`,
+        };
+      }
     } catch (error) {
       recordFailure("stage move failed", error);
     }
   }
 
-  // Dependants are probed only by the merge that takes the ticket to
-  // `PR Merged` — a later release PR naming the same key stays quiet.
-  if (decision.target === "PR Merged" && (!live || result.transitionApplied)) {
+  // Dependants are probed only by the merge that completes the ticket
+  // (`PR Merged` on YouTrack) — a later release PR naming the same key stays
+  // quiet.
+  if (
+    decision.target === policy.mergedTarget &&
+    (!live || result.transitionApplied)
+  ) {
     result.linked.push(...(await probeDependants(context, issue)));
   }
 
@@ -391,7 +419,7 @@ export async function executeMergeAudit({
 
   if (config === null || tracker === null) {
     return await postNotice(
-      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.",
+      "The post-merge audit is enabled for this repository, but no tracker is configured. Set `YOUTRACK_URL` and `YOUTRACK_TOKEN` (or, for Jira, `JIRA_URL`, `JIRA_USERNAME` and `JIRA_API_TOKEN`) on the organization environment (Environments → Organization) or on this repository's environment. Personal Global variables are not read by the audit.",
       { outcome: "tracker_unconfigured" },
     );
   }
@@ -423,7 +451,13 @@ export async function executeMergeAudit({
   }
 
   const live = config.writes === "live";
-  const context: AuditContext = { tracker, prUrl: pr.htmlUrl, live, logger };
+  const context: AuditContext = {
+    policy: stagePolicyFor(config.kind),
+    tracker,
+    prUrl: pr.htmlUrl,
+    live,
+    logger,
+  };
 
   // Reads are independent; the write chains run one ticket at a time, because
   // a PR can name two tickets that are linked to each other.

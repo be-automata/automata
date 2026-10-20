@@ -29,6 +29,14 @@ export const KNOWN_ENV_KEYS: Readonly<Record<string, string>> = {
     "Set to `live` to let the audit write to the tracker; anything else is shadow mode (reads and a PR comment only).",
   YOUTRACK_AGENT_TOKEN:
     "YouTrack token delivered to agents of prompt-defined automations.",
+  JIRA_URL:
+    "Jira site URL (e.g. https://acme.atlassian.net) used by the post-merge ticket audit. With JIRA_USERNAME and JIRA_API_TOKEN set, the audit uses Jira instead of YouTrack.",
+  JIRA_USERNAME:
+    "Atlassian account email the Jira API token belongs to, for the post-merge ticket audit.",
+  JIRA_API_TOKEN:
+    "Jira API token for the post-merge ticket audit. Control-plane only: never delivered to an agent.",
+  JIRA_PROJECTS:
+    "Comma-separated Jira project keys the audit matches (e.g. ACME).",
   SLACK_CLIENT_ID:
     "The organization's own Slack app client ID. Read from the Organization environment only; never delivered to an agent from there.",
   SLACK_CLIENT_SECRET:
@@ -46,14 +54,27 @@ export const ENV_KEY_ALIASES: Readonly<Record<string, string>> = {
   YOUTRACK_BASE_URL: "YOUTRACK_URL",
   YOUTRACK_HOST: "YOUTRACK_URL",
   YOUTRACK_API_TOKEN: "YOUTRACK_TOKEN",
+  JIRA_TOKEN: "JIRA_API_TOKEN",
+  JIRA_EMAIL: "JIRA_USERNAME",
+  JIRA_USER: "JIRA_USERNAME",
+  JIRA_BASE_URL: "JIRA_URL",
+  JIRA_HOST: "JIRA_URL",
+  JIRA_PROJECT: "JIRA_PROJECTS",
 };
 
 const TRACKER_KEYS = [
   "YOUTRACK_URL",
   "YOUTRACK_TOKEN",
   "YOUTRACK_PROJECTS",
+  "JIRA_URL",
+  "JIRA_USERNAME",
+  "JIRA_API_TOKEN",
+  "JIRA_PROJECTS",
   "AUTOMATA_TRACKER_WRITES",
 ];
+
+/** Jira is selected only when all three are set. */
+const JIRA_REQUIRED_KEYS = ["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"];
 
 export function getEnvKeyHints(
   variables: ReadonlyArray<{ key: string; value?: string }>,
@@ -110,6 +131,20 @@ export function getEnvKeyHints(
       key: hasUrl ? "YOUTRACK_URL" : "YOUTRACK_TOKEN",
       level: "warning",
       message: `The tracker needs both YOUTRACK_URL and YOUTRACK_TOKEN; ${hasUrl ? "YOUTRACK_TOKEN" : "YOUTRACK_URL"} is missing here.`,
+    });
+  }
+
+  const presentJiraKeys = JIRA_REQUIRED_KEYS.filter((key) => keys.has(key));
+  if (
+    scope === "organization" &&
+    presentJiraKeys.length > 0 &&
+    presentJiraKeys.length < JIRA_REQUIRED_KEYS.length
+  ) {
+    const missing = JIRA_REQUIRED_KEYS.filter((key) => !keys.has(key));
+    hints.push({
+      key: presentJiraKeys[0] ?? null,
+      level: "warning",
+      message: `Jira needs JIRA_URL, JIRA_USERNAME and JIRA_API_TOKEN; ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} missing here. Until then the audit does not use Jira.`,
     });
   }
 

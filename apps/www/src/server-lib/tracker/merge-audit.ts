@@ -155,8 +155,10 @@ export function formatScore(score: AuditScore): string {
 // Stage decisions
 // ---------------------------------------------------------------------------
 
-export interface TransitionDecision {
-  target: AllowedStageTarget | null;
+export interface TransitionDecision<
+  Target extends string = AllowedStageTarget,
+> {
+  target: Target | null;
   /** One line explaining the decision, shown in both comments. */
   note: string;
 }
@@ -242,13 +244,41 @@ export function decideSiblingPromotion({
   mergedKey: string;
   sibling: TrackerIssue;
 }): { promote: boolean; reason: string } {
-  if (canonicalStage(sibling.stage) !== "Backlog") {
+  return decideSiblingPromotionWith({
+    mergedKey,
+    sibling,
+    isBacklog: (stage) => canonicalStage(stage) === "Backlog",
+    dependLinkType: "Depend",
+    isCleared: isClearedIssue,
+  });
+}
+
+/**
+ * The promotion rule with the tracker's vocabulary passed in — the link type
+ * that reads "blocks", what counts as `Backlog`, and when a blocker is cleared.
+ * `decideSiblingPromotion` is this rule with YouTrack's vocabulary.
+ */
+export function decideSiblingPromotionWith({
+  mergedKey,
+  sibling,
+  isBacklog,
+  dependLinkType,
+  isCleared,
+}: {
+  mergedKey: string;
+  sibling: TrackerIssue;
+  isBacklog: (stage: string | null) => boolean;
+  /** Link type whose INWARD side lists the sibling's blockers. */
+  dependLinkType: string;
+  isCleared: (issue: TrackerLinkedIssue) => boolean;
+}): { promote: boolean; reason: string } {
+  if (!isBacklog(sibling.stage)) {
     return {
       promote: false,
       reason: `in ${inlineCode(sibling.stage ?? "unknown")}, not \`Backlog\``,
     };
   }
-  const blockers = linksOf(sibling, "Depend", "INWARD");
+  const blockers = linksOf(sibling, dependLinkType, "INWARD");
   if (!blockers.some((blocker) => blocker.key === mergedKey)) {
     return {
       promote: false,
@@ -256,7 +286,7 @@ export function decideSiblingPromotion({
     };
   }
   const stillOpen = blockers.filter(
-    (blocker) => blocker.key !== mergedKey && !isClearedIssue(blocker),
+    (blocker) => blocker.key !== mergedKey && !isCleared(blocker),
   );
   if (stillOpen.length > 0) {
     return {
@@ -352,7 +382,7 @@ function tableCell(text: string, maxLength: number): string {
 }
 
 /** Tracker- or agent-supplied text shown as inline code. */
-function inlineCode(text: string): string {
+export function inlineCode(text: string): string {
   return `\`${sanitizeInline(text, 40).replace(/`/g, "'")}\``;
 }
 
@@ -378,7 +408,7 @@ export interface TicketAuditResult {
   summary: string;
   stageBefore: string | null;
   stageAfter: string | null;
-  decision: TransitionDecision;
+  decision: TransitionDecision<string>;
   /** True when the stage write was performed and read back as the target. */
   transitionApplied: boolean;
   audit: MergeAuditTicket | null;

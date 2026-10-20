@@ -71,6 +71,12 @@ export interface TrackerClient {
   addComment(key: string, text: string): Promise<void>;
   /** Browser URL of an issue, for links in comments. */
   issueUrl(key: string): string;
+  /**
+   * The stages the issue can move to right now, for a tracker whose workflow
+   * is a set of named transitions (Jira). Absent for a tracker that accepts
+   * any stage name as a command (YouTrack): the requested stage is sent as is.
+   */
+  listStageTargets?(key: string): Promise<string[]>;
 }
 
 export class TrackerRequestError extends Error {
@@ -80,6 +86,17 @@ export class TrackerRequestError extends Error {
   ) {
     super(`tracker ${operation} failed with HTTP ${status}`);
     this.name = "TrackerRequestError";
+  }
+}
+
+/**
+ * The tracker offers no transition into the requested stage, so nothing was
+ * written. `stage` is a policy-chosen name, never tracker- or user-supplied.
+ */
+export class TrackerTransitionError extends Error {
+  constructor(public readonly stage: string) {
+    super(`no transition to ${stage}`);
+    this.name = "TrackerTransitionError";
   }
 }
 
@@ -98,6 +115,9 @@ export class TrackerConfigError extends Error {
 export function describeTrackerError(error: unknown): string {
   if (error instanceof TrackerRequestError) {
     return `${error.operation} failed (HTTP ${error.status})`;
+  }
+  if (error instanceof TrackerTransitionError) {
+    return `no transition to ${error.stage} is available`;
   }
   return error instanceof Error ? error.name : "unexpected error";
 }
@@ -143,7 +163,7 @@ export function normalizeTrackerBaseUrl(raw: string): string {
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
-function assertIssueKey(key: string): void {
+export function assertIssueKey(key: string): void {
   if (!ISSUE_KEY_RE.test(key)) {
     throw new TrackerConfigError(`not a valid issue key: ${key.slice(0, 32)}`);
   }

@@ -128,7 +128,7 @@ export async function runMergeAuditAtFinish({
       repoFullName,
     });
   } catch (error) {
-    // An invalid YOUTRACK_URL reads as "not configured": the executor then
+    // An invalid YOUTRACK_URL / JIRA_URL reads as "not configured": the executor then
     // says so on the PR instead of the audit silently vanishing.
     console.error("[merge-audit] tracker config invalid", {
       repoFullName,
