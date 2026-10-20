@@ -241,7 +241,7 @@ export type RunsReading =
 
 interface RunWindowStats {
   windowDays: number;
-  /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no started run. */
+  /** Per-day nearest-rank p90 queue wait in seconds, oldest first; null for a day with no counted run (started, or cancelled while queued). */
   queueWaitDailyP90S: Array<number | null>;
   /** Distinct `orgId`s in the window. `u:<userId>` personal scopes count: each is its own tenant. */
   clients: number;
@@ -446,7 +446,7 @@ export function evaluateRunSignals(input: RunSignalsInput): RunSignalsResult {
     (weakestDayS) =>
       `queue-wait p90: weakest of the last ${GROWTH_WINDOW_DAYS} UTC days ${weakestDayS}s ` +
       `(threshold > ${QUEUE_WAIT_P90_THRESHOLD_S}s every day` +
-      (emptyDays > 0 ? `; ${emptyDays} day(s) with no started run` : "") +
+      (emptyDays > 0 ? `; ${emptyDays} day(s) with no counted run` : "") +
       "; engine queue only, in-worker admission and box-slot waits not counted)",
   );
 
