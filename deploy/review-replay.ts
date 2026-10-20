@@ -36,16 +36,23 @@ import { readFileSync, writeFileSync } from "node:fs";
 import {
   prViewFromRest,
   renderPrView,
+  renderPriorReviews,
   renderReviewContext,
+  renderReviewThreads,
   type RestPullRequestLike,
 } from "../packages/review/src/review/context/render";
 import {
   applyApproveSeverityFloor,
+  buildReviewToleranceDirective,
   isBlockTolerance,
   isBlockingUnderPolicy,
   toleranceToPolicy,
   type BlockTolerance,
 } from "../packages/review/src/review/severity-policy";
+import {
+  findReviewContextDirective,
+  substituteReviewContext,
+} from "../apps/www/src/server-lib/review/review-skill";
 import { applyVerifyBeforeBlock } from "../packages/review/src/review/verify-before-block";
 import type { FileAtCommit } from "../packages/review/src/review/finding-verifier";
 import {
@@ -55,8 +62,9 @@ import {
 import {
   buildReplayPrompt,
   legacyVerdict,
-  renderHistoricalBlocks,
   resolvedTally,
+  reviewsAsOf,
+  threadsAsOf,
   type ReplayReview,
   type ReplayThread,
 } from "./lib/review-replay-core";
@@ -217,12 +225,12 @@ function runPrompt(argv: string[]): void {
   const pr = JSON.parse(
     gh(["api", `repos/${repoFullName}/pulls/${prNumber}`]),
   ) as RestPullRequestLike;
-  const { priorReviews, reviewThreads } = renderHistoricalBlocks({
-    reviews: fetchReviews(repoFullName, prNumber),
-    threads: fetchThreads(repoFullName, prNumber),
-    asOf,
-    botLogin: BOT_LOGIN,
-  });
+  const priorReviews = renderPriorReviews(
+    reviewsAsOf(fetchReviews(repoFullName, prNumber), asOf),
+  );
+  const reviewThreads = renderReviewThreads(
+    threadsAsOf(fetchThreads(repoFullName, prNumber), asOf, BOT_LOGIN),
+  );
   const renderedContext = renderReviewContext([
     // Documented limitation: the PR view (title, body, draft flag, counts) is
     // today's, not as of the legacy review; reviews and threads are as of it.
@@ -237,7 +245,13 @@ function runPrompt(argv: string[]): void {
     prNumber,
     event: event as ReplayEvent,
     renderedContext,
-    tolerance,
+    toleranceDirective: buildReviewToleranceDirective(
+      toleranceToPolicy(tolerance),
+    ),
+    substituteContext: (body, context) =>
+      findReviewContextDirective(body) === null
+        ? null
+        : substituteReviewContext(body, context),
   });
   writeFileSync(out, prompt);
   console.log(

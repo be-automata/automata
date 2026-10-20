@@ -22,14 +22,19 @@ import {
   type ReplayReview,
   type ReplayThread,
 } from "./lib/review-replay-core.ts";
-import {
-  buildReviewToleranceDirective,
-  toleranceToPolicy,
-} from "../packages/review/src/review/severity-policy.ts";
 
 const DIRECTIVE =
   "<!-- automata:context pr-view prior-reviews review-threads -->";
 const SKILL = `Review {{repoFullName}} against origin/{{baseBranch}}.\n## Trigger Context\n${DIRECTIVE}\n\`\`\`json\n{ "verdict": "approve" }\n\`\`\`\n`;
+
+/**
+ * Stand-ins for the production pieces deploy/review-replay.ts injects (the
+ * tolerance note and the directive substitution): this test runs under the
+ * plain `node --test` CI uses, which cannot load the workspace modules.
+ */
+const TOLERANCE_NOTE = "## Repository review tolerance: `info`";
+const substitute = (body: string, context: string): string | null =>
+  body.includes(DIRECTIVE) ? body.replace(DIRECTIVE, context) : null;
 
 describe("buildReplayPrompt", () => {
   test("placeholders, context last, one-space join, trimmed, tolerance after ---", () => {
@@ -40,7 +45,8 @@ describe("buildReplayPrompt", () => {
       prNumber: 7,
       event: "synchronize",
       renderedContext: "CTX {{baseBranch}}",
-      tolerance: "info",
+      toleranceDirective: TOLERANCE_NOTE,
+      substituteContext: substitute,
     });
     const expectedSkill = SKILL.replace("{{repoFullName}}", "acme/widgets")
       .replace("{{baseBranch}}", "develop")
@@ -49,7 +55,7 @@ describe("buildReplayPrompt", () => {
       prompt,
       `The "pull_request.synchronize" event was triggered for PR #7. ${expectedSkill}`.trim() +
         "\n\n---\n\n" +
-        buildReviewToleranceDirective(toleranceToPolicy("info")) +
+        TOLERANCE_NOTE +
         "\n",
     );
     assert.ok(
@@ -68,7 +74,8 @@ describe("buildReplayPrompt", () => {
           prNumber: 1,
           event: "opened",
           renderedContext: "",
-          tolerance: "warning",
+          toleranceDirective: TOLERANCE_NOTE,
+          substituteContext: substitute,
         }),
       /no automata:context directive/,
     );

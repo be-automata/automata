@@ -8,21 +8,15 @@
  * byte-for-byte what production builds, and the PR state must be the state AT
  * the legacy review, not today's.
  */
-import {
-  renderPriorReviews,
-  renderReviewThreads,
-  type PriorReviewData,
-  type ReviewThreadData,
+// Type-only imports: erased by Node's type stripping, so this module loads
+// under the plain `node --test 'deploy/*.test.ts'` CI runs (no tsx, no
+// extensionless value imports). The production pieces it composes — the
+// renderers, the tolerance note, the directive substitution — are injected by
+// deploy/review-replay.ts.
+import type {
+  PriorReviewData,
+  ReviewThreadData,
 } from "../../packages/review/src/review/context/render";
-import {
-  buildReviewToleranceDirective,
-  toleranceToPolicy,
-  type BlockTolerance,
-} from "../../packages/review/src/review/severity-policy";
-import {
-  findReviewContextDirective,
-  substituteReviewContext,
-} from "../../apps/www/src/server-lib/review/review-skill";
 
 /** A GitHub review as `GET /pulls/{n}/reviews` returns it (the fields used). */
 export interface ReplayReview {
@@ -97,30 +91,17 @@ export function threadsAsOf(
   return out;
 }
 
-/** Render the two historical blocks with the production renderers. */
-export function renderHistoricalBlocks(args: {
-  reviews: readonly ReplayReview[];
-  threads: readonly ReplayThread[];
-  asOf: string;
-  botLogin: string;
-}): { priorReviews: string; reviewThreads: string } {
-  return {
-    priorReviews: renderPriorReviews(reviewsAsOf(args.reviews, args.asOf)),
-    reviewThreads: renderReviewThreads(
-      threadsAsOf(args.threads, args.asOf, args.botLogin),
-    ),
-  };
-}
-
 /**
  * The prompt production sends, assembled the same three ways:
  *   1. the skill's placeholders are rendered (resolve-review-skill.ts
  *      renderSkillPlaceholders: only `{{repoFullName}}` and `{{baseBranch}}`),
  *   2. the context directive is replaced by the rendered context LAST
- *      (automations.ts), and the event line is joined to the skill with ONE
- *      space, then trimmed (db-message-helpers.ts convertToPlainText),
+ *      (automations.ts; `substituteContext` is review-skill.ts's, injected),
+ *      and the event line is joined to the skill with ONE space, then trimmed
+ *      (db-message-helpers.ts convertToPlainText),
  *   3. the tolerance note is appended after `\n\n---\n\n`
- *      (remote-daemon-message.ts computeReviewToleranceDirective).
+ *      (remote-daemon-message.ts computeReviewToleranceDirective;
+ *      `toleranceDirective` is severity-policy.ts's, injected).
  */
 export function buildReplayPrompt(args: {
   flattenedSkill: string;
@@ -129,27 +110,24 @@ export function buildReplayPrompt(args: {
   prNumber: number;
   event: "opened" | "synchronize" | "ready_for_review";
   renderedContext: string;
-  tolerance: BlockTolerance;
+  toleranceDirective: string;
+  /** Replace the context directive with `context`; null when the body has none. */
+  substituteContext: (body: string, context: string) => string | null;
 }): string {
   const rendered = args.flattenedSkill
     .replaceAll("{{repoFullName}}", args.repoFullName)
     .replaceAll("{{baseBranch}}", args.baseRef);
-  if (findReviewContextDirective(rendered) === null) {
+  const skillText = args.substituteContext(rendered, args.renderedContext);
+  if (skillText === null) {
     throw new Error(
       "The skill has no automata:context directive — it is not a ported review skill.",
     );
   }
-  const skillText = substituteReviewContext(rendered, args.renderedContext);
   const eventLine = `The "pull_request.${args.event}" event was triggered for PR #${args.prNumber}.`;
   const joined = /^\s/.test(skillText)
     ? `${eventLine}${skillText}`
     : `${eventLine} ${skillText}`;
-  return (
-    joined.trim() +
-    "\n\n---\n\n" +
-    buildReviewToleranceDirective(toleranceToPolicy(args.tolerance)) +
-    "\n"
-  );
+  return joined.trim() + "\n\n---\n\n" + args.toleranceDirective + "\n";
 }
 
 /** `Resolved: X / Y` as the review bodies state it, or null. */
