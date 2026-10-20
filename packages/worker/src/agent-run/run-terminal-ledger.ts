@@ -1,0 +1,180 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+
+/**
+ * The box's record of which workflow runs already reached a terminal (#386).
+ *
+ * The hole this closes: on SIGTERM the SDK (v1.26.0, `exitGracefully` in
+ * worker-internal.js) stops the dispatcher heartbeat and unsubscribes the
+ * listener FIRST, and only then awaits the in-flight task futures. Each future
+ * awaits its own COMPLETED/FAILED event (`sendStepActionEvent`, with the SDK's
+ * retrier), so the event IS sent before the drain completes — the SDK ordering
+ * is not the gap. The gap is that the engine has stopped hearing from the
+ * worker while the run is still draining: observed in prod (2026-10-19), a
+ * deferring run failed on schedule five minutes into a drain, the process
+ * exited, and the engine redelivered the SAME workflow run (attempt 0) to the
+ * next worker process, which ran the agent to completion — a task the worker
+ * had reported failed was executed again. Any terminal that ends a long drain
+ * can be redelivered the same way.
+ *
+ * So the run fn writes `<root>/run-terminals/<runId>.json` the moment it ends
+ * (returned or threw), and an attempt of a run id already recorded is refused
+ * with a NonRetryableError before it touches anything — no admission, no
+ * clone, no daemon. A worker-loss redelivery of a run that never ENDED (a
+ * crash mid-run, #152) finds no entry and re-executes as before.
+ *
+ * `root` is the run namespace root, shared by every worker process on the box
+ * and kept across a restart (`PrivateTmp=no` in automata-worker.service).
+ * Every op is best-effort: an unwritable or unreadable ledger fails OPEN (the
+ * run executes) — it narrows the redelivery window, it never blocks a run.
+ */
+
+/** How long an entry is kept: well past any redelivery (30m execution + 30m schedule). */
+export const RUN_TERMINAL_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The ledger's dir under the run namespace root. It sits beside the
+ * per-worker `<workerId>/` dirs, so the reapers' root scan (reclaim.ts
+ * `listWorkerDirs`) excludes it by this name.
+ */
+export const RUN_TERMINAL_LEDGER_DIR = "run-terminals";
+// Hatchet run ids are UUIDs; anything else is never used as a file name.
+const SAFE_RUN_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+export type RunTerminalOutcome = "returned" | "failed";
+
+export interface RunTerminal {
+  outcome: RunTerminalOutcome;
+  /** The error class/message for a failed run (never agent output). */
+  detail?: string;
+}
+
+export interface RecordedRunTerminal extends RunTerminal {
+  /** Epoch ms when the run ended. */
+  at: number;
+}
+
+/** A redelivered attempt of a run id that already reached a terminal on this box. */
+export class RunAlreadyTerminalError extends NonRetryableError {
+  constructor(
+    readonly runId: string,
+    readonly prior: RecordedRunTerminal,
+  ) {
+    super(
+      `workflow run ${runId} already ${prior.outcome === "failed" ? "failed" : "finished"} on this box at ` +
+        `${new Date(prior.at).toISOString()}; redelivered attempt refused, not re-executed (#386)`,
+    );
+    this.name = "RunAlreadyTerminalError";
+  }
+}
+
+function entryPath(root: string, runId: string): string | null {
+  return SAFE_RUN_ID.test(runId)
+    ? path.join(root, RUN_TERMINAL_LEDGER_DIR, `${runId}.json`)
+    : null;
+}
+
+function isRecordedRunTerminal(v: unknown): v is RecordedRunTerminal {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    (o.outcome === "returned" || o.outcome === "failed") &&
+    typeof o.at === "number"
+  );
+}
+
+/** The recorded terminal for `runId`, or null (none, unsafe id, unreadable). */
+export function readRunTerminal(
+  root: string,
+  runId: string,
+): RecordedRunTerminal | null {
+  const file = entryPath(root, runId);
+  if (!file) return null;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    return isRecordedRunTerminal(parsed) ? parsed : null;
+  } catch {
+    // Absent (the common case) or corrupt: fail open.
+    return null;
+  }
+}
+
+/**
+ * Record `runId`'s terminal (atomic write: tmp + rename) and prune entries
+ * older than RUN_TERMINAL_TTL_MS. Never throws; failures go to `log`.
+ */
+export function recordRunTerminal(
+  root: string,
+  runId: string,
+  terminal: RunTerminal,
+  now: number = Date.now(),
+  log: (msg: string) => void = () => {},
+): void {
+  const file = entryPath(root, runId);
+  if (!file) return;
+  const dir = path.dirname(file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    const entry: RecordedRunTerminal = { ...terminal, at: now };
+    fs.writeFileSync(tmp, JSON.stringify(entry));
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    log(
+      `run-terminal ledger: could not record ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      // An unreadable entry is aged by its mtime instead of its `at`.
+      const at =
+        readRunTerminal(root, name.slice(0, -".json".length))?.at ??
+        fs.statSync(path.join(dir, name)).mtimeMs;
+      if (now - at > RUN_TERMINAL_TTL_MS) fs.rmSync(path.join(dir, name));
+    }
+  } catch (err) {
+    log(
+      `run-terminal ledger: prune failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Run `run` at most once to a terminal per workflow run id on this box: refuse
+ * (RunAlreadyTerminalError) an id already recorded, otherwise run it and record
+ * how it ended. Without a run id there is nothing to key on — run unguarded.
+ */
+export async function guardRunTerminal<T>(
+  opts: { root: string; runId: string; log: (msg: string) => void },
+  run: () => Promise<T>,
+): Promise<T> {
+  const { root, runId, log } = opts;
+  if (!runId) return run();
+  const prior = readRunTerminal(root, runId);
+  if (prior) {
+    const err = new RunAlreadyTerminalError(runId, prior);
+    log(err.message);
+    throw err;
+  }
+  try {
+    const output = await run();
+    recordRunTerminal(root, runId, { outcome: "returned" }, Date.now(), log);
+    return output;
+  } catch (err) {
+    recordRunTerminal(
+      root,
+      runId,
+      {
+        outcome: "failed",
+        detail: err instanceof Error ? `${err.name}: ${err.message}` : "",
+      },
+      Date.now(),
+      log,
+    );
+    throw err;
+  }
+}

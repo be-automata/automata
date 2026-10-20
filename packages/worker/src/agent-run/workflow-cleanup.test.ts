@@ -445,6 +445,11 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.WORKER_BOX_TRUST;
   delete process.env.WORKER_CREDENTIAL_BROKER;
+  // #386: cases reuse run ids; each case starts with no recorded terminal.
+  fs.rmSync(path.join(TEST_NAMESPACE_ROOT, "run-terminals"), {
+    recursive: true,
+    force: true,
+  });
 });
 
 function ctx() {
@@ -481,6 +486,36 @@ describe("agent-run run task — the run's lane is journaled first (UAT #229 F2)
     expect(lines.some((l) => l.includes("clone complete"))).toBe(false);
     expect(lines.join("\n")).not.toContain("inst-secret");
     expect(lines.join("\n")).not.toContain("daemon-tok");
+  });
+});
+
+describe("#386: a redelivered run that already reached a terminal is refused, not re-executed", () => {
+  it("the first attempt fails; a redelivery of the SAME workflow run id never provisions again", async () => {
+    provisionWorkdir.mockClear();
+    provisionWorkdir.mockRejectedValueOnce(new Error("clone failed"));
+    const first = { ...ctx(), workflowRunId: () => "run-ext-386" };
+    await expect(runFn(INPUT, first)).rejects.toThrow(/clone failed/);
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+
+    const redelivered = { ...ctx(), workflowRunId: () => "run-ext-386" };
+    const err = await runFn(INPUT, redelivered).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NonRetryableError);
+    expect(String(err)).toMatch(/run-ext-386 already failed on this box/);
+    // Never re-executed: no second clone, so no admission, daemon or agent.
+    expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("a different workflow run of the same thread (a re-review) still runs", async () => {
+    provisionWorkdir.mockClear();
+    provisionWorkdir.mockRejectedValue(new Error("clone failed"));
+    await runFn(INPUT, { ...ctx(), workflowRunId: () => "run-ext-a" }).catch(
+      () => undefined,
+    );
+    await runFn(INPUT, { ...ctx(), workflowRunId: () => "run-ext-b" }).catch(
+      () => undefined,
+    );
+    expect(provisionWorkdir).toHaveBeenCalledTimes(2);
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
   });
 });
 
@@ -1270,12 +1305,16 @@ describe("#125 C4: queue-mode staleness self-check", () => {
   });
 
   it("other policies and legacy runs never ask", async () => {
-    for (const extra of [
+    for (const [i, extra] of [
       {},
       { supersedePolicy: "newest-wins" as const },
       { supersedePolicy: "complete-run-discard" as const },
-    ]) {
-      await runFn({ ...INPUT, prKey: "k", deliveryId: "d", ...extra }, ctx());
+    ].entries()) {
+      // Three distinct runs: each its own workflow run id (#386 ledger).
+      await runFn(
+        { ...INPUT, prKey: "k", deliveryId: "d", ...extra },
+        { ...ctx(), workflowRunId: () => `run-ext-q-${i}` },
+      );
     }
     expect(checkRunStaleness).not.toHaveBeenCalled();
   });
