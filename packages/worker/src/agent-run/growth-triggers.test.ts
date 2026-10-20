@@ -31,6 +31,9 @@ import {
 const NOW = Date.UTC(2026, 9, 19, 12, 0, 0);
 const DAY0 = Date.UTC(2026, 9, 12);
 const MIN = 60_000;
+const HOUR = 60 * MIN;
+
+type DedupeActionName = ReturnType<typeof decideTransition>["action"];
 
 interface RowSpec {
   day: number;
@@ -627,11 +630,14 @@ describe("RAM / swap", () => {
   });
 
   it("a restored firing ram_swap is not cleared before a full window, then clears once", () => {
-    const seeded = dedupeStatesFromSnapshot({
-      triggers: {
-        ram_swap: { firing: true, lastFiredAt: new Date(NOW).toISOString() },
+    const seeded = dedupeStatesFromSnapshot(
+      {
+        triggers: {
+          ram_swap: { firing: true, lastFiredAt: new Date(NOW).toISOString() },
+        },
       },
-    }).ram_swap;
+      NOW,
+    ).ram_swap;
     expect(seeded.firing).toBe(true);
     // The restarted worker samples every 5 min, all well under the fraction.
     const bootMs = NOW + MIN;
@@ -843,9 +849,231 @@ describe("dedupe state machine", () => {
     ).toBe("clear");
   });
 
-  it("honours a custom refire window", () => {
-    const s: TriggerDedupeState = { firing: true, lastFiredAtMs: T0 };
-    expect(decideTransition(s, "over", T0 + 1000, 1000).action).toBe("fire");
+  it("a lastFiredAt after now is due: the hold never outlives a clock that stepped back", () => {
+    for (const firing of [true, false]) {
+      const s: TriggerDedupeState = { firing, lastFiredAtMs: T0 + HOUR };
+      expect(decideTransition(s, "over", T0)).toEqual({
+        action: "fire",
+        next: { firing: true, lastFiredAtMs: T0 },
+      });
+    }
+    // The boundary: a fire at exactly now is the one just sent, not a future one.
+    expect(
+      decideTransition({ firing: true, lastFiredAtMs: T0 }, "over", T0).action,
+    ).toBe("none");
+  });
+
+  describe("client_share re-fires when the top client changes", () => {
+    const firedForA: TriggerDedupeState = {
+      firing: true,
+      lastFiredAtMs: T0,
+      lastFiredTopOrgId: "org-a",
+    };
+
+    it("records the top org on a fire", () => {
+      expect(
+        decideTransition(INITIAL_DEDUPE_STATE, "over", T0, {
+          topOrgId: "org-a",
+        }),
+      ).toEqual({ action: "fire", next: firedForA });
+    });
+
+    it("the same org within 24 h does not re-fire", () => {
+      expect(
+        decideTransition(firedForA, "over", T0 + HOUR, { topOrgId: "org-a" }),
+      ).toEqual({ action: "none", next: firedForA });
+    });
+
+    it("a different top org within 24 h fires at once and records the new org", () => {
+      expect(
+        decideTransition(firedForA, "over", T0 + HOUR, { topOrgId: "org-b" }),
+      ).toEqual({
+        action: "fire",
+        next: {
+          firing: true,
+          lastFiredAtMs: T0 + HOUR,
+          lastFiredTopOrgId: "org-b",
+        },
+      });
+      // Also after a clear: a different client is a different split.
+      const cleared = { ...firedForA, firing: false };
+      expect(
+        decideTransition(cleared, "over", T0 + HOUR, { topOrgId: "org-b" })
+          .action,
+      ).toBe("fire");
+    });
+
+    it("a clear keeps the org, so the next over for it is still held", () => {
+      const clear = decideTransition(firedForA, "under", T0 + MIN);
+      expect(clear).toEqual({
+        action: "clear",
+        next: { ...firedForA, firing: false },
+      });
+      expect(
+        decideTransition(clear.next, "over", T0 + HOUR, { topOrgId: "org-a" })
+          .action,
+      ).toBe("none");
+    });
+
+    it("an unrecorded previous org is not a change (no re-fire on upgrade)", () => {
+      const legacy: TriggerDedupeState = { firing: true, lastFiredAtMs: T0 };
+      expect(
+        decideTransition(legacy, "over", T0 + HOUR, { topOrgId: "org-b" })
+          .action,
+      ).toBe("none");
+    });
+
+    it("a restart seeded from the snapshot keeps the org", () => {
+      const snap = buildSnapshot({
+        nowMs: T0,
+        boxId: "b",
+        evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+        states: {
+          ...dedupeStatesFromSnapshot(null, T0),
+          client_share: firedForA,
+        },
+        stats: null,
+      });
+      expect(snap.triggers.client_share.lastFiredTopOrgId).toBe("org-a");
+      expect(snap.triggers.ram_swap).not.toHaveProperty("lastFiredTopOrgId");
+      const seeded = dedupeStatesFromSnapshot(
+        JSON.parse(JSON.stringify(snap)),
+        T0 + HOUR,
+      );
+      expect(seeded.client_share).toEqual(firedForA);
+      expect(
+        decideTransition(seeded.client_share, "over", T0 + HOUR, {
+          topOrgId: "org-a",
+        }).action,
+      ).toBe("none");
+      expect(
+        decideTransition(seeded.client_share, "over", T0 + HOUR, {
+          topOrgId: "org-b",
+        }).action,
+      ).toBe("fire");
+    });
+
+    it("other triggers never seed an org, even if the snapshot carries one", () => {
+      const seeded = dedupeStatesFromSnapshot(
+        {
+          triggers: {
+            ram_swap: {
+              firing: true,
+              lastFiredAt: new Date(T0).toISOString(),
+              lastFiredTopOrgId: "org-a",
+            },
+          },
+        },
+        T0,
+      );
+      expect(seeded.ram_swap).toEqual({ firing: true, lastFiredAtMs: T0 });
+    });
+  });
+});
+
+/**
+ * The dedupe matrix: every (state, input) cell, asserting the action and the committed
+ * state. "post-failed" is the cell's acting verdict (over, or under for a firing state
+ * that is still held) whose POST failed: nothing is committed. "restart-seed" round-trips
+ * the state through the snapshot and then evaluates an over.
+ */
+describe("dedupe matrix", () => {
+  const T0 = NOW;
+  type Input = "under" | "over" | "unknown" | "post-failed" | "restart-seed";
+  const STATES: Record<string, TriggerDedupeState> = {
+    idle: INITIAL_DEDUPE_STATE,
+    "firing-within-24h": { firing: true, lastFiredAtMs: T0 - HOUR },
+    "firing-stale": {
+      firing: true,
+      lastFiredAtMs: T0 - GROWTH_REFIRE_MS - HOUR,
+    },
+    "cleared-within-24h": { firing: false, lastFiredAtMs: T0 - HOUR },
+    "cleared-stale": {
+      firing: false,
+      lastFiredAtMs: T0 - GROWTH_REFIRE_MS - HOUR,
+    },
+  };
+  const FIRED_NOW: TriggerDedupeState = { firing: true, lastFiredAtMs: T0 };
+  const clearedFrom = (name: string): TriggerDedupeState => ({
+    ...(STATES[name] ?? INITIAL_DEDUPE_STATE),
+    firing: false,
+  });
+  const same = (name: string): TriggerDedupeState =>
+    STATES[name] ?? INITIAL_DEDUPE_STATE;
+
+  /** [state, input, expected action, expected committed state]. */
+  const CELLS: Array<[string, Input, DedupeActionName, TriggerDedupeState]> = [
+    ["idle", "under", "none", same("idle")],
+    ["idle", "over", "fire", FIRED_NOW],
+    ["idle", "unknown", "none", same("idle")],
+    ["idle", "post-failed", "fire", same("idle")],
+    ["idle", "restart-seed", "fire", FIRED_NOW],
+
+    ["firing-within-24h", "under", "clear", clearedFrom("firing-within-24h")],
+    ["firing-within-24h", "over", "none", same("firing-within-24h")],
+    ["firing-within-24h", "unknown", "none", same("firing-within-24h")],
+    ["firing-within-24h", "post-failed", "clear", same("firing-within-24h")],
+    ["firing-within-24h", "restart-seed", "none", same("firing-within-24h")],
+
+    ["firing-stale", "under", "clear", clearedFrom("firing-stale")],
+    ["firing-stale", "over", "fire", FIRED_NOW],
+    ["firing-stale", "unknown", "none", same("firing-stale")],
+    ["firing-stale", "post-failed", "fire", same("firing-stale")],
+    ["firing-stale", "restart-seed", "fire", FIRED_NOW],
+
+    ["cleared-within-24h", "under", "none", same("cleared-within-24h")],
+    ["cleared-within-24h", "over", "none", same("cleared-within-24h")],
+    ["cleared-within-24h", "unknown", "none", same("cleared-within-24h")],
+    ["cleared-within-24h", "post-failed", "none", same("cleared-within-24h")],
+    ["cleared-within-24h", "restart-seed", "none", same("cleared-within-24h")],
+
+    ["cleared-stale", "under", "none", same("cleared-stale")],
+    ["cleared-stale", "over", "fire", FIRED_NOW],
+    ["cleared-stale", "unknown", "none", same("cleared-stale")],
+    ["cleared-stale", "post-failed", "fire", same("cleared-stale")],
+    ["cleared-stale", "restart-seed", "fire", FIRED_NOW],
+  ];
+
+  function run(
+    start: TriggerDedupeState,
+    input: Input,
+  ): { action: DedupeActionName; committed: TriggerDedupeState } {
+    if (input === "restart-seed") {
+      const snap = buildSnapshot({
+        nowMs: T0,
+        boxId: "b",
+        evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
+        states: { ...dedupeStatesFromSnapshot(null, T0), ram_swap: start },
+        stats: null,
+      });
+      const seeded = dedupeStatesFromSnapshot(
+        JSON.parse(JSON.stringify(snap)),
+        T0,
+      ).ram_swap;
+      // The seed itself must reproduce the state exactly.
+      expect(seeded).toEqual(start);
+      const t = decideTransition(seeded, "over", T0);
+      return { action: t.action, committed: commitTransition(seeded, t, true) };
+    }
+    if (input === "post-failed") {
+      // A firing state still inside the hold can only act by clearing.
+      const verdict =
+        start.firing && decideTransition(start, "over", T0).action === "none"
+          ? "under"
+          : "over";
+      const t = decideTransition(start, verdict, T0);
+      return { action: t.action, committed: commitTransition(start, t, false) };
+    }
+    const t = decideTransition(start, input, T0);
+    return { action: t.action, committed: commitTransition(start, t, true) };
+  }
+
+  it.each(CELLS)("%s × %s → %s", (stateName, input, action, committed) => {
+    expect(run(same(stateName), input)).toEqual({ action, committed });
+  });
+
+  it("covers every state × input", () => {
+    expect(CELLS).toHaveLength(Object.keys(STATES).length * 5);
   });
 });
 
@@ -960,7 +1188,7 @@ describe("snapshot", () => {
       boxId: "box-1",
       evaluations: evaluationsOf(run, ram),
       states: {
-        ...dedupeStatesFromSnapshot(null),
+        ...dedupeStatesFromSnapshot(null, NOW),
         client_share: { firing: true, lastFiredAtMs: NOW - MIN },
       },
       stats: run.stats,
@@ -1000,7 +1228,7 @@ describe("snapshot", () => {
       nowMs: NOW,
       boxId: "box-1",
       evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
-      states: dedupeStatesFromSnapshot(null),
+      states: dedupeStatesFromSnapshot(null, NOW),
       stats: UNREADABLE_RUNS.stats,
     });
     expect(snap).toMatchObject({
@@ -1025,21 +1253,57 @@ describe("snapshot", () => {
       boxId: "b",
       evaluations: evaluationsOf(UNREADABLE_RUNS, UNREADABLE_RAM),
       states: {
-        ...dedupeStatesFromSnapshot(null),
+        ...dedupeStatesFromSnapshot(null, NOW),
         ram_swap: { firing: true, lastFiredAtMs: NOW - MIN },
       },
       stats: null,
     });
-    const seeded = dedupeStatesFromSnapshot(JSON.parse(JSON.stringify(snap)));
+    const seeded = dedupeStatesFromSnapshot(
+      JSON.parse(JSON.stringify(snap)),
+      NOW,
+    );
     expect(seeded.ram_swap).toEqual({ firing: true, lastFiredAtMs: NOW - MIN });
     expect(seeded.queue_wait_p90).toEqual(INITIAL_DEDUPE_STATE);
-    expect(dedupeStatesFromSnapshot(null).ram_swap).toEqual(
+    expect(dedupeStatesFromSnapshot(null, NOW).ram_swap).toEqual(
       INITIAL_DEDUPE_STATE,
     );
     expect(
-      dedupeStatesFromSnapshot({
-        triggers: { ram_swap: { firing: true, lastFiredAt: "garbage" } },
-      }).ram_swap,
+      dedupeStatesFromSnapshot(
+        {
+          triggers: { ram_swap: { firing: true, lastFiredAt: "garbage" } },
+        },
+        NOW,
+      ).ram_swap,
     ).toEqual(INITIAL_DEDUPE_STATE);
+  });
+
+  it("a lastFiredAt after the seed time resets that trigger to the initial state", () => {
+    const seeded = dedupeStatesFromSnapshot(
+      {
+        triggers: {
+          ram_swap: {
+            firing: true,
+            lastFiredAt: new Date(NOW + MIN).toISOString(),
+          },
+          client_share: {
+            firing: true,
+            lastFiredAt: new Date(NOW + DAY_MS).toISOString(),
+            lastFiredTopOrgId: "org-a",
+          },
+          supersede_waste: {
+            firing: true,
+            lastFiredAt: new Date(NOW).toISOString(),
+          },
+        },
+      },
+      NOW,
+    );
+    expect(seeded.ram_swap).toEqual(INITIAL_DEDUPE_STATE);
+    expect(seeded.client_share).toEqual(INITIAL_DEDUPE_STATE);
+    // At exactly the seed time it is a past fire, honoured as such.
+    expect(seeded.supersede_waste).toEqual({
+      firing: true,
+      lastFiredAtMs: NOW,
+    });
   });
 });

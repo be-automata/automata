@@ -40,7 +40,7 @@ const ENGINE_URLS: string[] = [];
 const LOG_LINES: string[] = [];
 
 const COLLECTION_ROUTE =
-  /^http:\/\/engine\.test:8888\/api\/v1\/stable\/tenants\/tenant-1\/workflow-runs\?since=[^&]+&limit=200&offset=\d+&only_tasks=true$/;
+  /^http:\/\/engine\.test:8888\/api\/v1\/stable\/tenants\/tenant-1\/workflow-runs\?since=[^&]+&until=[^&]+&limit=200&offset=\d+&only_tasks=true$/;
 
 afterEach(() => {
   for (const url of ENGINE_URLS) expect(url).toMatch(COLLECTION_ROUTE);
@@ -126,6 +126,7 @@ describe("readRunWindow", () => {
     tenantId: TENANT,
     token: TOKEN,
     sinceMs: growthWindow(NOW).startMs,
+    untilMs: growthWindow(NOW).endMs,
     deadlineMs: NOW + 60_000,
     now: () => NOW,
   };
@@ -173,6 +174,12 @@ describe("readRunWindow", () => {
     expect(new URL(ENGINE_URLS[0] ?? "").searchParams.get("since")).toBe(
       new Date(base.sinceMs).toISOString(),
     );
+    // Every page carries the same `until`: the window end, not a moving "now".
+    for (const u of ENGINE_URLS) {
+      expect(new URL(u).searchParams.get("until")).toBe(
+        new Date(base.untilMs).toISOString(),
+      );
+    }
   });
 
   it("stops when current_page reaches num_pages, even on a full page whose next_page points past it", async () => {
@@ -712,8 +719,9 @@ describe("armGrowthTriggers", () => {
       boxId: BOX_ID,
     });
 
-    // Snapshot: atomic writer, mode 0640, committed state.
-    expect(h.writes).toHaveLength(1);
+    // Snapshot: atomic writer, mode 0640, committed state — written right after the
+    // delivered fire and again at the end of the tick.
+    expect(h.writes).toHaveLength(2);
     expect(h.writes[0]).toMatchObject({
       dir: SNAPSHOT_DIR,
       filename: GROWTH_SNAPSHOT_FILENAME,
@@ -730,7 +738,7 @@ describe("armGrowthTriggers", () => {
     h.clock.ms = NOW + 300_000;
     await handle?.tick();
     expect(h.posts).toHaveLength(1);
-    expect(h.writes).toHaveLength(2);
+    expect(h.writes).toHaveLength(3);
     handle?.stop();
   });
 
@@ -1002,7 +1010,8 @@ describe("armGrowthTriggers", () => {
 
   it("an unexpected throw inside the tick becomes growth.tick_error", async () => {
     const h = harness();
-    // Arm itself never reads the clock; the tick's first read blows up.
+    // Arm's seed read of the clock falls back to the initial states (logged); the
+    // tick's first read blows up.
     h.deps.now = vi.fn((): number => {
       throw new RangeError("clock broke");
     });
@@ -1116,6 +1125,202 @@ describe("armGrowthTriggers", () => {
       handle?.stop();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe("armGrowthTriggers (ship Step 9 decisions)", () => {
+  /** Two orgs, org-a dominant and all of its time CANCELLED: client_share and supersede_waste over. */
+  const TWO_ORGS = [
+    rawRow({ status: "CANCELLED", runS: 600, orgId: "org-a", id: "r-a" }),
+    rawRow({ runS: 100, orgId: "org-b", id: "r-b" }),
+  ];
+
+  it("reads the engine bounded by until = 00:00 UTC today (the window end)", async () => {
+    const h = harness();
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    expect(ENGINE_URLS.length).toBeGreaterThan(0);
+    for (const u of ENGINE_URLS) {
+      const q = new URL(u).searchParams;
+      expect(q.get("since")).toBe(
+        new Date(growthWindow(NOW).startMs).toISOString(),
+      );
+      expect(q.get("until")).toBe(
+        new Date(growthWindow(NOW).endMs).toISOString(),
+      );
+    }
+    expect(new URL(ENGINE_URLS[0] ?? "").searchParams.get("until")).toBe(
+      "2026-10-19T00:00:00.000Z",
+    );
+    handle?.stop();
+  });
+
+  it("a delivered transition is persisted before the tick ends: a crash mid-tick does not re-send it", async () => {
+    const first = harness();
+    first.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
+    // Capture what is on disk the moment the SECOND POST goes out — the point at which a
+    // process killed mid-tick would leave the file.
+    let onDiskAtSecondPost: GrowthSnapshot | undefined;
+    const inner = first.deps.fetchImpl;
+    if (inner === undefined) throw new Error("harness has a fetchImpl");
+    first.deps.fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (urlOf(input) === WEBHOOK_URL && first.posts.length === 1) {
+          onDiskAtSecondPost = structuredClone(first.writes.at(-1)?.snapshot);
+        }
+        return inner(input, init);
+      },
+    ) as unknown as typeof fetch;
+    const h1 = armGrowthTriggers(ENV_ON, first.deps);
+    await h1?.firstTick;
+    h1?.stop();
+    expect(first.posts.map((p) => p.trigger)).toEqual([
+      "client_share",
+      "supersede_waste",
+    ]);
+    // One write per delivery, plus the end-of-tick write.
+    expect(first.writes).toHaveLength(3);
+    expect(onDiskAtSecondPost?.triggers.client_share).toMatchObject({
+      firing: true,
+      lastFiredAt: new Date(NOW).toISOString(),
+      lastFiredTopOrgId: "org-a",
+    });
+    expect(onDiskAtSecondPost?.triggers.supersede_waste.firing).toBe(false);
+
+    // "Restart" from the mid-tick file: client_share was delivered and is not re-sent;
+    // supersede_waste never made it to disk and is.
+    const second = harness({
+      snapshotText: JSON.stringify(onDiskAtSecondPost),
+    });
+    second.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
+    second.clock.ms = NOW + 60_000;
+    const h2 = armGrowthTriggers(ENV_ON, second.deps);
+    await h2?.firstTick;
+    h2?.stop();
+    expect(second.posts.map((p) => p.trigger)).toEqual(["supersede_waste"]);
+  });
+
+  it("client_share re-fires within 24 h when the top client changes, not when it stays", async () => {
+    const h = harness();
+    h.setEngine(() => jsonResponse(page(TWO_ORGS, 1, 1)));
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    h.clock.ms = NOW + 300_000;
+    await handle?.tick();
+    const shareFires = () =>
+      h.posts.filter((p) => p.trigger === "client_share");
+    expect(shareFires()).toHaveLength(1);
+
+    h.setEngine(() =>
+      jsonResponse(
+        page(
+          [
+            rawRow({ runS: 100, orgId: "org-a", id: "r-a" }),
+            rawRow({ runS: 600, orgId: "org-b", id: "r-b" }),
+          ],
+          1,
+          1,
+        ),
+      ),
+    );
+    h.clock.ms = NOW + 600_000;
+    await handle?.tick();
+    expect(shareFires()).toHaveLength(2);
+    expect(shareFires()[1]?.text).toContain("org-b");
+    expect(h.writes.at(-1)?.snapshot.triggers.client_share).toMatchObject({
+      firing: true,
+      lastFiredTopOrgId: "org-b",
+    });
+    h.clock.ms = NOW + 900_000;
+    await handle?.tick();
+    expect(shareFires()).toHaveLength(2);
+    handle?.stop();
+  });
+
+  it("logs webhook_failed once per (trigger, state, reason) streak and webhook_recovered on the next delivery", async () => {
+    const h = harness();
+    h.setWebhookStatus(503);
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    for (const k of [1, 2]) {
+      h.clock.ms = NOW + k * 300_000;
+      await handle?.tick();
+    }
+    const events = (event: string) =>
+      h.logs.filter((l) => l.startsWith(`${event} `));
+    expect(h.posts).toHaveLength(3); // retried every tick (V2) ...
+    expect(events("growth.webhook_failed")).toHaveLength(1); // ... logged once
+    expect(events("growth.webhook_recovered")).toHaveLength(0);
+
+    h.setWebhookStatus(200);
+    h.clock.ms = NOW + 900_000;
+    await handle?.tick();
+    expect(events("growth.webhook_recovered")).toEqual([
+      'growth.webhook_recovered {"trigger":"supersede_waste","state":"fired"}',
+    ]);
+    expect(events("growth.trigger_fired")).toHaveLength(1);
+
+    // A new failure after the recovery is a new streak: logged again.
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    h.setWebhookStatus(503);
+    h.clock.ms = NOW + 1_200_000;
+    await handle?.tick();
+    h.clock.ms = NOW + 1_500_000;
+    await handle?.tick();
+    const failed = events("growth.webhook_failed");
+    expect(failed).toHaveLength(2);
+    expect(failed[1]).toContain('"state":"cleared"');
+    handle?.stop();
+  });
+
+  it("the default writer leaves the snapshot at 0640 even when the temp file pre-exists at 0600", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "growth-chmod-"));
+    try {
+      const target = path.join(root, GROWTH_SNAPSHOT_FILENAME);
+      // writeFileSync's `mode` applies only when it CREATES the file, so a leftover temp
+      // file (or a restrictive umask) keeps its mode unless the writer chmods it.
+      const tmp = `${target}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, "stale", { mode: 0o600 });
+      fs.chmodSync(tmp, 0o600);
+      const h = harness();
+      // Nothing fires, so the tick writes exactly once, through the pre-created temp file
+      // (a delivery would add a second write that creates the temp file afresh).
+      h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+      delete h.deps.writeSnapshot;
+      h.deps.snapshotDir = root;
+      const handle = armGrowthTriggers(ENV_ON, h.deps);
+      await handle?.firstTick;
+      handle?.stop();
+      expect(h.posts).toHaveLength(0);
+      expect(fs.statSync(target).mode & 0o777).toBe(GROWTH_SNAPSHOT_MODE);
+      expect(fs.existsSync(tmp)).toBe(false);
+      expect(
+        (JSON.parse(fs.readFileSync(target, "utf8")) as GrowthSnapshot).boxId,
+      ).toBe(BOX_ID);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a throwing resolveEngine makes arm throw before any timer, fetch, file or log", () => {
+    const h = harness();
+    h.deps.resolveEngine = vi.fn(() => {
+      throw new Error("HATCHET_CLIENT_TOKEN is not set");
+    });
+    expect(() => armGrowthTriggers(ENV_ON, h.deps)).toThrow(
+      "HATCHET_CLIENT_TOKEN is not set",
+    );
+    for (const name of [
+      "setInterval",
+      "fetchImpl",
+      "readSnapshot",
+      "writeSnapshot",
+      "log",
+      "readText",
+      "now",
+    ] as const) {
+      expect(vi.mocked(h.deps[name]), name).not.toHaveBeenCalled();
     }
   });
 });

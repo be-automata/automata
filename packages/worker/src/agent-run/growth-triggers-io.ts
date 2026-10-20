@@ -132,6 +132,12 @@ interface ReadRunWindowInput {
   token: string;
   /** The reader's `since`, normally growthWindow(now).startMs. */
   sinceMs: number;
+  /**
+   * The reader's `until`, normally growthWindow(now).endMs (00:00 UTC today): the engine
+   * honours it (verified on the box's engine 2026-10-20: num_pages 620 → 604, newest row
+   * before `until`), so today's partial day is never paged in only to be dropped.
+   */
+  untilMs: number;
   /** Absolute clock time after which no request may still be in flight. */
   deadlineMs: number;
   fetchImpl?: typeof fetch;
@@ -181,13 +187,15 @@ function buildRunWindowUrl(input: {
   apiUrl: string;
   tenantId: string;
   sinceMs: number;
+  untilMs: number;
   offset: number;
 }): string {
   const base = input.apiUrl.replace(/\/+$/, "");
   const since = encodeURIComponent(new Date(input.sinceMs).toISOString());
+  const until = encodeURIComponent(new Date(input.untilMs).toISOString());
   return (
     `${base}/api/v1/stable/tenants/${encodeURIComponent(input.tenantId)}/workflow-runs` +
-    `?since=${since}&limit=${GROWTH_RUNS_PAGE_LIMIT}&offset=${input.offset}&only_tasks=true`
+    `?since=${since}&until=${until}&limit=${GROWTH_RUNS_PAGE_LIMIT}&offset=${input.offset}&only_tasks=true`
   );
 }
 
@@ -235,7 +243,7 @@ async function fetchRunsPage(
 }
 
 /**
- * Offset-paginated read of every run task created since `sinceMs` (V7). When the body
+ * Offset-paginated read of every run task created in [`sinceMs`, `untilMs`) (V7). When the body
  * carries `pagination` with numeric `current_page` and `num_pages`, the engine decides:
  * the read goes on while `current_page < num_pages`, whatever the page size — an engine
  * that caps `limit` below GROWTH_RUNS_PAGE_LIMIT returns short pages that are NOT the
@@ -273,6 +281,7 @@ export async function readRunWindow(
       apiUrl: input.apiUrl,
       tenantId: input.tenantId,
       sinceMs: input.sinceMs,
+      untilMs: input.untilMs,
       offset,
     });
 
@@ -514,8 +523,11 @@ function defaultReadSnapshot(filePath: string): string | null {
  *   2. evaluates every trigger (unreadable → `unknown`, logged once per streak; state
  *      unchanged);
  *   3. for each fire/clear transition POSTs the webhook and commits the transition only
- *      when delivered (V2: a failed POST retries next tick); each POST is bounded by
- *      min(10 s, interval / 2, time left before 0.95 × interval);
+ *      when delivered (V2: a failed POST retries next tick; `growth.webhook_failed` is
+ *      logged once per (trigger, state, reason) streak, `growth.webhook_recovered` on the
+ *      next delivery); each POST is bounded by min(10 s, interval / 2, time left before
+ *      0.95 × interval); a delivered transition is persisted to the snapshot at once, so
+ *      a crash later in the tick cannot re-send it after restart;
  *   4. ALWAYS writes the snapshot atomically with mode 0640 (AC 5, V9).
  * Ticks never overlap and a tick never throws.
  */
@@ -559,14 +571,20 @@ export function armGrowthTriggers(
   const snapshotPath = path.join(deps.snapshotDir, GROWTH_SNAPSHOT_FILENAME);
 
   // Seed (restart must not re-fire). Unreadable → initial states: worst case one
-  // duplicate alert, never a suppressed one.
+  // duplicate alert, never a suppressed one. A lastFiredAt after the arm-time clock is
+  // dropped by the seed (a fire from the future cannot hold anything).
   let states: Record<GrowthTriggerId, TriggerDedupeState>;
   try {
+    const seedMs = now();
     const text = readSnapshot(snapshotPath);
-    states = dedupeStatesFromSnapshot(text === null ? null : JSON.parse(text));
+    states = dedupeStatesFromSnapshot(
+      text === null ? null : JSON.parse(text),
+      seedMs,
+    );
   } catch (err) {
     logLine(log, "growth.snapshot_seed_failed", { error: errorName(err) });
-    states = dedupeStatesFromSnapshot(null);
+    // `null` seeds every trigger initial whatever the time, so no clock read is needed.
+    states = dedupeStatesFromSnapshot(null, 0);
   }
 
   let memSamples: MemSample[] = [];
@@ -576,6 +594,10 @@ export function armGrowthTriggers(
   // `growth.trigger_known` when it reads again — not a line per trigger per tick for
   // as long as the engine is down (the engine-liveness `unreadableLogged` pattern).
   const unknownReasonLogged = new Map<GrowthTriggerId, string>();
+  // One `growth.webhook_failed` per contiguous (trigger, state, reason) streak, and one
+  // `growth.webhook_recovered` on the first delivery after it: a sink that is down for a
+  // day must not write a line per trigger per tick.
+  const webhookFailureLogged = new Map<GrowthTriggerId, string>();
 
   const runTick = async (): Promise<GrowthSnapshot> => {
     const startMs = now();
@@ -583,12 +605,14 @@ export function armGrowthTriggers(
     const engineDeadlineMs = startMs + engineReadBudgetMs;
     const deadlineMs = startMs + tickBudgetMs;
 
+    const window = growthWindow(startMs);
     const [runs, mem] = await Promise.all([
       readRunWindow({
         apiUrl: engine.apiUrl,
         tenantId: engine.tenantId,
         token: engine.token,
-        sinceMs: growthWindow(startMs).startMs,
+        sinceMs: window.startMs,
+        untilMs: window.endMs,
         deadlineMs: engineDeadlineMs,
         fetchImpl,
         now,
@@ -624,6 +648,31 @@ export function armGrowthTriggers(
       supersede_waste: runSignals.supersedeWaste,
     };
 
+    // The snapshot of THIS tick's evaluations and the states committed so far. Written
+    // after every delivered transition as well as at the end, so a process that dies
+    // mid-tick after a POST (a crash loop, an OOM kill) restarts holding that delivery
+    // instead of re-sending it.
+    const persist = (): GrowthSnapshot => {
+      const snapshot = buildSnapshot({
+        nowMs,
+        boxId: deps.boxId,
+        evaluations,
+        states,
+        stats: runSignals.stats,
+      });
+      try {
+        writeSnapshot(deps.snapshotDir, snapshot, {
+          filename: GROWTH_SNAPSHOT_FILENAME,
+          mode: GROWTH_SNAPSHOT_MODE,
+        });
+      } catch (err) {
+        logLine(log, "growth.snapshot_write_failed", {
+          error: errnoCode(err) ?? errorName(err),
+        });
+      }
+      return snapshot;
+    };
+
     for (const id of GROWTH_TRIGGER_IDS) {
       const evaluation = evaluations[id];
       if (evaluation.verdict === "unknown") {
@@ -637,7 +686,15 @@ export function armGrowthTriggers(
         logLine(log, "growth.trigger_known", { trigger: id });
       }
       const current = states[id];
-      const transition = decideTransition(current, evaluation.verdict, nowMs);
+      // client_share names its top org, so a different dominant client re-fires at once.
+      const topOrgId =
+        id === "client_share" ? runSignals.stats?.topClient?.orgId : undefined;
+      const transition = decideTransition(
+        current,
+        evaluation.verdict,
+        nowMs,
+        topOrgId === undefined ? {} : { topOrgId },
+      );
       if (transition.action === "none") continue;
       const state = transition.action === "fire" ? "fired" : "cleared";
       const body = buildWebhookBody({
@@ -658,6 +715,11 @@ export function armGrowthTriggers(
             );
       states[id] = commitTransition(current, transition, result.delivered);
       if (result.delivered) {
+        persist();
+        if (webhookFailureLogged.has(id)) {
+          webhookFailureLogged.delete(id);
+          logLine(log, "growth.webhook_recovered", { trigger: id, state });
+        }
         logLine(
           log,
           state === "fired" ? "growth.trigger_fired" : "growth.trigger_cleared",
@@ -670,33 +732,20 @@ export function armGrowthTriggers(
           },
         );
       } else {
-        logLine(log, "growth.webhook_failed", {
-          trigger: id,
-          state,
-          ...(result.status !== undefined ? { status: result.status } : {}),
-          reason: result.reason,
-        });
+        const streak = `${state}|${result.reason}`;
+        if (webhookFailureLogged.get(id) !== streak) {
+          webhookFailureLogged.set(id, streak);
+          logLine(log, "growth.webhook_failed", {
+            trigger: id,
+            state,
+            ...(result.status !== undefined ? { status: result.status } : {}),
+            reason: result.reason,
+          });
+        }
       }
     }
 
-    const snapshot = buildSnapshot({
-      nowMs,
-      boxId: deps.boxId,
-      evaluations,
-      states,
-      stats: runSignals.stats,
-    });
-    try {
-      writeSnapshot(deps.snapshotDir, snapshot, {
-        filename: GROWTH_SNAPSHOT_FILENAME,
-        mode: GROWTH_SNAPSHOT_MODE,
-      });
-    } catch (err) {
-      logLine(log, "growth.snapshot_write_failed", {
-        error: errnoCode(err) ?? errorName(err),
-      });
-    }
-    return snapshot;
+    return persist();
   };
 
   const tick = async (): Promise<GrowthTickResult> => {

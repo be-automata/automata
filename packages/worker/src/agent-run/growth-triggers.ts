@@ -721,6 +721,12 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
 export interface TriggerDedupeState {
   firing: boolean;
   lastFiredAtMs: number | null;
+  /**
+   * client_share only: the top org the last fire was about. A different top org is a new
+   * split signal, so it is announced at once instead of waiting out the 24 h hold. Absent
+   * for every other trigger, and for a client_share that never fired.
+   */
+  lastFiredTopOrgId?: string;
 }
 
 export const INITIAL_DEDUPE_STATE: TriggerDedupeState = {
@@ -736,12 +742,27 @@ interface DedupeTransition {
   next: TriggerDedupeState;
 }
 
+interface DecideTransitionOptions {
+  /**
+   * client_share only: the org that currently holds the largest share. Recorded on a fire,
+   * and an `over` for a different org than the last fire's is due at once.
+   */
+  topOrgId?: string;
+}
+
 /**
- * Pure transition. `fire` when over and the last fire is ≥ refireMs old or there was none
- * — whether or not the trigger is still `firing`, so a condition that flaps (fire → clear
- * → over again) is announced at most once per window (AC 4), and one that stays over is
- * re-announced once a day, not every tick. `clear` once when it drops under while firing,
- * never held by the window; `unknown` is always a no-op.
+ * Pure transition. `fire` when over and the last fire is ≥ GROWTH_REFIRE_MS old or there
+ * was none — whether or not the trigger is still `firing`, so a condition that flaps (fire
+ * → clear → over again) is announced at most once per window (AC 4), and one that stays
+ * over is re-announced once a day, not every tick. `clear` once when it drops under while
+ * firing, never held by the window; `unknown` is always a no-op.
+ *
+ * Two more ways an `over` is due:
+ *  - a `lastFiredAtMs` AFTER `nowMs` (a clock that stepped back, or a snapshot written by
+ *    a box with a fast clock) is treated as never fired: otherwise the hold would last
+ *    until the clock caught up, however long that is;
+ *  - client_share, when `options.topOrgId` differs from the org the last fire named: a
+ *    different client is a different split, not a repeat of the one already announced.
  *
  * The transition is a PROPOSAL. A failed webhook must not be recorded as delivered (V2) —
  * otherwise a sink outage at the moment of the fire would silence the trigger for 24 h —
@@ -751,20 +772,34 @@ export function decideTransition(
   state: TriggerDedupeState,
   verdict: GrowthVerdict,
   nowMs: number,
-  refireMs: number = GROWTH_REFIRE_MS,
+  options: DecideTransitionOptions = {},
 ): DedupeTransition {
   if (verdict === "over") {
+    const last = state.lastFiredAtMs;
+    const topOrgChanged =
+      options.topOrgId !== undefined &&
+      state.lastFiredTopOrgId !== undefined &&
+      options.topOrgId !== state.lastFiredTopOrgId;
     const due =
-      state.lastFiredAtMs === null || nowMs - state.lastFiredAtMs >= refireMs;
+      last === null ||
+      last > nowMs ||
+      nowMs - last >= GROWTH_REFIRE_MS ||
+      topOrgChanged;
     return due
-      ? { action: "fire", next: { firing: true, lastFiredAtMs: nowMs } }
+      ? {
+          action: "fire",
+          next: {
+            firing: true,
+            lastFiredAtMs: nowMs,
+            ...(options.topOrgId !== undefined
+              ? { lastFiredTopOrgId: options.topOrgId }
+              : {}),
+          },
+        }
       : { action: "none", next: state };
   }
   if (verdict === "under" && state.firing) {
-    return {
-      action: "clear",
-      next: { firing: false, lastFiredAtMs: state.lastFiredAtMs },
-    };
+    return { action: "clear", next: { ...state, firing: false } };
   }
   return { action: "none", next: state };
 }
@@ -832,6 +867,8 @@ interface SnapshotTriggerEntry {
   reason?: string;
   firing: boolean;
   lastFiredAt: string | null;
+  /** client_share only, once it has fired: the top org that fire named. */
+  lastFiredTopOrgId?: string;
 }
 
 export interface GrowthSnapshot {
@@ -873,6 +910,9 @@ export function buildSnapshot(input: {
           ? null
           : new Date(s.lastFiredAtMs).toISOString(),
       ...(e.reason !== undefined ? { reason: e.reason } : {}),
+      ...(s.lastFiredTopOrgId !== undefined
+        ? { lastFiredTopOrgId: s.lastFiredTopOrgId }
+        : {}),
     };
   }
   return {
@@ -892,10 +932,12 @@ export function buildSnapshot(input: {
  * Seed the dedupe states from a previous snapshot (parsed JSON, or anything) so a worker
  * restart does not re-fire every trigger that was already firing. Anything unreadable
  * seeds the initial state for that trigger — worst case one duplicate alert, never a
- * suppressed one that was not delivered.
+ * suppressed one that was not delivered. So does a `lastFiredAt` after `seedMs` (the
+ * arm-time clock): a fire from the future cannot be honoured as a hold.
  */
 export function dedupeStatesFromSnapshot(
   raw: unknown,
+  seedMs: number,
 ): Record<GrowthTriggerId, TriggerDedupeState> {
   const out = {} as Record<GrowthTriggerId, TriggerDedupeState>;
   const triggers =
@@ -911,11 +953,24 @@ export function dedupeStatesFromSnapshot(
       out[id] = INITIAL_DEDUPE_STATE;
       continue;
     }
-    const e = entry as { firing?: unknown; lastFiredAt?: unknown };
+    const e = entry as {
+      firing?: unknown;
+      lastFiredAt?: unknown;
+      lastFiredTopOrgId?: unknown;
+    };
     const lastFiredAtMs = parseTimestampMs(e.lastFiredAt);
+    if (lastFiredAtMs !== null && lastFiredAtMs > seedMs) {
+      out[id] = INITIAL_DEDUPE_STATE;
+      continue;
+    }
+    const topOrgId =
+      id === "client_share" && lastFiredAtMs !== null
+        ? nonEmptyString(e.lastFiredTopOrgId)
+        : null;
     out[id] = {
       firing: e.firing === true && lastFiredAtMs !== null,
       lastFiredAtMs,
+      ...(topOrgId !== null ? { lastFiredTopOrgId: topOrgId } : {}),
     };
   }
   return out;

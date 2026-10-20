@@ -45,8 +45,8 @@ function parseCadenceKnob(spec: {
   raw: string | undefined;
   defaultValue: number;
   floor: number;
-  /** Inclusive; absent = unbounded. */
-  ceiling?: number;
+  /** Inclusive; absent = unbounded. `hint` says why, as `floorHint` does for the floor. */
+  ceiling?: { value: number; hint: string };
   floorHint: string;
 }): number {
   const v = (spec.raw ?? "").trim();
@@ -62,9 +62,9 @@ function parseCadenceKnob(spec: {
       `${spec.name}=${n} is below the floor of ${spec.floor} s (${spec.floorHint})`,
     );
   }
-  if (spec.ceiling !== undefined && n > spec.ceiling) {
+  if (spec.ceiling !== undefined && n > spec.ceiling.value) {
     throw new Error(
-      `${spec.name}=${n} is above the ceiling of ${spec.ceiling} s (one day)`,
+      `${spec.name}=${n} is above the ceiling of ${spec.ceiling.value} s (${spec.ceiling.hint})`,
     );
   }
   return n;
@@ -139,7 +139,10 @@ export function loadGrowthTriggerConfig(
     raw: env.WORKER_GROWTH_TRIGGER_INTERVAL_S,
     defaultValue: GROWTH_TRIGGER_INTERVAL_DEFAULT_S,
     floor: GROWTH_TRIGGER_INTERVAL_FLOOR_S,
-    ceiling: GROWTH_TRIGGER_INTERVAL_CEILING_S,
+    ceiling: {
+      value: GROWTH_TRIGGER_INTERVAL_CEILING_S,
+      hint: "one day: a slower tick could not hold the 24 h dedupe window it serves",
+    },
     floorHint:
       "WORKER_GROWTH_TRIGGER_SUSTAIN_S must also be ≥ 2 × the interval",
   });

@@ -153,7 +153,8 @@ describe("loadGrowthTriggerConfig", () => {
         WORKER_GROWTH_TRIGGER_SUSTAIN_S: "172802",
       }),
     ).toThrow(
-      /WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s/,
+      "WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s " +
+        "(one day: a slower tick could not hold the 24 h dedupe window it serves)",
     );
   });
 

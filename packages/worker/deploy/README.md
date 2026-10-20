@@ -364,7 +364,9 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   window → add a second shared box on the same tenant.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 2 orgs) → split
   that client to its own box. Reads `unknown` while more than 5 % of run time is
-  unattributed (see below).
+  unattributed (see below). It re-fires at once, inside the 24 h hold, when the
+  dominant client changes: the alert names the org, and a different org is a different
+  split.
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
@@ -372,6 +374,13 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   while deferred by #371 or parked on a #205 box slot counts that wait as waste although
   no agent compute ran. On a busy box, check `queue_wait_p90` and the `box.headroom_*`
   lines before reading a high ratio as a policy problem (follow-up #409).
+
+**A saturated box can keep `ram_swap` and `queue_wait_p90` both quiet.** Agent runs have
+`memory.swap.max=0`, so they never page, and the #371 headroom check defers a new run
+before RAM fills, so utilisation plateaus under the fraction. The deferred run is already
+running on the engine, so its wait is not engine queue wait either. The pressure shows
+up only as deferrals: read the `box.headroom_rejected` / `box.headroom_deferred_wait`
+journal lines alongside both triggers before concluding the box has room.
 
 | Knob                                 | Default | Notes                                                 |
 | :----------------------------------- | :------ | :---------------------------------------------------- |
@@ -391,11 +400,18 @@ A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be ar
 The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
 state}` with `state` `fired` or `cleared`; `text` is a one-line summary, so the same URL
 works for a Slack incoming webhook or ntfy. A trigger that stays over re-fires at most
-once per 24 h, and one `cleared` notice is sent when it drops back under. A failed POST
-is not recorded and is retried next tick.
+once per 24 h (sooner only for `client_share` when the top client changes, and when a
+recorded fire time lies in the future — a clock that stepped back never extends the
+hold), and one `cleared` notice is sent when it drops back under. A failed POST is not
+recorded and is retried next tick; `growth.webhook_failed` is logged once per
+(trigger, state, reason) streak and `growth.webhook_recovered` on the next delivery.
+
+The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
+`until` = 00:00 UTC today, so today's partial day is never paged in.
 
 State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
-atomically every tick). `/tmp` is cleared at reboot, so a trigger may re-fire once after
+atomically every tick, and again right after each delivered alert so a worker that dies
+mid-tick does not resend it on restart). `/tmp` is cleared at reboot, so a trigger may re-fire once after
 a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
 `unattributed`; the client signals are meaningful only once the window holds 7 complete
 UTC days of tagged runs — up to 8 calendar days after the www deploy. The attribution gate enforces that: while more than 5 % of the window's run
