@@ -568,8 +568,8 @@ async function runAgentResolved(
 
 /**
  * Structural mirror of the control plane's engine-owned policy set (the
- * planes share no imports — composability invariant; drift is caught by the
- * C3 E2E, same contract as the variant table above).
+ * planes import nothing from each other — composability invariant; drift is
+ * caught by the C3 E2E, same contract as the variant table above).
  */
 const ENGINE_OWNED_POLICIES: readonly string[] = [
   "newest-wins",
