@@ -30,6 +30,7 @@ export type {
   UpdateResult,
   Updater,
 } from "./claims";
+export * from "./diff";
 export * from "./op-key";
 export * from "./reanchor";
 export * from "./evidence-class";

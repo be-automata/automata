@@ -601,21 +601,82 @@ function locate(e: EvidenceStatus, idx: DiffIndex | undefined): Located {
 }
 
 /**
- * A line pin pushed past end-of-file by the diff is not gone, it moved up: with a diff for its file it is
- * a re-anchor candidate (stale), not a retraction.
+ * Evidence as the diff explains it. A line pin pushed past end-of-file is not gone, it moved up: with a diff
+ * for its file it is a re-anchor candidate (stale), not a retraction. A pin on a renamed file's old path is
+ * re-targeted to the new path: when the text there is identical to what was pinned it relocated (a
+ * mechanical repin); otherwise it is stale and locate() re-anchors it at the new path.
  */
 function inDiffContext(
   evidence: EvidenceStatus[],
+  pins: EvidencePin[],
   idx: DiffIndex | undefined,
+  root: string,
 ): EvidenceStatus[] {
   if (!idx) return evidence;
-  return evidence.map((e) =>
-    e.kind === "missing" &&
-    e.code === "past-eof" &&
-    idx.has(parseUri(e.uri).target)
-      ? { kind: "stale", uri: e.uri, now: "" }
-      : e,
+  return evidence.map((e, j): EvidenceStatus => {
+    if (e.kind !== "missing") return e;
+    const { scheme, target, anchor } = parseUri(e.uri);
+    const d = idx.get(target);
+    if (!d) return e;
+    const stale: EvidenceStatus = { kind: "stale", uri: e.uri, now: "" };
+    if (e.code === "past-eof") return stale;
+    if (
+      scheme !== "repo" ||
+      d.diff.oldPath !== target ||
+      d.diff.path === target
+    )
+      return e;
+    return renamed(root, e, pins[j], d, lineAnchor(e.uri, anchor)) ?? stale;
+  });
+}
+
+/** A gone pin on a rename source that lands on identical text at the new path, or null. */
+function renamed(
+  root: string,
+  e: EvidenceStatus,
+  pinned: EvidencePin | undefined,
+  d: DiffLines,
+  span: LineSpan,
+): EvidenceStatus | null {
+  const r = reanchorSpan({
+    hunks: d.diff.hunks,
+    oldLines: d.oldLines,
+    newLines: d.newLines,
+    span,
+    floor: d.diff.floor,
+  });
+  if (r.status !== "shifted" && r.status !== "in-hunk") return null;
+  const newUri = newPathUri(d, r.span);
+  if (!newUri || !pinned) return null;
+  const now = resolve(root, newUri);
+  return "text" in now && matchesHash(pinned.hash, now.text)
+    ? { kind: "relocated", uri: e.uri, newUri }
+    : null;
+}
+
+/**
+ * A repin that moves a pin to another file (a rename) carries the new evidence and its fingerprint, so
+ * applyDraft can re-check it: a gone pin cannot be relocated from the sources alone. Same-file relocations
+ * carry nothing (applyDraft finds them again by hash).
+ */
+function renameProposal(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+): Pick<DraftOp, "newEvidence" | "newEvidenceHash"> {
+  const crossFile = ev.some(
+    (e) =>
+      e.kind === "relocated" &&
+      parseUri(e.newUri).target !== parseUri(e.uri).target,
   );
+  if (!crossFile) return {};
+  const newEvidence = ev.map((e, j) =>
+    e.kind === "relocated" ? e.newUri : (claim.evidence[j]?.uri ?? e.uri),
+  );
+  return {
+    newEvidence,
+    newEvidenceHash: newEvidence.map((uri) => pin(root, uri).hash),
+  };
 }
 
 /** Widest line span an updater may choose: wider overrides would make the window scan quadratic. */
@@ -768,11 +829,16 @@ export async function reconcile(
   sc.claims.forEach((claim, i) => {
     const cr = report.claims[i];
     if (!cr) return;
-    const ev = inDiffContext(cr.evidence, idx);
+    const ev = inDiffContext(cr.evidence, claim.evidence, idx, root);
     const status =
       cr.status === "orphaned" ? cr.status : claimStatus(ev.map((e) => e.kind));
     const fixed = FIXED_OPS[status];
-    if (fixed) return add({ ...baseOf(claim, ev), ...fixed });
+    if (fixed)
+      return add({
+        ...baseOf(claim, ev),
+        ...fixed,
+        ...(fixed.op === "repin" ? renameProposal(root, claim, ev) : {}),
+      });
     if (status !== "stale") return; // fresh
     const located = ev.map((e) => locate(e, idx));
     const pins = located.filter(
@@ -1001,6 +1067,34 @@ function keepOrRelocate(
 }
 
 /**
+ * The evidence a rename repin moves to. Every span must resolve (parseUri and the source containment check
+ * run inside resolve) to text identical to what was pinned, and still match the fingerprint proposed: a
+ * forged or outdated repin can never re-ground a claim onto different text.
+ */
+function renamedEvidence(root: string, c: Claim, op: DraftOp): EvidencePin[] {
+  const { newEvidence = [], newEvidenceHash } = op;
+  const refuse = () =>
+    new UnappliableOpError(
+      op.id,
+      "a rename repin must land on content identical to the pinned span: reconcile again",
+    );
+  if (
+    newEvidence.length !== c.evidence.length ||
+    newEvidenceHash?.length !== newEvidence.length
+  )
+    throw refuse();
+  return newEvidence.map((uri, j) => {
+    const was = c.evidence[j];
+    const r = resolve(root, uri);
+    if (!was || !("text" in r) || !matchesHash(was.hash, r.text))
+      throw refuse();
+    const now = pin(root, uri);
+    if (now.hash !== newEvidenceHash[j]) throw refuse();
+    return now;
+  });
+}
+
+/**
  * Apply auto ops plus the ops a human approved. Content changes on a human-edited page are refused;
  * repins are still allowed there because they never touch the page text. Nothing on the draft is
  * trusted: the op kind caps `auto`, the page is re-hashed rather than reading `mode`, every op id must
@@ -1053,9 +1147,14 @@ export function applyDraft(
       continue;
     }
     if (op.op === "repin") {
+      // A retargeted repin is never auto and has lost newEvidence (keepsProposal is false), so it falls back
+      // to keepOrRelocate, which refuses a pin whose file is gone.
       claims.push({
         ...c,
-        evidence: c.evidence.map((e) => keepOrRelocate(root, e, op.id)),
+        evidence:
+          op.newEvidence === undefined
+            ? c.evidence.map((e) => keepOrRelocate(root, e, op.id))
+            : renamedEvidence(root, c, op),
       });
       continue;
     }

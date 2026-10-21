@@ -67,6 +67,7 @@ describe("core entry (fs-free surface)", () => {
     const { modules, external } = runtimeGraph(join(HERE, "core.ts"));
     expect(modules.map((m) => m.slice(HERE.length + 1)).sort()).toEqual([
       "core.ts",
+      "diff.ts",
       "evidence-class.ts",
       "op-key.ts",
       "reanchor.ts",
@@ -80,6 +81,7 @@ describe("core entry (fs-free surface)", () => {
     expect(typeof core.parseHunks).toBe("function");
     expect(core.REANCHOR_FLOOR).toBe(0.5);
     expect(typeof core.classifyEvidence).toBe("function");
+    expect(typeof core.parseUnifiedDiff).toBe("function");
   });
 
   it("detects a runtime import but ignores type-only ones", () => {
