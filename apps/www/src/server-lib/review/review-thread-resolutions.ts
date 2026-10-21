@@ -45,6 +45,24 @@ export function threadResolutionClaimKey(
   return `review-resolve:${threadId}:${commit}`;
 }
 
+/**
+ * Take the (thread, commit) claim in Redis. Redis is loaded only when a claim
+ * is actually taken: most reviews resolve nothing, and the finish hooks must
+ * not need a Redis client just to be imported.
+ */
+export async function claimThreadResolution(
+  threadId: string,
+  commit: string,
+): Promise<boolean> {
+  const { redis } = await import("@/lib/redis");
+  const taken = await redis.set(
+    threadResolutionClaimKey(threadId, commit),
+    "1",
+    { nx: true, ex: THREAD_RESOLUTION_CLAIM_TTL_SECONDS },
+  );
+  return taken === "OK";
+}
+
 async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

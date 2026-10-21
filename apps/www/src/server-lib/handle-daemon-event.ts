@@ -753,6 +753,27 @@ async function handleThreadFinish({
         }),
       ),
   );
+  // The org-owned mention lane's terminal writer: a mention on an ISSUE has
+  // no PR number, so like the audit lane this is a sibling of the PR block
+  // above (whose review executor never matches a github_mention thread). It
+  // no-ops for any thread the mention lane did not stamp.
+  waitUntil(
+    import("@/server-lib/review/mention-reply-finish")
+      .then(({ handleMentionReplyAtFinish }) =>
+        handleMentionReplyAtFinish({
+          db,
+          userId,
+          threadId,
+          threadChatId,
+        }),
+      )
+      .catch((error) =>
+        console.error("[mention-reply] finish-hook failed (non-fatal)", {
+          threadId,
+          error,
+        }),
+      ),
+  );
 
   // ADR-003 F3 (S12 fix — DECOUPLED): the daemon token is NO LONGER revoked here.
   // Revoking at thread-finish let the background revoke beat the worker's next

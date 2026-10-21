@@ -24,6 +24,15 @@
  * Push the skill itself first with deploy/skill-push.ts: the automation only
  * references it by name.
  *
+ * `--mention` (the org-owned mention lane) writes NO settings row and upserts,
+ * keyed by (organization, repo, name 'GitHub mention (<skill>)'), ONE
+ * github_mention automation: filter { orgLane: true }, action skill_message
+ * { skillName, version 'latest', model }, disableGitCheckpointing true, owned
+ * by the org owner, created DISABLED unless --enable. Once enabled, every
+ * mention on the repo goes through that lane instead of the per-user path.
+ *   DATABASE_URL=postgres://... pnpm exec tsx deploy/onboard-review-repo.ts \
+ *     <orgSlug> <owner/repo> github-mention --mention --model <model> [--enable]
+ *
  * `--dry-run` prints the field diff and writes nothing. Unknown flags are a
  * hard error. Re-running with the same arguments is a no-op.
  */
@@ -51,9 +60,11 @@ import {
   OnboardArgsError,
   USAGE,
   type OnboardArgs,
+  buildMentionAutomation,
   buildReviewAutomation,
   buildReviewSettingsPatch,
   diffFields,
+  mentionAutomationName,
   parseOnboardArgs,
   reviewAutomationName,
   stableStringify,
@@ -95,7 +106,18 @@ const desired =
         // Already checked against AIModelSchema.options; parse narrows the type.
         model: AIModelSchema.parse(args.model),
       })
-    : null;
+    : args.kind === "configure-mention"
+      ? buildMentionAutomation({
+          ...args,
+          model: AIModelSchema.parse(args.model),
+        })
+      : null;
+const lane: "review" | "mention" =
+  args.kind === "flip"
+    ? args.lane
+    : args.kind === "configure-mention"
+      ? "mention"
+      : "review";
 if (desired) assertSchemaKeeps(desired);
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -106,11 +128,11 @@ const db = createDb(databaseUrl);
 const tag = args.dryRun ? "[dry-run] " : "";
 
 /**
- * Every pull_request automation, all owners: the upsert key is (org, repo,
- * name) regardless of owner, so a row another member created must be found
- * (and refused) rather than duplicated.
+ * Every automation of the lane's trigger type, all owners: the upsert key is
+ * (org, repo, name) regardless of owner, so a row another member created must
+ * be found (and refused) rather than duplicated.
  */
-async function listPullRequestAutomations() {
+async function listLaneAutomations() {
   const pageSize = 500;
   const rows: Awaited<ReturnType<typeof getAllAutomationsForAdmin>> = [];
   for (let offset = 0; ; offset += pageSize) {
@@ -118,7 +140,7 @@ async function listPullRequestAutomations() {
       db,
       limit: pageSize,
       offset,
-      triggerType: "pull_request",
+      triggerType: lane === "mention" ? "github_mention" : "pull_request",
     });
     rows.push(...page);
     if (page.length < pageSize) return rows;
@@ -131,7 +153,9 @@ async function listPullRequestAutomations() {
  * ignore excludeBotSenders / model, so bots get reviewed on the wrong model.
  */
 function assertSchemaKeeps(
-  automation: ReturnType<typeof buildReviewAutomation>,
+  automation:
+    | ReturnType<typeof buildReviewAutomation>
+    | ReturnType<typeof buildMentionAutomation>,
 ) {
   const trigger = {
     type: automation.triggerType,
@@ -148,7 +172,7 @@ function assertSchemaKeeps(
         `The automation ${label} schema in this checkout drops fields of\n` +
           `  ${stableStringify(input)}\n(parsed: ${stableStringify(parsed)}).\n` +
           `Run this script from a checkout whose packages/shared/src/automations ` +
-          `knows filter.excludeBotSenders and skill_message.model.`,
+          `knows filter.excludeBotSenders, filter.orgLane and skill_message.model.`,
       );
     }
   }
@@ -167,9 +191,12 @@ async function main(parsed: RunArgs) {
     fail(`Org '${parsed.orgSlug}' has no members. Add an owner first.`);
   }
 
-  const name = reviewAutomationName(parsed.skillName);
+  const name =
+    lane === "mention"
+      ? mentionAutomationName(parsed.skillName)
+      : reviewAutomationName(parsed.skillName);
   const repoKey = parsed.repoFullName.toLowerCase();
-  const all = await listPullRequestAutomations();
+  const all = await listLaneAutomations();
   const matches = all.filter(
     (a) =>
       a.organizationId === org.id &&
@@ -192,9 +219,14 @@ async function main(parsed: RunArgs) {
   );
   for (const other of others) {
     console.warn(
-      `WARNING: another ENABLED pull_request automation also fires on ` +
-        `${parsed.repoFullName}: '${other.name}' (${other.id}, org ` +
-        `${other.organizationId ?? "none"}). Two review lanes on one repo post two reviews.`,
+      lane === "mention"
+        ? `WARNING: another ENABLED github_mention automation also matches ` +
+            `${parsed.repoFullName}: '${other.name}' (${other.id}, org ` +
+            `${other.organizationId ?? "none"}). With an org-lane automation enabled ` +
+            `the per-user mention automations no longer run on this repo.`
+        : `WARNING: another ENABLED pull_request automation also fires on ` +
+            `${parsed.repoFullName}: '${other.name}' (${other.id}, org ` +
+            `${other.organizationId ?? "none"}). Two review lanes on one repo post two reviews.`,
     );
   }
 
@@ -202,7 +234,9 @@ async function main(parsed: RunArgs) {
     if (!existing) {
       fail(
         `No automation '${name}' for ${parsed.repoFullName} in '${parsed.orgSlug}'. ` +
-          `Run with --tolerance and --model to create it first.`,
+          (lane === "mention"
+            ? `Run with --mention --model to create it first.`
+            : `Run with --tolerance and --model to create it first.`),
       );
     }
     if (existing.enabled === parsed.enabled) {
@@ -246,6 +280,17 @@ async function main(parsed: RunArgs) {
     );
   }
 
+  if (parsed.kind === "configure") {
+    await configureReviewSettings(parsed, org, ownerUserId);
+  }
+  await upsertLaneAutomation(parsed, desired, org, ownerUserId, name, existing);
+}
+
+async function configureReviewSettings(
+  parsed: Extract<RunArgs, { kind: "configure" }>,
+  org: { id: string; slug: string },
+  ownerUserId: string,
+) {
   const settingsPatch = buildReviewSettingsPatch(parsed);
   const currentSettings = await getRepoReviewSetting({
     db,
@@ -270,7 +315,18 @@ async function main(parsed: RunArgs) {
       });
     }
   }
+}
 
+async function upsertLaneAutomation(
+  parsed: Exclude<RunArgs, { kind: "flip" }>,
+  desired:
+    | ReturnType<typeof buildReviewAutomation>
+    | ReturnType<typeof buildMentionAutomation>,
+  org: { id: string; slug: string },
+  ownerUserId: string,
+  name: string,
+  existing: Awaited<ReturnType<typeof listLaneAutomations>>[number] | undefined,
+) {
   if (!existing) {
     const enabled = parsed.enabled ?? false;
     console.log(
@@ -294,6 +350,9 @@ async function main(parsed: RunArgs) {
       repoFullName: desired.repoFullName,
       branchName: desired.branchName,
       action: desired.action,
+      ...("disableGitCheckpointing" in desired
+        ? { disableGitCheckpointing: desired.disableGitCheckpointing }
+        : {}),
       ...(parsed.enabled !== undefined ? { enabled: parsed.enabled } : {}),
     };
     const automationDiff = diffFields(existing, updates);

@@ -8,6 +8,7 @@ import {
 } from "@/lib/github";
 import { getGithubPR } from "@terragon/shared/model/github";
 import { handleAppMention } from "./handle-app-mention";
+import { handleOrgLaneMention, isOrgLaneRepo } from "./org-mention-lane";
 import { resolveReviewDraftPolicy } from "@/server-lib/review/resolve-review-draft-policy";
 import {
   isAppMentioned,
@@ -351,6 +352,25 @@ export async function handleIssueCommentEvent(
       );
       return;
     }
+    // The org-owned mention lane owns every mention on a repo that enabled it
+    // (orgLane github_mention automation); the per-user path below is skipped.
+    if (
+      await handleOrgLaneMention({
+        repoFullName,
+        installationId: installationIdOf(event),
+        isPullRequest: issueType === "pull_request",
+        issueOrPrNumber: issueNumber,
+        commentKind: "issue",
+        comment: {
+          id: event.comment.id,
+          body: commentBody,
+          authorAssociation: event.comment.author_association,
+          user: { login: commentUsername, type: event.comment.user.type },
+        },
+      })
+    ) {
+      return;
+    }
     console.log(
       `Processing app mention in comment on ${issueType} #${issueNumber} in ${repoFullName} by ${commentUsername}`,
     );
@@ -406,6 +426,27 @@ export async function handlePullRequestReviewCommentEvent(
       console.log(
         `Review comment on PR #${prNumber} in ${repoFullName} does not mention the app`,
       );
+      return;
+    }
+    if (
+      await handleOrgLaneMention({
+        repoFullName,
+        installationId: installationIdOf(event),
+        isPullRequest: true,
+        issueOrPrNumber: prNumber,
+        commentKind: "review_comment",
+        comment: {
+          id: event.comment.id,
+          body: commentBody,
+          authorAssociation: event.comment.author_association,
+          user: { login: commentUsername, type: event.comment.user.type },
+          path: event.comment.path,
+          line: event.comment.line ?? event.comment.original_line ?? null,
+          diffHunk: event.comment.diff_hunk,
+          inReplyToId: event.comment.in_reply_to_id ?? null,
+        },
+      })
+    ) {
       return;
     }
     console.log(
@@ -476,6 +517,14 @@ export async function handlePullRequestReviewEvent(
     if (!reviewBody || !isAppMentioned(reviewBody)) {
       console.log(
         `Review on PR #${prNumber} in ${repoFullName} does not mention the app or has no body`,
+      );
+      return;
+    }
+    // The org lane answers comments only (legacy parity): a review BODY on a
+    // repo that enabled it is neither answered nor sent down the per-user path.
+    if (await isOrgLaneRepo(repoFullName)) {
+      console.log(
+        `[org-mention] skip: review body mention on PR #${prNumber} in ${repoFullName} (org lane answers comments only)`,
       );
       return;
     }

@@ -375,6 +375,8 @@ export interface ReviewThreadClient {
     threadId: string;
     isResolved: boolean;
     commentBodies: string[];
+    /** The same comments with their authors (null for a deleted account). */
+    comments: Array<{ body: string; authorLogin: string | null }>;
   } | null>;
   replyToReviewComment(
     prNumber: number,
@@ -425,6 +427,10 @@ export function createOctokitThreadClient(
             threadId: thread.id,
             isResolved: thread.isResolved,
             commentBodies: thread.comments.map((c) => c.body ?? ""),
+            comments: thread.comments.map((c) => ({
+              body: c.body ?? "",
+              authorLogin: c.authorLogin,
+            })),
           }
         : null;
     },

@@ -24,6 +24,7 @@ import {
 import {
   AccessTier,
   DBUserMessage,
+  MentionLaneStamp,
   ThreadTrustContext,
 } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
@@ -126,8 +127,11 @@ export async function runAutomation({
      * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
      * at thread creation, so the fix attempt travels with the thread. Applies
      * to skill_message automations only; ignored for user_message.
+     * `mention` (the org-owned mention lane) also turns git checkpointing off
+     * for the thread: the agent pushes its own fix to the PR head, and the
+     * lane never auto-commits or opens a pull request.
      */
-    stampExtra?: { selfHealAttemptId: string };
+    stampExtra?: { selfHealAttemptId?: string; mention?: MentionLaneStamp };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -292,15 +296,20 @@ export async function runAutomation({
             ...(orchestratedApplied
               ? { reviewPromptMode: "orchestrated" as const }
               : {}),
-            ...(options?.stampExtra
+            ...(options?.stampExtra?.selfHealAttemptId
               ? { selfHealAttemptId: options.stampExtra.selfHealAttemptId }
+              : {}),
+            ...(options?.stampExtra?.mention
+              ? { mention: options.stampExtra.mention }
               : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
-          disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+          disableGitCheckpointing:
+            options?.stampExtra?.mention !== undefined ||
+            (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
         });
@@ -700,15 +709,12 @@ export async function runPullRequestAutomation({
     // Phase 4: isCrossRepo comes from the SAME read and covers a same-owner,
     // non-fork head in another repo that `fork` alone misses. Missing head or
     // base repo data fails closed (true).
-    const headFullName = pr.data.head?.repo?.full_name?.toLowerCase();
-    const baseFullName = pr.data.base?.repo?.full_name?.toLowerCase();
     const trustContext: ThreadTrustContext = {
       source: "github-pr",
       isFork: pr.data.head?.repo?.fork ?? true,
       authorAssociation: pr.data.author_association ?? "NONE",
       capturedAt: new Date().toISOString(),
-      isCrossRepo:
-        headFullName && baseFullName ? headFullName !== baseFullName : true,
+      isCrossRepo: isCrossRepoPull(pr.data),
     };
 
     // #165 (ADR-007): www owns NO supersession path. Prior review threads of
@@ -779,6 +785,20 @@ export async function runPullRequestAutomation({
     }
     return false;
   }
+}
+
+/**
+ * True when a PR's head lives in another repository than its base (a fork, or
+ * a same-owner repo) — compared case-insensitively. Missing head or base repo
+ * data (e.g. a deleted fork) fails closed: true.
+ */
+export function isCrossRepoPull(pull: {
+  head?: { repo?: { full_name?: string | null } | null } | null;
+  base?: { repo?: { full_name?: string | null } | null } | null;
+}): boolean {
+  const head = pull.head?.repo?.full_name?.toLowerCase();
+  const base = pull.base?.repo?.full_name?.toLowerCase();
+  return head && base ? head !== base : true;
 }
 
 /**

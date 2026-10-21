@@ -11,12 +11,17 @@ export const USAGE =
   "  configure: pnpm exec tsx deploy/onboard-review-repo.ts <orgSlug> <owner/repo> <skillName> \\\n" +
   "               --tolerance <info|warning|error> [--drafts] --model <model> [--enable|--disable] [--dry-run]\n" +
   "  flip only: pnpm exec tsx deploy/onboard-review-repo.ts <orgSlug> <owner/repo> <skillName> \\\n" +
-  "               --enable|--disable [--dry-run]\n" +
+  "               --enable|--disable [--mention] [--dry-run]\n" +
+  "  mention:   pnpm exec tsx deploy/onboard-review-repo.ts <orgSlug> <owner/repo> <skillName> \\\n" +
+  "               --mention --model <model> [--enable|--disable] [--dry-run]\n" +
   "\n" +
   "Configure upserts the repo's review settings (block tolerance, draft reviews,\n" +
   "classic mode, 120 turns, supersede policy inherited) and ONE pull_request\n" +
   "automation named 'PR review (<skillName>)', created disabled unless --enable.\n" +
-  "Flip only changes that automation's enabled flag. --dry-run prints the diff\n" +
+  "--mention instead upserts ONE org-lane github_mention automation named\n" +
+  "'GitHub mention (<skillName>)' (no settings row), created disabled unless --enable.\n" +
+  "Flip only changes that automation's enabled flag (with --mention, the mention\n" +
+  "automation's). --dry-run prints the diff\n" +
   "and writes nothing. DATABASE_URL must point at the target Postgres.";
 
 /** Fixed per the cutover spec: the legacy lane's turn budget, classic mode. */
@@ -29,10 +34,22 @@ export type OnboardArgs =
   | { kind: "help" }
   | {
       kind: "flip";
+      /** Which automation the flip targets: the PR review or the mention lane. */
+      lane: "review" | "mention";
       orgSlug: string;
       repoFullName: string;
       skillName: string;
       enabled: boolean;
+      dryRun: boolean;
+    }
+  | {
+      kind: "configure-mention";
+      orgSlug: string;
+      repoFullName: string;
+      skillName: string;
+      model: string;
+      /** undefined = create disabled, leave an existing row's flag as is. */
+      enabled: boolean | undefined;
       dryRun: boolean;
     }
   | {
@@ -55,7 +72,13 @@ export class OnboardArgsError extends Error {
   }
 }
 
-const BOOLEAN_FLAGS = ["--drafts", "--enable", "--disable", "--dry-run"];
+const BOOLEAN_FLAGS = [
+  "--drafts",
+  "--enable",
+  "--disable",
+  "--dry-run",
+  "--mention",
+];
 const VALUE_FLAGS = ["--tolerance", "--model"];
 
 /**
@@ -129,6 +152,45 @@ export function parseOnboardArgs(
       : undefined;
   const dryRun = seen.has("--dry-run");
 
+  if (seen.has("--mention")) {
+    for (const flag of ["--tolerance", "--drafts"]) {
+      if (seen.has(flag)) {
+        throw new OnboardArgsError(
+          `${flag} is a review-lane flag and is not used with --mention.`,
+        );
+      }
+    }
+    const model = values.get("--model");
+    if (model === undefined) {
+      if (enabled === undefined) {
+        throw new OnboardArgsError(
+          "Nothing to do: pass --model to configure the mention lane, or --enable/--disable to flip it.",
+        );
+      }
+      return {
+        kind: "flip",
+        lane: "mention",
+        orgSlug,
+        repoFullName,
+        skillName,
+        enabled,
+        dryRun,
+      };
+    }
+    if (!allowed.models.includes(model)) {
+      throw new OnboardArgsError(`--model is not a known model: ${model}`);
+    }
+    return {
+      kind: "configure-mention",
+      orgSlug,
+      repoFullName,
+      skillName,
+      model,
+      enabled,
+      dryRun,
+    };
+  }
+
   const configuring =
     values.has("--tolerance") || values.has("--model") || seen.has("--drafts");
   if (!configuring) {
@@ -137,7 +199,15 @@ export function parseOnboardArgs(
         "Nothing to do: pass --tolerance and --model to configure, or --enable/--disable to flip.",
       );
     }
-    return { kind: "flip", orgSlug, repoFullName, skillName, enabled, dryRun };
+    return {
+      kind: "flip",
+      lane: "review",
+      orgSlug,
+      repoFullName,
+      skillName,
+      enabled,
+      dryRun,
+    };
   }
 
   const tolerance = values.get("--tolerance");
@@ -224,6 +294,39 @@ export function buildReviewAutomation<Model extends string>({
       type: "skill_message" as const,
       config: { skillName, version: "latest", model },
     },
+  };
+}
+
+/** The mention automation's upsert key within (organization, repo). */
+export function mentionAutomationName(skillName: string): string {
+  return `GitHub mention (${skillName})`;
+}
+
+/**
+ * The org-lane mention automation (minus owner/org/enabled) a `--mention`
+ * configure run upserts: the repo's mentions run the skill as the automation
+ * owner, and the thread never auto-commits or opens a pull request.
+ */
+export function buildMentionAutomation<Model extends string>({
+  repoFullName,
+  skillName,
+  model,
+}: {
+  repoFullName: string;
+  skillName: string;
+  model: Model;
+}) {
+  return {
+    name: mentionAutomationName(skillName),
+    triggerType: "github_mention" as const,
+    triggerConfig: { filter: { orgLane: true } },
+    repoFullName,
+    branchName: AUTOMATION_BRANCH_NAME,
+    action: {
+      type: "skill_message" as const,
+      config: { skillName, version: "latest", model },
+    },
+    disableGitCheckpointing: true,
   };
 }
 

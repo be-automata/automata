@@ -44,6 +44,10 @@ function makeThreadClient(threads: Thread[]) {
             threadId: t.id,
             isResolved: t.isResolved,
             commentBodies: t.comments.map((c) => c.body),
+            comments: t.comments.map((c) => ({
+              body: c.body,
+              authorLogin: null,
+            })),
           }
         : null;
     }),

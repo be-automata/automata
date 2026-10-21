@@ -115,6 +115,12 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
           .string()
           .optional()
           .describe("Comma-separated list of bot usernames to include"),
+        // The org-owned mention lane: an ENABLED automation with this flag
+        // makes the repo's mentions run as the automation owner through the
+        // skill_message action, gated on the commenter's repo permission and
+        // answered by the control plane (emit-only). Absent = today's
+        // per-user mention behaviour.
+        orgLane: z.boolean().optional(),
       }),
       permissionMode: permissionModeConfig,
     }),

@@ -138,7 +138,12 @@ const SKILL_BODIES: Record<string, string> = {
     `----- BEGIN REVIEW METHODOLOGY -----\n${reviewSkillBody}\n----- END REVIEW METHODOLOGY -----`,
   "github-deep-research":
     "An issue was opened in {{repoFullName}}. Research it (prod skill: github-deep-research).",
-  "github-mention": "Respond to the GitHub mention.",
+  // The mention lane's validator requires the emit-only reply contract; the
+  // full skill is deploy/skills/github-mention/SKILL.md (push it with
+  // skill-push.ts for a repo onboarded onto the org mention lane).
+  "github-mention":
+    "Respond to the GitHub mention. Your final message ends with exactly one block:\n" +
+    '```json mention-reply\n{ "kind": "mention-reply", "reply": "<your reply>" }\n```',
 };
 
 // Validator-enforced write surface, same as skill-push/API/dashboard: every
