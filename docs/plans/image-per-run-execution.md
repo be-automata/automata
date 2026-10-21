@@ -1,141 +1,153 @@
 # Plan: image-per-run execution (ADR-013)
 
-Decision record: [ADR-013](../adr/ADR-013-image-per-run-execution.md). Image:
-[`deploy/images/batteries/`](../../deploy/images/batteries/README.md). Anchors are against `main` @
-`59a57af5`.
+Decision record: [ADR-013](../adr/ADR-013-image-per-run-execution.md), including the operator's
+locked decisions of 2026-10-21. Image: [`deploy/images/batteries/`](../../deploy/images/batteries/README.md).
+Anchors are against `main` @ `1a13f49a`.
 
-Every phase has acceptance criteria, the measurements it records, and a kill switch. A phase starts
-only when the previous one's criteria hold. Measurements go into the ADR's status line as they land.
+Shape: a **hard switch**. The container path is built dark on `main`, proven on a throwaway box,
+then made the only path by one release PR that also deletes the host-uid machinery. There is no
+per-repo execution setting at any point. Each phase has acceptance criteria and the measurements it
+records; a phase starts only when the previous one's criteria hold. Measurements go into the ADR's
+status line as they land.
 
 ## Phases
 
-### P0 — build the image, smoke it on the box
+### P0 — image in GHCR, rootless daemon on a throwaway box, measurements
 
-No worker change. Nothing a run does changes.
+No worker change. Nothing a production run does changes.
 
 Steps:
 
-1. Build `deploy/images/batteries/Dockerfile` for linux/amd64 (CI or the box) and run
-   `deploy/images/batteries/verify.sh <image>` against it.
-2. On the box: pull or load the image by digest; run `verify.sh` there.
-3. In-container smoke as a run would see it (manual, as root on the box): a scratch run dir with a
-   clone of a canary repo bind-mounted at `/workspace`, `--network none`, `--cap-drop ALL`,
-   `--security-opt no-new-privileges`, `--init`, `--memory`/`--pids-limit` from the box's tuple, and
-   a `socat` bridge to a throwaway proxy unix socket. Run `claude --version`, `flutter analyze` and
-   `dart pub get` (through the proxy), `somnio status`, `ruflo --version`, gstack `browse` against
-   a page served through the proxy, `gh --version`.
-4. Measure the daemon-socket permission model and rootless Docker (below).
+1. Merge this PR: `.github/workflows/batteries-image.yml` builds the image, runs `verify.sh` and
+   pushes `ghcr.io/be-automata/automata-batteries:sha-<commit>`; make the package public (README).
+2. On a fresh throwaway box (same size class as production): a dedicated rootless Docker daemon
+   under `automata-runner` (no sudo, lingering on), with cgroup v2 delegation for its
+   `user@<uid>.service` (`Delegate=cpu cpuset io memory pids`). Pull the image by digest, run
+   `verify.sh` and `gh attestation verify` there.
+3. Smoke a container by hand with the full hardening baseline (ADR-013 Decision 3), a clone of a
+   test repo at `/workspace`, and a `socat` bridge to a throwaway proxy unix socket. Run
+   `claude --version`, `flutter analyze` and `flutter pub get` (through the proxy), `somnio status`,
+   the per-run rules install, `ruflo --version`, gstack `browse` against a page served on the
+   container's own loopback, `gh --version`.
 
-Acceptance:
+Acceptance (all required; the first is a **blocker** for the whole migration):
 
+- Under the rootless daemon, `--memory` is enforced (a container allocating past it is OOM-killed
+  and `.State.OOMKilled` is true), `--pids-limit` is enforced (a fork loop stops at the limit) and
+  `--cpus` is enforced (a CPU burner is throttled to the quota, read from `cpu.stat`).
 - `verify.sh` passes on the box against the pinned digest.
-- The smoke container cannot reach `127.0.0.1:7077`/`:8888` on the host, cannot resolve or connect
-  anywhere without the proxy socket, and reaches an allowed host through it.
-- A container killed with `docker rm -f` leaves no process of uid 10001 (or its mapped uid) on the
-  host, including a deliberately `setsid`-detached child.
-- A rootless-Docker (or userns-remap) daemon either runs the smoke with `--memory`/`--pids-limit`
-  enforced, or the ADR records why not and which fallback P1 uses.
-- Chromium (gstack browse) works in the container, with the sandbox mode recorded.
+- The smoke container cannot reach the host's `7077`/`8888`, cannot connect anywhere without the
+  proxy socket, and reaches an allowed host through it.
+- `docker rm -f` leaves no process of the container's mapped uids on the host, including a
+  deliberately `setsid`-detached child.
+- The run-dir hand-over works: the container (uid 10001, `--group-add 0`) can write `/workspace`
+  and the socket dir, which the worker created setgid and group-owned by `automata-runner`'s group.
+- gstack `browse` works in the container, with the Chromium sandbox mode recorded.
 
-Measurements: image size (`docker image inspect --format '{{.Size}}'`), disk headroom (`df -h` on the
-Docker root before/after), pull time for a fresh digest, cold start (`create` + `cp` + `start` to
-first daemon line, median of 10), idle container RSS, peak RSS of a `flutter analyze` and of a full
-`pnpm install` on a large repo, and the box's free memory with 3 smoke containers at their ceiling.
+Measurements: image size and pull time for a fresh digest; Docker root `df` before/after; cold start
+(`create` with the HOME and Flutter volumes + `cp` + `start` to first daemon line, median of 10);
+idle container RSS; peak RSS of `flutter analyze` and of a full `pnpm install` on a large repo; the
+box's free memory with 3 containers at their ceiling. If the Flutter volume copy dominates cold
+start, record the cut chosen (ADR-013 Risks).
 
-Kill switch: none needed (no run path uses it). Remove with `docker rmi`.
+### P1 — the container run path, dark, every lane
 
-### P1 — the container run path behind a per-repo flag, one canary repo
+Worker change, merged to `main` in small PRs, **unused in production**: the path runs only when
+`WORKER_DEV_CONTAINER_RUNS=1`, which is set only on the throwaway box (ADR-013 Decision 6). This
+dev-only switch is the one exception to "no flag", exists only until the release PR, and has no
+per-repo or per-lane form.
 
-Worker change: a container spawn path beside the host path, chosen per run.
+- `WORKER_BATTERIES_IMAGE` (digest only, present in the rootless daemon's store, checked at boot)
+  and the rootless daemon's socket path in the worker config.
+- A pure container-argv builder (unit-tested like `packages/sandbox/src/providers/docker-egress.ts`)
+  that emits the hardening baseline and refuses anything ADR-013 I2 forbids.
+- The egress proxy and the git broker gain a unix-socket listener; the gh broker's socket moves
+  under `<runDir>/sock/`.
+- The run path of ADR-013 ("Run path", steps 1-7) for **every lane**: review, pr/mention/companion,
+  task, self-heal (audit and fix). The review lane mounts no broker socket.
+- The entry step: `socat` bridges, the Somnio rules install with stack detection (unit-tested on
+  fixture checkouts: tracked `CLAUDE.md` restored, written paths excluded, `git status` clean),
+  then the daemon.
+- Teardown and boot remove containers by label and slot name; OOM read from the container.
+- The per-run settings merge: the worker's deny rules and foreground-only hook plus the lane's share
+  of `~/.claude/settings.batteries.json`.
 
-- Control plane: a per-repo `execution` setting (`host` default, `container`), resolved onto the run
-  input like `egressPolicy` (`apps/www/src/agent/hatchet/dispatch.ts:959-983`), carried as
-  `AgentRunInput.execution` (`packages/worker/src/agent-run/types.ts:102`). Schema change ships as a
-  migration first (AGENTS.md ordering).
-- Worker: `WORKER_BATTERIES_IMAGE` (digest only, checked present at boot) and a pure
-  container-argv builder (unit-tested like `packages/sandbox/src/providers/docker-egress.ts`); the
-  egress proxy and git broker gain a unix-socket listener; teardown and boot scan remove containers
-  by label; OOM read from the container.
-- Only the **task lane** of the canary repo runs in a container in P1 (smallest blast radius: no PR
-  effects).
+Acceptance (on the throwaway box, against a test org and test repos):
 
-Acceptance:
-
-- 20 consecutive canary task runs complete in containers with the same outcomes as host runs on the
-  same prompts (thread status, commits, egress audit rows present).
-- Every run's journal shows `execution=container image=<digest>`; no run in the canary shows a host
-  spawn.
+- Every lane completes on containers with the outcome the host path gives for the same input:
+  a review posts its verdict, a mention replies, the companion posts its one comment, a task pushes
+  and opens its PR through the brokers, a self-heal audit files its findings and a fix run opens its
+  PR inside its ref fence, and a test-Postgres repo passes its suite through the bridged socket.
 - A cancelled run and a run killed at its memory ceiling leave no container and release the slot
   (ADR-013 I6); the OOM is attributed on the thread.
-- Egress: a denied host is refused and audited exactly as on the host path; nothing leaves without
-  the proxy.
-- Non-canary repos are byte-identical on the host path (their run journal is unchanged).
+- 3 concurrent runs at the slot tuple (3 slots, ≤ 2 per org) complete without a headroom refusal
+  that the host path would not have given.
+- CI green with the switch off; production's behaviour is unchanged (its runs never take the path).
 
-Measurements: run wall time and setup time vs host runs on the canary (median, p95), peak memory per
-run, disk growth per run (container layer size before removal).
+Measurements: run wall time and setup time per lane vs the production host path (median, p95), peak
+memory per lane, disk growth per run.
 
-Kill switch: set the canary repo's `execution` to `host` (next run, no restart).
-`WORKER_EXECUTION_CONTAINER=off` forces the host path for every run (restart).
+### P2 — provisioning script and the security probes
 
-### P2 — task and PR lanes
+- `deploy/provision-execution-box.sh` (ADR-013 "Fleet"): rootless daemon, delegation, image pull by
+  digest + `verify.sh` + attestation check, worker unit and env. Idempotent.
+- The security probe script (ADR-013 "Security probes", seven probes), launched from inside a run
+  container.
 
-- Extend `container` to the `pr` lane (mentions on PRs) and to all task runs of opted-in repos; then
-  opt in repos in batches.
-- Brokers: git and gh broker sockets are mounted for lanes that get them today; self-heal fix runs
-  keep their ref fence.
-- Test services: task runs of `TEST_SERVICES_REPOS` repos get the test Postgres unix socket mounted
-  and bridged to `127.0.0.1:25432`.
+Acceptance:
 
-Acceptance: all task/PR runs of opted-in repos for 7 days without a container-specific failure;
-push, PR creation and mention replies work through the brokers; the test-Postgres repos pass their
-suites in containers.
+- A second fresh throwaway box is provisioned by the script alone and runs every lane; a second run
+  of the script on it changes nothing.
+- All seven probes pass on that box.
+- The script is run on the **production box** in a mode that only adds the rootless daemon and
+  pre-pulls the release digest (no worker change): the host path keeps running, and the rootless
+  daemon is verified there before the release.
 
-Measurements: per-lane setup overhead, concurrent slot behaviour at the full tuple (3 slots at
-ceiling), box free memory and disk at peak.
+### P3 — release PR: hard switch and host-uid deletion
 
-Kill switch: per-repo flag; global env switch.
+One PR:
 
-### P3 — review lane
+- The container path becomes the only path; `WORKER_DEV_CONTAINER_RUNS` is deleted.
+- Everything ADR-013 lists under "What becomes obsolete" for the release PR is deleted.
+- ADR-013 moves to Accepted with its measurements; ADR-002 gets the revision note drafted in
+  ADR-013.
 
-- Reviews of opted-in repos run in containers with: no broker socket, no write token, the existing
-  `reviewPolicyArgs` (`packages/daemon/src/claude.ts:204`), and the review settings/MCP allowlist
-  copied in. The deny list gains entries for skills that were "dropped" from the host batteries
-  (for example `gstack-cso`).
-- Persistent ruflo memory is never mounted on reviews (read-only at most, decided per the ADR).
+Deploy: the worker restarts on the new revision at an idle moment, with `WORKER_BATTERIES_IMAGE`
+set to the pre-pulled digest. Right after: the seven probes run on the production box, then one run
+per lane is watched to completion.
 
-Acceptance: an automated check per review run that the container has no gh broker socket,
-no git broker socket, and no GitHub token in env or files; 50 consecutive reviews on opted-in repos with
-the same verdict rate (approve / request changes / non-verdict notice) as the host path for the same
-repos over the prior two weeks; orchestrated reviews' fan-out works inside the container.
+Acceptance: probes green on production; every lane completes on containers in its first 24 hours;
+no host-path code remains (`grep` for `sudo -u`, `meta skuid`, `reapAgentUidEscapees` returns
+nothing outside history docs).
 
-Measurements: review wall time vs host, model-call count per review (to catch a silent tool
-breakage), memory peak.
+Rollback: `git revert` the release PR and redeploy. The box still holds the host provisioning
+(slot accounts, nft tables, sudoers, drop-ins) until P4, so this is a pure redeploy.
 
-Kill switch: per-repo flag (reviews return to the host path on the next push).
+### P4 — box cleanup after the soak
 
-### P4 — delete the host-uid machinery
+After 14 days on containers with no open container-path incident: the provisioning script removes
+the slot accounts, their sudoers lines, the nft tables and loader, the unit drop-ins and the host
+battery trees from the production box, and `cloud-init.yaml` is reduced to the script. After this,
+a revert also needs the old host provisioning re-run.
 
-Gate: every lane on containers for 14 consecutive days, zero host-path runs, no open container-path
-incident, and the last pre-P4 worker revision tagged `pre-image-p4`.
-
-Work: delete what the ADR lists under "What becomes obsolete"; move the GSD/ruflo/Somnio lockfiles
-next to the Dockerfile; drop the `execution` flag's `host` value (or keep the column and refuse
-`host`); simplify `cloud-init.yaml` to Docker + worker + engine.
-
-Acceptance: CI green; the box rebuilt from the simplified cloud-init runs all lanes; no
-`meta skuid` table, no slot accounts, no delegated cgroup on the box.
-
-Kill switch: redeploy `pre-image-p4` and re-run battery install and agent-uid provisioning (slow;
-hence the gate).
+Acceptance: the box has no `meta skuid` table, no slot accounts and no delegated worker cgroup, and
+every lane still runs.
 
 ## Evidence
 
-Current host-model code each phase touches (`main` @ `59a57af5`).
+Current host-model code each phase touches (`main` @ `1a13f49a`).
+
+**Motivating defect**
+
+- `packages/worker/deploy/linux/loopback-nft.conf:84` (the per-uid mark), `:110` (accept only
+  listeners in the worker's cgroup), `:133` (reset everything else);
+  `packages/worker/deploy/linux/automata-batteries:287` (`browse goto failed as $AGENT_USER`);
+  `packages/worker/deploy/linux/install-batteries.sh:3136-3137` (`harness.sha256` invalidated).
 
 **P0** (reads only; nothing changes)
 
-- Pins reused by the Dockerfile: `packages/worker/deploy/batteries.json` (Dart SDK, Somnio CLI
-  `aa53f071…`, shellcheck/actionlint/gitleaks, pnpm), `packages/worker/deploy/harness.json` (gstack
+- Pins reused by the Dockerfile: `packages/worker/deploy/batteries.json` (Somnio CLI `aa53f071…`,
+  shellcheck/actionlint/gitleaks, pnpm), `packages/worker/deploy/harness.json` (gstack
   `df89475b…`, bun, Chromium, GSD 1.16.0, ruflo 3.56.7 and its prebuild/model prefetch),
   `packages/worker/deploy/linux/cloud-init.yaml:87-93` (Node, pnpm, Claude Code 2.1.284),
   `:101-105` (Chromium runtime packages).
@@ -143,15 +155,14 @@ Current host-model code each phase touches (`main` @ `59a57af5`).
   (`WORKER_RUN_MEMORY_MAX`), `:601` (`WORKER_BOX_SLOTS`), `box-slots-boot.ts:451,497`
   (`warnIfSlotsExceedMemory`, `assertSlotsFitCommitLimit`), `headroom.ts:121` (`evaluateHeadroom`).
 
-**P1** (container spawn beside the host spawn)
+**P1** (the container path; all paths under `packages/worker/src/agent-run/` unless stated)
 
-- Spawn: `packages/worker/src/agent-run/daemon-process.ts:380-410` (`prepareRunCgroup`,
-  `ensureEnv`, `buildSpawnInvocation`, `spawn`), `spawn-as-user.ts:166` (`buildSpawnInvocation`),
-  `:219,251` (kill invocations), `agent-command.ts:55` (`runAsAgent`), `provision.ts:430`
-  (`runAsAgentViaSudo`).
+- Spawn: `daemon-process.ts:380-410` (`prepareRunCgroup`, `ensureEnv`, `buildSpawnInvocation`,
+  `spawn`), `spawn-as-user.ts:166` (`buildSpawnInvocation`), `:219,251` (kill invocations),
+  `agent-command.ts:55` (`runAsAgent`), `provision.ts:430` (`runAsAgentViaSudo`).
 - Run setup: `workflow.ts:1295` (`provisionWorkdir`), `:1425` (admission reap), `:1447`
   (`materialiseAgentCredentials`), `agent-credentials.ts:51-130` (trust seed), `:165-222` (per-run
-  HOME, `seedBatteries` call at `:211`).
+  HOME, `seedBatteries` call at `:207`).
 - Egress: `workflow.ts:1517-1550` (proxy start, enforce vs observe), `egress-proxy.ts:497`
   (`startEgressProxy`), `:764` (TCP `listen(0, "127.0.0.1")`), `daemon-env.ts:324`
   (`buildRunProxyEnv`), `:410` (`buildDaemonEnv`).
@@ -161,29 +172,23 @@ Current host-model code each phase touches (`main` @ `59a57af5`).
   (`killAndRemoveRunCgroup`), `daemon-process.ts:709` (`prepareRunCgroup`), `:817`.
 - Reaper and teardown: `workflow.ts:1744,1789`, `uid-reaper.ts:441` (`reapAgentUidEscapees`), `:683`
   (`bootUidScan`).
-- Flag plumbing: `apps/www/src/agent/hatchet/dispatch.ts:959-983`, `packages/worker/src/agent-run/types.ts:102,164`.
-- Unchanged but on the path: `workflow.ts:470` (`guardRunTerminal`), `run-terminal-ledger.ts:108,151`;
-  `run-lane.ts:15` (`resolveRunLane`).
-
-**P2** (task/PR lanes)
-
-- `task-agent.ts:66,97,118,148` (`taskAgentForRun`, `batterySeedForRun`, `foregroundOnlyForRun`,
-  `readTokenForRun`), `foreground-only-hook.ts:79` (`mergeForegroundOnlySettings`),
+- Lanes: `run-lane.ts:15` (`resolveRunLane`), `task-agent.ts:66,97,118,148` (`taskAgentForRun`,
+  `batterySeedForRun`, `foregroundOnlyForRun`, `readTokenForRun`), `review-agent-wire.ts:57`
+  (`reviewAgentForRun`), `workflow.ts:1391-1396`.
+- Settings and packs to replace: `foreground-only-hook.ts:79` (`mergeForegroundOnlySettings`),
   `harness-seed.ts:462` (`resolveHarnessPacks`), `:583` (`writeHarnessHomeFiles`), `:636`
-  (`harnessMcpServers`), `:673` (`harnessRunEnv`), `batteries-seed.ts:672` (`seedForegroundOnly`),
-  `:754` (`seedBatteries`).
-- Test services: `packages/worker/deploy/linux/install-test-postgres.sh` (loopback 25432), the
-  `TEST_SERVICES_REPOS` injection described in `AGENTS.md`.
-
-**P3** (review lane)
-
-- `review-agent-wire.ts:57` (`reviewAgentForRun`), `workflow.ts:1391-1396`, `harness-seed.ts:662`
-  (`harnessDenyRules`), `packages/daemon/src/claude.ts:204` (`reviewPolicyArgs`),
+  (`harnessMcpServers`), `:662` (`harnessDenyRules`), `:673` (`harnessRunEnv`),
+  `batteries-seed.ts:672` (`seedForegroundOnly`), `:754` (`seedBatteries`).
+- Review fence: `packages/daemon/src/claude.ts:204` (`reviewPolicyArgs`),
   `packages/daemon/src/daemon.ts:774` (`withholdGitCredentialsInReviewMode`),
   `packages/worker/deploy/linux/harness-mcp-filter.mjs`, `packages/worker/deploy/batteries.json`
   (`forbiddenHelperTokens`, `dropped`).
+- Test services: `packages/worker/deploy/linux/install-test-postgres.sh` (loopback 25432), the
+  `TEST_SERVICES_REPOS` injection described in `AGENTS.md`.
+- Unchanged but on the path: `workflow.ts:470` (`guardRunTerminal`), `run-terminal-ledger.ts:108,151`
+  (`recordRunTerminal`, `guardRunTerminal`).
 
-**P4** (deletions)
+**P3** (deletions)
 
 - `packages/worker/src/agent-run/`: `batteries-seed.ts`, `harness-seed.ts`, `batteries-manifest.ts`,
   `harness-manifest.ts`, `harness-layout.ts`, `spawn-as-user.ts`, `agent-uid-fs.ts:283,315,340,399`,

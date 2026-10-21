@@ -42,10 +42,8 @@ ARG CLAUDE_CODE_VERSION=2.1.284
 ARG GH_VERSION=2.102.0
 ARG GH_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 
-# Dart >= 3.10 is required by the Somnio CLI; 3.13.5 is the tested version.
-ARG DART_VERSION=3.13.5
-ARG DART_SHA256=ea864bc64df30a6b8bdf30b2e32550f7717d9a890de8f40293aeabb924fe232b
-# Flutter 3.47.7 bundles Dart 3.13.5, the same Dart as above.
+# Flutter 3.47.7 bundles Dart 3.13.5, the ONLY Dart in the image (ADR-013: no
+# standalone SDK). The Somnio CLI needs Dart >= 3.10.
 ARG FLUTTER_VERSION=3.47.7
 ARG FLUTTER_SHA256=af7455f540df951184c7953fbe3cf884766e7541dacf8571f9f582db03dd6230
 
@@ -67,6 +65,8 @@ ARG GSD_VERSION=1.16.0
 ARG GSD_LOCK_SHA256=21f19d078cf65e51b422fe623bc9cf0d5d3d3eef917415c73b671b4cb98b75af
 ARG RUFLO_VERSION=3.56.7
 ARG RUFLO_LOCK_SHA256=cfac0ec4433e1e58ca2208e4e5e2ba953af2b09f76d57579183de068f41c6e50
+# better-sqlite3's prebuild for Node 24's ABI (node-v137), the version ruflo's lock resolves.
+ARG BETTER_SQLITE3_VERSION=12.11.1
 ARG BETTER_SQLITE3_PREBUILD_SHA256=99c43785639d5d3690c396ba245ee680ac8b469a46b19233a3546f0eb7f8e312
 ARG MINILM_REV=751bff37182d3f1213fa05d7196b954e230abad9
 
@@ -92,7 +92,7 @@ COPY --chmod=0755 <<'EOF' /usr/local/sbin/fetch-verified
 #!/bin/bash
 set -euo pipefail
 url="$1" sha="$2" out="$3"
-curl -fsSL --retry 3 --retry-delay 2 -o "$out" "$url"
+curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -o "$out" "$url"
 echo "${sha}  ${out}" | sha256sum -c --quiet -
 EOF
 
@@ -105,7 +105,9 @@ EOF
 # ca-certificates is bootstrapped from the live (signed) archive first; the
 # snapshot install below then moves it to the snapshot's version
 # (--allow-downgrades), so the finished image holds snapshot packages only.
-RUN snap=(); if [ -n "${APT_SNAPSHOT}" ]; then \
+# The snapshot host drops connections under load: apt retries each fetch.
+RUN echo 'Acquire::Retries "8";' >/etc/apt/apt.conf.d/80-retries; \
+    snap=(); if [ -n "${APT_SNAPSHOT}" ]; then \
       apt-get update; apt-get install -y --no-install-recommends ca-certificates; \
       snap=(--snapshot "${APT_SNAPSHOT}" --allow-downgrades); \
     fi; \
@@ -157,29 +159,25 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
 # second layer).
 RUN useradd --create-home --home-dir "/home/${AGENT_USER}" --shell /bin/bash \
       --uid "${AGENT_UID}" --user-group "${AGENT_USER}"; \
-    mkdir -p /workspace /opt/automata /opt/ms-playwright; \
+    mkdir -p /workspace; \
     chown "${AGENT_USER}:${AGENT_USER}" /workspace
 
-# ── Dart SDK + Flutter SDK ──────────────────────────────────────────────────
-# Both on PATH; /opt/dart-sdk/bin comes first, so `dart` is the standalone SDK
-# (identical version to Flutter's bundled one). Flutter and the pub cache are
-# owned by the runtime user because Flutter writes its own bin/cache lock and
-# `pub get` writes PUB_CACHE on every run.
-ENV PUB_CACHE=/opt/pub-cache \
+# ── Flutter SDK (and its bundled Dart) ──────────────────────────────────────
+# `dart` on PATH is Flutter's own (/opt/flutter/bin/dart). Flutter is owned by
+# the runtime user because it writes stamps and a lock under bin/cache on every
+# invocation; with a read-only rootfs a run mounts /opt/flutter as a per-run
+# volume (ADR-013 "read-only rootfs"). PUB_CACHE lives in the writable HOME.
+ENV PUB_CACHE=/home/${AGENT_USER}/.pub-cache \
     FLUTTER_ROOT=/opt/flutter \
     FLUTTER_SUPPRESS_ANALYTICS=true \
     DART_SUPPRESS_ANALYTICS=true \
     CI=true \
-    PATH=/opt/dart-sdk/bin:/opt/pub-cache/bin:/opt/flutter/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-RUN fetch-verified "https://storage.googleapis.com/dart-archive/channels/stable/release/${DART_VERSION}/sdk/dartsdk-linux-x64-release.zip" \
-      "${DART_SHA256}" /tmp/dart.zip; \
-    unzip -q /tmp/dart.zip -d /opt; rm /tmp/dart.zip; chmod -R a+rX /opt/dart-sdk; \
-    fetch-verified "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+    PATH=/opt/flutter/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN fetch-verified "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
       "${FLUTTER_SHA256}" /tmp/flutter.tar.xz; \
     tar -xJf /tmp/flutter.tar.xz -C /opt --no-same-owner; rm /tmp/flutter.tar.xz; \
     git config --system --add safe.directory /opt/flutter; \
-    mkdir -p /opt/pub-cache; \
-    chown -R "${AGENT_USER}:${AGENT_USER}" /opt/flutter /opt/pub-cache
+    chown -R "${AGENT_USER}:${AGENT_USER}" /opt/flutter
 
 # ── Somnio CLI + every catalog skill ────────────────────────────────────────
 # The pinned commit, its CLI resolved against the committed lockfile overlay
@@ -216,7 +214,7 @@ RUN echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -
       && npm_config_ignore_scripts=false npm rebuild @claude-flow/cli --foreground-scripts); \
     echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -c --quiet -; \
     echo "${RUFLO_LOCK_SHA256}  /opt/automata/ruflo/package-lock.json" | sha256sum -c --quiet -; \
-    fetch-verified "https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-node-v137-linux-x64.tar.gz" \
+    fetch-verified "https://github.com/WiseLibs/better-sqlite3/releases/download/v${BETTER_SQLITE3_VERSION}/better-sqlite3-v${BETTER_SQLITE3_VERSION}-node-v137-linux-x64.tar.gz" \
       "${BETTER_SQLITE3_PREBUILD_SHA256}" /tmp/bsq.tgz; \
     tar -xzf /tmp/bsq.tgz -C /opt/automata/ruflo/node_modules/better-sqlite3 build/Release/better_sqlite3.node; \
     m=/opt/automata/ruflo/node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2; \
@@ -264,13 +262,14 @@ RUN flutter config --no-analytics --no-cli-animations >/dev/null; \
 # catalog skill globally for Claude. AOT, not `pub global activate`: an
 # activated binstub re-resolves dependencies at start and fails offline (the
 # run has --network none); the compiled CLI finds its content via SOMNIO_ROOT,
-# like the host battery (batteries.json `dart-aot`, `rootEnv`). Agent rules are
-# per-project only for Claude (the CLI refuses --global), so they ship as
-# source under SOMNIO_ROOT and the run decides whether to install them
-# (ADR-013 open question).
+# like the host battery (batteries.json `dart-aot`, `rootEnv`), so the pub
+# cache it resolved into is emptied afterwards. Agent rules are per-project
+# only for Claude (the CLI refuses --global): every run installs them into its
+# checkout (ADR-013 "run path").
 RUN cd "${SOMNIO_ROOT}/cli"; \
     dart pub get --enforce-lockfile; \
     dart compile exe bin/somnio.dart -o "${SOMNIO_ROOT}/somnio"; \
+    rm -rf "${SOMNIO_ROOT}/cli/.dart_tool" "${PUB_CACHE:?}"; \
     test "$(somnio --version | tail -n 1)" = "${SOMNIO_VERSION_LINE}"; \
     cd "$HOME"; \
     somnio skills install --agent claude --all-skills --global
@@ -287,21 +286,41 @@ RUN co="$HOME/.claude/skills/gstack"; \
     "$co/bin/gstack-config" set update_check false; \
     GSTACK_SKIP_ASIDE=1 "$co/setup" --host claude </dev/null; \
     test -z "$(git -C "$co" status --porcelain --untracked-files=no)"; \
-    rm -f "$HOME"/.claude/skills/*/.gstack-owned
+    rm -f "$HOME"/.claude/skills/*/.gstack-owned; \
+    rm -rf "$HOME/.bun/install/cache"
 
 # GSD: its own installer, into the agent's Claude config dir.
-RUN node /opt/automata/gsd/node_modules/@opengsd/gsd-core/bin/install.js \
-      --claude --global --config-dir "$HOME/.claude" --portable-hooks --no-legacy-cleanup; \
-    rm -rf "$HOME/.claude/.gsd-source" "$HOME/.claude/.gsd-staging"
-
+#
 # The image carries no Claude settings, trust seed, MCP registration or
 # credential: those are per-run, per-lane policy the worker copies in before
-# the container starts (ADR-013 "run HOME" and "review-lane fence").
+# the container starts (ADR-013 "run HOME" and "review-lane fence"). The hooks
+# gstack and GSD registered in settings.json are kept as settings.batteries.json
+# for the worker to merge per lane, and Claude's .claude.json (a machine and
+# user id minted at build, identical in every container) is dropped.
+RUN node /opt/automata/gsd/node_modules/@opengsd/gsd-core/bin/install.js \
+      --claude --global --config-dir "$HOME/.claude" --portable-hooks --no-legacy-cleanup; \
+    rm -rf "$HOME/.claude/.gsd-source" "$HOME/.claude/.gsd-staging"; \
+    mv "$HOME/.claude/settings.json" "$HOME/.claude/settings.batteries.json"; \
+    rm -f "$HOME/.claude.json"
+
+# The pins verify.sh checks the installed tools against, so a bump is one edit
+# to the ARG lines above, not a second one to verify.sh.
+USER root
+RUN printf '%s\n' \
+      "NODE_VERSION=${NODE_VERSION}" "PNPM_VERSION=${PNPM_VERSION}" \
+      "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}" "GH_VERSION=${GH_VERSION}" \
+      "RUFLO_VERSION=${RUFLO_VERSION}" "CHROMIUM_REVISION=${CHROMIUM_REVISION}" \
+      "CHROMIUM_VERSION=${CHROMIUM_VERSION}" "BUN_VERSION=${BUN_VERSION}" \
+      "FLUTTER_VERSION=${FLUTTER_VERSION}" "SOMNIO_VERSION_LINE='${SOMNIO_VERSION_LINE}'" \
+      "ACTIONLINT_VERSION=${ACTIONLINT_VERSION}" "GITLEAKS_VERSION=${GITLEAKS_VERSION}" \
+      "SHELLCHECK_VERSION=${SHELLCHECK_VERSION}" >/opt/automata/pins.env; \
+    chmod 0444 /opt/automata/pins.env
+USER ${AGENT_USER}
 WORKDIR /workspace
 
 LABEL org.opencontainers.image.title="automata-batteries" \
       org.opencontainers.image.description="Pinned agent-run image for the execution box (ADR-013)" \
       org.opencontainers.image.source="https://github.com/be-automata/automata" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="Apache-2.0"
 
 CMD ["bash"]
