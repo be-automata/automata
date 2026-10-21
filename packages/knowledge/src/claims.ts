@@ -465,8 +465,10 @@ export interface Draft {
   llmCalls: number;
 }
 export interface ReconcileDiff {
-  /** The single repo:// target this diff covers (e.g. "deploy/PILOT-RUNBOOK.md"). */
+  /** The repo:// target this diff covers, as a path in the NEW tree (e.g. "deploy/PILOT-RUNBOOK.md"). */
   path: string;
+  /** Set for a rename: pins on oldPath are re-targeted to path. */
+  oldPath?: string;
   hunks: Hunk[];
   oldText: string;
   newText: string;
@@ -476,12 +478,33 @@ export interface ReconcileOptions {
   /** Source commit the evidence was checked at; part of every op key. Defaults to "working". */
   sourceRev?: string;
   /**
-   * The diff that produced this state. With it, every stale line pin is re-anchored through reanchorSpan
-   * before anything reaches the model: below-floor, tied or narrowed spans become reviews, deleted spans
-   * become retracts or reviews, and line pins on other files (no diff to locate them) become reviews.
-   * Without a diff, a stale line pin is assumed to have changed in place (positional re-pin).
+   * The diffs that produced this state, one per changed file. With them, every stale line pin is re-anchored
+   * through the diff of ITS file (reanchorSpan) before anything reaches the model: below-floor, tied or
+   * narrowed spans become reviews, deleted spans become retracts or reviews, and line pins on files absent
+   * from the diffs (nothing to locate them with) become reviews. A pin on a renamed file's old path is
+   * re-targeted to its new path. Without diffs (or with an empty list), a stale line pin is assumed to have
+   * changed in place (positional re-pin). Passing both `diff` and `diffs` is an error.
    */
+  diffs?: ReconcileDiff[];
+  /** @deprecated single-file form, kept for existing callers: the same as `diffs: [diff]`. */
   diff?: ReconcileDiff;
+}
+
+export class ConflictingDiffOptionsError extends Error {
+  constructor() {
+    super("pass either diff or diffs, not both");
+    this.name = "ConflictingDiffOptionsError";
+  }
+}
+
+/** Two diff entries claim the same path (as new path or rename source): which one locates a pin is unknowable. */
+export class DuplicateDiffPathError extends Error {
+  readonly path: string;
+  constructor(path: string) {
+    super(`two diff entries name the path ${JSON.stringify(path)}`);
+    this.name = "DuplicateDiffPathError";
+    this.path = path;
+  }
 }
 
 interface DiffLines {
@@ -489,18 +512,62 @@ interface DiffLines {
   oldLines: string[];
   newLines: string[];
 }
+/** Each changed file's diff, keyed by its new path and (for a rename) its old path. */
+type DiffIndex = Map<string, DiffLines>;
+
+/**
+ * Index the diffs once per reconcile, splitting each file's text once. Diff paths are untrusted and are only
+ * ever map keys here: they become repo:// targets through repoUri and are read only through resolve().
+ */
+function buildDiffIndex(options: ReconcileOptions): DiffIndex | undefined {
+  if (options.diff !== undefined && options.diffs !== undefined)
+    throw new ConflictingDiffOptionsError();
+  const diffs = options.diffs ?? (options.diff ? [options.diff] : undefined);
+  if (!diffs || diffs.length === 0) return undefined;
+  const idx: DiffIndex = new Map();
+  for (const diff of diffs) {
+    const lines: DiffLines = {
+      diff,
+      oldLines: diff.oldText.split("\n"),
+      newLines: diff.newText.split("\n"),
+    };
+    const keys =
+      diff.oldPath !== undefined && diff.oldPath !== diff.path
+        ? [diff.path, diff.oldPath]
+        : [diff.path];
+    for (const key of keys) {
+      if (idx.has(key)) throw new DuplicateDiffPathError(key);
+      idx.set(key, lines);
+    }
+  }
+  return idx;
+}
+
+/** The repo:// URI of a span in a diff's new path, or null when that path could name a file outside the repo. */
+function newPathUri(d: DiffLines, span: LineSpan): string | null {
+  const uri = repoUri(d.diff.path, span);
+  try {
+    parseUri(uri);
+    return uri;
+  } catch (e) {
+    if (e instanceof InvalidEvidenceUriError) return null;
+    throw e;
+  }
+}
+
 type Located =
   | { kind: "located"; uri: string; score: number }
   | { kind: "review"; why: string }
   | { kind: "deleted" };
 
 /** Where a pin lives after the diff. Ticket and doc anchors are semantic, so they never move. */
-function locate(e: EvidenceStatus, d: DiffLines | undefined): Located {
-  if (e.kind !== "stale" || !d)
+function locate(e: EvidenceStatus, idx: DiffIndex | undefined): Located {
+  if (e.kind !== "stale" || !idx)
     return { kind: "located", uri: e.uri, score: 1 };
   const { scheme, target, anchor } = parseUri(e.uri);
   if (scheme !== "repo") return { kind: "located", uri: e.uri, score: 1 };
-  if (target !== d.diff.path)
+  const d = idx.get(target);
+  if (!d)
     return {
       kind: "review",
       why: `no diff for ${target}: a line pin cannot be re-anchored, a human must locate this fact`,
@@ -521,8 +588,15 @@ function locate(e: EvidenceStatus, d: DiffLines | undefined): Located {
         why: `re-anchor ${r.reason} (similarity ${r.score}): a human must locate this fact`,
       };
     case "shifted":
-    case "in-hunk":
-      return { kind: "located", uri: repoUri(target, r.span), score: r.score };
+    case "in-hunk": {
+      const uri = newPathUri(d, r.span);
+      return uri
+        ? { kind: "located", uri, score: r.score }
+        : {
+            kind: "review",
+            why: `the diff moves ${target} to a path outside the repository: a human must locate this fact`,
+          };
+    }
   }
 }
 
@@ -532,13 +606,13 @@ function locate(e: EvidenceStatus, d: DiffLines | undefined): Located {
  */
 function inDiffContext(
   evidence: EvidenceStatus[],
-  d: DiffLines | undefined,
+  idx: DiffIndex | undefined,
 ): EvidenceStatus[] {
-  if (!d) return evidence;
+  if (!idx) return evidence;
   return evidence.map((e) =>
     e.kind === "missing" &&
     e.code === "past-eof" &&
-    parseUri(e.uri).target === d.diff.path
+    idx.has(parseUri(e.uri).target)
       ? { kind: "stale", uri: e.uri, now: "" }
       : e,
   );
@@ -688,23 +762,19 @@ export async function reconcile(
     before: claim.statement,
     evidence: ev.map(describe),
   });
-  const d = options.diff && {
-    diff: options.diff,
-    oldLines: options.diff.oldText.split("\n"),
-    newLines: options.diff.newText.split("\n"),
-  };
+  const idx = buildDiffIndex(options);
   const needWork: UpdateRequest[] = [];
   // checkPage reports claims in sc.claims order.
   sc.claims.forEach((claim, i) => {
     const cr = report.claims[i];
     if (!cr) return;
-    const ev = inDiffContext(cr.evidence, d);
+    const ev = inDiffContext(cr.evidence, idx);
     const status =
       cr.status === "orphaned" ? cr.status : claimStatus(ev.map((e) => e.kind));
     const fixed = FIXED_OPS[status];
     if (fixed) return add({ ...baseOf(claim, ev), ...fixed });
     if (status !== "stale") return; // fresh
-    const located = ev.map((e) => locate(e, d));
+    const located = ev.map((e) => locate(e, idx));
     const pins = located.filter(
       (l): l is Extract<Located, { kind: "located" }> => l.kind === "located",
     );

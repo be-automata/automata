@@ -165,6 +165,28 @@ export const diffOf = (now: string[], header: string): ReconcileDiff => ({
   newText: `${now.join("\n")}\n`,
 });
 
+/** A diff of any repo file, described by one or more -U0 hunk headers; oldPath marks a rename. */
+export const diffOfFile = (
+  path: string,
+  oldText: string,
+  newText: string,
+  header: string,
+  oldPath?: string,
+): ReconcileDiff => ({
+  path,
+  ...(oldPath ? { oldPath } : {}),
+  hunks: parseHunks(header),
+  oldText,
+  newText,
+});
+
+/** Write `<root>/repo/<rel>`, creating parent directories. */
+export function writeRepo(root: string, rel: string, text: string): void {
+  const p = join(root, "repo", rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text);
+}
+
 /** The stub updater, recording which claims reached it. */
 export function countingUpdater(): { llm: Updater; seen: string[] } {
   const inner = stubUpdater();
