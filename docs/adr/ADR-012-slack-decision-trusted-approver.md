@@ -205,7 +205,7 @@ the chosen option and the facts behind it.
 Phase 15 must ship tests for:
 
 - the owner/delegate matrix on each route kind (owner, delegate, non-owner, unlinked Slack user).
-  An unlinked Slack user is refused under A, B, C and D; under A′ that user decides only when the
+  An unlinked Slack user is refused under A, B and C; under A′ that user decides only when the
   owner map names their `(slack_team_id, slack_user_id)`, and is refused otherwise;
 - under A′, a Slack-keyed owner deciding without a platform account, and the same Slack user id
   from a different team refused;
