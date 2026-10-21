@@ -78,7 +78,8 @@ equally well, so a modal adds friction for honest users and nothing against a se
   install it; the org does not own a Slack app (no `SLACK_*` key on its environment); the people
   who decide have linked Slack through OpenID.
 - **Phase 15 code implied:** a route-kind check at the start of the decision handler, a refusal
-  reply, and a log line. No new trust root and no new endpoint.
+  reply, and a log line. No new trust root and no new endpoint. Decision rows record
+  `identity_source = platform_linked`.
 - **Residual risk:** an org that owns its app cannot decide in Slack. This is a capability gap,
   not a security gap.
 
@@ -97,8 +98,10 @@ equally well, so a modal adds friction for honest users and nothing against a se
   not sign in to the platform.
 - **Phase 15 code implied:** owner-map entries that hold either a platform user id or a Slack
   identity; an org-admin flow to name Slack users as owners or delegates; the same route-kind
-  check, refusal reply and log line as A. Decision rows record `identity_source = platform_slack`
-  with the linked platform user id null.
+  check, refusal reply and log line as A. A decision matched through a Slack-keyed owner-map
+  entry records `identity_source = platform_slack`, with the linked platform user id null when the
+  decider has no linked platform account. A decision matched through a platform-user entry, under
+  A or A′, records `identity_source = platform_linked` with the linked id set.
 - **Residual risk:** offboarding follows Slack, not the platform: a person removed from the
   workspace stops being able to click, but their owner-map entry stays until an admin removes it,
   and a reused or reassigned Slack account inherits it. Decisions are attributed to a Slack
@@ -174,7 +177,7 @@ the chosen option and the facts behind it.
 3. Refuse and log any decider who is not the claim owner or a named delegate (DEC-03). Only the
    mapped owner or a named delegate can decide; the org admin or the owner names delegates.
 4. Every decision row stores `slack_team_id`, `slack_user_id`, the linked platform user id (null
-   under A′ when the decider has no platform account), the route kind and an `identity_source`
+   under A′ when the decider has no linked platform account), the route kind and an `identity_source`
    value, so the decision is signed with the approver's verified Slack identity by the control
    plane.
 5. A refusal reply never reveals org membership to an unverified payload (the rule at
