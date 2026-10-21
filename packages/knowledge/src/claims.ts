@@ -12,6 +12,7 @@ import { join, sep } from "node:path";
 import { classifyEvidence, type EvidenceClass } from "./evidence-class";
 import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
+import { compareValueSets, extractValues, type ValueExtractor } from "./values";
 
 export interface EvidencePin {
   uri: string;
@@ -456,6 +457,16 @@ export interface DraftOp {
   newEvidenceHash?: string[];
   /** Re-anchor similarity behind an update (1 = located by the diff alone). */
   score?: number;
+  /** For a value conflict: what each source says now, for the owner's choose-source decision. */
+  sourceValues?: SourceValues[];
+}
+/**
+ * Tokens extracted from one source at its re-anchored location. Numbers and versions only, never prose,
+ * so a persisted conflict op stays minimal (OPS-04).
+ */
+export interface SourceValues {
+  uri: string;
+  values: string[];
 }
 export interface Draft {
   page: string;
@@ -488,6 +499,8 @@ export interface ReconcileOptions {
   diffs?: ReconcileDiff[];
   /** @deprecated single-file form, kept for existing callers: the same as `diffs: [diff]`. */
   diff?: ReconcileDiff;
+  /** Replaces the deterministic token extractor (e.g. a model-extracted or typed-value variant). */
+  extractValues?: ValueExtractor;
 }
 
 export class ConflictingDiffOptionsError extends Error {
@@ -824,6 +837,7 @@ export async function reconcile(
     evidence: ev.map(describe),
   });
   const idx = buildDiffIndex(options);
+  const extract = options.extractValues ?? extractValues;
   const needWork: UpdateRequest[] = [];
   // checkPage reports claims in sc.claims order.
   sc.claims.forEach((claim, i) => {
@@ -868,6 +882,28 @@ export async function reconcile(
         op: "review",
         why: "a re-anchored span does not resolve: a human must locate this fact",
       });
+    // ENG-04: every source of a multi-source fact changed. Compare the values at the re-anchored spans
+    // (never the text at the old pin) before the model can paper over a disagreement.
+    if (claim.evidence.length >= 2) {
+      const sets = evidence.map((e) =>
+        e.kind === "stale" ? extract(e.now) : [],
+      );
+      if (compareValueSets(sets) === "conflict") {
+        const sourceValues = pins.map((l, j) => ({
+          uri: l.uri,
+          values: sets[j] ?? [],
+        }));
+        const says = sourceValues
+          .map((s) => `${s.uri} says ${s.values.join(", ")}`)
+          .join("; ");
+        return add({
+          ...baseOf(claim, evidence),
+          op: "conflict",
+          why: `sources changed in the same merge and now disagree: ${says}; the owner must decide which source is right`,
+          sourceValues,
+        });
+      }
+    }
     needWork.push({
       claim,
       evidence,

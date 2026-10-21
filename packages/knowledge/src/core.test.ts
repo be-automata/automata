@@ -71,6 +71,7 @@ describe("core entry (fs-free surface)", () => {
       "evidence-class.ts",
       "op-key.ts",
       "reanchor.ts",
+      "values.ts",
     ]);
     expect(external).toEqual([]);
   });
@@ -82,6 +83,8 @@ describe("core entry (fs-free surface)", () => {
     expect(core.REANCHOR_FLOOR).toBe(0.5);
     expect(typeof core.classifyEvidence).toBe("function");
     expect(typeof core.parseUnifiedDiff).toBe("function");
+    expect(typeof core.extractValues).toBe("function");
+    expect(typeof core.compareValueSets).toBe("function");
   });
 
   it("detects a runtime import but ignores type-only ones", () => {

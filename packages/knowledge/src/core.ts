@@ -26,6 +26,7 @@ export type {
   ReconcileOptions,
   Resolved,
   Sidecar,
+  SourceValues,
   UpdateRequest,
   UpdateResult,
   Updater,
@@ -34,3 +35,4 @@ export * from "./diff";
 export * from "./op-key";
 export * from "./reanchor";
 export * from "./evidence-class";
+export * from "./values";
