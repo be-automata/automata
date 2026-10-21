@@ -245,6 +245,13 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
         reason: "Too many tasks were queued at once, so this one was dropped.",
         action: "open-task",
       };
+    case "out-of-memory":
+      return {
+        title: "Ran out of memory",
+        reason:
+          "The run exceeded its memory limit and was stopped. Reduce parallelism and retry.",
+        action: "open-task",
+      };
     case "agent-not-responding":
     case "request-timeout":
       return {
@@ -285,6 +292,7 @@ const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
   "setup-script-failed": true,
   "prompt-too-long": true,
   "queue-limit-exceeded": true,
+  "out-of-memory": true,
 };
 
 function isThreadErrorType(value: string): value is ThreadErrorType {

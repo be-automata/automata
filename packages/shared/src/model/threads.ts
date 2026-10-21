@@ -1548,6 +1548,7 @@ export async function markThreadsTerminal({
   cause,
   supersededByThreadId,
   errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
@@ -1572,6 +1573,12 @@ export async function markThreadsTerminal({
    * the move onto this typed-terminal path.
    */
   errorMessage?: ThreadErrorMessage | null;
+  /**
+   * #437: worker-authored detail shown under the error (e.g. the branch a
+   * timed-out run's work was saved to). Written on both tables with the
+   * terminal; omitted leaves the column untouched.
+   */
+  errorMessageInfo?: string | null;
 }): Promise<string[]> {
   if (threadIds.length === 0) return [];
   const terminal = {
@@ -1582,6 +1589,7 @@ export async function markThreadsTerminal({
         : cause === "superseded"
           ? THREAD_SUPERSEDED_ERROR
           : null,
+    ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
   };
   // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
   // TWO tables: threadChat carries the live `status`, the thread row carries the
@@ -1665,6 +1673,7 @@ export async function markThreadsTerminal({
         .set({
           terminalCause: cause,
           ...(supersededByThreadId ? { supersededByThreadId } : {}),
+          ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
         })
         .where(
           and(
@@ -1697,12 +1706,18 @@ export async function markThreadTerminal({
   threadId,
   cause,
   supersededByThreadId,
+  errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
   threadId: string;
   cause: TerminalCause;
   supersededByThreadId?: string | null;
+  /** See markThreadsTerminal. */
+  errorMessage?: ThreadErrorMessage | null;
+  /** See markThreadsTerminal. */
+  errorMessageInfo?: string | null;
   /** See markThreadsTerminal. */
   unchangedSince?: Date;
 }): Promise<boolean> {
@@ -1713,6 +1728,8 @@ export async function markThreadTerminal({
         threadIds: [threadId],
         cause,
         supersededByThreadId,
+        errorMessage,
+        errorMessageInfo,
         unchangedSince,
       })
     ).length > 0

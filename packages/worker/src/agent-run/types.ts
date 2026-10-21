@@ -225,6 +225,7 @@ export const TERMINAL_CAUSES = [
   "publish-failed",
   "plane-offline",
   "run-failed-unreported",
+  "out-of-memory",
 ] as const;
 export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
 
@@ -253,6 +254,8 @@ export function describeTerminalCause(cause: TerminalCause): string {
       return "never became visible on the execution plane";
     case "run-failed-unreported":
       return "failed on the execution plane before reporting back";
+    case "out-of-memory":
+      return "run cgroup hit its memory limit";
     default:
       return assertNever(cause);
   }

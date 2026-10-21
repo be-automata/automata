@@ -82,6 +82,7 @@ export function runStatusChipModel({
     case "publish-failed":
     case "plane-offline":
     case "run-failed-unreported":
+    case "out-of-memory":
       return { label, detail, tone: "danger", cause };
     default:
       return assertNever(cause);
@@ -98,6 +99,7 @@ const ICONS: Record<TerminalCause, typeof Ban> = {
   "publish-failed": Send,
   "plane-offline": CloudOff,
   "run-failed-unreported": XCircle,
+  "out-of-memory": XCircle,
 };
 
 const TONE_CLASSES: Record<RunStatusChipModel["tone"], string> = {

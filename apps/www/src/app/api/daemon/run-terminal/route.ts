@@ -10,7 +10,11 @@ import {
   retireHatchetRun,
   getHatchetRunByExternalId,
 } from "@terragon/shared/model/hatchet-run";
-import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
+import {
+  TERMINAL_CAUSES,
+  type TerminalCause,
+} from "@terragon/shared/model/terminal-cause";
+import type { ThreadErrorMessage } from "@terragon/shared";
 import { waitUntil } from "@/lib/wait-until";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 
@@ -37,8 +41,32 @@ const bodySchema = z.object({
   threadChatId: z.string().min(1),
   runExternalId: z.string().min(1).max(256),
   cause: z.enum(TERMINAL_CAUSES),
-  detail: z.object({ policy: z.string().max(64).optional() }).optional(),
+  detail: z
+    .object({
+      policy: z.string().max(64).optional(),
+      // #437: worker-authored only (never agent output), shown under the error.
+      info: z.string().max(300).optional(),
+    })
+    .optional(),
 });
+
+/**
+ * The user-visible error type a cause renders as (#437). `timeout` and
+ * `out-of-memory` have dedicated chat cases; every other cause keeps
+ * markThreadsTerminal's default (the `superseded` sentinel or NULL).
+ */
+function errorMessageForCause(
+  cause: TerminalCause,
+): ThreadErrorMessage | undefined {
+  switch (cause) {
+    case "timeout":
+      return "request-timeout";
+    case "out-of-memory":
+      return "out-of-memory";
+    default:
+      return undefined;
+  }
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const r = await parseDaemonRequest(request, bodySchema);
@@ -106,7 +134,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // lands first; the run row leaves the supersede-candidate set only once it
   // has, so a failed thread write leaves the row in_flight for the sweep.
   // Both writes are idempotent (reapable-status guard; status column).
-  const applied = await markThreadTerminal({ db, threadId, cause });
+  const applied = await markThreadTerminal({
+    db,
+    threadId,
+    cause,
+    errorMessage: errorMessageForCause(cause),
+    errorMessageInfo: detail?.info,
+  });
   if (runRow) {
     await retireHatchetRun({
       db,

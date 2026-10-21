@@ -241,3 +241,112 @@ describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
     }
   });
 });
+
+describe("POST /api/daemon/run-terminal — detail.info and error mapping (#437)", () => {
+  async function freshThread() {
+    const user = (await createTestUser({ db })).user;
+    const org = await createOrganization({
+      db,
+      name: "Org",
+      slug: `org-${nanoid(8).toLowerCase()}`,
+    });
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { organizationId: org.id },
+    });
+    await db
+      .update(threadTable)
+      .set({ status: "working" })
+      .where(eq(threadTable.id, t.threadId));
+    vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+      organizationId: org.id,
+      threadChatId: t.threadChatId,
+      threadId: t.threadId,
+      tokenType: "daemon",
+    });
+    return t;
+  }
+
+  async function post(
+    t: { threadId: string; threadChatId: string },
+    cause: string,
+    detail?: Record<string, unknown>,
+  ) {
+    return POST(
+      req({
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        runExternalId: `run-${cause}`,
+        cause,
+        ...(detail ? { detail } : {}),
+      }),
+    );
+  }
+
+  async function row(threadId: string) {
+    const [r] = await db
+      .select({
+        terminalCause: threadTable.terminalCause,
+        errorMessage: threadTable.errorMessage,
+        errorMessageInfo: threadTable.errorMessageInfo,
+      })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    return r!;
+  }
+
+  it("stores detail.info as errorMessageInfo", async () => {
+    // protects=the worker's salvage note reaching the thread the user sees;
+    // fails_when=detail.info is dropped or rejected; no_claim=the worker
+    // authoring that text (the worker side is not in this change).
+    const t = await freshThread();
+    const info =
+      "Unfinished work was saved to branch automata/x (commit 1234abcd).";
+    const res = await post(t, "timeout", { info });
+    expect(res.status).toBe(200);
+    expect((await row(t.threadId)).errorMessageInfo).toBe(info);
+  });
+
+  it("maps timeout to the request-timeout error type", async () => {
+    // protects=a timed-out run rendering "Request timed out", not a generic
+    // error; fails_when=errorMessage stays NULL; no_claim=none beyond protects.
+    const t = await freshThread();
+    await post(t, "timeout");
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: "timeout",
+      errorMessage: "request-timeout",
+      errorMessageInfo: null,
+    });
+  });
+
+  it("maps out-of-memory to the out-of-memory error type", async () => {
+    // protects=an OOM-killed run rendering "Ran out of memory" with readable
+    // info; fails_when=the cause is refused or errorMessage is not set;
+    // no_claim=the worker detecting OOM.
+    const t = await freshThread();
+    const info = "Memory limit 5000M reached (13 process(es) killed).";
+    const res = await post(t, "out-of-memory", { info });
+    expect(res.status).toBe(200);
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: "out-of-memory",
+      errorMessage: "out-of-memory",
+      errorMessageInfo: info,
+    });
+  });
+
+  it("400 when detail.info exceeds 300 chars, and the thread is untouched", async () => {
+    // protects=the 300-char cap on worker-authored text; fails_when=a longer
+    // string is persisted; no_claim=none beyond protects.
+    const t = await freshThread();
+    const res = await post(t, "timeout", { info: "x".repeat(301) });
+    expect(res.status).toBe(400);
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: null,
+      errorMessage: null,
+      errorMessageInfo: null,
+    });
+  });
+});

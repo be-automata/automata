@@ -242,7 +242,10 @@ function ChatContent({
     }
     case "request-timeout": {
       return (
-        <ChatErrorContentsWithPre header="Request timed out" errorStr={null} />
+        <ChatErrorContentsWithPre
+          header="Request timed out"
+          errorStr={errorInfo}
+        />
       );
     }
     case "no-user-message": {
@@ -317,6 +320,14 @@ function ChatContent({
               compress the context window.
             </>
           }
+        />
+      );
+    }
+    case "out-of-memory": {
+      return (
+        <ChatErrorContentsWithPre
+          header="Ran out of memory"
+          errorStr={errorInfo}
         />
       );
     }
