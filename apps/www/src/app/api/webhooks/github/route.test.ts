@@ -1715,9 +1715,11 @@ describe("GitHub webhook route", () => {
         prNumber: pr.number,
         createIfNotFound: false,
       });
-      // Not a self-heal fix PR: one lookup, no GitHub client, nothing deferred.
+      // Not a self-heal fix PR: one lookup, no GitHub client. #447: the route
+      // defers exactly the two closed handlers (mirror intake, self-heal
+      // settle); the settle itself defers nothing more.
       expect(createSelfHealOctokit).not.toHaveBeenCalled();
-      expect(waitUntil).not.toHaveBeenCalled();
+      expect(waitUntil).toHaveBeenCalledTimes(2);
     });
 
     it("other pull_request actions do not reach the self-heal handler", async () => {
