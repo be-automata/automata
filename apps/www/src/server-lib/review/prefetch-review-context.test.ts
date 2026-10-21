@@ -197,4 +197,26 @@ describe("prefetchReviewContext", () => {
     expect(out).toContain("state:\tMERGED");
     expect(out).toContain("mergeable:\tUNKNOWN");
   });
+
+  it("renders pr-view from the caller's PR read without fetching it again", async () => {
+    const octokit = makeOctokit({});
+    const out = await prefetchReviewContext({
+      octokit,
+      repoFullName: "acme/widgets",
+      prNumber: 7,
+      fetchers: ["pr-view", "prior-reviews"],
+      pullRequest: {
+        number: 7,
+        title: "Already read",
+        state: "open",
+        labels: [],
+        html_url: "u",
+        head: { ref: "h" },
+        base: { ref: "b" },
+      },
+    });
+    expect(octokit.rest.pulls.get).not.toHaveBeenCalled();
+    expect(out).toContain("title:\tAlready read");
+    expect(octokit.paginate).toHaveBeenCalledTimes(1);
+  });
 });

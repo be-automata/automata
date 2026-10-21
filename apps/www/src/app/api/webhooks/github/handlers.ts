@@ -44,6 +44,7 @@ import { resolveBotLogin } from "@/server-lib/review/bot-login";
 import { normalizeLabel } from "@/server-lib/audit/render-issue";
 import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
+import { waitUntil } from "@/lib/wait-until";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -164,34 +165,56 @@ export async function handlePullRequestUpdated(
         ),
       );
     }
-    // Process each automation
-    for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-      const batch = automations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((automation) =>
-          handlePullRequestAutomation(event, automation, deliveryId),
-        ),
-      );
-      const failed = results.filter((result) => result.status === "rejected");
-      const succeeded = results.filter(
-        (result) => result.status === "fulfilled",
-      );
-      console.log(
-        `Successfully handled ${succeeded.length} pull request automations`,
-      );
-      if (failed.length > 0) {
-        console.error(
-          `Error handling ${failed.length} pull request automations: ${failed.map((result) => result.reason).join(", ")}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    // Ack fast. Every automation run makes many sequential GitHub round trips
+    // (App token mints, the PR read, the skill override, the review-context
+    // prefetch) and creates a thread; awaited inline they outran GitHub's 10s
+    // delivery timeout, which GitHub records as a failure and never retries.
+    // The response never depended on them (this handler swallows every
+    // error), so they run after it. Idempotency is unchanged: the delivery id
+    // still reaches the dispatch, and the desired head above is already
+    // durable before the ack.
+    waitUntil(
+      runPullRequestAutomations(event, automations, deliveryId).catch(
+        (error) => {
+          console.error("Error handling pull request updated event:", error);
+        },
+      ),
+    );
   } catch (error) {
     console.error("Error handling pull request updated event:", error);
   }
 }
 
 const BATCH_SIZE = 5;
+const BATCH_PAUSE_MS = 1000;
+
+async function runPullRequestAutomations(
+  event: PullRequestEvent,
+  automations: Automation[],
+  deliveryId: string | undefined,
+): Promise<void> {
+  for (let i = 0; i < automations.length; i += BATCH_SIZE) {
+    // Pace successive batches only; nothing follows the last one.
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, BATCH_PAUSE_MS));
+    }
+    const batch = automations.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map((automation) =>
+        handlePullRequestAutomation(event, automation, deliveryId),
+      ),
+    );
+    const failed = results.filter((result) => result.status === "rejected");
+    console.log(
+      `Successfully handled ${results.length - failed.length} pull request automations`,
+    );
+    if (failed.length > 0) {
+      console.error(
+        `Error handling ${failed.length} pull request automations: ${failed.map((result) => result.reason).join(", ")}`,
+      );
+    }
+  }
+}
 
 async function handlePullRequestAutomation(
   event: PullRequestEvent,
