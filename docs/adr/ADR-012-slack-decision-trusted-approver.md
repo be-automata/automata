@@ -157,12 +157,10 @@ equally well, so a modal adds friction for honest users and nothing against a se
 **A as the default, with C as the fallback** for orgs that cannot install the platform app. A reuses
 the fence that already exists (`route-fence.ts:33-59` serves a workspace through exactly one app)
 and adds no new trust root. **A′ is the same route with a wider owner map**: choose it, alone or
-alongside A, when the deciders are workspace members who will not hold platform accounts. The
-setup check found exactly that for the first external org: the platform app is installed, the org
-owns no app, and the intended deciders are members of its workspace and alerts channel, of whom
-only the platform owner has linked Slack. This is a recommendation only: the final choice depends on the Slack
-setup facts of the first external org, recorded in a local investigation note, and is made when
-this ADR moves to Accepted. The ADR names no organisation.
+alongside A, if the org runs the platform app, owns no app of its own, and its deciders are
+workspace members without linked platform accounts. This is a recommendation only: the final
+choice depends on the Slack setup facts of the first external org, recorded in a local
+investigation note, and is made when this ADR moves to Accepted. The ADR names no organisation.
 
 ## Decision
 
