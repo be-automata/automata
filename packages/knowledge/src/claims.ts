@@ -12,6 +12,12 @@ import { join, sep } from "node:path";
 import { classifyEvidence, type EvidenceClass } from "./evidence-class";
 import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
+import {
+  findRejection,
+  type RejectedOp,
+  type RejectionCandidate,
+  type SuppressedOp,
+} from "./rejections";
 import { compareValueSets, extractValues, type ValueExtractor } from "./values";
 
 export interface EvidencePin {
@@ -481,6 +487,11 @@ export interface Draft {
   /** propose = a human edited the page since the agent last verified it. Informational: applyDraft re-derives it. */
   mode: "apply" | "propose";
   ops: DraftOp[];
+  /**
+   * Ops a prior rejection still covers (ENG-02): kept here, never silently dropped. reconcile always sets
+   * it (empty when nothing matched); optional only so hand-built drafts need not carry it.
+   */
+  suppressed?: SuppressedOp[];
   llmCalls: number;
 }
 export interface ReconcileDiff {
@@ -509,6 +520,12 @@ export interface ReconcileOptions {
   diff?: ReconcileDiff;
   /** Replaces the deterministic token extractor (e.g. a model-extracted or typed-value variant). */
   extractValues?: ValueExtractor;
+  /**
+   * Prior owner rejections supplied by the caller (ENG-02). A non-auto op they still cover goes to
+   * draft.suppressed instead of draft.ops; a covered update never reaches the model. See RejectedOp for
+   * the latest-only, ledger-sourced contract.
+   */
+  rejected?: readonly RejectedOp[];
 }
 
 export class ConflictingDiffOptionsError extends Error {
@@ -700,6 +717,67 @@ function renameProposal(
   };
 }
 
+/**
+ * What the owner saw when an op was raised: the claim, its statement and every pin's pinned hash with its
+ * current state. A pin that holds (fresh or relocated) contributes only "holds", so a line shift never
+ * changes it; a stale pin contributes the hash of the text at its located span (content, not line
+ * numbers). Deterministic: keys are written in a fixed order and pins are sorted by URI.
+ */
+function evidenceFingerprintOf(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+  idx: DiffIndex | undefined,
+): string {
+  const pins = claim.evidence
+    .map((p, j) => ({
+      uri: p.uri,
+      pinned: p.hash,
+      state: pinState(root, p, ev[j], idx),
+    }))
+    .sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
+  return sha(
+    JSON.stringify({
+      v: 1,
+      claimId: claim.id,
+      statement: sha(claim.statement),
+      pins,
+    }),
+  );
+}
+
+function pinState(
+  root: string,
+  p: EvidencePin,
+  e: EvidenceStatus | undefined,
+  idx: DiffIndex | undefined,
+): string {
+  if (!e) return "unchecked";
+  switch (e.kind) {
+    case "fresh":
+    case "relocated":
+      return "holds";
+    case "missing":
+      return `missing:${e.code}`;
+    case "ambiguous":
+      return `ambiguous:${e.candidates.length}`;
+    case "stale": {
+      const l = locate(e, idx);
+      const r = l.kind === "located" ? resolve(root, l.uri) : null;
+      const text = r && "text" in r ? r.text : e.now;
+      return `stale:${hashAs(modeOfHash(p.hash), text)}`;
+    }
+  }
+}
+
+/** The identity of a proposed change: the new statement and the fingerprint of each new evidence span. */
+function proposalFingerprintOf(
+  after: string,
+  newEvidenceHash: string[],
+): string {
+  return sha(JSON.stringify({ v: 1, after, newEvidenceHash }));
+}
+
 /** Widest line span an updater may choose: wider overrides would make the window scan quadratic. */
 const MAX_OVERRIDE_LINES = 200;
 
@@ -832,35 +910,70 @@ export async function reconcile(
 ): Promise<Draft> {
   const report = checkPage(root, pageMd, sc);
   const before = llm.calls;
+  const idx = buildDiffIndex(options);
   const ops: DraftOp[] = [];
-  const add = (o: Omit<DraftOp, "id" | "auto">) =>
-    ops.push({
+  const rejected = options.rejected ?? [];
+  const suppressed: SuppressedOp[] = [];
+  /** A covered candidate is recorded in suppressed; returns whether it was. */
+  const suppress = (c: RejectionCandidate): boolean => {
+    const match = findRejection(c, rejected);
+    if (!match || c.evidenceFingerprint === undefined) return false;
+    suppressed.push({
+      claimId: c.claimId,
+      op: c.op,
+      rejectedOpId: match.opId,
+      evidenceFingerprint: c.evidenceFingerprint,
+    });
+    return true;
+  };
+  // ENG-02: every non-auto op carries what the owner saw; auto repins carry nothing and are never suppressed.
+  const add = (
+    o: Omit<DraftOp, "id" | "auto" | "evidenceFingerprint">,
+    evidenceFingerprint: () => string,
+  ) => {
+    const auto = OP_KINDS[o.op].auto;
+    const op: DraftOp = {
       ...o,
       id: opKey(o.op, sc.page, o.claimId, options.sourceRev),
-      auto: OP_KINDS[o.op].auto,
-    });
+      auto,
+    };
+    if (!auto) {
+      op.evidenceFingerprint = evidenceFingerprint();
+      if (suppress(op)) return;
+    }
+    ops.push(op);
+  };
+  /** Computed at most once per claim, and only when an op is about to be emitted. */
+  const fingerprintOf = (claim: Claim, ev: EvidenceStatus[]) => {
+    let fp: string | undefined;
+    return () => (fp ??= evidenceFingerprintOf(root, claim, ev, idx));
+  };
   const baseOf = (claim: Claim, ev: EvidenceStatus[]) => ({
     claimId: claim.id,
     before: claim.statement,
     evidence: ev.map(describe),
   });
-  const idx = buildDiffIndex(options);
   const extract = options.extractValues ?? extractValues;
-  const needWork: UpdateRequest[] = [];
+  // Each claim sent to the model, with the evidence fingerprint its answer's op will carry.
+  const work: { w: UpdateRequest; fp: string }[] = [];
   // checkPage reports claims in sc.claims order.
   sc.claims.forEach((claim, i) => {
     const cr = report.claims[i];
     if (!cr) return;
     const ev = inDiffContext(cr.evidence, claim.evidence, idx, root);
+    const fp = fingerprintOf(claim, ev);
     const status =
       cr.status === "orphaned" ? cr.status : claimStatus(ev.map((e) => e.kind));
     const fixed = FIXED_OPS[status];
     if (fixed)
-      return add({
-        ...baseOf(claim, ev),
-        ...fixed,
-        ...(fixed.op === "repin" ? renameProposal(root, claim, ev) : {}),
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          ...fixed,
+          ...(fixed.op === "repin" ? renameProposal(root, claim, ev) : {}),
+        },
+        fp,
+      );
     if (status !== "stale") return; // fresh
     const located = ev.map((e) => locate(e, idx));
     const pins = located.filter(
@@ -870,26 +983,35 @@ export async function reconcile(
       (l): l is Extract<Located, { kind: "review" }> => l.kind === "review",
     );
     if (located.every((l) => l.kind === "deleted"))
-      return add({
-        ...baseOf(claim, ev),
-        op: "retract",
-        why: "the merge deleted every span this fact was grounded on",
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "retract",
+          why: "the merge deleted every span this fact was grounded on",
+        },
+        fp,
+      );
     if (review || pins.length !== located.length)
-      return add({
-        ...baseOf(claim, ev),
-        op: "review",
-        why:
-          review?.why ??
-          "the merge deleted part of this fact's evidence: re-ground or retract",
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "review",
+          why:
+            review?.why ??
+            "the merge deleted part of this fact's evidence: re-ground or retract",
+        },
+        fp,
+      );
     const evidence = ev.map((e, j) => atLocation(root, e, pins[j]?.uri ?? ""));
     if (!evidence.every((e): e is EvidenceStatus => e !== null))
-      return add({
-        ...baseOf(claim, ev),
-        op: "review",
-        why: "a re-anchored span does not resolve: a human must locate this fact",
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "review",
+          why: "a re-anchored span does not resolve: a human must locate this fact",
+        },
+        fp,
+      );
     // ENG-04: every source of a multi-source fact changed. Compare the values at the re-anchored spans
     // (never the text at the old pin) before the model can paper over a disagreement.
     if (claim.evidence.length >= 2) {
@@ -904,68 +1026,100 @@ export async function reconcile(
         const says = sourceValues
           .map((s) => `${s.uri} says ${s.values.join(", ")}`)
           .join("; ");
-        return add({
-          ...baseOf(claim, evidence),
-          op: "conflict",
-          why: `sources changed in the same merge and now disagree: ${says}; the owner must decide which source is right`,
-          sourceValues,
-        });
+        return add(
+          {
+            ...baseOf(claim, evidence),
+            op: "conflict",
+            why: `sources changed in the same merge and now disagree: ${says}; the owner must decide which source is right`,
+            sourceValues,
+          },
+          fp,
+        );
       }
     }
-    needWork.push({
-      claim,
-      evidence,
-      newEvidence: pins.map((l) => l.uri),
-      reanchorScore: Math.min(...pins.map((l) => l.score)),
+    // A rejected update is suppressed before the model is asked: no call is spent on it.
+    if (
+      suppress({ claimId: claim.id, op: "update", evidenceFingerprint: fp() })
+    )
+      return;
+    work.push({
+      w: {
+        claim,
+        evidence,
+        newEvidence: pins.map((l) => l.uri),
+        reanchorScore: Math.min(...pins.map((l) => l.score)),
+      },
+      fp: fp(),
     });
   });
-  if (needWork.length > 0) {
-    const asked = new Map(needWork.map((w) => [w.claim.id, w]));
-    for (const u of await llm.rework(needWork)) {
-      const w = asked.get(u.id);
-      if (!w) continue; // unknown or already-answered id: an updater answers each claim at most once
+  if (work.length > 0) {
+    const asked = new Map(work.map((x) => [x.w.claim.id, x]));
+    for (const u of await llm.rework(work.map((x) => x.w))) {
+      const x = asked.get(u.id);
+      if (!x) continue; // unknown or already-answered id: an updater answers each claim at most once
       asked.delete(u.id);
+      const { w } = x;
+      const fp = () => x.fp;
       if (!isUsableAnswer(u)) {
-        add({
-          ...baseOf(w.claim, w.evidence),
-          op: "review",
-          why: "the updater returned an empty or malformed rewrite: a human must review this fact",
-        });
+        add(
+          {
+            ...baseOf(w.claim, w.evidence),
+            op: "review",
+            why: "the updater returned an empty or malformed rewrite: a human must review this fact",
+          },
+          fp,
+        );
         continue;
       }
       if (
         u.evidence !== undefined &&
         !acceptableEvidence(root, u.evidence, w.newEvidence.length)
       ) {
-        add({
-          ...baseOf(w.claim, w.evidence),
-          op: "review",
-          why: "the updater chose evidence that is missing, ambiguous or malformed: a human must locate this fact",
-        });
+        add(
+          {
+            ...baseOf(w.claim, w.evidence),
+            op: "review",
+            why: "the updater chose evidence that is missing, ambiguous or malformed: a human must locate this fact",
+          },
+          fp,
+        );
         continue;
       }
       const newEvidence = u.evidence ?? w.newEvidence;
-      add({
-        ...baseOf(w.claim, w.evidence),
-        op: "update",
-        after: u.statement,
-        why: "all sources changed consistently",
-        newEvidence,
-        newEvidenceHash: newEvidence.map((uri) => pin(root, uri).hash),
-        score: w.reanchorScore,
-      });
+      const newEvidenceHash = newEvidence.map((uri) => pin(root, uri).hash);
+      // A rejection that names this exact proposal suppresses it; a different proposal is raised.
+      add(
+        {
+          ...baseOf(w.claim, w.evidence),
+          op: "update",
+          after: u.statement,
+          why: "all sources changed consistently",
+          newEvidence,
+          newEvidenceHash,
+          proposalFingerprint: proposalFingerprintOf(
+            u.statement,
+            newEvidenceHash,
+          ),
+          score: w.reanchorScore,
+        },
+        fp,
+      );
     }
-    for (const w of asked.values())
-      add({
-        ...baseOf(w.claim, w.evidence),
-        op: "review",
-        why: "the updater returned no rewrite for this fact: a human must review it",
-      });
+    for (const { w, fp } of asked.values())
+      add(
+        {
+          ...baseOf(w.claim, w.evidence),
+          op: "review",
+          why: "the updater returned no rewrite for this fact: a human must review it",
+        },
+        () => fp,
+      );
   }
   return {
     page: sc.page,
     mode: report.humanEdited ? "propose" : "apply",
     ops,
+    suppressed,
     llmCalls: llm.calls - before,
   };
 }
