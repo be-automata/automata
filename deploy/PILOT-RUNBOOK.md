@@ -1129,7 +1129,11 @@ is no other toggle.
 **What is installed** (by `install-batteries.sh`, as root):
 
 - The `somnio-skills` pack (`skills/dora-metrics`, `skills/react-health-audit`,
-  `skills/security-audit` + LICENSE) at
+  `skills/security-audit`, `skills/flutter-best-practices`,
+  `skills/flutter-health-audit`, `skills/dart-model-from-json`,
+  `skills/react-best-practices` + LICENSE; the Flutter and React standards
+  from upstream `agent-rules/rules/<stack>/` are vendored inside their
+  best-practices skill dir) at
   `/usr/local/lib/automata-batteries/somnio-skills@<sha>/`.
 - A **build-only** Dart SDK at `/usr/local/lib/automata-batteries/dart-sdk@3.13.5/`
   (top dir 0700, sha256-checked before extraction, extracted with

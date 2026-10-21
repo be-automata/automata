@@ -224,7 +224,7 @@ export const REVIEW_BATTERY_PACK_LABELS: Record<ReviewBatteryPackId, string> = {
 /** Short plain labels for every manifest battery pack. */
 export const BATTERY_PACK_LABELS: Record<BatteryPackId, string> = {
   ...REVIEW_BATTERY_PACK_LABELS,
-  "somnio-skills": "Somnio skills (DORA, health, security)",
+  "somnio-skills": "Somnio skills (DORA, Flutter, React, security)",
 };
 
 /** Short plain labels for the harness packs. */

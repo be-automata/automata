@@ -739,7 +739,7 @@ describe("#batteries (phase 3): batteries.json", () => {
     expect(pack.repo).toBe(
       "https://github.com/somnio-software/somnio-ai-tools",
     );
-    expect(pack.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(pack.sha).toBe("8db3d0d57682087aebebd4526a53c72eb30246b9");
     expect(pack.license).toBe("MIT");
     expect(pack.overlays).toBeUndefined();
     expect(pack.allowedHelperRefs).toBeUndefined();
@@ -747,7 +747,7 @@ describe("#batteries (phase 3): batteries.json", () => {
       {
         src: "skills/dora-metrics",
         dest: "skills/dora-metrics",
-        gitId: "33659094d6a829dc01af402d363e2576a3b1c6db",
+        gitId: "8756f199a35284b3d9e777f921a6e782e6da459a",
         exclude: [
           "tests/e2e/run_e2e.py",
           "tests/test_dora_metrics.py",
@@ -759,20 +759,73 @@ describe("#batteries (phase 3): batteries.json", () => {
       {
         src: "skills/react-health-audit",
         dest: "skills/react-health-audit",
-        gitId: "8e9a07ad933408a28da2ef4b3ca25ee84e244d16",
+        gitId: "34fca7094e041fda1e5026d5c338925d451fcd5f",
         exclude: [".agent/workflows/react_health_audit.md"],
       },
       {
         src: "skills/security-audit",
         dest: "skills/security-audit",
-        gitId: "9660e00d89d444c4d1bd505a4a628ec215158326",
+        gitId: "2fc215db442a4e722fe039df078100f6b35c2b0d",
         exclude: [".agent/workflows/security_audit.md"],
+      },
+      {
+        src: "skills/flutter-best-practices",
+        dest: "skills/flutter-best-practices",
+        gitId: "ed9e0550ad2cfb8df1c5318b5e7ecfb4fdca3097",
+        exclude: [".agent/workflows/flutter_best_practices.md"],
+      },
+      {
+        src: "agent-rules/rules/flutter",
+        dest: "skills/flutter-best-practices/agent-rules/rules/flutter",
+        gitId: "25c3c0b8708bbe409e8a2c4c834176f2985233fd",
+      },
+      {
+        src: "skills/flutter-health-audit",
+        dest: "skills/flutter-health-audit",
+        gitId: "42b104d85dee7ded738946ebe8f4951b57def403",
+        exclude: [".agent/workflows/flutter_health_audit.md"],
+      },
+      {
+        src: "skills/dart-model-from-json",
+        dest: "skills/dart-model-from-json",
+        gitId: "aa44e54515e4c0ecfb89dbfe409170a1f4699935",
+      },
+      {
+        src: "skills/react-best-practices",
+        dest: "skills/react-best-practices",
+        gitId: "a94386bf9e0e893c2d9f01595a93bbab7e0fc75e",
+        exclude: [".agent/workflows/react_best_practices.md"],
+      },
+      {
+        src: "agent-rules/rules/react",
+        dest: "skills/react-best-practices/agent-rules/rules/react",
+        gitId: "6bd6071db9c95846b166cff346b2b621ccb02ad4",
       },
       {
         src: "LICENSE",
         dest: "LICENSE",
         gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
       },
+    ]);
+  });
+
+  it("vendors the somnio standards rules inside the skill that reads them", () => {
+    // The best-practices skills read `agent-rules/rules/<stack>/*.md` local-first
+    // (else a live, unpinned fetch from upstream main). Under the skill dir the
+    // relative path resolves to the pinned copy; a top-level skills/agent-rules
+    // dir would fail the installer's "every skills/* dir has a SKILL.md" check.
+    const rules = packById("somnio-skills").subpaths.filter((s) =>
+      s.src.startsWith("agent-rules/"),
+    );
+    expect(rules.map((s) => [s.src, s.dest])).toEqual([
+      [
+        "agent-rules/rules/flutter",
+        "skills/flutter-best-practices/agent-rules/rules/flutter",
+      ],
+      [
+        "agent-rules/rules/react",
+        "skills/react-best-practices/agent-rules/rules/react",
+      ],
     ]);
   });
 

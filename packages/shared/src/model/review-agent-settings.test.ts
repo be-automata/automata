@@ -127,7 +127,7 @@ describe("BATTERY_PACK_IDS (phase 7)", () => {
       expect(BATTERY_PACK_LABELS[id].trim()).not.toBe("");
     }
     expect(BATTERY_PACK_LABELS["somnio-skills"]).toBe(
-      "Somnio skills (DORA, health, security)",
+      "Somnio skills (DORA, Flutter, React, security)",
     );
   });
 });
