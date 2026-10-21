@@ -8,7 +8,6 @@ import { describe, expect, it } from "vitest";
 import {
   applyDraft,
   ConflictingDiffOptionsError,
-  DuplicateDiffPathError,
   InvalidEvidenceUriError,
   reconcile,
   stubUpdater,
@@ -232,14 +231,21 @@ describe("reconcile over a multi-file diff (SC1)", () => {
         { path: "billing.ts", hunks: [], oldText: "", newText: "" },
       ],
     ],
-  ])("%s is refused with the path", async (_, diffs) => {
-    const { root, sc } = useCorpus();
-    const err = await reconcile(root, pageOf(root), sc, stubUpdater(), {
-      diffs,
-    }).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DuplicateDiffPathError);
-    expect((err as DuplicateDiffPathError).path).toBe("billing.ts");
-  });
+  ])(
+    "%s makes only that path ambiguous: its pins become reviews, reconcile does not throw",
+    async (_, diffs) => {
+      const { root, sc } = useCorpus();
+      extendTrial(root);
+      const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
+        sourceRev: SOURCE_SHA,
+        diffs,
+      });
+      const op = draft.ops.find((o) => o.claimId === "trial-length");
+      expect(op?.op).toBe("review");
+      expect(op?.why).toMatch(/^two diff entries name billing\.ts/);
+      expect(draft.llmCalls).toBe(0);
+    },
+  );
 
   it("an empty diffs list behaves like no diff at all (positional re-pin)", async () => {
     const { root, sc } = useCorpus();

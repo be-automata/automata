@@ -535,23 +535,18 @@ export class ConflictingDiffOptionsError extends Error {
   }
 }
 
-/** Two diff entries claim the same path (as new path or rename source): which one locates a pin is unknowable. */
-export class DuplicateDiffPathError extends Error {
-  readonly path: string;
-  constructor(path: string) {
-    super(`two diff entries name the path ${JSON.stringify(path)}`);
-    this.name = "DuplicateDiffPathError";
-    this.path = path;
-  }
-}
-
 interface DiffLines {
   diff: ReconcileDiff;
   oldLines: string[];
   newLines: string[];
 }
-/** Each changed file's diff, keyed by its new path and (for a rename) its old path. */
-type DiffIndex = Map<string, DiffLines>;
+/**
+ * Each changed file's diff, keyed by its new path and (for a rename) its old path. AMBIGUOUS marks a path two
+ * entries claim (e.g. `a -> b` renamed plus a new file at `a`): which diff locates a pin there is unknowable, so
+ * only pins on that path become reviews and the rest of the reconcile proceeds.
+ */
+const AMBIGUOUS = "ambiguous";
+type DiffIndex = Map<string, DiffLines | typeof AMBIGUOUS>;
 
 /**
  * Index the diffs once per reconcile, splitting each file's text once. Diff paths are untrusted and are only
@@ -573,10 +568,7 @@ function buildDiffIndex(options: ReconcileOptions): DiffIndex | undefined {
       diff.oldPath !== undefined && diff.oldPath !== diff.path
         ? [diff.path, diff.oldPath]
         : [diff.path];
-    for (const key of keys) {
-      if (idx.has(key)) throw new DuplicateDiffPathError(key);
-      idx.set(key, lines);
-    }
+    for (const key of keys) idx.set(key, idx.has(key) ? AMBIGUOUS : lines);
   }
   return idx;
 }
@@ -609,6 +601,11 @@ function locate(e: EvidenceStatus, idx: DiffIndex | undefined): Located {
     return {
       kind: "review",
       why: `no diff for ${target}: a line pin cannot be re-anchored, a human must locate this fact`,
+    };
+  if (d === AMBIGUOUS)
+    return {
+      kind: "review",
+      why: `two diff entries name ${target} (a rename source and a file at the same path): a human must locate this fact`,
     };
   const r = reanchorSpan({
     hunks: d.diff.hunks,
@@ -657,6 +654,8 @@ function inDiffContext(
     const d = idx.get(target);
     if (!d) return e;
     const stale: EvidenceStatus = { kind: "stale", uri: e.uri, now: "" };
+    // An ambiguous path: let locate() turn the pin into a review rather than a retraction.
+    if (d === AMBIGUOUS) return stale;
     if (e.code === "past-eof") return stale;
     if (
       scheme !== "repo" ||
