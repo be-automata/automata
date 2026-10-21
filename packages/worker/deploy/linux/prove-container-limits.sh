@@ -39,7 +39,7 @@ bad() {
 }
 # One name per probe, removed on exit whatever happened.
 prefix="automata-prove-$$"
-# shellcheck disable=SC2329 # invoked by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap (SC2317 on older shellcheck)
 cleanup() {
   for p in mem pids pidsctl cpu rm; do d rm -f -v "$prefix-$p" >/dev/null 2>&1 || true; done
 }
