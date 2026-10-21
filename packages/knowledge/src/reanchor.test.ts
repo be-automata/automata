@@ -108,13 +108,15 @@ describe("reanchorSpan", () => {
   });
 
   it("returns review when the best match is below the floor", () => {
+    // -2 +2,2 is not one-for-one, so the windows are scored: 0 and 0.25, both below 0.5.
     const newLines = [
       "intro",
       "Completely different sentence here",
+      "the new plan",
       ...oldLines.slice(2),
     ];
     const r = reanchorSpan({
-      hunks: [hunk(2, 1, 2, 1)],
+      hunks: [hunk(2, 1, 2, 2)],
       oldLines,
       newLines,
       span: [2, 2],
@@ -126,11 +128,12 @@ describe("reanchorSpan", () => {
     const newLines = [
       "intro",
       "Fact AC: the ac plan costs 26 dollars",
+      "unrelated remark",
       ...oldLines.slice(2),
     ];
     expect(
       reanchorSpan({
-        hunks: [hunk(2, 1, 2, 1)],
+        hunks: [hunk(2, 1, 2, 2)],
         oldLines,
         newLines,
         span: [2, 2],
@@ -216,5 +219,118 @@ describe("reanchorSpan", () => {
       span: [2, 3],
     });
     expect(r).toMatchObject({ status: "in-hunk", span: [2, 3] });
+  });
+});
+
+describe("reanchorSpan: one-for-one replacement by position", () => {
+  const oldLines = ["a", "RATE = 120", "BURST = 20", "z"];
+
+  it("re-anchors a replaced line in place even with no shared token", () => {
+    const newLines = ["a", "completely different", "BURST = 20", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 1, 2, 1)],
+        oldLines,
+        newLines,
+        span: [2, 2],
+      }),
+    ).toEqual({
+      status: "in-hunk",
+      span: [2, 2],
+      score: 1,
+      match: "positional",
+    });
+  });
+
+  it("re-anchors a short value edit (similarity 0.33) at the default floor", () => {
+    const newLines = ["a", "RATE = 150", "BURST = 20", "z"];
+    expect(similarity("RATE = 120", "RATE = 150")).toBeCloseTo(1 / 3);
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 1, 2, 1)],
+        oldLines,
+        newLines,
+        span: [2, 2],
+      }),
+    ).toMatchObject({ status: "in-hunk", span: [2, 2], match: "positional" });
+  });
+
+  it("follows the hunk's new start when lines were inserted above", () => {
+    const newLines = ["# header", "a", "RATE = 150", "BURST = 20", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(0, 0, 1, 1), hunk(2, 1, 3, 1)],
+        oldLines,
+        newLines,
+        span: [2, 2],
+      }),
+    ).toMatchObject({ status: "in-hunk", span: [3, 3], match: "positional" });
+  });
+
+  it("covers a multi-line span replaced by the same number of lines", () => {
+    const newLines = ["a", "RATE = 150", "BURST = 25", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 2, 2, 2)],
+        oldLines,
+        newLines,
+        span: [2, 3],
+      }),
+    ).toMatchObject({ status: "in-hunk", span: [2, 3], match: "positional" });
+  });
+
+  it("does not apply when the hunk replaces more lines than the span (scored, floor enforced)", () => {
+    // A 3-line rewrite covering the 1-line pin: windows score 0, 0.25 and 0 -> below the floor.
+    const newLines = ["x", "RATE limit", "y", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(1, 3, 1, 3)],
+        oldLines,
+        newLines,
+        span: [2, 2],
+      }),
+    ).toMatchObject({
+      status: "review",
+      reason: "below-floor",
+      candidates: [[2, 2]],
+    });
+  });
+
+  it("does not apply when the hunk changes the line count", () => {
+    const newLines = ["a", "RATE = 150", "RATE_NOTE = 1", "BURST = 20", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 1, 2, 2)],
+        oldLines,
+        newLines,
+        span: [2, 2],
+      }),
+    ).toMatchObject({ status: "review", reason: "below-floor" });
+  });
+
+  it("does not apply to a same-size hunk that starts at a different line", () => {
+    // -2,2 +2,2 rewrites lines 2-3; the pin is line 3 only, so it is scored.
+    const newLines = ["a", "other words", "unrelated", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 2, 2, 2)],
+        oldLines,
+        newLines,
+        span: [3, 3],
+      }),
+    ).toMatchObject({ status: "review" });
+  });
+
+  it("keeps the similarity match label for a scored in-hunk result", () => {
+    const old = ["a", "Fact one alpha beta gamma", "z"];
+    const now = ["a", "inserted line", "Fact one alpha beta delta", "z"];
+    expect(
+      reanchorSpan({
+        hunks: [hunk(2, 1, 2, 2)],
+        oldLines: old,
+        newLines: now,
+        span: [2, 2],
+      }),
+    ).toMatchObject({ status: "in-hunk", span: [3, 3], match: "similarity" });
   });
 });

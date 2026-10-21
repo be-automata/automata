@@ -34,18 +34,11 @@ import {
 const fixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
 
 /**
- * `RATE_LIMIT_PER_MINUTE = 120` -> `= 150` keeps one of three tokens: a value edit on a two-token line
- * scores 0.33, below the default re-anchor floor (0.5). The caller-supplied floor admits it; the default
- * floor sends it to review (pinned by its own test below).
- */
-const SHORT_LINE_FLOOR = 0.3;
-
-/**
  * The SC1 merge: a py constant changes in place, a yaml value changes below an inserted comment line, and
  * a README heading changes (nothing is pinned on it). Returns one diff per changed file, with the hunk
  * headers `git diff -U0` emits for exactly these edits.
  */
-function mutateLimits(root: string, floor?: number): ReconcileDiff[] {
+function mutateLimits(root: string): ReconcileDiff[] {
   const py = fixture("ratelimit.py").replace(
     "RATE_LIMIT_PER_MINUTE = 120",
     "RATE_LIMIT_PER_MINUTE = 150",
@@ -58,18 +51,15 @@ function mutateLimits(root: string, floor?: number): ReconcileDiff[] {
   writeRepo(root, "ratelimit.py", py);
   writeRepo(root, "config.yaml", yaml);
   writeRepo(root, "README.md", readme);
-  const at = (d: ReconcileDiff) => (floor === undefined ? d : { ...d, floor });
   return [
-    at(diffOfFile("ratelimit.py", fixture("ratelimit.py"), py, "@@ -1 +1 @@")),
-    at(
-      diffOfFile(
-        "config.yaml",
-        fixture("config.yaml"),
-        yaml,
-        "@@ -0,0 +1 @@\n@@ -3 +4 @@",
-      ),
+    diffOfFile("ratelimit.py", fixture("ratelimit.py"), py, "@@ -1 +1 @@"),
+    diffOfFile(
+      "config.yaml",
+      fixture("config.yaml"),
+      yaml,
+      "@@ -0,0 +1 @@\n@@ -3 +4 @@",
     ),
-    at(diffOfFile("README.md", fixture("README.md"), readme, "@@ -1 +1 @@")),
+    diffOfFile("README.md", fixture("README.md"), readme, "@@ -1 +1 @@"),
   ];
 }
 
@@ -94,7 +84,7 @@ function extendTrial(root: string): ReconcileDiff {
 describe("reconcile over a multi-file diff (SC1)", () => {
   it("re-anchors stale pins in every changed file with one batched model call", async () => {
     const { root, sc } = useLimitsCorpus();
-    const diffs = mutateLimits(root, SHORT_LINE_FLOOR);
+    const diffs = mutateLimits(root);
     const { llm, seen } = countingUpdater();
     const draft = await reconcile(root, limitsPageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
@@ -112,17 +102,50 @@ describe("reconcile over a multi-file diff (SC1)", () => {
     expect(seen).toEqual(["api-rate"]);
   });
 
-  it("at the default floor a two-token value edit is located through its file's diff, then reviewed below the floor", async () => {
+  it("at the default floor a two-token value edit (similarity 0.33) re-anchors by position, not to review", async () => {
+    // `RATE_LIMIT_PER_MINUTE = 120` -> `= 150` keeps one of three tokens, below the 0.5 floor. Each file's
+    // hunk replaces exactly the pinned line with one line, so the positional rule locates it.
     const { root, sc } = useLimitsCorpus();
     const diffs = mutateLimits(root);
+    expect(diffs.every((d) => d.floor === undefined)).toBe(true);
     const { llm, seen } = countingUpdater();
     const draft = await reconcile(root, limitsPageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
       diffs,
     });
+    expect(draft.ops.find((o) => o.claimId === "api-rate")).toMatchObject({
+      op: "update",
+      newEvidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L4-L4"],
+    });
+    expect(draft.ops.some((o) => o.op === "review")).toBe(false);
+    expect(draft.llmCalls).toBe(1);
+    expect(seen).toEqual(["api-rate"]);
+  });
+
+  it("the default floor still applies when the hunk is not a one-for-one replacement of the pin", async () => {
+    // The py constant is a one-for-one edit (positional). In config.yaml, lines 2-4 are rewritten as three
+    // new lines: the 1-line pin on L3 sits inside a wider hunk, so it is scored. The best window
+    // (`burst: 120`, 0.33) is below the floor: review, no model call.
+    const { root, sc } = useLimitsCorpus();
+    const [py] = mutateLimits(root);
+    const before = fixture("config.yaml");
+    const yaml = before.replace(
+      "  api:\n    requests_per_minute: 120\n  seats:",
+      "  rate:\n    burst: 120\n  seat_caps:",
+    );
+    expect(yaml).not.toBe(before);
+    writeRepo(root, "config.yaml", yaml);
+    const { llm, seen } = countingUpdater();
+    const draft = await reconcile(root, limitsPageOf(root), sc, llm, {
+      sourceRev: SOURCE_SHA,
+      diffs: [
+        py as ReconcileDiff,
+        diffOfFile("config.yaml", before, yaml, "@@ -2,3 +2,3 @@"),
+      ],
+    });
     const op = draft.ops.find((o) => o.claimId === "api-rate");
     expect(op?.op).toBe("review");
-    expect(op?.why).toMatch(/^re-anchor below-floor/);
+    expect(op?.why).toMatch(/^re-anchor below-floor \(similarity 0\.33\)/);
     expect(draft.llmCalls).toBe(0);
     expect(seen).toEqual([]);
   });
@@ -147,7 +170,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
 
   it("a stale line pin on a file absent from the diffs becomes a review and never reaches the model", async () => {
     const { root, sc } = useLimitsCorpus();
-    const [, yaml, readme] = mutateLimits(root, SHORT_LINE_FLOOR);
+    const [, yaml, readme] = mutateLimits(root);
     const { llm, seen } = countingUpdater();
     const draft = await reconcile(root, limitsPageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
@@ -248,10 +271,7 @@ function moveRatelimit(
   renameSync(join(root, "repo/ratelimit.py"), join(root, "repo", MOVED));
   const now = change(PY);
   writeRepo(root, MOVED, now);
-  return {
-    ...diffOfFile(MOVED, PY, now, header, "ratelimit.py"),
-    floor: SHORT_LINE_FLOOR,
-  };
+  return diffOfFile(MOVED, PY, now, header, "ratelimit.py");
 }
 
 const opFor = (draft: Draft, claimId: string) =>
@@ -456,14 +476,13 @@ const SC1_GIT_DIFF = [
 describe("parser integration", () => {
   it("parseUnifiedDiff output plus file texts gives the same draft as the hand-built SC1 diffs", async () => {
     const { root, sc } = useLimitsCorpus();
-    const hand = mutateLimits(root, SHORT_LINE_FLOOR);
+    const hand = mutateLimits(root);
     const parsed: ReconcileDiff[] = parseUnifiedDiff(SC1_GIT_DIFF).map((f) => ({
       path: f.path,
       ...(f.oldPath ? { oldPath: f.oldPath } : {}),
       hunks: f.hunks,
       oldText: fixture(f.oldPath ?? f.path),
       newText: readFileSync(join(root, "repo", f.path), "utf8"),
-      floor: SHORT_LINE_FLOOR,
     }));
     const hunksByPath = (ds: ReconcileDiff[]) =>
       Object.fromEntries(ds.map((d) => [d.path, d.hunks]));
