@@ -34,5 +34,6 @@ export type {
 export * from "./diff";
 export * from "./op-key";
 export * from "./reanchor";
+export * from "./rejections";
 export * from "./evidence-class";
 export * from "./values";

@@ -459,6 +459,14 @@ export interface DraftOp {
   score?: number;
   /** For a value conflict: what each source says now, for the owner's choose-source decision. */
   sourceValues?: SourceValues[];
+  /**
+   * Identity of what the owner saw: the claim, its statement and the current state of every pin. Stable
+   * across merges that do not touch the evidence (line shifts included). Set on every non-auto op reconcile
+   * emits; a rejection is matched on it (ENG-02).
+   */
+  evidenceFingerprint?: string;
+  /** Identity of the proposed change (statement and new evidence fingerprints). update/reverify only. */
+  proposalFingerprint?: string;
 }
 /**
  * Tokens extracted from one source at its re-anchored location. Numbers and versions only, never prose,
