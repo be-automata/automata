@@ -54,7 +54,7 @@ Today an agent run on the execution box is **a host Unix uid on a shared host**:
   `ps` for the uid.
 - Each of these has needed a live incident to get right (the uid 999 collision with the engine's
   Postgres #210, the ACL mask zeroed by `chmod 600`, `sun_path` truncation, the `ProtectControlGroups`
-  remount, the cgroup a socket carries from its creator #367). Adding a slot is a seven-step manual
+  remount, the cgroup a socket carries from its creator #367). Adding a slot is a five-step manual
   procedure (`AGENT-UID-PROVISIONING.md` §6). Adding a battery is a manifest entry plus a link
   layout plus install-script support for its install kind.
 
@@ -169,9 +169,12 @@ instructions by our own prompts.
 - **Chromium in an unprivileged container** cannot use its own user-namespace sandbox under
   Docker's default seccomp profile; gstack's browse must run with `--no-sandbox` (the container is
   the sandbox) or with a seccomp profile that allows it. Measured in P0.
-- **Image size.** Estimated 5-7 GB uncompressed (Flutter ~1.5 GB, Dart ~0.5 GB, two Chromium builds
-  ~0.7 GB, the ruflo closure with ONNX runtime and model ~0.5 GB, the rest ~1 GB). Two digests are
-  kept during a rollout. P0 records the real `docker image inspect` size and `df` headroom.
+- **Image size.** Measured on the spike build (2026-10-21, local linux/amd64 build, not yet on the
+  box): **9.0 GB** unpacked. Largest parts: Flutter 2.5 GB, the ruflo closure 1.7 GB, the agent's
+  `~/.claude` (gstack with its node_modules, GSD, skills) 1.6 GB, Chromium + headless shell 0.65 GB,
+  the standalone Dart SDK 0.64 GB, GSD's npm closure 0.41 GB. Two digests are kept during a
+  rollout, so budget about 20 GB of Docker root. P0 records the size and `df` headroom on the box;
+  the obvious cuts (one Dart, pruning Flutter's unused platform artifacts) are follow-ups.
 - **Cold start.** `create` + copy-in + `start` from a local image should be about a second; a
   first pull of a new digest is minutes and must never happen on the run path (pre-pull is part of
   rollout; the worker refuses a digest that is not present locally).
@@ -260,7 +263,7 @@ no token reach the container. The plan lists acceptance criteria and kill switch
    daemon, or gVisor — and is a narrow sudo helper the acceptable (only) path from the worker to
    Docker? P0 measures; the operator picks.
 2. **One Dart or two.** Flutter 3.47.7 bundles Dart 3.13.5, the same version as the standalone SDK
-   the reference installs. Dropping `/opt/dart-sdk` saves about 0.5 GB.
+   the reference installs. Dropping `/opt/dart-sdk` saves about 0.64 GB.
 3. **Somnio agent rules.** The CLI installs rules for Claude per project only. Install them into
    each run's checkout (git-excluded, chosen stacks) or not at all?
 4. **Registry and visibility** for the image (it holds no secrets, but redistributes third-party

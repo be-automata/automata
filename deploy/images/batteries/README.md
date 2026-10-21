@@ -4,7 +4,9 @@ The one pinned image every agent run on the execution box starts from
 ([ADR-013](../../../docs/adr/ADR-013-image-per-run-execution.md), plan:
 [`docs/plans/image-per-run-execution.md`](../../../docs/plans/image-per-run-execution.md)).
 
-Status: **P0**. No worker code uses this image yet.
+Status: **P0**. No worker code uses this image yet. Spike result (2026-10-21, local linux/amd64
+build under emulation, not on the box): the image builds, is 9.0 GB unpacked, and `verify.sh`
+passes all 20 checks.
 
 ## What is in it
 
@@ -66,10 +68,12 @@ one stack of Somnio agent rules into a scratch project. Exits non-zero on any fa
 
 - **Two Dart SDKs.** `dart` on `PATH` is the standalone SDK at `/opt/dart-sdk` (the operator's
   reference install); `flutter` uses its own bundled Dart, which is the same version at this pin.
-  Dropping the standalone SDK would save about 0.5 GB (open question in the ADR).
+  Dropping the standalone SDK would save about 0.64 GB (open question in the ADR).
 - **Somnio agent rules** cannot be installed globally for Claude (the CLI only supports per-project
   rules for Claude). They ship as source under `SOMNIO_ROOT=/opt/somnio-ai-tools`; whether a run
   installs them into its checkout is a run-time decision.
+- **The Somnio CLI is compiled ahead of time** (`dart compile exe`), not `pub global activate`d:
+  an activated binstub re-resolves its dependencies at start and fails with `--network none`.
 - **`SOMNIO_ROOT` is set on purpose.** The CLI's last fallback walks up from the cwd looking for a
   `skills/` + `agent-rules/` + `cli/pubspec.yaml` layout, which a checked-out repo could plant.
 - **Writable layer.** Flutter writes its own cache lock and `pub get` writes `PUB_CACHE`, so

@@ -151,6 +151,15 @@ RUN fetch-verified "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSI
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     npm cache clean --force
 
+# ── the runtime account ─────────────────────────────────────────────────────
+# Created before the SDKs so their ownership is set in the SAME layer that
+# extracts them (a later `chown -R` would copy the 2.5 GB Flutter tree into a
+# second layer).
+RUN useradd --create-home --home-dir "/home/${AGENT_USER}" --shell /bin/bash \
+      --uid "${AGENT_UID}" --user-group "${AGENT_USER}"; \
+    mkdir -p /workspace /opt/automata /opt/ms-playwright; \
+    chown "${AGENT_USER}:${AGENT_USER}" /workspace
+
 # ── Dart SDK + Flutter SDK ──────────────────────────────────────────────────
 # Both on PATH; /opt/dart-sdk/bin comes first, so `dart` is the standalone SDK
 # (identical version to Flutter's bundled one). Flutter and the pub cache are
@@ -169,14 +178,8 @@ RUN fetch-verified "https://storage.googleapis.com/dart-archive/channels/stable/
       "${FLUTTER_SHA256}" /tmp/flutter.tar.xz; \
     tar -xJf /tmp/flutter.tar.xz -C /opt --no-same-owner; rm /tmp/flutter.tar.xz; \
     git config --system --add safe.directory /opt/flutter; \
-    mkdir -p /opt/pub-cache
-
-# ── the runtime account ─────────────────────────────────────────────────────
-RUN useradd --create-home --home-dir "/home/${AGENT_USER}" --shell /bin/bash \
-      --uid "${AGENT_UID}" --user-group "${AGENT_USER}"; \
-    chown -R "${AGENT_USER}:${AGENT_USER}" /opt/flutter /opt/pub-cache; \
-    mkdir -p /workspace /opt/automata /opt/ms-playwright; \
-    chown "${AGENT_USER}:${AGENT_USER}" /workspace
+    mkdir -p /opt/pub-cache; \
+    chown -R "${AGENT_USER}:${AGENT_USER}" /opt/flutter /opt/pub-cache
 
 # ── Somnio CLI + every catalog skill ────────────────────────────────────────
 # The pinned commit, its CLI resolved against the committed lockfile overlay
@@ -195,18 +198,24 @@ RUN echo "${SOMNIO_LOCK_SHA256}  /tmp/somnio-pubspec.lock" | sha256sum -c --quie
     rm -rf "${SOMNIO_ROOT}/.git"; \
     install -m 0644 /tmp/somnio-pubspec.lock "${SOMNIO_ROOT}/cli/pubspec.lock"; \
     rm /tmp/somnio-pubspec.lock; \
-    chown -R "${AGENT_USER}:${AGENT_USER}" "${SOMNIO_ROOT}"
+    chown -R "${AGENT_USER}:${AGENT_USER}" "${SOMNIO_ROOT}"; \
+    ln -s "${SOMNIO_ROOT}/somnio" /usr/local/bin/somnio
 
 # ── npm-locked harness closures: GSD and ruflo ──────────────────────────────
 # The same package.json + package-lock.json the host batteries install from,
-# checksum-verified, installed with `npm ci` into root-owned, read-only dirs.
+# checksum-verified, installed into root-owned, read-only dirs. `npm install`
+# against the lock, not `npm ci`: ruflo's lock omits optional platform packages
+# never published for other platforms, which `npm ci` refuses (the host
+# install-batteries.sh does the same). The lock is re-checked afterwards.
 COPY batteries/gsd/package.json batteries/gsd/package-lock.json /opt/automata/gsd/
 COPY batteries/ruflo/package.json batteries/ruflo/package-lock.json /opt/automata/ruflo/
 RUN echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -c --quiet -; \
     echo "${RUFLO_LOCK_SHA256}  /opt/automata/ruflo/package-lock.json" | sha256sum -c --quiet -; \
-    (cd /opt/automata/gsd && npm ci --omit=dev --ignore-scripts --no-audit); \
-    (cd /opt/automata/ruflo && npm ci --omit=dev --ignore-scripts --no-audit \
-      && npm rebuild @claude-flow/cli); \
+    (cd /opt/automata/gsd && npm install --ignore-scripts --no-save --no-audit --no-fund); \
+    (cd /opt/automata/ruflo && npm install --ignore-scripts --no-save --no-audit --no-fund \
+      && npm_config_ignore_scripts=false npm rebuild @claude-flow/cli --foreground-scripts); \
+    echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -c --quiet -; \
+    echo "${RUFLO_LOCK_SHA256}  /opt/automata/ruflo/package-lock.json" | sha256sum -c --quiet -; \
     fetch-verified "https://github.com/WiseLibs/better-sqlite3/releases/download/v12.11.1/better-sqlite3-v12.11.1-node-v137-linux-x64.tar.gz" \
       "${BETTER_SQLITE3_PREBUILD_SHA256}" /tmp/bsq.tgz; \
     tar -xzf /tmp/bsq.tgz -C /opt/automata/ruflo/node_modules/better-sqlite3 build/Release/better_sqlite3.node; \
@@ -251,13 +260,17 @@ ENV HOME=/home/${AGENT_USER} \
 RUN flutter config --no-analytics --no-cli-animations >/dev/null; \
     flutter --version; dart --disable-analytics
 
-# Somnio: resolve against the lock, activate from the path, install EVERY
-# catalog skill globally for Claude. Agent rules are per-project only for
-# Claude (the CLI refuses --global), so they ship as source under SOMNIO_ROOT
-# and the run decides whether to install them (ADR-013 open question).
+# Somnio: resolve against the lock, compile ahead of time, install EVERY
+# catalog skill globally for Claude. AOT, not `pub global activate`: an
+# activated binstub re-resolves dependencies at start and fails offline (the
+# run has --network none); the compiled CLI finds its content via SOMNIO_ROOT,
+# like the host battery (batteries.json `dart-aot`, `rootEnv`). Agent rules are
+# per-project only for Claude (the CLI refuses --global), so they ship as
+# source under SOMNIO_ROOT and the run decides whether to install them
+# (ADR-013 open question).
 RUN cd "${SOMNIO_ROOT}/cli"; \
     dart pub get --enforce-lockfile; \
-    dart pub global activate --source path "${SOMNIO_ROOT}/cli"; \
+    dart compile exe bin/somnio.dart -o "${SOMNIO_ROOT}/somnio"; \
     test "$(somnio --version | tail -n 1)" = "${SOMNIO_VERSION_LINE}"; \
     cd "$HOME"; \
     somnio skills install --agent claude --all-skills --global
