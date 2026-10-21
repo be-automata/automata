@@ -5,6 +5,7 @@ import {
   renderPriorReviews,
   renderReviewContext,
   renderReviewThreads,
+  type RestPullRequestLike,
   type ReviewContextBlock,
   type ReviewThreadData,
 } from "@terragon/review/context/render";
@@ -108,11 +109,14 @@ export async function prefetchReviewContext({
   repoFullName,
   prNumber,
   fetchers,
+  pullRequest,
 }: {
   octokit: Octokit;
   repoFullName: string;
   prNumber: number;
   fetchers: readonly ReviewContextFetcher[];
+  /** The PR the caller already read: pr-view renders from it, no fetch. */
+  pullRequest?: RestPullRequestLike;
 }): Promise<string> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const blocks = await Promise.all(
@@ -120,7 +124,10 @@ export async function prefetchReviewContext({
       try {
         return {
           name,
-          content: await FETCHERS[name](octokit, owner, repo, prNumber),
+          content:
+            name === "pr-view" && pullRequest
+              ? renderPrView(prViewFromRest(pullRequest))
+              : await FETCHERS[name](octokit, owner, repo, prNumber),
         };
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -146,10 +153,13 @@ export async function prefetchReviewContextForPr({
   repoFullName,
   prNumber,
   fetchers,
+  pullRequest,
 }: {
   repoFullName: string;
   prNumber: number;
   fetchers: readonly ReviewContextFetcher[];
+  /** The PR the caller already read: pr-view renders from it, no fetch. */
+  pullRequest?: RestPullRequestLike;
 }): Promise<string> {
   let octokit: Octokit;
   try {
@@ -166,7 +176,13 @@ export async function prefetchReviewContextForPr({
       fetchers.map((name) => ({ name, unavailable: reason.slice(0, 200) })),
     );
   }
-  return prefetchReviewContext({ octokit, repoFullName, prNumber, fetchers });
+  return prefetchReviewContext({
+    octokit,
+    repoFullName,
+    prNumber,
+    fetchers,
+    pullRequest,
+  });
 }
 
 /** What a context directive becomes in a run that no pull request started. */

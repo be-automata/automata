@@ -44,6 +44,8 @@ import { resolveBotLogin } from "@/server-lib/review/bot-login";
 import { normalizeLabel } from "@/server-lib/audit/render-issue";
 import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
+import { waitUntil } from "@/lib/wait-until";
+import { mapLimit } from "@/lib/map-limit";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -164,34 +166,54 @@ export async function handlePullRequestUpdated(
         ),
       );
     }
-    // Process each automation
-    for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-      const batch = automations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((automation) =>
-          handlePullRequestAutomation(event, automation, deliveryId),
-        ),
-      );
-      const failed = results.filter((result) => result.status === "rejected");
-      const succeeded = results.filter(
-        (result) => result.status === "fulfilled",
-      );
-      console.log(
-        `Successfully handled ${succeeded.length} pull request automations`,
-      );
-      if (failed.length > 0) {
-        console.error(
-          `Error handling ${failed.length} pull request automations: ${failed.map((result) => result.reason).join(", ")}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    // Ack fast. Every automation run makes many sequential GitHub round trips
+    // (App token mints, the PR read, the skill override, the review-context
+    // prefetch) and creates a thread; awaited inline they outran GitHub's 10s
+    // delivery timeout, which GitHub records as a failure and never retries.
+    // The response never depended on them (this handler swallows every
+    // error), so they run after it. Idempotency is unchanged: the delivery id
+    // still reaches the dispatch, and the desired head above is already
+    // durable before the ack.
+    waitUntil(
+      runPullRequestAutomations(event, automations, deliveryId).catch(
+        (error) => {
+          console.error("Error handling pull request updated event:", error);
+        },
+      ),
+    );
   } catch (error) {
     console.error("Error handling pull request updated event:", error);
   }
 }
 
 const BATCH_SIZE = 5;
+const AUTOMATION_CONCURRENCY = 5;
+
+async function runPullRequestAutomations(
+  event: PullRequestEvent,
+  automations: Automation[],
+  deliveryId: string | undefined,
+): Promise<void> {
+  // All of this shares ONE waitUntil budget (on Workers, 30s after the
+  // response), so no pause between runs and no lock-step batches: at most
+  // AUTOMATION_CONCURRENCY in flight, a free lane takes the next at once.
+  const failures: unknown[] = [];
+  await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    try {
+      await handlePullRequestAutomation(event, automation, deliveryId);
+    } catch (error) {
+      failures.push(error);
+    }
+  });
+  console.log(
+    `Successfully handled ${automations.length - failures.length} pull request automations`,
+  );
+  if (failures.length > 0) {
+    console.error(
+      `Error handling ${failures.length} pull request automations: ${failures.join(", ")}`,
+    );
+  }
+}
 
 async function handlePullRequestAutomation(
   event: PullRequestEvent,
