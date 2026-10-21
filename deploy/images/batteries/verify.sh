@@ -30,6 +30,7 @@ fi
 docker run --rm -i --platform linux/amd64 --network none \
   --cap-drop ALL --security-opt no-new-privileges --init \
   --read-only --tmpfs /tmp -v /home/agent -v /opt/flutter \
+  -v /opt/somnio-ai-tools/agent-rules/adapters \
   --entrypoint /bin/bash "$image" -s <<'IN_CONTAINER'
 set -uo pipefail
 fail=0
@@ -61,12 +62,15 @@ assert() {
 }
 
 # ── the run sandbox as the image sees it ────────────────────────────────────
-assert runtime-user "$(id -un) uid=$(id -u), not root" test "$(id -u)" != 0
+# Every assertion must fail closed: a numeric test errors (and so fails) on an
+# empty `id -u`, and a missing /workspace is a failure, not "not writable".
+assert runtime-user "$(id -un) uid=$(id -u), not root" test "$(id -u)" -ne 0
 assert no-capabilities "CapEff is zero" grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/self/status
 assert no-new-privs "NoNewPrivs is set" grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status
 # /workspace is the agent's own dir in the image (a run bind-mounts its clone
 # there); unmounted, only the read-only rootfs can make it unwritable.
-assert readonly-rootfs "agent-owned /workspace is not writable" test ! -w /workspace
+assert readonly-rootfs "agent-owned /workspace is not writable" \
+  bash -c 'test -d /workspace && ! test -w /workspace'
 assert writable-home "$HOME is writable" touch "$HOME/.probe"
 
 # ── no per-run policy baked in (ADR-013 I1) ─────────────────────────────────
@@ -77,7 +81,14 @@ assert batteries-hooks "settings.batteries.json present" test -s "$HOME/.claude/
 # ── batteries, against the pins the image records from its own ARG lines ───
 # shellcheck disable=SC1091 # inside the image
 . /opt/automata/pins.env
-check node             "v${NODE_VERSION}" node --version
+# An empty pin would turn its `check` into "exits 0" (grep -F "" matches
+# anything), so every pin a check compares against must be set.
+for pin in NODE_VERSION PNPM_VERSION CLAUDE_CODE_VERSION GH_VERSION RUFLO_VERSION \
+  CHROMIUM_VERSION CHROMIUM_REVISION BUN_VERSION FLUTTER_VERSION SOMNIO_VERSION_LINE \
+  ACTIONLINT_VERSION GITLEAKS_VERSION SHELLCHECK_VERSION; do
+  if [ -z "${!pin:-}" ]; then bad pins "$pin is empty in /opt/automata/pins.env"; fi
+done
+check node            "v${NODE_VERSION}" node --version
 check npm              ""              npm --version
 check pnpm             "${PNPM_VERSION}" pnpm --version
 check claude           "${CLAUDE_CODE_VERSION}" claude --version
@@ -108,19 +119,21 @@ fi
 # The per-run Somnio agent-rules step (ADR-013 "Run path") against a checkout
 # that tracks its own CLAUDE.md: install, restore what the repo tracks, exclude
 # the rest. The checkout must end up clean.
+# Chained with && on purpose: bash ignores `set -e` inside a subshell used as
+# an `if` condition, so a failing installer used to fall through to a vacuous
+# "checkout clean" (the CLI wrote nothing, exit 70, read-only adapters dir).
 repo="$(mktemp -d)"
 if (
-  set -e
-  cd "$repo"
-  git init -q .
-  printf '# repo\n' >CLAUDE.md
-  git add CLAUDE.md
-  git -c user.name=v -c user.email=v@v commit -qm init
-  somnio -q rules install --agent claude --project --stacks typescript </dev/null >/dev/null 2>&1
-  git diff --name-only -z | xargs -0r git checkout --
-  git ls-files --others --exclude-standard | sed 's|^|/|' >>.git/info/exclude
-  test -s .claude/rules/typescript/best-practices.md
-  test -z "$(git status --porcelain)"
+  cd "$repo" &&
+    git init -q . &&
+    printf '# repo\n' >CLAUDE.md &&
+    git add CLAUDE.md &&
+    git -c user.name=v -c user.email=v@v commit -qm init &&
+    somnio -q rules install --agent claude --project --stacks typescript </dev/null >/dev/null 2>&1 &&
+    test -s .claude/rules/typescript/best-practices.md &&
+    { git diff --name-only -z | xargs -0r git checkout --; } &&
+    { git ls-files --others --exclude-standard | sed 's|^|/|' >>.git/info/exclude; } &&
+    test -z "$(git status --porcelain)"
 ) >/dev/null 2>&1; then
   ok somnio-rules "installed, tracked files restored, checkout clean"
 else
