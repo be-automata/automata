@@ -56,10 +56,10 @@ describe("slack oauth state", () => {
 
   it("carries the requested workspace", () => {
     const encoded = encodeSlackOAuthState(
-      { ...STATE, teamId: "T09BANGR01" },
+      { ...STATE, teamId: "T09PARTNER1" },
       KEY,
     );
-    expect(decodeSlackOAuthState(encoded, KEY)?.teamId).toBe("T09BANGR01");
+    expect(decodeSlackOAuthState(encoded, KEY)?.teamId).toBe("T09PARTNER1");
   });
 
   it("reads a state minted before the workspace check as any workspace", () => {
@@ -75,16 +75,16 @@ describe("isRequestedSlackTeam", () => {
   it("refuses a token for a workspace other than the one asked for", () => {
     // Slack swaps the hint for the app's home workspace when the app is not
     // distributed; that token must not be saved as the requested workspace.
-    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, "T0AUTOMATA1")).toBe(
+    expect(isRequestedSlackTeam({ teamId: "T09PARTNER1" }, "T0AUTOMATA1")).toBe(
       false,
     );
-    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, undefined)).toBe(
+    expect(isRequestedSlackTeam({ teamId: "T09PARTNER1" }, undefined)).toBe(
       false,
     );
   });
 
   it("accepts the requested workspace, or any when none was named", () => {
-    expect(isRequestedSlackTeam({ teamId: "T09BANGR01" }, "T09BANGR01")).toBe(
+    expect(isRequestedSlackTeam({ teamId: "T09PARTNER1" }, "T09PARTNER1")).toBe(
       true,
     );
     expect(isRequestedSlackTeam({ teamId: null }, "T0AUTOMATA1")).toBe(true);

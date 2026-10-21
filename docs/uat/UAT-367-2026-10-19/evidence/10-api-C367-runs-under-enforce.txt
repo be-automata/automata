@@ -13,7 +13,7 @@ Oct 19 14:11:56 Task run starting
 Oct 19 14:11:56 run start: lane=task repo=be-automata/automata
 Oct 19 14:15:27 Task run completed
 Oct 19 14:15:28 Task run starting
-Oct 19 14:15:28 run start: lane=task repo=bangr-inc/Bangr-Admin-Panel
+Oct 19 14:15:28 run start: lane=task repo=partner-org/admin-panel
 Oct 19 14:16:23 Task run completed
 Oct 19 14:16:24 Task run starting
 Oct 19 14:16:24 run start: lane=review pr=385 repo=be-automata/automata
@@ -34,7 +34,7 @@ Oct 19 14:31:45 Task run starting
 Oct 19 14:31:45 run start: lane=task repo=be-automata/automata
 Oct 19 14:36:02 Task run completed
 Oct 19 15:01:01 Task run starting
-Oct 19 15:01:01 run start: lane=task repo=bangr-inc/bangr-core
+Oct 19 15:01:01 run start: lane=task repo=partner-org/core
 Oct 19 15:01:53 Task run completed
 Oct 19 15:05:16 Task run starting
 Oct 19 15:05:16 run start: lane=review pr=393 repo=be-automata/automata
