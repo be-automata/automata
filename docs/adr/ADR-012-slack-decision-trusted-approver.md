@@ -90,9 +90,13 @@ equally well, so a modal adds friction for honest users and nothing against a se
   payload. What changes is the owner map, not the trust root: an owner or delegate may be named by
   `(slack_team_id, slack_user_id)` instead of by platform user, so a workspace member decides
   without a platform account or an OpenID link.
-- **Routes accepted:** `/api/webhooks/slack` only, exactly as A. The team in the payload must be the
-  workspace bound to the claim's org (`route-fence.ts:33-59`); a click from any other team is
-  refused.
+- **Routes accepted:** `/api/webhooks/slack` only, exactly as A. The existing fence
+  (`route-fence.ts:33-59`) only matches the route kind to the installation: on the platform route
+  it returns an unbound installation, or one whose org has no app of its own, without comparing it
+  to any claim. A′ therefore needs a **new check in the decision handler**: the installation for
+  the payload's team must have an `organizationId` equal to the claim's org. An unbound
+  installation, or one bound to another org, is refused. This matters more under A′ than A,
+  because a Slack-keyed owner entry would otherwise match a click from any workspace.
 - **Setup facts that favour it:** the org's workspace runs the platform app, and the people who
   should decide are workspace members (for example everyone in the org's alerts channel) who will
   not sign in to the platform.
@@ -208,7 +212,8 @@ Phase 15 must ship tests for:
   An unlinked Slack user is refused under A, B and C; under A′ that user decides only when the
   owner map names their `(slack_team_id, slack_user_id)`, and is refused otherwise;
 - under A′, a Slack-keyed owner deciding without a platform account, and the same Slack user id
-  from a different team refused;
+  refused when it arrives from a different team, an unbound installation, or an installation bound
+  to another org;
 - a forged org-route payload naming an owner, refused (A, A′, B, C) or recorded with
   `identity_source = org_app_asserted` (D);
 - a refusal reply that does not leak org membership;
