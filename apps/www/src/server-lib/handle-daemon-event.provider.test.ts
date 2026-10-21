@@ -203,4 +203,3 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
     expect(chat.reattemptQueueAt ?? null).toBeNull();
   });
 });
-

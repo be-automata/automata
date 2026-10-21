@@ -352,20 +352,9 @@ export function providerUnavailableOfChat(
   return parseProviderUnavailableInfo(chat.errorMessageInfo);
 }
 
-const MONTH_LABELS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-] as const;
+const MONTH_LABELS = MONTHS.map(
+  (month) => month.charAt(0).toUpperCase() + month.slice(1),
+);
 
 /** `17:00 UTC on 22 Oct`. */
 export function formatResetUtc(epochMs: number): string {

@@ -451,9 +451,9 @@ describe("resolveResetText — clock edges (#441 refinement)", () => {
   // the runtime's ICU does not ship.
   it("an explicit zone is resolved on the reset's own date (DST)", () => {
     // Europe/Berlin leaves CEST on Sun 25 Oct 2026: 9am CET is 08:00 UTC.
-    expect(
-      resolveResetText("Oct 26, 9am (Europe/Berlin)", NOW),
-    ).toBe(Date.UTC(2026, 9, 26, 8, 0));
+    expect(resolveResetText("Oct 26, 9am (Europe/Berlin)", NOW)).toBe(
+      Date.UTC(2026, 9, 26, 8, 0),
+    );
     // Same date, no zone: UTC, no DST.
     expect(resolveResetText("Oct 26, 9am", NOW)).toBe(
       Date.UTC(2026, 9, 26, 9, 0),

@@ -361,9 +361,7 @@ describe("provider_unavailable notice (#441)", () => {
       "duplicate_at_commit",
     );
     const later = RESET + 86_400_000;
-    expect((await publishReviewNotice(provider(later))).result).toBe(
-      "updated",
-    );
+    expect((await publishReviewNotice(provider(later))).result).toBe("updated");
     expect(github.comments[0]!.body).toContain("17:00 UTC on 23 Oct");
     // An indefinite cause outranks every timed one, and is never undone.
     expect(
