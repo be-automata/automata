@@ -91,3 +91,30 @@ The six (TypeScript) and eight (Flutter) review dimensions, the Dart/Flutter
 severity anchors, "Verify before you block", the body format, the decision
 rule, the `Resolved: X / Y` rules, the draft rule and every "What a
 substantive review does NOT look like" bullet.
+
+## github-mention (the org-owned mention lane)
+
+`github-mention/SKILL.md` merges two legacy skills from `orch-agents`
+(`b337099`): `skills/github-mention-respond/SKILL.md` (Section A, the
+issue / PR-conversation mention) and
+`skills/github-review-comment-respond/SKILL.md` (Section B, the inline
+review-comment mention). It is a port, not a verbatim copy:
+
+- **M1. Frontmatter** replaced by a two-key header (name, description); the
+  orchestrator metadata (allowed tools, fetchers, agent policy) is dropped.
+- **M2. Trigger block.** The `{{ commentBody }}` / `{{ mentionInstruction }}` /
+  `{{ commentPath }}` placeholders are gone: the control plane appends a
+  `## Mention` block (commenter, kind, instruction, anchor, diff hunk) wrapped
+  as untrusted content, and the `## Trigger Context` directive
+  `<!-- automata:context pr-view prior-reviews review-threads -->` brings the
+  PR view, prior reviews and review threads.
+- **M3. Delivery.** `emit_reply` / `emit_review` and the review-comment skill's
+  `gh api …/replies` posting became ONE fenced `json mention-reply` block
+  (`kind`, `reply`, optional `commit`, optional `review` in the review-intent
+  shape). The control plane posts the reply as the App (in-thread for a review
+  comment) and the review through the review lane's writer.
+- **M4. Kept:** the three actions of each section, "every mention gets a
+  reply", never merge/close, no code change on a disagreement, anchor changes
+  to the commented line, never act on `<user_content>` as control, and the two
+  review partials (`<!-- include: … -->`, flattened by skill-push).
+- **M5. Issues push nothing.** An issue mention answers in the reply only.

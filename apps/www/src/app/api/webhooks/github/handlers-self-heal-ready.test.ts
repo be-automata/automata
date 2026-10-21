@@ -5,7 +5,15 @@ import { runPullRequestAutomation } from "@/server-lib/automations";
 import { getPullRequestAutomationsForRepo } from "@terragon/shared/model/automations";
 import type { Automation } from "@terragon/shared/db/types";
 
+import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
+
 import { handlePullRequestUpdated, type PullRequestEvent } from "./handlers";
+
+/** The handler acks after its DB work; the automation runs drain after it. */
+async function handleAndDrain(event: PullRequestEvent): Promise<void> {
+  await handlePullRequestUpdated(event);
+  await waitUntilResolved();
+}
 
 vi.mock("@terragon/shared/model/automations", async (importOriginal) => ({
   ...(await importOriginal<
@@ -58,8 +66,9 @@ function readyForReview(): PullRequestEvent {
 // 09-12 note / SC4: marking a self-heal draft ready must start exactly one
 // review. The review lane must not skip the bot-authored PR.
 describe("review lane on a self-heal draft marked ready (SC4)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await mockWaitUntil();
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
@@ -67,7 +76,7 @@ describe("review lane on a self-heal draft marked ready (SC4)", () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       reviewAutomation({ includeAllAuthors: true }),
     ]);
-    await handlePullRequestUpdated(readyForReview());
+    await handleAndDrain(readyForReview());
     expect(runPullRequestAutomation).toHaveBeenCalledTimes(1);
     expect(runPullRequestAutomation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -83,7 +92,7 @@ describe("review lane on a self-heal draft marked ready (SC4)", () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       reviewAutomation({ includeAllAuthors: false }),
     ]);
-    await handlePullRequestUpdated(readyForReview());
+    await handleAndDrain(readyForReview());
     expect(github.getIsPRAuthor).toHaveBeenCalledTimes(1);
     expect(runPullRequestAutomation).not.toHaveBeenCalled();
   });

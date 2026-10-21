@@ -14,6 +14,7 @@ import {
   markThreadTerminal,
 } from "@terragon/shared/model/threads";
 import { revokeDaemonTokensForThread } from "@/lib/daemon-token";
+import { mapLimit } from "@/lib/map-limit";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
@@ -221,23 +222,6 @@ async function decide(
     default:
       return assertNever(status);
   }
-}
-
-/** Run `fn` over `items` with at most `limit` in flight. */
-async function mapLimit<T>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) {
-        const item = items[next++]!;
-        await fn(item);
-      }
-    }),
-  );
 }
 
 export async function runSupersedeSweep(

@@ -4,7 +4,15 @@ import { runPullRequestAutomation } from "@/server-lib/automations";
 import { getPullRequestAutomationsForRepo } from "@terragon/shared/model/automations";
 import type { Automation } from "@terragon/shared/db/types";
 
+import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
+
 import { handlePullRequestUpdated, type PullRequestEvent } from "./handlers";
+
+/** The handler acks after its DB work; the automation runs drain after it. */
+async function handleAndDrain(event: PullRequestEvent): Promise<void> {
+  await handlePullRequestUpdated(event);
+  await waitUntilResolved();
+}
 
 /**
  * `filter.excludeBotSenders` (legacy-orchestrator parity): a bot's push or
@@ -75,8 +83,9 @@ const APP = { login: "automata-ai-bot[bot]", type: "Bot" as const };
 const HUMAN = { login: "dev", type: "User" as const };
 
 describe("excludeBotSenders", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await mockWaitUntil();
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
@@ -84,8 +93,8 @@ describe("excludeBotSenders", () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       automation({ includeAllAuthors: true, excludeBotSenders: true }),
     ]);
-    await handlePullRequestUpdated(event("opened", DEPENDABOT));
-    await handlePullRequestUpdated(event("synchronize", APP));
+    await handleAndDrain(event("opened", DEPENDABOT));
+    await handleAndDrain(event("synchronize", APP));
     expect(runPullRequestAutomation).not.toHaveBeenCalled();
   });
 
@@ -93,8 +102,8 @@ describe("excludeBotSenders", () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       automation({ includeAllAuthors: true, excludeBotSenders: true }),
     ]);
-    await handlePullRequestUpdated(event("synchronize", HUMAN));
-    await handlePullRequestUpdated(event("ready_for_review", APP));
+    await handleAndDrain(event("synchronize", HUMAN));
+    await handleAndDrain(event("ready_for_review", APP));
     expect(runPullRequestAutomation).toHaveBeenCalledTimes(2);
   });
 
@@ -102,7 +111,7 @@ describe("excludeBotSenders", () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       automation({ includeAllAuthors: true }),
     ]);
-    await handlePullRequestUpdated(event("synchronize", DEPENDABOT));
+    await handleAndDrain(event("synchronize", DEPENDABOT));
     expect(runPullRequestAutomation).toHaveBeenCalledTimes(1);
   });
 });

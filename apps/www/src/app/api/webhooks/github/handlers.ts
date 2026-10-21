@@ -8,6 +8,7 @@ import {
 } from "@/lib/github";
 import { getGithubPR } from "@terragon/shared/model/github";
 import { handleAppMention } from "./handle-app-mention";
+import { handleOrgLaneMention, isOrgLaneRepo } from "./org-mention-lane";
 import { resolveReviewDraftPolicy } from "@/server-lib/review/resolve-review-draft-policy";
 import {
   isAppMentioned,
@@ -43,6 +44,8 @@ import { resolveBotLogin } from "@/server-lib/review/bot-login";
 import { normalizeLabel } from "@/server-lib/audit/render-issue";
 import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
+import { waitUntil } from "@/lib/wait-until";
+import { mapLimit } from "@/lib/map-limit";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -163,34 +166,54 @@ export async function handlePullRequestUpdated(
         ),
       );
     }
-    // Process each automation
-    for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-      const batch = automations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((automation) =>
-          handlePullRequestAutomation(event, automation, deliveryId),
-        ),
-      );
-      const failed = results.filter((result) => result.status === "rejected");
-      const succeeded = results.filter(
-        (result) => result.status === "fulfilled",
-      );
-      console.log(
-        `Successfully handled ${succeeded.length} pull request automations`,
-      );
-      if (failed.length > 0) {
-        console.error(
-          `Error handling ${failed.length} pull request automations: ${failed.map((result) => result.reason).join(", ")}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    // Ack fast. Every automation run makes many sequential GitHub round trips
+    // (App token mints, the PR read, the skill override, the review-context
+    // prefetch) and creates a thread; awaited inline they outran GitHub's 10s
+    // delivery timeout, which GitHub records as a failure and never retries.
+    // The response never depended on them (this handler swallows every
+    // error), so they run after it. Idempotency is unchanged: the delivery id
+    // still reaches the dispatch, and the desired head above is already
+    // durable before the ack.
+    waitUntil(
+      runPullRequestAutomations(event, automations, deliveryId).catch(
+        (error) => {
+          console.error("Error handling pull request updated event:", error);
+        },
+      ),
+    );
   } catch (error) {
     console.error("Error handling pull request updated event:", error);
   }
 }
 
 const BATCH_SIZE = 5;
+const AUTOMATION_CONCURRENCY = 5;
+
+async function runPullRequestAutomations(
+  event: PullRequestEvent,
+  automations: Automation[],
+  deliveryId: string | undefined,
+): Promise<void> {
+  // All of this shares ONE waitUntil budget (on Workers, 30s after the
+  // response), so no pause between runs and no lock-step batches: at most
+  // AUTOMATION_CONCURRENCY in flight, a free lane takes the next at once.
+  const failures: unknown[] = [];
+  await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    try {
+      await handlePullRequestAutomation(event, automation, deliveryId);
+    } catch (error) {
+      failures.push(error);
+    }
+  });
+  console.log(
+    `Successfully handled ${automations.length - failures.length} pull request automations`,
+  );
+  if (failures.length > 0) {
+    console.error(
+      `Error handling ${failures.length} pull request automations: ${failures.join(", ")}`,
+    );
+  }
+}
 
 async function handlePullRequestAutomation(
   event: PullRequestEvent,
@@ -351,6 +374,25 @@ export async function handleIssueCommentEvent(
       );
       return;
     }
+    // The org-owned mention lane owns every mention on a repo that enabled it
+    // (orgLane github_mention automation); the per-user path below is skipped.
+    if (
+      await handleOrgLaneMention({
+        repoFullName,
+        installationId: installationIdOf(event),
+        isPullRequest: issueType === "pull_request",
+        issueOrPrNumber: issueNumber,
+        commentKind: "issue",
+        comment: {
+          id: event.comment.id,
+          body: commentBody,
+          authorAssociation: event.comment.author_association,
+          user: { login: commentUsername, type: event.comment.user.type },
+        },
+      })
+    ) {
+      return;
+    }
     console.log(
       `Processing app mention in comment on ${issueType} #${issueNumber} in ${repoFullName} by ${commentUsername}`,
     );
@@ -406,6 +448,27 @@ export async function handlePullRequestReviewCommentEvent(
       console.log(
         `Review comment on PR #${prNumber} in ${repoFullName} does not mention the app`,
       );
+      return;
+    }
+    if (
+      await handleOrgLaneMention({
+        repoFullName,
+        installationId: installationIdOf(event),
+        isPullRequest: true,
+        issueOrPrNumber: prNumber,
+        commentKind: "review_comment",
+        comment: {
+          id: event.comment.id,
+          body: commentBody,
+          authorAssociation: event.comment.author_association,
+          user: { login: commentUsername, type: event.comment.user.type },
+          path: event.comment.path,
+          line: event.comment.line ?? event.comment.original_line ?? null,
+          diffHunk: event.comment.diff_hunk,
+          inReplyToId: event.comment.in_reply_to_id ?? null,
+        },
+      })
+    ) {
       return;
     }
     console.log(
@@ -476,6 +539,14 @@ export async function handlePullRequestReviewEvent(
     if (!reviewBody || !isAppMentioned(reviewBody)) {
       console.log(
         `Review on PR #${prNumber} in ${repoFullName} does not mention the app or has no body`,
+      );
+      return;
+    }
+    // The org lane answers comments only (legacy parity): a review BODY on a
+    // repo that enabled it is neither answered nor sent down the per-user path.
+    if (await isOrgLaneRepo(repoFullName)) {
+      console.log(
+        `[org-mention] skip: review body mention on PR #${prNumber} in ${repoFullName} (org lane answers comments only)`,
       );
       return;
     }

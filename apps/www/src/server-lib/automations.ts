@@ -24,6 +24,7 @@ import {
 import {
   AccessTier,
   DBUserMessage,
+  MentionLaneStamp,
   ThreadTrustContext,
 } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
@@ -67,6 +68,7 @@ import {
   NO_PR_REVIEW_CONTEXT,
   prefetchReviewContextForPr,
 } from "./review/prefetch-review-context";
+import type { RestPullRequestLike } from "@terragon/review/context/render";
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -106,6 +108,12 @@ export async function runAutomation({
     prBaseBranchName?: string;
     transformMessage?: (message: DBUserMessage) => DBUserMessage;
     prNumber?: number;
+    /**
+     * The PR the caller already read (`pulls.get`), when it did: the
+     * review-context prefetch renders its pr-view block from it rather than
+     * reading the same PR again.
+     */
+    pullRequest?: RestPullRequestLike;
     issueNumber?: number;
     /**
      * Server-derived PR trust snapshot (ADR-005 §3a, #82) — captured by the
@@ -126,8 +134,11 @@ export async function runAutomation({
      * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
      * at thread creation, so the fix attempt travels with the thread. Applies
      * to skill_message automations only; ignored for user_message.
+     * `mention` (the org-owned mention lane) also turns git checkpointing off
+     * for the thread: the agent pushes its own fix to the PR head, and the
+     * lane never auto-commits or opens a pull request.
      */
-    stampExtra?: { selfHealAttemptId: string };
+    stampExtra?: { selfHealAttemptId?: string; mention?: MentionLaneStamp };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -184,21 +195,36 @@ export async function runAutomation({
         // message — so an accepted edit is live on the next run and in-flight
         // threads are untouched by construction.
         const { skillName, version, model } = automation.action.config;
-        const resolved = await resolveReviewSkill({
-          db,
-          organizationId: automation.organizationId,
-          repoFullName: automation.repoFullName,
-          skillName,
-          version,
-          // Tier 0 (#54 C5): the repo's committed override, DEFAULT branch
-          // only (fetchRepoSkillOverride passes no ref by construction). Any
-          // failure degrades to the DB tiers — see buildRepoOverrideFetcher.
-          fetchRepoOverride: buildRepoOverrideFetcher({
-            userId: automation.userId,
+        // Review-mode sections (phase 6) are opt-in and github-ops only. A PR
+        // review (the same predicate dispatch's isReviewThread uses) renders
+        // the mode the Phase 4 resolver picks; anything else renders classic;
+        // every other skill gets its body verbatim. The render happens per
+        // thread creation (per push), so flipping a repo back to classic
+        // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
+        // Independent of the skill body, so resolved alongside it.
+        const [resolved, reviewPrompt] = await Promise.all([
+          resolveReviewSkill({
+            db,
+            organizationId: automation.organizationId,
             repoFullName: automation.repoFullName,
             skillName,
+            version,
+            // Tier 0 (#54 C5): the repo's committed override, DEFAULT branch
+            // only (fetchRepoSkillOverride passes no ref by construction). Any
+            // failure degrades to the DB tiers — see buildRepoOverrideFetcher.
+            fetchRepoOverride: buildRepoOverrideFetcher({
+              userId: automation.userId,
+              repoFullName: automation.repoFullName,
+              skillName,
+            }),
           }),
-        });
+          resolveRenderedReviewPrompt({
+            automation,
+            skillName,
+            prNumber: options?.prNumber,
+            trustContext: options?.trustContext ?? null,
+          }),
+        ]);
         if (!resolved) {
           // Defaultless skill with no usable version: skipping the run loudly
           // beats dispatching an agent with an empty instruction.
@@ -215,26 +241,6 @@ export async function runAutomation({
         const baseBranchName = options?.branchName ?? automation.branchName;
         const reviewDiffBase =
           options?.prBaseBranchName ?? automation.branchName;
-        // Review-mode sections (phase 6) are opt-in and github-ops only. A PR
-        // review (the same predicate dispatch's isReviewThread uses) renders
-        // the mode the Phase 4 resolver picks; anything else renders classic;
-        // every other skill gets its body verbatim. The render happens per
-        // thread creation (per push), so flipping a repo back to classic
-        // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
-        let reviewPrompt: ReviewPromptMode | undefined;
-        if (skillName === "github-ops") {
-          reviewPrompt =
-            automation.triggerType === "pull_request" &&
-            automation.organizationId &&
-            options?.prNumber !== undefined
-              ? await resolveReviewPromptMode({
-                  db,
-                  organizationId: automation.organizationId,
-                  repoFullName: automation.repoFullName,
-                  trustContext: options?.trustContext ?? null,
-                })
-              : CLASSIC_REVIEW_PROMPT;
-        }
         const orchestratedApplied =
           reviewPrompt?.mode === "orchestrated" &&
           hasReviewModeSections(resolved.body);
@@ -256,6 +262,7 @@ export async function runAutomation({
                     repoFullName: automation.repoFullName,
                     prNumber: options.prNumber,
                     fetchers: contextFetchers,
+                    pullRequest: options.pullRequest,
                   })
                 : NO_PR_REVIEW_CONTEXT,
             )
@@ -292,15 +299,20 @@ export async function runAutomation({
             ...(orchestratedApplied
               ? { reviewPromptMode: "orchestrated" as const }
               : {}),
-            ...(options?.stampExtra
+            ...(options?.stampExtra?.selfHealAttemptId
               ? { selfHealAttemptId: options.stampExtra.selfHealAttemptId }
+              : {}),
+            ...(options?.stampExtra?.mention
+              ? { mention: options.stampExtra.mention }
               : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
-          disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
+          disableGitCheckpointing:
+            options?.stampExtra?.mention !== undefined ||
+            (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
         });
@@ -346,6 +358,40 @@ export async function runAutomation({
     });
     return undefined;
   }
+}
+
+/**
+ * The review-prompt mode a skill_message thread renders: undefined for any
+ * skill but github-ops (its body stays verbatim), the resolved mode for an
+ * org's PR review, classic otherwise.
+ */
+async function resolveRenderedReviewPrompt({
+  automation,
+  skillName,
+  prNumber,
+  trustContext,
+}: {
+  automation: Automation;
+  skillName: string;
+  prNumber: number | undefined;
+  trustContext: ThreadTrustContext | null;
+}): Promise<ReviewPromptMode | undefined> {
+  if (skillName !== "github-ops") {
+    return undefined;
+  }
+  if (
+    automation.triggerType !== "pull_request" ||
+    !automation.organizationId ||
+    prNumber === undefined
+  ) {
+    return CLASSIC_REVIEW_PROMPT;
+  }
+  return resolveReviewPromptMode({
+    db,
+    organizationId: automation.organizationId,
+    repoFullName: automation.repoFullName,
+    trustContext,
+  });
 }
 
 export async function validateCanRunAutomation({
@@ -646,32 +692,29 @@ export async function runPullRequestAutomation({
   // is suppressed downstream in runAutomation → createNewThread).
   const shadow = await isAutomationShadow(automation.organizationId);
   const [owner, repo] = parseRepoFullName(repoFullName);
-  if (!shadow) {
-    // Add eyes reaction to the PR
-    await addEyesReactionToPullRequest({
-      owner,
-      repo,
-      issueNumber: prNumber,
-    });
-  }
-
-  // Check if GitHub checks should be created for automations
-  // Only create checks if the feature flag is enabled AND the automation owner is the PR author
-  const [shouldCreateGitHubChecks, isPRAuthor] = await Promise.all([
+  // Independent, so concurrent: the eyes reaction (never throws), the checks
+  // flag, and the PR read everything below is derived from.
+  const [shouldCreateGitHubChecks, prRead] = await Promise.all([
     getFeatureFlagForUser({
       db,
       userId,
       flagName: "createGitHubChecksForAutomations",
     }),
-    getIsPRAuthor({
-      userId,
-      repoFullName,
-      prNumber,
-    }),
+    readPullRequest({ userId, repoFullName, prNumber }),
+    shadow
+      ? undefined
+      : addEyesReactionToPullRequest({ owner, repo, issueNumber: prNumber }),
   ]);
 
+  // Only create checks if the feature flag is enabled AND the automation owner
+  // is the PR author. The author lookup costs GitHub round trips, so it runs
+  // only when its answer can matter.
   let checkRunId: number | null = null;
-  if (!shadow && shouldCreateGitHubChecks && isPRAuthor) {
+  if (
+    !shadow &&
+    shouldCreateGitHubChecks &&
+    (await getIsPRAuthor({ userId, repoFullName, prNumber }))
+  ) {
     checkRunId = await createGitHubCheckRunForAutomation({
       userId,
       automationId,
@@ -680,18 +723,14 @@ export async function runPullRequestAutomation({
   }
 
   try {
-    // Background-capable token: falls back to the App installation token when the
-    // automation owner has no GitHub identity (e.g. an email/password org owner).
-    const octokit = await getOctokitForBackground({ userId, repoFullName });
-    const pr = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: prNumber,
-    });
-    const branchName = pr.data.head.ref;
+    if (!prRead.ok) {
+      throw prRead.error;
+    }
+    const pr = prRead.data;
+    const branchName = pr.head.ref;
     // #125 C5: the SHA this run reviews, from the SAME read — stamped on the
     // thread (reviewedSha) so the recheck reconciliation never re-reads GitHub.
-    const headSha = pr.data.head.sha;
+    const headSha = pr.head.sha;
     // Server-derived trust snapshot (ADR-005 §3a, #82): captured HERE, from the
     // EXISTING pulls.get read (no new webhook/API call, no extra round trip),
     // for BOTH source: "automated" and "manual" — runs unconditionally.
@@ -700,15 +739,12 @@ export async function runPullRequestAutomation({
     // Phase 4: isCrossRepo comes from the SAME read and covers a same-owner,
     // non-fork head in another repo that `fork` alone misses. Missing head or
     // base repo data fails closed (true).
-    const headFullName = pr.data.head?.repo?.full_name?.toLowerCase();
-    const baseFullName = pr.data.base?.repo?.full_name?.toLowerCase();
     const trustContext: ThreadTrustContext = {
       source: "github-pr",
-      isFork: pr.data.head?.repo?.fork ?? true,
-      authorAssociation: pr.data.author_association ?? "NONE",
+      isFork: pr.head?.repo?.fork ?? true,
+      authorAssociation: pr.author_association ?? "NONE",
       capturedAt: new Date().toISOString(),
-      isCrossRepo:
-        headFullName && baseFullName ? headFullName !== baseFullName : true,
+      isCrossRepo: isCrossRepoPull(pr),
     };
 
     // #165 (ADR-007): www owns NO supersession path. Prior review threads of
@@ -730,8 +766,11 @@ export async function runPullRequestAutomation({
         // the automation's configured branch (the resolver's fallback), not
         // throw inside this try and silently skip the whole run — exactly
         // what a base-less test fixture did to the shadow suite.
-        prBaseBranchName: pr.data.base?.ref,
+        prBaseBranchName: pr.base?.ref,
         prNumber,
+        // The review-context prefetch renders its pr-view block from this
+        // read instead of fetching the same PR again.
+        pullRequest: pr,
         trustContext,
         transformMessage: (message: DBUserMessage) => {
           return {
@@ -779,6 +818,59 @@ export async function runPullRequestAutomation({
     }
     return false;
   }
+}
+
+type PullRequestData = Awaited<
+  ReturnType<
+    Awaited<ReturnType<typeof getOctokitForBackground>>["rest"]["pulls"]["get"]
+  >
+>["data"];
+
+/**
+ * The PR read a pull-request run derives its branch, head SHA and trust
+ * snapshot from. Settled rather than thrown, so it can run concurrently with
+ * the eyes reaction and the checks flag and still fail inside the caller's
+ * try, where a check run is closed out.
+ */
+async function readPullRequest({
+  userId,
+  repoFullName,
+  prNumber,
+}: {
+  userId: string;
+  repoFullName: string;
+  prNumber: number;
+}): Promise<
+  { ok: true; data: PullRequestData } | { ok: false; error: unknown }
+> {
+  try {
+    const [owner, repo] = parseRepoFullName(repoFullName);
+    // Background-capable token: falls back to the App installation token when the
+    // automation owner has no GitHub identity (e.g. an email/password org owner).
+    const octokit = await getOctokitForBackground({ userId, repoFullName });
+    const { data } = await octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: prNumber,
+    });
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/**
+ * True when a PR's head lives in another repository than its base (a fork, or
+ * a same-owner repo) — compared case-insensitively. Missing head or base repo
+ * data (e.g. a deleted fork) fails closed: true.
+ */
+export function isCrossRepoPull(pull: {
+  head?: { repo?: { full_name?: string | null } | null } | null;
+  base?: { repo?: { full_name?: string | null } | null } | null;
+}): boolean {
+  const head = pull.head?.repo?.full_name?.toLowerCase();
+  const base = pull.base?.repo?.full_name?.toLowerCase();
+  return head && base ? head !== base : true;
 }
 
 /**

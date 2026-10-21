@@ -17,9 +17,11 @@ import { describe, test } from "node:test";
 import {
   OnboardArgsError,
   REVIEW_MAX_TURNS,
+  buildMentionAutomation,
   buildReviewAutomation,
   buildReviewSettingsPatch,
   diffFields,
+  mentionAutomationName,
   parseOnboardArgs,
   reviewAutomationName,
   stableStringify,
@@ -66,6 +68,7 @@ describe("parseOnboardArgs", () => {
   test("--enable / --disable alone is a flip, nothing else", () => {
     assert.deepEqual(parse("--enable"), {
       kind: "flip",
+      lane: "review",
       orgSlug: "example-org",
       repoFullName: "example-owner/example-repo",
       skillName: "flutter-pr-review",
@@ -176,6 +179,96 @@ describe("rows a configure run writes", () => {
         model: "opus",
       }).triggerConfig.filter.includeDraftPRs,
       false,
+    );
+  });
+});
+
+describe("--mention (the org-owned mention lane)", () => {
+  const MENTION = ["example-org", "acme/widgets", "github-mention"];
+  const parseMention = (...extra: string[]) =>
+    parseOnboardArgs([...MENTION, ...extra], ALLOWED);
+
+  test("configure needs only --model; created disabled unless --enable", () => {
+    assert.deepEqual(parseMention("--mention", "--model", "opus"), {
+      kind: "configure-mention",
+      orgSlug: "example-org",
+      repoFullName: "acme/widgets",
+      skillName: "github-mention",
+      model: "opus",
+      enabled: undefined,
+      dryRun: false,
+    });
+    const on = parseMention("--model", "sonnet", "--mention", "--enable");
+    assert.equal(on.kind, "configure-mention");
+    assert.equal(on.kind === "configure-mention" && on.enabled, true);
+  });
+
+  test("--mention with --enable/--disable alone flips the mention automation", () => {
+    assert.deepEqual(parseMention("--mention", "--disable", "--dry-run"), {
+      kind: "flip",
+      lane: "mention",
+      orgSlug: "example-org",
+      repoFullName: "acme/widgets",
+      skillName: "github-mention",
+      enabled: false,
+      dryRun: true,
+    });
+  });
+
+  test("rejects review-lane flags, unknown models and an empty run", () => {
+    const cases: [string[], RegExp][] = [
+      [
+        ["--mention", "--model", "opus", "--tolerance", "info"],
+        /--tolerance is a review-lane flag/,
+      ],
+      [
+        ["--mention", "--model", "opus", "--drafts"],
+        /--drafts is a review-lane flag/,
+      ],
+      [["--mention", "--model", "gpt-4"], /not a known model: gpt-4/],
+      [["--mention"], /Nothing to do/],
+      [
+        ["--mention", "--model", "opus", "--mentions"],
+        /Unknown flag: --mentions/,
+      ],
+    ];
+    for (const [extra, message] of cases) {
+      assert.throws(
+        () => parseMention(...extra),
+        (err: unknown) =>
+          err instanceof OnboardArgsError && message.test(err.message),
+        extra.join(" "),
+      );
+    }
+  });
+
+  test("automation: org-lane github_mention, skill_message with model, no checkpointing", () => {
+    assert.equal(
+      mentionAutomationName("github-mention"),
+      "GitHub mention (github-mention)",
+    );
+    assert.deepEqual(
+      buildMentionAutomation({
+        repoFullName: "acme/Widgets",
+        skillName: "github-mention",
+        model: "opus",
+      }),
+      {
+        name: "GitHub mention (github-mention)",
+        triggerType: "github_mention",
+        triggerConfig: { filter: { orgLane: true } },
+        repoFullName: "acme/Widgets",
+        branchName: "main",
+        action: {
+          type: "skill_message",
+          config: {
+            skillName: "github-mention",
+            version: "latest",
+            model: "opus",
+          },
+        },
+        disableGitCheckpointing: true,
+      },
     );
   });
 });

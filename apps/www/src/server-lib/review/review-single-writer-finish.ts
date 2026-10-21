@@ -19,10 +19,7 @@ import {
   createOctokitThreadClient,
   getPrHeadState,
 } from "./octokit-review-client";
-import {
-  THREAD_RESOLUTION_CLAIM_TTL_SECONDS,
-  threadResolutionClaimKey,
-} from "./review-thread-resolutions";
+import { claimThreadResolution } from "./review-thread-resolutions";
 import {
   executeReviewFromIntent,
   type ReviewFromIntentOutcome,
@@ -444,18 +441,7 @@ export async function handleReviewEffectAtFinish({
         // resolved once, by the terminal writer, under a (thread, commit) claim.
         threadResolutions: {
           client: createOctokitThreadClient(octokit, repoFullName),
-          // Redis is loaded only when a claim is actually taken: most reviews
-          // resolve nothing, and the finish hook must not need a Redis client
-          // just to be imported.
-          claim: async (commit) => {
-            const { redis } = await import("@/lib/redis");
-            const taken = await redis.set(
-              threadResolutionClaimKey(threadId, commit),
-              "1",
-              { nx: true, ex: THREAD_RESOLUTION_CLAIM_TTL_SECONDS },
-            );
-            return taken === "OK";
-          },
+          claim: (commit) => claimThreadResolution(threadId, commit),
         },
         // Same two degraded-path gates as the sweep: a run that produced no
         // parseable intent must not stamp a warning onto a head it was never

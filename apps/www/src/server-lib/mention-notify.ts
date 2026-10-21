@@ -1,8 +1,15 @@
 import { eq } from "drizzle-orm";
 import * as schema from "@terragon/shared/db/schema";
-import { ThreadErrorType } from "@terragon/shared";
+import { MentionLaneStamp, ThreadErrorType } from "@terragon/shared";
 import { DB } from "@terragon/shared/db";
+import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import { effectiveShadow } from "@/lib/github-side-effects";
+import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
+import {
+  mentionReplyMarker,
+  replyToMention,
+} from "@/server-lib/review/mention-target-reply";
 
 /**
  * #163: when a github-mention thread's boot fails, the person who mentioned
@@ -35,11 +42,23 @@ export async function notifyMentionSourceOfFailure({
       .select({
         sourceType: schema.thread.sourceType,
         sourceMetadata: schema.thread.sourceMetadata,
+        organizationId: schema.thread.organizationId,
       })
       .from(schema.thread)
       .where(eq(schema.thread.id, threadId))
       .limit(1);
 
+    if (row && isMentionLaneStamp(row.sourceMetadata)) {
+      // Same gate as the lane's intake and finish writer: a shadow-mode
+      // installation (or side effects off) never gets a visible comment.
+      const mode = await getOrganizationInstallationMode({
+        db,
+        organizationId: row.organizationId,
+      });
+      if (effectiveShadow(mode)) return;
+      await notifyOrgLaneMention(row.sourceMetadata.mention, errorType);
+      return;
+    }
     if (!row || row.sourceType !== "github-mention") {
       return;
     }
@@ -84,4 +103,23 @@ export async function notifyMentionSourceOfFailure({
   } catch (error) {
     console.error("[mention-notify] failed", { threadId, error });
   }
+}
+
+/**
+ * The org-owned mention lane's boot-failure reply. It carries the lane's reply
+ * marker, so a later finish of the same thread never answers twice.
+ */
+async function notifyOrgLaneMention(
+  stamp: MentionLaneStamp,
+  errorType: ThreadErrorType,
+): Promise<void> {
+  const [owner, repo] = parseRepoFullName(stamp.repoFullName);
+  const octokit = await getOctokitForApp({ owner, repo });
+  await replyToMention({
+    octokit,
+    stamp,
+    body:
+      `⚠️ I couldn't start on this request (\`${errorType}\`). Mention me again to retry.` +
+      `\n\n${mentionReplyMarker(stamp.commentId)}`,
+  });
 }

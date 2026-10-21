@@ -202,8 +202,8 @@ describe("GET/PUT /api/repo-skills/[owner]/[repo]/[skill]", () => {
   });
 
   it("422 when a non-registry skill body is empty (default validator)", async () => {
-    const res = await PUT(putReq("github-mention", { body: "   \n" }), {
-      params: params("github-mention"),
+    const res = await PUT(putReq("github-deep-research", { body: "   \n" }), {
+      params: params("github-deep-research"),
     });
     expect(res.status).toBe(422);
     expect(createRepoSkillVersion).not.toHaveBeenCalled();

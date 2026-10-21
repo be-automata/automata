@@ -550,6 +550,54 @@ export function assertAuditFixSkillContract(
 }
 
 /**
+ * The org-owned mention lane's fixed skill name. Like the other lanes the
+ * BODY pushed under this name is what a repo's mentions run.
+ */
+export const MENTION_SKILL_NAME = "github-mention";
+
+/**
+ * The kind of the one block a mention run emits. The opener is three
+ * backticks, `json`, a space, then this kind (mention-reply-finish.ts).
+ */
+export const MENTION_REPLY_KIND = "mention-reply";
+
+/**
+ * Contract check for the mention skill: the control plane posts only what the
+ * agent emits in a fenced json `mention-reply` block, so a body that cannot
+ * teach that block would answer every mention with the "couldn't complete"
+ * notice. indexOf, not one regex (a repo-controlled override body).
+ */
+export function assertMentionSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  const fence = body.indexOf("```json");
+  const kind = fence < 0 ? -1 : body.indexOf(`"${MENTION_REPLY_KIND}"`, fence);
+  if (kind < 0 || body.indexOf("```", kind) < 0) {
+    throw new Error(
+      `Mention skill from ${sourceLabel} has no fenced-json ` +
+        `"${MENTION_REPLY_KIND}" contract — wrong content or a truncated ` +
+        `skill. Refusing to dispatch a mention whose reply could not be parsed.`,
+    );
+  }
+}
+
+/** The automation-skill stamp of a mention-lane thread. */
+export type MentionLaneThreadStamp = AutomationSkillStamp & {
+  mention: NonNullable<AutomationSkillStamp["mention"]>;
+};
+
+/** True for a thread the org-owned mention lane started. */
+export function isMentionLaneStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is MentionLaneThreadStamp {
+  return (
+    sourceMetadata?.type === "automation-skill" &&
+    sourceMetadata.mention !== undefined
+  );
+}
+
+/**
  * Per-skill body validators — THE single registry shared by every surface that
  * accepts or dispatches a skill body: the resolver (read side,
  * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
@@ -578,6 +626,7 @@ const SKILL_VALIDATORS: Record<
   [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
   [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
   [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,
+  [MENTION_SKILL_NAME]: assertMentionSkillContract,
 };
 
 export function validateSkillBody(
