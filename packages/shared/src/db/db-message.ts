@@ -185,6 +185,13 @@ export type DBRateLimitMetaMessage = {
   /** Epoch SECONDS, as the CLI sends it; null when absent. */
   resetsAt: number | null;
   utilization: number | null;
+  /**
+   * True when paid overage covers the overflow, so a `rejected` status did
+   * not refuse the run (the CLI's own `isUsingOverage || overageInUse ||
+   * overageStatus allowed*` reading). Optional: rows stored before it are
+   * read as not covered.
+   */
+  overageCovered?: boolean;
   session_id: string | null;
 };
 

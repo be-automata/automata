@@ -251,10 +251,17 @@ export type ClaudeMessage =
       session_id: string;
     }
 
-  // The CLI's rate-limit state for the subscription it runs on. A `rejected`
-  // status means the run was refused by a usage limit (#441). Every field
-  // inside is optional: the CLI owns this shape, and a missing field must
-  // degrade to "unknown", never to a parse failure.
+  // The CLI's rate-limit state for the subscription it runs on (#441). The
+  // shape is the Agent SDK's `SDKRateLimitEvent` / `SDKRateLimitInfo`
+  // (sdk.d.ts, @anthropic-ai/claude-agent-sdk 0.3.x; the same zod enum ships
+  // in the box's claude-code 2.1.284): `status` is
+  // `allowed | allowed_warning | rejected`, `rateLimitType` is `five_hour |
+  // seven_day | seven_day_opus | seven_day_sonnet | seven_day_overage_included
+  // | overage`, `resetsAt` is unix epoch SECONDS. A `rejected` status while
+  // overage covers the overflow (`isUsingOverage` / `overageInUse`, or
+  // `overageStatus` allowed*) does not refuse the run. Every field stays
+  // optional here: the CLI owns this shape, and a missing field must degrade
+  // to "unknown", never to a parse failure.
   | {
       type: "rate_limit_event";
       rate_limit_info?: {
@@ -263,6 +270,9 @@ export type ClaudeMessage =
         resetsAt?: number;
         rateLimitType?: string;
         utilization?: number;
+        overageStatus?: string;
+        isUsingOverage?: boolean;
+        overageInUse?: boolean;
       };
       session_id?: string;
     }

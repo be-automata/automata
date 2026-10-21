@@ -25,10 +25,13 @@ import {
  *    re-reads the same silent run adds nothing.
  *  - A VERDICT RETIRES THE NOTICE: once a real review posts at HEAD the notice
  *    is deleted, so a PR never shows "no verdict" next to a verdict.
- *  - A PROVIDER CAUSE CORRECTS THE NOTICE IN PLACE (#441): when the notice at
- *    a commit names a different cause class than the one being reported (a
- *    generic "no verdict" vs "the Claude subscription hit its limit"), the
- *    existing comment is edited, never duplicated. Generic causes among
+ *  - A PROVIDER CAUSE CORRECTS THE NOTICE IN PLACE (#441), ONE WAY ONLY: the
+ *    notice at a commit is edited, never duplicated, when the cause being
+ *    reported OUTRANKS the one it shows (`noticeRank`: generic < a usage
+ *    limit with an unknown reset < a later reset < an indefinite cause). A
+ *    lower or equal rank is a duplicate, so two threads at one commit (the
+ *    hourly sweep re-reads every terminal one) converge on the highest rank
+ *    instead of flipping the comment back and forth. Generic causes among
  *    themselves still dedupe on the commit alone (#220).
  */
 
@@ -80,24 +83,52 @@ export interface ReviewNoticeClient {
 /** Everything the single writer may do on a PR: post reviews, keep the notice. */
 export type ReviewWriterClient = ReviewGitHubClient & ReviewNoticeClient;
 
-const NOTICE_MARKER_PATTERN =
-  /^<!-- automata:review-notice sha=([\w.-]+)(?: cause=([a-z_]+))? -->/;
-const REASON_MAX_LENGTH = 600;
-const PROVIDER_CAUSE: NoVerdictCause = "provider_unavailable";
-
+const NOTICE_MARKER_PATTERN = /^<!-- automata:review-notice sha=([\w.-]+) -->/;
 /**
- * Generic notices keep the original marker (so every notice already on a PR
- * still parses); only a provider notice names its cause in the marker.
+ * A provider notice's SECOND line (#441). The first line stays the original
+ * marker, byte for byte, so every notice already on a PR parses and a
+ * rolled-back revision still dedupes and retires a provider notice.
  */
-function reviewNoticeMarker(sha: string, cause: NoVerdictCause): string {
-  return cause === PROVIDER_CAUSE
-    ? `<!-- automata:review-notice sha=${sha} cause=${cause} -->`
-    : `<!-- automata:review-notice sha=${sha} -->`;
+const PROVIDER_MARKER_PATTERN =
+  /^<!-- automata:review-notice-cause provider_unavailable until=(\d+|unknown|never) -->$/;
+const REASON_MAX_LENGTH = 600;
+/** A provider notice whose classification did not travel: an unknown limit. */
+const DEFAULT_PROVIDER: ProviderUnavailable = { kind: "usage_limit" };
+
+function reviewNoticeMarker(sha: string): string {
+  return `<!-- automata:review-notice sha=${sha} -->`;
 }
 
-/** The two classes a same-commit notice is compared by. */
-function causeClass(cause: string | undefined): "provider" | "generic" {
-  return cause === PROVIDER_CAUSE ? "provider" : "generic";
+/** When the provider cause ends: epoch ms, "unknown", or "never" on its own. */
+function providerUntil(provider: ProviderUnavailable): string {
+  if (provider.kind !== "usage_limit") return "never";
+  return provider.resetsAt === undefined
+    ? "unknown"
+    : String(Math.trunc(provider.resetsAt));
+}
+
+function providerMarker(provider: ProviderUnavailable): string {
+  return `<!-- automata:review-notice-cause provider_unavailable until=${providerUntil(provider)} -->`;
+}
+
+/**
+ * The order a same-commit notice may be corrected in: only a strictly higher
+ * rank edits. Monotonic, so concurrent or repeated writers converge.
+ */
+function rankOfUntil(until: string | undefined): number {
+  if (until === undefined) return 0; // a generic notice
+  if (until === "unknown") return 1;
+  if (until === "never") return Number.POSITIVE_INFINITY;
+  return Number(until);
+}
+
+function noticeRank(
+  cause: NoVerdictCause,
+  provider?: ProviderUnavailable,
+): number {
+  return cause === "provider_unavailable"
+    ? rankOfUntil(providerUntil(provider ?? DEFAULT_PROVIDER))
+    : 0;
 }
 
 /**
@@ -137,19 +168,20 @@ export function renderReviewNotice(args: {
   /** The classification, read only for `provider_unavailable`. */
   provider?: ProviderUnavailable;
 }): string {
-  if (args.cause === PROVIDER_CAUSE) {
+  if (args.cause === "provider_unavailable") {
     // Never names the account (epic #440 decision 5): the text is built from
     // the classification alone, never from credential metadata.
-    const provider = args.provider ?? { kind: "usage_limit" };
+    const provider = args.provider ?? DEFAULT_PROVIDER;
     return [
-      reviewNoticeMarker(args.sha, args.cause),
+      reviewNoticeMarker(args.sha),
+      providerMarker(provider),
       `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** ${describeProviderUnavailable(provider)} Nothing was approved or blocked.`,
       "",
       `**Next:** push a new commit ${providerUnavailableRetryWhen(provider)}, or have a teammate review.`,
     ].join("\n");
   }
   return [
-    reviewNoticeMarker(args.sha, args.cause),
+    reviewNoticeMarker(args.sha),
     `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** Nothing was approved or blocked. This is not a pass.`,
     "",
     `**Why:** ${describeCause(args.cause, args.reason)}`,
@@ -161,9 +193,8 @@ export function renderReviewNotice(args: {
 interface OwnNotice {
   id: number;
   sha: string;
-  /** The cause named in the marker; undefined for a generic notice. */
-  cause: string | undefined;
-  body: string;
+  /** `noticeRank` of what the comment shows (0 for a generic notice). */
+  rank: number;
 }
 
 interface NoticeTarget {
@@ -189,18 +220,12 @@ async function listOwnNotices(
       target.prNumber,
     );
     return comments.flatMap((comment) => {
-      if (comment.user?.login !== target.botLogin) return [];
-      const match = NOTICE_MARKER_PATTERN.exec(comment.body);
-      return match
-        ? [
-            {
-              id: comment.id,
-              sha: match[1]!,
-              cause: match[2],
-              body: comment.body,
-            },
-          ]
-        : [];
+      const sha = reviewNoticeSha(comment, target.botLogin);
+      if (!sha) return [];
+      const until = PROVIDER_MARKER_PATTERN.exec(
+        comment.body.split("\n", 2)[1] ?? "",
+      )?.[1];
+      return [{ id: comment.id, sha, rank: rankOfUntil(until) }];
     });
   } catch (err) {
     target.logger?.warn(`review-notice: comment lookup failed (${purpose})`, {
@@ -255,21 +280,16 @@ export async function publishReviewNotice(
   const existing = await listOwnNotices(args, "per-commit dedup");
   const atCommit = existing.find((notice) => notice.sha === args.sha);
   if (atCommit) {
-    const body = renderReviewNotice(args);
-    const sameClass = causeClass(atCommit.cause) === causeClass(args.cause);
-    // Same class: one notice per commit (#220). A provider notice whose text
-    // changed (a new reset time) is still corrected, never duplicated.
-    if (
-      sameClass &&
-      (args.cause !== PROVIDER_CAUSE || atCommit.body === body)
-    ) {
+    // One notice per commit (#220): only a cause that outranks the one shown
+    // corrects it, so writers never undo each other.
+    if (noticeRank(args.cause, args.provider) <= atCommit.rank) {
       return { result: "duplicate_at_commit", commentId: atCommit.id };
     }
     try {
       await args.github.updateConversationComment(
         args.repoFullName,
         atCommit.id,
-        body,
+        renderReviewNotice(args),
       );
     } catch (err) {
       return {

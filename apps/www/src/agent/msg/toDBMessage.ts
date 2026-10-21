@@ -88,6 +88,11 @@ export function toDBMessage(claudeMessage: ClaudeMessage): DBMessage[] {
             typeof info?.rateLimitType === "string" ? info.rateLimitType : null,
           resetsAt: finiteOrNull(info?.resetsAt),
           utilization: finiteOrNull(info?.utilization),
+          overageCovered:
+            info?.isUsingOverage === true ||
+            info?.overageInUse === true ||
+            info?.overageStatus === "allowed" ||
+            info?.overageStatus === "allowed_warning",
           session_id:
             typeof claudeMessage.session_id === "string"
               ? claudeMessage.session_id

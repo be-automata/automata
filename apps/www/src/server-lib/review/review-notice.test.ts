@@ -196,9 +196,12 @@ describe("provider_unavailable notice (#441)", () => {
       window: "weekly",
       resetsAt: RESET,
     });
-    expect(weekly.split("\n")[0]).toBe(
-      `<!-- automata:review-notice sha=${SHA} cause=provider_unavailable -->`,
-    );
+    // Line 1 is the original marker byte for byte (rollback-safe); the
+    // cause and its end ride on line 2.
+    expect(weekly.split("\n").slice(0, 2)).toEqual([
+      `<!-- automata:review-notice sha=${SHA} -->`,
+      `<!-- automata:review-notice-cause provider_unavailable until=${RESET} -->`,
+    ]);
     expect(weekly).toContain(
       "⚠️ **Automata has no verdict for commit `0123456`.** The connected Claude subscription hit its weekly usage limit; it resets at 17:00 UTC on 22 Oct. Nothing was approved or blocked.",
     );
@@ -303,5 +306,118 @@ describe("provider_unavailable notice (#441)", () => {
       }),
     ).toEqual({ result: "duplicate_at_commit", commentId: 1 });
     expect(githubB.updateConversationComment).not.toHaveBeenCalled();
+  });
+
+  const weeklyAt = (resetsAt: number) => ({
+    kind: "usage_limit" as const,
+    window: "weekly" as const,
+    resetsAt,
+  });
+
+  // Card: protects=no loop between causes: two threads at one commit (the
+  // hourly sweep re-reads every terminal one) converge on the provider
+  // notice, and a later reset or an indefinite cause still corrects it;
+  // fails_when=a generic notice overwrites a provider one, alternating
+  // writers keep editing, or an earlier reset replaces a later one;
+  // no_claim=GitHub's PATCH semantics (fake).
+  it("corrects one way only: alternating writers converge without re-editing", async () => {
+    const github = makeNoticeFake(BOT);
+    const generic = {
+      ...TARGET,
+      github,
+      sha: SHA,
+      cause: "unparseable" as const,
+      reason: "no JSON intent block found in agent output",
+    };
+    const provider = (resetsAt: number) => ({
+      ...TARGET,
+      github,
+      sha: SHA,
+      cause: "provider_unavailable" as const,
+      reason: "r",
+      provider: weeklyAt(resetsAt),
+    });
+    await publishReviewNotice(generic);
+    expect(await publishReviewNotice(provider(RESET))).toEqual({
+      result: "updated",
+      commentId: 1,
+    });
+    // Three sweep passes over both threads: nothing changes any more.
+    for (let pass = 0; pass < 3; pass++) {
+      expect((await publishReviewNotice(generic)).result).toBe(
+        "duplicate_at_commit",
+      );
+      expect((await publishReviewNotice(provider(RESET))).result).toBe(
+        "duplicate_at_commit",
+      );
+    }
+    expect(github.updateConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.body).toContain("weekly usage limit");
+
+    // An earlier reset never replaces a later one; a later one does.
+    const earlier = RESET - 3_600_000;
+    expect((await publishReviewNotice(provider(earlier))).result).toBe(
+      "duplicate_at_commit",
+    );
+    const later = RESET + 86_400_000;
+    expect((await publishReviewNotice(provider(later))).result).toBe(
+      "updated",
+    );
+    expect(github.comments[0]!.body).toContain("17:00 UTC on 23 Oct");
+    // An indefinite cause outranks every timed one, and is never undone.
+    expect(
+      (
+        await publishReviewNotice({
+          ...provider(later),
+          provider: { kind: "subscription_disabled" },
+        })
+      ).result,
+    ).toBe("updated");
+    expect((await publishReviewNotice(provider(later + 1))).result).toBe(
+      "duplicate_at_commit",
+    );
+    expect(github.comments[0]!.body).toContain("will not reset on its own");
+    expect(github.comments).toHaveLength(1);
+  });
+
+  // Card: protects=edit-in-place touches only our own notice: a person's
+  // comment carrying the marker and a bot comment that is not a notice are
+  // never edited; the pre-#441 dedup regex still reads a provider notice
+  // (rollback safety); fails_when=updateConversationComment targets any
+  // comment but the bot's notice, or an old revision would duplicate a
+  // provider notice; no_claim=review (pulls API) objects, which this
+  // surface never lists.
+  it("never edits a comment that is not our notice, and stays readable by the old marker", async () => {
+    const github = makeNoticeFake(BOT);
+    github.comments.push(
+      {
+        id: 50,
+        user: { login: "a-human" },
+        body: `<!-- automata:review-notice sha=${SHA} -->\nquoted`,
+      },
+      {
+        id: 51,
+        user: { login: BOT },
+        body: `## Post-merge ticket audit\n<!-- automata:review-notice sha=${SHA} -->`,
+      },
+    );
+    const outcome = await publishReviewNotice({
+      ...TARGET,
+      github,
+      sha: SHA,
+      cause: "provider_unavailable",
+      reason: "r",
+      provider: weeklyAt(RESET),
+    });
+    expect(outcome).toEqual({ result: "posted" });
+    expect(github.updateConversationComment).not.toHaveBeenCalled();
+    expect(github.comments.find((c) => c.id === 50)!.body).toContain("quoted");
+    expect(github.comments.find((c) => c.id === 51)!.body).toContain(
+      "Post-merge ticket audit",
+    );
+    const posted = github.comments.at(-1)!.body;
+    const preIssue441Marker = /^<!-- automata:review-notice sha=([\w.-]+) -->/;
+    expect(preIssue441Marker.exec(posted)?.[1]).toBe(SHA);
   });
 });

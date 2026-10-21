@@ -40,8 +40,18 @@ function refusedResult(
   };
 }
 
+/**
+ * The Agent SDK's `SDKRateLimitEvent` shape (sdk.d.ts): the fields nest under
+ * `rate_limit_info`, `resetsAt` is epoch seconds.
+ */
 function rateLimitEvent(
-  info: { status: string; rateLimitType?: string; resetsAt?: number },
+  info: {
+    status: string;
+    rateLimitType?: string;
+    resetsAt?: number;
+    overageStatus?: string;
+    isUsingOverage?: boolean;
+  },
   sessionId = SESSION,
 ): ClaudeMessage {
   return {
@@ -271,6 +281,7 @@ describe("rate_limit_event persistence", () => {
         rateLimitType: "five_hour",
         resetsAt: 1761152400,
         utilization: 1,
+        overageCovered: false,
         session_id: SESSION,
       },
     ]);
@@ -304,5 +315,153 @@ describe("rate_limit_event persistence", () => {
     expect(describeProviderUnavailable(parsed!)).toBe(
       "The connected Claude subscription hit its weekly usage limit; it resets at 17:00 UTC on 22 Oct.",
     );
+  });
+});
+
+describe("classifyProviderResult — the SDK's real rate_limit_info (#441 refinement)", () => {
+  // Card: protects=every weekly member of the SDK's rateLimitType enum maps
+  // to `weekly`, `five_hour` to five_hour, and `overage` to no window;
+  // fails_when=seven_day_opus/sonnet/overage_included lose their window or
+  // `overage` is called weekly; no_claim=the notice wording.
+  it("maps the SDK rateLimitType enum", () => {
+    const windowOf = (rateLimitType: string) =>
+      classify([
+        rateLimitEvent({ status: "rejected", rateLimitType, resetsAt: 1 }),
+        refusedResult("API Error: 429"),
+      ])?.window;
+    for (const weekly of [
+      "seven_day",
+      "seven_day_opus",
+      "seven_day_sonnet",
+      "seven_day_overage_included",
+    ]) {
+      expect(windowOf(weekly)).toBe("weekly");
+    }
+    expect(windowOf("five_hour")).toBe("five_hour");
+    expect(windowOf("overage")).toBeUndefined();
+  });
+
+  // Card: protects=a `rejected` status that paid overage covered (the CLI's
+  // own isUsingOverage / overageStatus allowed reading) is not a refusal, so
+  // an unrelated failure of that run keeps its own cause; fails_when=such a
+  // run is labelled a usage limit; no_claim=the text path, which still
+  // applies to the result on its own merits.
+  it("a rejected event covered by overage does not classify the run", () => {
+    for (const covered of [
+      { isUsingOverage: true },
+      { overageStatus: "allowed" },
+      { overageStatus: "allowed_warning" },
+    ]) {
+      expect(
+        classify([
+          rateLimitEvent({
+            status: "rejected",
+            rateLimitType: "five_hour",
+            resetsAt: 1761152400,
+            ...covered,
+          }),
+          refusedResult("API Error: 500 upstream", {
+            num_turns: 6,
+            total_cost_usd: 0.8,
+          }),
+        ]),
+      ).toBeNull();
+    }
+    // overageStatus rejected: the overflow was NOT covered.
+    expect(
+      classify([
+        rateLimitEvent({
+          status: "rejected",
+          rateLimitType: "five_hour",
+          overageStatus: "rejected",
+        }),
+        refusedResult("API Error: 429"),
+      ]),
+    ).toEqual({ kind: "usage_limit", window: "five_hour" });
+  });
+
+  // Card: protects=a row stored before `overageCovered` existed still counts
+  // as a refusal; fails_when=the optional field's absence disables the
+  // structured path; no_claim=none.
+  it("a stored row without overageCovered is read as not covered", () => {
+    const rows: DBMessage[] = [
+      {
+        type: "meta",
+        subtype: "rate-limit",
+        status: "rejected",
+        rateLimitType: "seven_day",
+        resetsAt: 1761152400,
+        utilization: 1,
+        session_id: SESSION,
+      },
+      ...toDBMessage(refusedResult("API Error: 429")),
+    ];
+    expect(classifyProviderResult(rows, { now: NOW })).toEqual({
+      kind: "usage_limit",
+      window: "weekly",
+      resetsAt: 1761152400 * 1000,
+    });
+  });
+});
+
+describe("resolveResetText — clock edges (#441 refinement)", () => {
+  // Card: protects=a date-less reset the clock is barely past (delivery lag,
+  // skew) is today's, not tomorrow's; a genuinely passed one is tomorrow's;
+  // fails_when="resets 5pm" received at 17:00:20 resolves 24 h out;
+  // no_claim=the exact skew allowance beyond 15 minutes.
+  it("allows a little skew past a date-less reset", () => {
+    const at = (h: number, m: number, sec = 0) =>
+      Date.UTC(2026, 9, 21, h, m, sec);
+    expect(resolveResetText("5pm", at(17, 0, 20))).toBe(at(17, 0));
+    expect(resolveResetText("5pm", at(17, 14))).toBe(at(17, 0));
+    expect(resolveResetText("5pm", at(17, 16))).toBe(
+      Date.UTC(2026, 9, 22, 17, 0),
+    );
+    // The weekday form honours the same allowance.
+    expect(resolveResetText("Wed 5pm", at(17, 0, 20))).toBe(at(17, 0));
+    expect(resolveResetText("Wed 5pm", at(18, 0))).toBe(
+      Date.UTC(2026, 9, 28, 17, 0),
+    );
+  });
+
+  // Card: protects=a dated reset takes the year nearest the clock: a date
+  // just behind it stays in the past (already reset) and a January date read
+  // in late December is next year; fails_when="Oct 21, 5pm" read at 17:01
+  // resolves to next October, or "Jan 2" read on Dec 30 to this January;
+  // no_claim=dates more than six months out (the CLI never prints them).
+  it("resolves a dated reset to the nearest year, never a year ahead by skew", () => {
+    expect(
+      resolveResetText("Oct 21, 5pm (UTC)", Date.UTC(2026, 9, 21, 17, 1)),
+    ).toBe(Date.UTC(2026, 9, 21, 17, 0));
+    expect(
+      resolveResetText("Oct 20, 5pm (UTC)", Date.UTC(2026, 9, 21, 13, 24)),
+    ).toBe(Date.UTC(2026, 9, 20, 17, 0));
+    expect(resolveResetText("Jan 2, 9am", Date.UTC(2026, 11, 30, 12, 0))).toBe(
+      Date.UTC(2027, 0, 2, 9, 0),
+    );
+    expect(resolveResetText("Dec 30, 9am", Date.UTC(2027, 0, 2, 12, 0))).toBe(
+      Date.UTC(2026, 11, 30, 9, 0),
+    );
+    expect(resolveResetText("Feb 30, 9am", NOW)).toBeUndefined();
+  });
+
+  // Card: protects=an explicit zone's wall clock is honoured across a DST
+  // change and the UTC default never shifts; fails_when=the zone's offset on
+  // the reference day is applied to a reset after the change; no_claim=zones
+  // the runtime's ICU does not ship.
+  it("an explicit zone is resolved on the reset's own date (DST)", () => {
+    // Europe/Berlin leaves CEST on Sun 25 Oct 2026: 9am CET is 08:00 UTC.
+    expect(
+      resolveResetText("Oct 26, 9am (Europe/Berlin)", NOW),
+    ).toBe(Date.UTC(2026, 9, 26, 8, 0));
+    // Same date, no zone: UTC, no DST.
+    expect(resolveResetText("Oct 26, 9am", NOW)).toBe(
+      Date.UTC(2026, 9, 26, 9, 0),
+    );
+    // Garbage around a valid zone.
+    expect(resolveResetText("whenever (UTC)", NOW)).toBeUndefined();
+    expect(resolveResetText("", NOW)).toBeUndefined();
+    expect(resolveResetText("13pm", NOW)).toBeUndefined();
+    expect(resolveResetText("17:75", NOW)).toBeUndefined();
   });
 });

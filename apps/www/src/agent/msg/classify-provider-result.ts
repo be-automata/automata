@@ -111,13 +111,16 @@ function isResultMeta(message: DBMessage): message is DBResultMetaMessage {
   );
 }
 
+/**
+ * The SDK's `rateLimitType` enum: `five_hour`, the weekly family
+ * (`seven_day`, `seven_day_opus`, `seven_day_sonnet`,
+ * `seven_day_overage_included`) and `overage` (no window of its own).
+ */
 function windowOfRateLimitType(
   rateLimitType: string | null,
 ): ProviderLimitWindow | undefined {
   if (rateLimitType === "five_hour") return "five_hour";
-  if (rateLimitType === "weekly" || rateLimitType?.startsWith("seven_day")) {
-    return "weekly";
-  }
+  if (rateLimitType?.startsWith("seven_day")) return "weekly";
   return undefined;
 }
 
@@ -148,6 +151,8 @@ export function classifyProviderResult(
       message.type === "meta" &&
       message.subtype === "rate-limit" &&
       message.status === "rejected" &&
+      // Paid overage took the overflow: the run was not refused here.
+      message.overageCovered !== true &&
       (message.session_id === null ||
         !result.session_id ||
         message.session_id === result.session_id)
@@ -195,6 +200,10 @@ const MONTHS = [
 ] as const;
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 
+/** How far past a date-less reset the clock may be and still mean it. */
+const RESET_SKEW_MS = 15 * 60 * 1000;
+const HALF_YEAR_MS = 183 * 24 * 60 * 60 * 1000;
+
 const RESET_PATTERN =
   /^(?:(?<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?<day>\d{1,2})(?:st|nd|rd|th)?,?\s+|(?<wd>sun|mon|tue|wed|thu|fri|sat)[a-z]*,?\s+)?(?:at\s+)?(?<hour>\d{1,2})(?::(?<minute>\d{2}))?\s*(?<ampm>am|pm)?$/i;
 
@@ -210,8 +219,11 @@ function isValidTimeZone(zone: string): boolean {
 /**
  * A CLI reset text ("5pm", "5pm (UTC)", "Oct 22, 5pm (UTC)", "17:30",
  * "Mon 10am (Europe/Berlin)") as epoch ms. An explicit zone wins; no zone is
- * UTC. A date-less time is its next occurrence after `now`; a dated one
- * without a year is the next such date. Unparseable → undefined.
+ * UTC. A date-less time is its next occurrence after `now` (minus a small
+ * skew allowance); a dated one without a year takes the year nearest `now`,
+ * so a date just behind the clock stays in the past. DST needs no handling:
+ * the default zone is UTC and an explicit zone is resolved by `TZDate`.
+ * Unparseable → undefined.
  */
 export function resolveResetText(
   text: string,
@@ -254,23 +266,42 @@ export function resolveResetText(
       return undefined;
     }
     candidate.setHours(hour, minute, 0, 0);
-    if (candidate.getTime() <= now) {
-      candidate.setFullYear(candidate.getFullYear() + 1, month, day);
+    // The year is the one that puts the date nearest the reference time: a
+    // "Jan 2" read on Dec 30 is next year, but a date just behind the clock
+    // (skew, a late delivery) stays in the past, i.e. already reset, rather
+    // than jumping a whole year ahead.
+    const offset = candidate.getTime() - now;
+    if (Math.abs(offset) > HALF_YEAR_MS) {
+      candidate.setFullYear(
+        candidate.getFullYear() + (offset < 0 ? 1 : -1),
+        month,
+        day,
+      );
+      // Feb 29 has no twin in the neighbouring year.
+      if (candidate.getMonth() !== month) return undefined;
       candidate.setHours(hour, minute, 0, 0);
     }
     return candidate.getTime();
   }
   candidate.setHours(hour, minute, 0, 0);
+  // A date-less time is its next occurrence, allowing the clock to be a
+  // little past it: "resets 5pm" received at 17:00:20 is today's 17:00, not
+  // tomorrow's.
+  const earliest = now - RESET_SKEW_MS;
   if (groups.wd) {
     const weekday = WEEKDAYS.indexOf(
       groups.wd.toLowerCase() as (typeof WEEKDAYS)[number],
     );
     const ahead = (weekday - candidate.getDay() + 7) % 7;
     candidate.setDate(candidate.getDate() + ahead);
-    if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 7);
+    if (candidate.getTime() <= earliest) {
+      candidate.setDate(candidate.getDate() + 7);
+    }
     return candidate.getTime();
   }
-  if (candidate.getTime() <= now) candidate.setDate(candidate.getDate() + 1);
+  if (candidate.getTime() <= earliest) {
+    candidate.setDate(candidate.getDate() + 1);
+  }
   return candidate.getTime();
 }
 

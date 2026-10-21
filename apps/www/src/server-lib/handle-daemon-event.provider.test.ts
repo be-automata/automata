@@ -182,4 +182,25 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
     expect(chat.errorMessage).toBe("agent-generic-error");
     expect(chat.errorMessageInfo).not.toContain("usage_limit");
   });
+
+  // Card: protects=AC7 holds even where the classifier declines: a
+  // worker-plane run whose banner only the legacy parser reads (here a
+  // multi-turn, billed run, which the text path refuses to classify) ends
+  // terminal, never in queued-agent-rate-limit; fails_when=the legacy
+  // `system.agent-rate-limit` route parks a thread that has no control-plane
+  // sandbox; no_claim=the sandbox plane, which keeps the route (e2e.test.ts
+  // "handles batch with init and rate limit error").
+  it("a worker-plane run the classifier declines still never enters queued-agent-rate-limit", async () => {
+    const { chat } = await finish([
+      result("Weekly limit reached ∙ resets 6pm (UTC)", {
+        num_turns: 7,
+        total_cost_usd: 0.9,
+      }),
+    ]);
+    expect(chat.status).not.toBe("queued-agent-rate-limit");
+    expect(chat.status).toBe("working-error");
+    expect(chat.errorMessage).toBe("agent-generic-error");
+    expect(chat.reattemptQueueAt ?? null).toBeNull();
+  });
 });
+
