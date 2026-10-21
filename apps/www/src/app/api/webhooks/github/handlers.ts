@@ -45,6 +45,7 @@ import { normalizeLabel } from "@/server-lib/audit/render-issue";
 import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
+import { mapLimit } from "@/lib/map-limit";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -186,33 +187,31 @@ export async function handlePullRequestUpdated(
 }
 
 const BATCH_SIZE = 5;
-const BATCH_PAUSE_MS = 1000;
+const AUTOMATION_CONCURRENCY = 5;
 
 async function runPullRequestAutomations(
   event: PullRequestEvent,
   automations: Automation[],
   deliveryId: string | undefined,
 ): Promise<void> {
-  for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-    // Pace successive batches only; nothing follows the last one.
-    if (i > 0) {
-      await new Promise((resolve) => setTimeout(resolve, BATCH_PAUSE_MS));
+  // All of this shares ONE waitUntil budget (on Workers, 30s after the
+  // response), so no pause between runs and no lock-step batches: at most
+  // AUTOMATION_CONCURRENCY in flight, a free lane takes the next at once.
+  const failures: unknown[] = [];
+  await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    try {
+      await handlePullRequestAutomation(event, automation, deliveryId);
+    } catch (error) {
+      failures.push(error);
     }
-    const batch = automations.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((automation) =>
-        handlePullRequestAutomation(event, automation, deliveryId),
-      ),
+  });
+  console.log(
+    `Successfully handled ${automations.length - failures.length} pull request automations`,
+  );
+  if (failures.length > 0) {
+    console.error(
+      `Error handling ${failures.length} pull request automations: ${failures.join(", ")}`,
     );
-    const failed = results.filter((result) => result.status === "rejected");
-    console.log(
-      `Successfully handled ${results.length - failed.length} pull request automations`,
-    );
-    if (failed.length > 0) {
-      console.error(
-        `Error handling ${failed.length} pull request automations: ${failed.map((result) => result.reason).join(", ")}`,
-      );
-    }
   }
 }
 

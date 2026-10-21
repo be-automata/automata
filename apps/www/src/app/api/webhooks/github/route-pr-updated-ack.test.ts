@@ -158,6 +158,49 @@ describe("pull_request.synchronize acks before the automation runs", () => {
     );
   });
 
+  it("runs at most five automations at once and refills a free slot without pausing", async () => {
+    // Every run shares one waitUntil budget, so a slow run must not hold the
+    // rest behind a lock-step batch plus a 1s pause.
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue(
+      Array.from({ length: 7 }, (_, i) => ({
+        ...automation({ includeAllAuthors: true }),
+        id: `review-${i}`,
+      })),
+    );
+    const release = new Map<string, () => void>();
+    vi.mocked(runPullRequestAutomation).mockImplementation(
+      ({ automationId }) =>
+        new Promise<boolean>((resolve) => {
+          release.set(automationId, () => resolve(true));
+        }),
+    );
+
+    const response = await POST(await synchronizeRequest());
+    expect(response.status).toBe(200);
+    // One org on the delivery: one desired-head write.
+    expect(upsertDesiredHead).toHaveBeenCalledTimes(1);
+
+    await vi.waitFor(() => expect(release.size).toBe(5));
+    expect([...release.keys()].sort()).toEqual(
+      ["review-0", "review-1", "review-2", "review-3", "review-4"].sort(),
+    );
+    // One run finishing frees one slot; the next run starts well inside the
+    // old 1s inter-batch pause while the other four are still in flight.
+    release.get("review-3")!();
+    await vi.waitFor(() => expect(release.size).toBe(6), { timeout: 300 });
+    expect(release.has("review-5")).toBe(true);
+    expect(release.has("review-6")).toBe(false);
+
+    for (const id of ["review-0", "review-1", "review-2", "review-4"]) {
+      release.get(id)!();
+    }
+    await vi.waitFor(() => expect(release.size).toBe(7), { timeout: 300 });
+    release.get("review-5")!();
+    release.get("review-6")!();
+    await waitUntilResolved();
+    expect(runPullRequestAutomation).toHaveBeenCalledTimes(7);
+  });
+
   it("a repo with no pull request automation schedules nothing", async () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([]);
 
