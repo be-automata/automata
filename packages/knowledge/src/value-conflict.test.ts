@@ -9,14 +9,20 @@ import {
   reconcile,
   stubUpdater,
   type DraftOp,
+  type ReconcileDiff,
 } from "./claims";
 import {
   countingUpdater,
+  diffOfFile,
   edit,
+  FIXTURES,
+  limitsPageOf,
   PAGE,
   pageOf,
   SOURCE_SHA,
   useCorpus,
+  useLimitsCorpus,
+  writeRepo,
 } from "./test-fixtures";
 
 const opOf = (ops: DraftOp[], claimId: string) =>
@@ -169,5 +175,83 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const out = applyDraft(root, md, sc, draft, op ? [op.id] : []);
     expect(out.md).toBe(md);
     expect(out.sc).toEqual(sc);
+  });
+});
+
+const fixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
+
+/**
+ * One merge over two files: the py rate limit changes in place to `py`, and the yaml one changes to `yaml`
+ * below an inserted comment line (its pin moves from L3 to L4). Returns the `git diff -U0` diffs.
+ */
+function changeLimits(
+  root: string,
+  values: { py: string; yaml: string },
+): ReconcileDiff[] {
+  const py = fixture("ratelimit.py").replace(
+    "RATE_LIMIT_PER_MINUTE = 120",
+    `RATE_LIMIT_PER_MINUTE = ${values.py}`,
+  );
+  const yaml = `# tuned for the new plan\n${fixture("config.yaml").replace(
+    "requests_per_minute: 120",
+    `requests_per_minute: ${values.yaml}`,
+  )}`;
+  writeRepo(root, "ratelimit.py", py);
+  writeRepo(root, "config.yaml", yaml);
+  return [
+    diffOfFile("ratelimit.py", fixture("ratelimit.py"), py, "@@ -1 +1 @@"),
+    diffOfFile(
+      "config.yaml",
+      fixture("config.yaml"),
+      yaml,
+      "@@ -0,0 +1 @@\n@@ -3 +4 @@",
+    ),
+  ];
+}
+
+describe("cross-file value conflicts", () => {
+  it("py and yaml change to different values in one diff: one conflict at the re-anchored locations, zero calls", async () => {
+    const { root, sc } = useLimitsCorpus();
+    const diffs = changeLimits(root, { py: "150", yaml: "100" });
+    const { llm, seen } = countingUpdater();
+    const draft = await reconcile(root, limitsPageOf(root), sc, llm, {
+      sourceRev: SOURCE_SHA,
+      diffs,
+    });
+    expect(opOf(draft.ops, "api-rate")).toMatchObject({
+      op: "conflict",
+      sourceValues: [
+        { uri: "repo://ratelimit.py#L1-L1", values: ["150"] },
+        // The RE-ANCHORED line: the value check read the located text, not the old pin.
+        { uri: "repo://config.yaml#L4-L4", values: ["100"] },
+      ],
+    });
+    expect(draft.llmCalls).toBe(0);
+    expect(seen).toEqual([]);
+  });
+
+  it("py and yaml change to the same value: the batched model update", async () => {
+    const { root, sc } = useLimitsCorpus();
+    const diffs = changeLimits(root, { py: "150", yaml: "150" });
+    const draft = await reconcile(root, limitsPageOf(root), sc, stubUpdater(), {
+      sourceRev: SOURCE_SHA,
+      diffs,
+    });
+    expect(opOf(draft.ops, "api-rate")).toMatchObject({
+      op: "update",
+      newEvidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L4-L4"],
+    });
+    expect(draft.llmCalls).toBe(1);
+  });
+
+  it("without diffs the yaml pin is read positionally (L3 is now `  api:`, no values): the conflict is missed", async () => {
+    // Documents why the value check needs located text: the Phase 13 caller must pass `diffs`.
+    const { root, sc } = useLimitsCorpus();
+    changeLimits(root, { py: "150", yaml: "100" });
+    const draft = await reconcile(root, limitsPageOf(root), sc, stubUpdater(), {
+      sourceRev: SOURCE_SHA,
+    });
+    expect(opOf(draft.ops, "api-rate")?.op).toBe("update");
+    expect(draft.llmCalls).toBe(1);
   });
 });
