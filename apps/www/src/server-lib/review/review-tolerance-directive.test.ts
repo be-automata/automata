@@ -145,4 +145,60 @@ describe("computeReviewToleranceDirective (mode-agnostic)", () => {
     expect(isReview).toBe(false);
     expect(directive).toBe("");
   });
+
+  async function makeMentionThread(
+    repoFullName: string,
+    githubPRNumber: number | null,
+  ): Promise<string> {
+    const automation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgId,
+        repoFullName,
+        triggerType: "github_mention",
+        triggerConfig: { filter: { orgLane: true } },
+      },
+    });
+    const { threadId } = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgId,
+        automationId: automation.id,
+        githubRepoFullName: repoFullName,
+        githubPRNumber,
+      },
+    });
+    return threadId;
+  }
+
+  it("a mention on a PR gets the repo's directive but is not a review thread (no review permission cap)", async () => {
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      blockTolerance: "info",
+    });
+    const threadId = await makeMentionThread("acme/widgets", 7);
+    const { directive, isReview } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(isReview).toBe(false);
+    expect(directive).toContain("Repository review tolerance: `info`");
+    expect(directive).toContain("EVERY finding — including `info`");
+  });
+
+  it("a mention on an issue gets no directive", async () => {
+    const threadId = await makeMentionThread("acme/widgets", null);
+    const { directive, isReview } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(isReview).toBe(false);
+    expect(directive).toBe("");
+  });
 });

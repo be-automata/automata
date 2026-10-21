@@ -10,6 +10,7 @@ type ThreadForDirective = {
   automationId: string | null;
   organizationId: string | null;
   githubRepoFullName: string;
+  githubPRNumber?: number | null;
   trustContext?: ThreadTrustContext | null;
 };
 
@@ -84,7 +85,15 @@ export async function computeReviewToleranceDirective({
       })) ?? null)
     : null;
   const isReview = automation?.triggerType === "pull_request";
-  if (!isReview || !thread?.githubRepoFullName) {
+  // A mention on a PR can emit a review through the same writer and floor as
+  // the review lane, so its agent needs the same tolerance guidance (else
+  // findings below `warning` ship unquoted and are de-fanged at an `info`
+  // floor). It stays out of `isReview`: that gates the review-only permission
+  // cap, and a mention may push a fix.
+  const isMentionOnPr =
+    automation?.triggerType === "github_mention" &&
+    thread?.githubPRNumber != null;
+  if ((!isReview && !isMentionOnPr) || !thread?.githubRepoFullName) {
     return { directive: "", isReview, automation, thread };
   }
   const policy = await resolveApproveFloor({
