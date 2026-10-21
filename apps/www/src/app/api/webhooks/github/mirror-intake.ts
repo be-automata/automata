@@ -273,7 +273,8 @@ export async function createMirrorTask({
   // mirror row stays off for such deliveries, as it always was.
   //
   // A lookup failure other than "not installed" propagates on purpose: the
-  // delivery then shows as failed in GitHub and can be redelivered. Turning an
+  // caller logs it with the delivery id (pull_request.closed runs this after
+  // the ack, #447) or 500s, so the delivery can be redelivered. Turning an
   // outage into a skip would lose the audit for that merge without a trace.
   const viaRepoLookup =
     (installationId === null || installationId === undefined) &&

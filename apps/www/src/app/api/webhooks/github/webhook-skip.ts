@@ -1,13 +1,16 @@
 /**
  * WI-8 — webhook endpoints must fast-ack business rejections, not 5xx.
  *
- * GitHub marks a 5xx delivery failed, retries it, and disables the webhook after
- * repeated failures. A business rejection (app not installed on the repo, no
- * mapped user, unconfigured/unmapped installation) is NOT a transient failure —
- * retrying never helps. So those paths throw a `WebhookSkip`, which the webhook
- * route catches and turns into a 2xx with a structured skip log. Genuine
- * unexpected errors (bugs, DB down) still propagate to a 500 so GitHub's retry
- * remains the durability net until the ingress outbox lands (Hatchet phase).
+ * GitHub marks a 5xx (or timed-out) delivery failed and never retries it on its
+ * own: a failed delivery is lost unless a person redelivers it. A business
+ * rejection (app not installed on the repo, no mapped user,
+ * unconfigured/unmapped installation) is NOT a transient failure — a
+ * redelivery never helps. So those paths throw a `WebhookSkip`, which the
+ * webhook route (or deferred work, see defer-webhook-work.ts) catches and turns
+ * into a 2xx / a structured skip log. Genuine unexpected errors (bugs, DB
+ * down) still propagate to a 500, which only marks the delivery failed in
+ * GitHub's delivery log so an operator can redeliver it. Durable ingress, which
+ * would make that recovery automatic, is #448.
  */
 export type WebhookSkipCategory =
   | "app_access_unavailable" // couldn't get an installation client (not installed / bad creds)

@@ -123,15 +123,17 @@ export async function updateGitHubPR({
   createIfNotFound: boolean;
 }) {
   const [owner, repoName] = parseRepoFullName(repoFullName);
-  const octokit = await getOctokitForApp({ owner, repo: repoName });
   const existingPR = await getGithubPR({
     db,
     repoFullName,
     prNumber,
   });
+  // #447: an untracked PR returns before the installation-token mint (two
+  // GitHub round trips) that webhook acks used to wait on for nothing.
   if (!existingPR && !createIfNotFound) {
     return;
   }
+  const octokit = await getOctokitForApp({ owner, repo: repoName });
   const pr = await octokit.rest.pulls.get({
     owner,
     repo: repoName,

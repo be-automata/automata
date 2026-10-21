@@ -47,6 +47,7 @@ import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import { mapLimit } from "@/lib/map-limit";
+import { deferWebhookWork, errorText } from "./defer-webhook-work";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -190,7 +191,6 @@ export async function handlePullRequestUpdated(
   }
 }
 
-const BATCH_SIZE = 5;
 const AUTOMATION_CONCURRENCY = 5;
 
 async function runPullRequestAutomations(
@@ -648,7 +648,11 @@ export async function handleCheckSuiteEvent(
 }
 
 // Handle issue events
-export async function handleIssueEvent(event: IssueEvent): Promise<void> {
+export async function handleIssueEvent(
+  event: IssueEvent,
+  /** #447: the webhook's X-GitHub-Delivery id, for the deferred work's logs. */
+  deliveryId?: string,
+): Promise<void> {
   const repoFullName = event.repository.full_name;
   const issueNumber = event.issue.number;
   console.log(
@@ -666,26 +670,45 @@ export async function handleIssueEvent(event: IssueEvent): Promise<void> {
     console.log(
       `Found ${automations.length} issue automations for ${repoFullName}`,
     );
-    // Process each automation
-    for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-      const batch = automations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((automation) => handleIssueAutomation(event, automation)),
-      );
-      const failed = results.filter((result) => result.status === "rejected");
-      const succeeded = results.filter(
-        (result) => result.status === "fulfilled",
-      );
-      console.log(`Successfully handled ${succeeded.length} issue automations`);
-      if (failed.length > 0) {
-        console.error(
-          `Error handling ${failed.length} issue automations: ${failed.map((result) => result.reason).join(", ")}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    // #447: ack fast, as #422 did for pull_request.synchronize. A run makes
+    // GitHub round trips (the author check, token mints) and creates a
+    // thread; awaited inline, plus a 1s pause per batch, issues.opened acks
+    // reached GitHub's 10s delivery timeout, and GitHub never retries a
+    // timed-out delivery. The response never depended on them (this handler
+    // swallows every error), so they run after it.
+    deferWebhookWork({
+      deliveryId,
+      eventName: `issues.${event.action}`,
+      label: "issue automations",
+      work: () => runIssueAutomations(event, automations, deliveryId),
+    });
   } catch (error) {
     console.error("Error handling issue event:", error);
+  }
+}
+
+async function runIssueAutomations(
+  event: IssueEvent,
+  automations: Automation[],
+  deliveryId: string | undefined,
+): Promise<void> {
+  // One waitUntil budget for all of them: at most AUTOMATION_CONCURRENCY in
+  // flight, a free lane takes the next at once, no pause between runs.
+  const failures: unknown[] = [];
+  await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    try {
+      await handleIssueAutomation(event, automation, deliveryId);
+    } catch (error) {
+      failures.push(error);
+    }
+  });
+  console.log(
+    `Successfully handled ${automations.length - failures.length} issue automations`,
+  );
+  if (failures.length > 0) {
+    console.error(
+      `Error handling ${failures.length} issue automations (delivery ${deliveryId ?? "unknown"}): ${failures.map(errorText).join(", ")}`,
+    );
   }
 }
 
@@ -881,6 +904,7 @@ export async function handleSelfHealIssueReopened(
 async function handleIssueAutomation(
   event: IssueEvent,
   automation: Automation,
+  deliveryId: string | undefined,
 ): Promise<void> {
   const issueNumber = event.issue.number;
   const repoFullName = event.repository.full_name;
@@ -928,7 +952,7 @@ async function handleIssueAutomation(
   }
   // Self-heal fix loop (BULK-01, WH-01): only mark the ledger finding ready;
   // the dispatcher starts runs. Runs before any author API check so this path
-  // makes zero GitHub calls inside the webhook budget.
+  // makes zero GitHub calls.
   if (isAuditFixAction(automation.action)) {
     await markSelfHealFindingReady(event, automation);
     return;
@@ -966,7 +990,7 @@ async function handleIssueAutomation(
       source: "automated",
     }).catch((error) => {
       console.error(
-        `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
+        `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName} (delivery ${deliveryId ?? "unknown"}):`,
         error,
       );
     });
@@ -1010,7 +1034,7 @@ async function handleIssueAutomation(
     source: "automated",
   }).catch((error) => {
     console.error(
-      `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
+      `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName} (delivery ${deliveryId ?? "unknown"}):`,
       error,
     );
   });
@@ -1021,7 +1045,8 @@ async function handleIssueAutomation(
 // skill but the chassis has no task-creation path for. Each creates one org-
 // attributed task (shadow when the installation is in shadow mode). See
 // mirror-intake.ts + deploy/PILOT-RUNBOOK.md. These intentionally propagate a
-// WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8).
+// WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8);
+// on pull_request.closed they run after the ack and the skip is only logged.
 // ---------------------------------------------------------------------------
 
 // pull_request.review_requested + pull_request.closed(merged=true)
