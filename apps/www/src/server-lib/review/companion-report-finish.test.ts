@@ -12,9 +12,10 @@ import {
   companionReportMarker,
   executeCompanionReport,
   handleCompanionReportAtFinish,
-  parseCompanionMarkerSha,
+  parseCompanionMarker,
   parseCompanionReport,
   type CompanionReportGitHub,
+  type CompanionReportRun,
 } from "./companion-report-finish";
 import {
   COMPANION_REPORT_KIND,
@@ -31,9 +32,11 @@ import { resolveBotLogin } from "./bot-login";
  * conversation comment as the App, edited on a newer head, never a review.
  *
  * protects: one comment per (PR, skill); the head sha in the body; a newer
- *   head's report is never overwritten by an older run; a run that emitted
- *   nothing still gets a notice; shadow and the side-effects kill-switch
- *   write nothing; agent text cannot forge the marker.
+ *   run's or head's report is never overwritten by an older run; two runs
+ *   finishing together converge on one comment; a comment a person deleted
+ *   is replaced; a run that emitted nothing still gets a notice; shadow and
+ *   the side-effects kill-switch write nothing; agent text cannot forge the
+ *   marker, and neither can a person whose login equals the App's name.
  * fails_when: a second comment is created where one exists, an older run
  *   overwrites the current head's report, the notice is dropped, a shadow
  *   org gets a comment, the skill validators accept a verdict contract.
@@ -75,12 +78,21 @@ vi.mock("@/lib/posthog-server", () => ({
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 
+const SHA_C = "c".repeat(40);
+const T0 = 1_760_000_000_000;
+
 const STAMP: CompanionLaneStamp = {
   repoFullName: "acme/widgets",
   prNumber: 7,
   headSha: SHA_A,
   skillName: FLUTTER_COMPANION_SKILL_NAME,
 };
+const RUN: CompanionReportRun = { stamp: STAMP, requestedAt: T0 };
+
+/** A run for `headSha`, started `later` ms after RUN. */
+function runAt(headSha: string, later: number): CompanionReportRun {
+  return { stamp: { ...STAMP, headSha }, requestedAt: T0 + later };
+}
 
 const REPORT = {
   kind: COMPANION_REPORT_KIND,
@@ -108,12 +120,29 @@ function block(value: unknown, tag = "json companion-report"): string {
   return `Done.\n\n\`\`\`${tag}\n${JSON.stringify(value)}\n\`\`\``;
 }
 
+/** A stateful fake of the App's PR conversation comments. */
 function fakeGitHub(existing: Array<{ id: number; body: string }> = []) {
+  const comments = existing.map((comment) => ({ ...comment }));
+  let nextId = 100;
   const github = {
-    listBotIssueComments: vi.fn(async (_prNumber: number) => existing),
-    createIssueComment: vi.fn(async (_prNumber: number, _body: string) => {}),
-    updateIssueComment: vi.fn(async (_commentId: number, _body: string) => {}),
-  } satisfies CompanionReportGitHub;
+    comments,
+    listBotIssueComments: vi.fn(async (_prNumber: number) =>
+      comments.map((comment) => ({ ...comment })),
+    ),
+    createIssueComment: vi.fn(async (_prNumber: number, body: string) => {
+      comments.push({ id: nextId++, body });
+    }),
+    updateIssueComment: vi.fn(async (commentId: number, body: string) => {
+      const comment = comments.find((c) => c.id === commentId);
+      if (!comment) return false;
+      comment.body = body;
+      return true;
+    }),
+    deleteIssueComment: vi.fn(async (commentId: number) => {
+      const index = comments.findIndex((c) => c.id === commentId);
+      if (index >= 0) comments.splice(index, 1);
+    }),
+  } satisfies CompanionReportGitHub & { comments: unknown };
   return github;
 }
 
@@ -149,23 +178,26 @@ describe("parseCompanionReport", () => {
 });
 
 describe("companion marker", () => {
-  it("is per (PR, skill) and carries the head sha", () => {
-    const marker = companionReportMarker(STAMP);
+  it("is per (PR, skill) and carries the head sha and the run time", () => {
+    const marker = companionReportMarker(RUN);
     expect(marker).toBe(
-      `${COMPANION_MARKER_PREFIX} pr=7 skill=flutter-pr-companion sha=${SHA_A} -->`,
+      `${COMPANION_MARKER_PREFIX} pr=7 skill=flutter-pr-companion sha=${SHA_A} at=${T0} -->`,
     );
-    expect(parseCompanionMarkerSha(`${marker}\nbody`, STAMP)).toBe(SHA_A);
+    expect(parseCompanionMarker(`${marker}\nbody`, STAMP)).toEqual({
+      sha: SHA_A,
+      at: T0,
+    });
     expect(
-      parseCompanionMarkerSha(`${marker}\nbody`, { ...STAMP, prNumber: 8 }),
+      parseCompanionMarker(`${marker}\nbody`, { ...STAMP, prNumber: 8 }),
     ).toBeNull();
     expect(
-      parseCompanionMarkerSha(`${marker}\nbody`, {
+      parseCompanionMarker(`${marker}\nbody`, {
         ...STAMP,
         skillName: REACT_COMPANION_SKILL_NAME,
       }),
     ).toBeNull();
     // The marker must START the comment: a quote of it is not a report.
-    expect(parseCompanionMarkerSha(`> ${marker}`, STAMP)).toBeNull();
+    expect(parseCompanionMarker(`> ${marker}`, STAMP)).toBeNull();
   });
 });
 
@@ -174,7 +206,7 @@ describe("executeCompanionReport", () => {
     const github = fakeGitHub();
     const outcome = await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_A,
     });
@@ -183,7 +215,7 @@ describe("executeCompanionReport", () => {
     expect(github.updateIssueComment).not.toHaveBeenCalled();
     const [prNumber, body] = github.createIssueComment.mock.calls[0]!;
     expect(prNumber).toBe(7);
-    expect(body.startsWith(companionReportMarker(STAMP))).toBe(true);
+    expect(body.startsWith(companionReportMarker(RUN))).toBe(true);
     expect(body).toContain(SHA_A);
     expect(body).toContain("not a review");
     expect(body.indexOf("**error**")).toBeLessThan(body.indexOf("**info**"));
@@ -192,12 +224,12 @@ describe("executeCompanionReport", () => {
 
   it("a newer head edits the existing comment instead of posting another", async () => {
     const github = fakeGitHub([
-      { id: 11, body: `${companionReportMarker(STAMP)}\nold` },
+      { id: 11, body: `${companionReportMarker(RUN)}\nold` },
     ]);
-    const newer = { ...STAMP, headSha: SHA_B };
+    const newer = runAt(SHA_B, 1000);
     const outcome = await executeCompanionReport({
       github,
-      stamp: newer,
+      run: newer,
       terminalText: block(REPORT),
       currentHeadSha: SHA_B,
     });
@@ -211,13 +243,13 @@ describe("executeCompanionReport", () => {
   });
 
   it("an older run never overwrites the report about the current head", async () => {
-    const current = { ...STAMP, headSha: SHA_B };
+    const current = runAt(SHA_B, 1000);
     const github = fakeGitHub([
       { id: 11, body: `${companionReportMarker(current)}\ncurrent` },
     ]);
     const outcome = await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_B,
     });
@@ -229,11 +261,135 @@ describe("executeCompanionReport", () => {
     expect(github.updateIssueComment).not.toHaveBeenCalled();
   });
 
+  it("an older run never overwrites a newer run's report, even when neither is about the current head", async () => {
+    // Pushes A, B, C: B's run reported, C's run is still going, A's finishes last.
+    const github = fakeGitHub([
+      { id: 11, body: `${companionReportMarker(runAt(SHA_B, 1000))}\nB` },
+    ]);
+    const outcome = await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_C,
+    });
+    expect(outcome).toEqual({
+      outcome: "skipped_newer_head",
+      existingSha: SHA_B,
+    });
+    expect(github.updateIssueComment).not.toHaveBeenCalled();
+    expect(github.comments).toEqual([
+      { id: 11, body: `${companionReportMarker(runAt(SHA_B, 1000))}\nB` },
+    ]);
+  });
+
+  it("two runs that both posted converge on the newer run's comment", async () => {
+    // The older run's comment landed between the newer run's lookup and write.
+    const github = fakeGitHub();
+    github.listBotIssueComments.mockImplementationOnce(async () => []);
+    github.createIssueComment.mockImplementationOnce(async (_pr, body) => {
+      github.comments.push({
+        id: 50,
+        body: `${companionReportMarker(RUN)}\nolder`,
+      });
+      github.comments.push({ id: 51, body });
+    });
+    const newer = runAt(SHA_B, 1000);
+    const outcome = await executeCompanionReport({
+      github,
+      run: newer,
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_B,
+    });
+    expect(outcome).toEqual({ outcome: "created", report: "parsed" });
+    expect(github.deleteIssueComment).toHaveBeenCalledWith(50);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.id).toBe(51);
+    expect(
+      github.comments[0]!.body.startsWith(companionReportMarker(newer)),
+    ).toBe(true);
+  });
+
+  it("an older run that edited the comment concurrently is written over again", async () => {
+    const github = fakeGitHub([
+      { id: 11, body: `${companionReportMarker(RUN)}\nA` },
+    ]);
+    const newer = runAt(SHA_B, 1000);
+    // The older run's edit lands right after this run's.
+    github.updateIssueComment.mockImplementationOnce(async (id, _body) => {
+      github.comments[0] = {
+        id,
+        body: `${companionReportMarker(RUN)}\nA again`,
+      };
+      return true;
+    });
+    await executeCompanionReport({
+      github,
+      run: newer,
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_B,
+    });
+    expect(github.comments).toHaveLength(1);
+    expect(
+      github.comments[0]!.body.startsWith(companionReportMarker(newer)),
+    ).toBe(true);
+  });
+
+  it("a comment a person deleted is replaced by a new one", async () => {
+    const github = fakeGitHub([
+      { id: 11, body: `${companionReportMarker(RUN)}\nold` },
+    ]);
+    // A person deletes it between the lookup and the edit.
+    github.updateIssueComment.mockImplementationOnce(async () => {
+      github.comments.length = 0;
+      return false;
+    });
+    const outcome = await executeCompanionReport({
+      github,
+      run: runAt(SHA_B, 1000),
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_B,
+    });
+    // The lookup ran before the deletion: it saw 11, the edit found nothing.
+    expect(outcome).toEqual({ outcome: "created", report: "parsed" });
+    expect(github.comments).toHaveLength(1);
+  });
+
+  it("an oversize report is cut below GitHub's 65536-character limit", async () => {
+    const github = fakeGitHub();
+    const findings = Array.from({ length: 50 }, (_, i) => ({
+      severity: "warning",
+      body: `${i} ${"x".repeat(3990)}`,
+    }));
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: block({ ...REPORT, findings }),
+      currentHeadSha: SHA_A,
+    });
+    const [, body] = github.createIssueComment.mock.calls[0]!;
+    expect(body.length).toBeLessThanOrEqual(65_536);
+    expect(body.startsWith(companionReportMarker(RUN))).toBe(true);
+    expect(body.endsWith("_(truncated)_")).toBe(true);
+  });
+
+  it("an empty report says there were no findings", async () => {
+    const github = fakeGitHub();
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: block({ ...REPORT, findings: [], checks: [] }),
+      currentHeadSha: SHA_A,
+    });
+    const [, body] = github.createIssueComment.mock.calls[0]!;
+    expect(body).toContain("**Findings:** none.");
+    expect(body).not.toContain("**Checks:**");
+  });
+
   it("an older run with no current-head report still writes, and says the head moved", async () => {
     const github = fakeGitHub();
     await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_B,
     });
@@ -245,7 +401,7 @@ describe("executeCompanionReport", () => {
     const first = fakeGitHub();
     await executeCompanionReport({
       github: first,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_A,
     });
@@ -253,7 +409,7 @@ describe("executeCompanionReport", () => {
     const github = fakeGitHub([{ id: 5, body }]);
     const outcome = await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_A,
     });
@@ -265,13 +421,13 @@ describe("executeCompanionReport", () => {
     const github = fakeGitHub();
     const outcome = await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: "I ran out of time.",
       currentHeadSha: SHA_A,
     });
     expect(outcome).toEqual({ outcome: "created", report: "notice" });
     const [, body] = github.createIssueComment.mock.calls[0]!;
-    expect(body.startsWith(companionReportMarker(STAMP))).toBe(true);
+    expect(body.startsWith(companionReportMarker(RUN))).toBe(true);
     expect(body).toContain("without a usable report");
     expect(body).toContain(SHA_A);
   });
@@ -281,15 +437,21 @@ describe("executeCompanionReport", () => {
       {
         id: 3,
         body: companionReportMarker({
-          ...STAMP,
-          skillName: REACT_COMPANION_SKILL_NAME,
+          ...RUN,
+          stamp: { ...STAMP, skillName: REACT_COMPANION_SKILL_NAME },
         }),
       },
-      { id: 4, body: companionReportMarker({ ...STAMP, prNumber: 8 }) },
+      {
+        id: 4,
+        body: companionReportMarker({
+          ...RUN,
+          stamp: { ...STAMP, prNumber: 8 },
+        }),
+      },
     ]);
     await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: SHA_A,
     });
@@ -301,10 +463,10 @@ describe("executeCompanionReport", () => {
     const github = fakeGitHub();
     await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block({
         ...REPORT,
-        summary: `${companionReportMarker({ ...STAMP, headSha: SHA_B })} hi`,
+        summary: `${companionReportMarker(runAt(SHA_B, 1))} hi`,
       }),
       currentHeadSha: SHA_A,
     });
@@ -318,7 +480,7 @@ describe("executeCompanionReport", () => {
     github.createIssueComment.mockRejectedValueOnce(new Error("403"));
     const outcome = await executeCompanionReport({
       github,
-      stamp: STAMP,
+      run: RUN,
       terminalText: block(REPORT),
       currentHeadSha: null,
     });
@@ -334,6 +496,7 @@ describe("handleCompanionReportAtFinish (routing by stamp)", () => {
         listComments: vi.fn(),
         createComment: vi.fn(async () => ({ data: {} })),
         updateComment: vi.fn(async () => ({ data: {} })),
+        deleteComment: vi.fn(async () => ({ data: {} })),
       },
       pulls: {
         get: vi.fn(async () => ({
@@ -350,6 +513,7 @@ describe("handleCompanionReportAtFinish (routing by stamp)", () => {
   };
   const companionThread = {
     organizationId: "o-1",
+    createdAt: new Date(T0),
     terminalCause: null,
     sourceMetadata: {
       type: "automation-skill",
@@ -401,17 +565,28 @@ describe("handleCompanionReportAtFinish (routing by stamp)", () => {
       repo: "widgets",
       issue_number: 7,
     });
-    expect(call[0].body.startsWith(companionReportMarker(STAMP))).toBe(true);
+    expect(call[0].body.startsWith(companionReportMarker(RUN))).toBe(true);
   });
 
   it("the App's own marked comment is edited; a person's copy of the marker is ignored", async () => {
     vi.mocked(getThreadMinimal).mockResolvedValue(companionThread as never);
+    const bare = resolveBotLogin().replace(/\[bot\]$/, "");
     octokit.paginate.mockResolvedValueOnce([
-      { id: 1, user: { login: "mallory" }, body: companionReportMarker(STAMP) },
+      {
+        id: 1,
+        user: { login: "mallory", type: "User" },
+        body: companionReportMarker(RUN),
+      },
+      // A person whose login is the App's name without `[bot]`.
+      {
+        id: 3,
+        user: { login: bare, type: "User" },
+        body: `${companionReportMarker(RUN)}\nforged`,
+      },
       {
         id: 2,
-        user: { login: resolveBotLogin() },
-        body: `${companionReportMarker(STAMP)}\nold`,
+        user: { login: resolveBotLogin(), type: "Bot" },
+        body: `${companionReportMarker(RUN)}\nold`,
       },
     ]);
     await handleCompanionReportAtFinish(args);
@@ -477,6 +652,19 @@ describe("companion skill validators", () => {
           ),
       );
       expect(parseCompanionReport(block(sample)).ok).toBe(true);
+    },
+  );
+
+  it.each([FLUTTER_COMPANION_SKILL_NAME, REACT_COMPANION_SKILL_NAME])(
+    "%s only teaches what a review-mode run can do",
+    (name) => {
+      const body = tracked(name);
+      // SOMNIO_ROOT lives only inside the somnio wrapper, never in the run env.
+      expect(body).not.toMatch(/\$SOMNIO_ROOT/);
+      expect(body).toContain(`grep '^SOMNIO_ROOT=' "$(command -v somnio)"`);
+      // Review mode allows Read/Grep/Glob/Bash: no Skill tool, no MCP tools.
+      expect(body).toContain("no `Skill` tool, no MCP tools");
+      expect(body).not.toMatch(/\bmcp__|Skill\(/);
     },
   );
 

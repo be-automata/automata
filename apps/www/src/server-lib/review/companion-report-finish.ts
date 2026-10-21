@@ -8,6 +8,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
+import type { ReviewLogger } from "@terragon/review/state/review-github-client";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { getPostHogServer } from "@/lib/posthog-server";
@@ -15,7 +16,11 @@ import { getPrHeadState } from "./octokit-review-client";
 import { isBotAuthor } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { COMPANION_REPORT_KIND, isCompanionLaneStamp } from "./review-skill";
-import { buildTaggedFence } from "./tagged-fence";
+import {
+  buildTaggedFence,
+  parseTaggedJsonBlock,
+  type ParseTaggedJsonResult,
+} from "./tagged-fence";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
 
 /**
@@ -30,22 +35,35 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
  * as the App. The comment is advisory and is never a review: the classic
  * review keeps sole ownership of the verdict (ADR-009).
  *   - One comment per (PR, skill): it starts with the hidden marker
- *     `<!-- automata:companion-report pr=<n> skill=<name> sha=<sha> -->`, and a
- *     later run EDITS that comment instead of posting another.
+ *     `<!-- automata:companion-report pr=<n> skill=<name> sha=<sha> at=<ms> -->`,
+ *     and a later run EDITS that comment instead of posting another.
  *   - The body names the head sha the run reported on.
- *   - Newest head wins: a run for an older commit never overwrites the report
- *     about the PR's current head.
+ *   - Newest run wins: `at` is when the run's thread was created (the PR head
+ *     is read at that moment), so a run that finishes late never overwrites
+ *     a report from a run started after it, nor the report about the PR's
+ *     current head.
+ *   - Two runs that finish together converge on one comment: after writing,
+ *     the writer re-reads, keeps the newest run's comment and deletes the
+ *     other marked copies (the review-notice lane's dedupe, same posture).
  *   - No parseable block → a short notice in the same comment, never silence.
  * Only the App's own comments count: anyone can type the marker.
  */
 
 export const COMPANION_MARKER_PREFIX = "<!-- automata:companion-report";
 
-/** The hidden marker of a (PR, skill) report about `sha`. */
-export function companionReportMarker(
-  stamp: Pick<CompanionLaneStamp, "prNumber" | "skillName" | "headSha">,
-): string {
-  return `${companionMarkerKey(stamp)} sha=${stamp.headSha} -->`;
+/** What a report comment describes: the stamped PR head and the run's start. */
+export interface CompanionReportRun {
+  stamp: CompanionLaneStamp;
+  /** The run's thread creation time, epoch ms: orders two runs' reports. */
+  requestedAt: number;
+}
+
+/** The hidden marker of a (PR, skill) report about `stamp.headSha`. */
+export function companionReportMarker({
+  stamp,
+  requestedAt,
+}: CompanionReportRun): string {
+  return `${companionMarkerKey(stamp)} sha=${stamp.headSha} at=${requestedAt} -->`;
 }
 
 /** The marker up to (not including) the sha: matched as a prefix. */
@@ -55,15 +73,17 @@ function companionMarkerKey(
   return `${COMPANION_MARKER_PREFIX} pr=${stamp.prNumber} skill=${stamp.skillName}`;
 }
 
-/** The sha a report comment names, or null when it is not one of ours. */
-export function parseCompanionMarkerSha(
+const MARKER_TAIL = /^([0-9a-f]{7,64}) at=(\d{1,16}) -->/;
+
+/** The commit and run time a report comment names, or null when it is not ours. */
+export function parseCompanionMarker(
   body: string,
   stamp: Pick<CompanionLaneStamp, "prNumber" | "skillName">,
-): string | null {
+): { sha: string; at: number } | null {
   const key = `${companionMarkerKey(stamp)} sha=`;
   if (!body.startsWith(key)) return null;
-  const match = /^([0-9a-f]{7,64}) -->/.exec(body.slice(key.length));
-  return match?.[1] ?? null;
+  const match = MARKER_TAIL.exec(body.slice(key.length));
+  return match ? { sha: match[1]!, at: Number(match[2]) } : null;
 }
 
 const COMPANION_REPORT_FENCE = buildTaggedFence(COMPANION_REPORT_KIND);
@@ -99,54 +119,24 @@ const companionReportSchema = z.object({
 
 export type CompanionReport = z.infer<typeof companionReportSchema>;
 
-export type ParseCompanionReportResult =
-  | { ok: true; value: CompanionReport }
-  | { ok: false; reason: string };
-
-/** Untagged ```json fences, the fallback when the agent dropped the tag. */
-const PLAIN_JSON_FENCE = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
+export type ParseCompanionReportResult = ParseTaggedJsonResult<CompanionReport>;
 
 /**
  * Parse the agent's terminal text. The LAST tagged `json companion-report`
  * block decides; without one, the last plain ```json block naming the kind.
  */
 export function parseCompanionReport(text: string): ParseCompanionReportResult {
-  let payload: string | null = null;
-  const tagged = COMPANION_REPORT_FENCE.extractLast(text);
-  if (tagged !== null) {
-    if (!tagged.ok) return { ok: false, reason: tagged.reason };
-    payload = tagged.payload;
-  } else {
-    for (const match of text.matchAll(PLAIN_JSON_FENCE)) {
-      const candidate = match[1]?.trim() ?? "";
-      if (candidate.includes(`"${COMPANION_REPORT_KIND}"`)) payload = candidate;
-    }
-  }
-  if (payload === null) {
-    return { ok: false, reason: "no companion-report block in agent output" };
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(payload);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `companion-report JSON parse failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  const parsed = companionReportSchema.safeParse(raw);
-  if (!parsed.success) {
-    return {
-      ok: false,
-      reason: `companion-report schema validation failed: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join("; ")}`,
-    };
-  }
-  return { ok: true, value: parsed.data };
+  return parseTaggedJsonBlock(
+    text,
+    COMPANION_REPORT_FENCE,
+    companionReportSchema,
+  );
 }
 
-/** GitHub caps a comment body at 65536 characters. */
+/**
+ * GitHub caps a comment body at 65536 characters; the cut leaves room for
+ * the truncation note.
+ */
 const COMMENT_BODY_LIMIT = 60_000;
 
 /**
@@ -155,6 +145,14 @@ const COMMENT_BODY_LIMIT = 60_000;
  */
 function neutralise(text: string): string {
   return text.replaceAll("<!--", "&lt;!--");
+}
+
+/** `text` cut to `limit` UTF-16 units without splitting a surrogate pair. */
+function truncate(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const code = text.charCodeAt(limit - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? limit - 1 : limit;
+  return `${text.slice(0, end)}\n\n_(truncated)_`;
 }
 
 function shortSha(sha: string): string {
@@ -171,35 +169,35 @@ const CHECK_LABELS: Record<
   skipped: "skipped",
 };
 
-function renderStaleNote(
-  stamp: CompanionLaneStamp,
+/** The opening lines every companion comment shares: marker, title, head. */
+function renderHeader(
+  run: CompanionReportRun,
   currentHeadSha: string | null,
 ): string[] {
-  if (!currentHeadSha || currentHeadSha === stamp.headSha) return [];
-  return [
-    `> The PR head has moved to \`${shortSha(currentHeadSha)}\` since this ` +
-      `run started; these notes describe \`${shortSha(stamp.headSha)}\`.`,
-  ];
-}
-
-function renderHeader(stamp: CompanionLaneStamp): string[] {
-  return [
-    companionReportMarker(stamp),
+  const { stamp } = run;
+  const lines = [
+    companionReportMarker(run),
     `### PR companion: \`${stamp.skillName}\``,
     `Advisory notes for commit \`${stamp.headSha}\`. This is not a review ` +
       `and carries no verdict; the review of this PR is posted separately.`,
   ];
+  if (currentHeadSha && currentHeadSha !== stamp.headSha) {
+    lines.push(
+      `> The PR head has moved to \`${shortSha(currentHeadSha)}\` since this ` +
+        `run started; these notes describe \`${shortSha(stamp.headSha)}\`.`,
+    );
+  }
+  return lines;
 }
 
 /** The comment for a parsed report: header, summary, findings, checks. */
 export function renderCompanionReport(
   report: CompanionReport,
-  stamp: CompanionLaneStamp,
+  run: CompanionReportRun,
   currentHeadSha: string | null,
 ): string {
   const parts = [
-    ...renderHeader(stamp),
-    ...renderStaleNote(stamp, currentHeadSha),
+    ...renderHeader(run, currentHeadSha),
     neutralise(report.summary),
   ];
   const findings = [...report.findings].sort(
@@ -227,20 +225,16 @@ export function renderCompanionReport(
     );
     parts.push(`**Checks:**\n\n${lines.join("\n")}`);
   }
-  const body = parts.join("\n\n");
-  return body.length > COMMENT_BODY_LIMIT
-    ? `${body.slice(0, COMMENT_BODY_LIMIT)}\n\n_(truncated)_`
-    : body;
+  return truncate(parts.join("\n\n"), COMMENT_BODY_LIMIT);
 }
 
 /** The comment when the run produced no usable report. */
 export function renderCompanionNotice(
-  stamp: CompanionLaneStamp,
+  run: CompanionReportRun,
   currentHeadSha: string | null,
 ): string {
   return [
-    ...renderHeader(stamp),
-    ...renderStaleNote(stamp, currentHeadSha),
+    ...renderHeader(run, currentHeadSha),
     "The companion run finished without a usable report for this commit, " +
       "so there are no notes this time. The review of this PR is not affected.",
   ].join("\n\n");
@@ -253,7 +247,9 @@ export interface CompanionReportGitHub {
     prNumber: number,
   ): Promise<Array<{ id: number; body: string }>>;
   createIssueComment(prNumber: number, body: string): Promise<void>;
-  updateIssueComment(commentId: number, body: string): Promise<void>;
+  /** False when the comment is gone (a person deleted it); throws otherwise. */
+  updateIssueComment(commentId: number, body: string): Promise<boolean>;
+  deleteIssueComment(commentId: number): Promise<void>;
 }
 
 export type CompanionReportOutcome =
@@ -262,29 +258,62 @@ export type CompanionReportOutcome =
   | { outcome: "skipped_newer_head"; existingSha: string }
   | { outcome: "post_failed"; failureReason: string };
 
-interface Logger {
-  info(message: string, meta?: Record<string, unknown>): void;
-  warn(message: string, meta?: Record<string, unknown>): void;
-  error(message: string, meta?: Record<string, unknown>): void;
+interface MarkedComment {
+  id: number;
+  body: string;
+  sha: string;
+  at: number;
+}
+
+/** Our marked comments for this (PR, skill). */
+async function listMarked(
+  github: CompanionReportGitHub,
+  stamp: CompanionLaneStamp,
+): Promise<MarkedComment[]> {
+  const comments = await github.listBotIssueComments(stamp.prNumber);
+  return comments.flatMap((comment) => {
+    const marker = parseCompanionMarker(comment.body, stamp);
+    return marker ? [{ ...comment, ...marker }] : [];
+  });
+}
+
+/** The comment that stands: the newest run's, the later comment on a tie. */
+function newestOf(comments: MarkedComment[]): MarkedComment | null {
+  let best: MarkedComment | null = null;
+  for (const comment of comments) {
+    if (
+      best === null ||
+      comment.at > best.at ||
+      (comment.at === best.at && comment.id > best.id)
+    ) {
+      best = comment;
+    }
+  }
+  return best;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
  * The pure core: decide and write. `currentHeadSha` is the PR head now, or
- * null when it could not be read (no newest-head check then).
+ * null when it could not be read (no current-head check then).
  */
 export async function executeCompanionReport({
   github,
-  stamp,
+  run,
   terminalText,
   currentHeadSha,
   logger,
 }: {
   github: CompanionReportGitHub;
-  stamp: CompanionLaneStamp;
+  run: CompanionReportRun;
   terminalText: string;
   currentHeadSha: string | null;
-  logger?: Logger;
+  logger?: ReviewLogger;
 }): Promise<CompanionReportOutcome> {
+  const { stamp, requestedAt } = run;
   const meta = {
     repoFullName: stamp.repoFullName,
     prNumber: stamp.prNumber,
@@ -292,33 +321,30 @@ export async function executeCompanionReport({
     headSha: stamp.headSha,
   };
 
-  // The newest of our marked comments for this (PR, skill). A failed lookup
-  // posts a fresh comment: a rare duplicate beats a lost report.
-  let existing: { id: number; body: string; sha: string } | null = null;
+  // A failed lookup posts a fresh comment: a rare duplicate (which the next
+  // run's convergence removes) beats a lost report.
+  let existing: MarkedComment | null = null;
   try {
-    for (const comment of await github.listBotIssueComments(stamp.prNumber)) {
-      const sha = parseCompanionMarkerSha(comment.body, stamp);
-      if (sha !== null && (existing === null || comment.id > existing.id)) {
-        existing = { ...comment, sha };
-      }
-    }
+    existing = newestOf(await listMarked(github, stamp));
   } catch (error) {
     logger?.warn("companion: comment lookup failed; posting a new one", {
       ...meta,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 
-  // Newest head wins: a run for an older commit never replaces the report
-  // about the commit the PR is at now.
+  // Newest run wins: a run started after this one already reported, or the
+  // comment is about the commit the PR is at now while this run is not.
   if (
     existing !== null &&
-    currentHeadSha !== null &&
-    stamp.headSha !== currentHeadSha &&
-    existing.sha === currentHeadSha
+    (existing.at > requestedAt ||
+      (currentHeadSha !== null &&
+        stamp.headSha !== currentHeadSha &&
+        existing.sha === currentHeadSha))
   ) {
-    logger?.info("companion: a report for the current head exists; skipping", {
+    logger?.info("companion: a newer report exists; skipping", {
       ...meta,
+      existingSha: existing.sha,
       currentHeadSha,
     });
     return { outcome: "skipped_newer_head", existingSha: existing.sha };
@@ -326,21 +352,26 @@ export async function executeCompanionReport({
 
   const parsed = parseCompanionReport(terminalText);
   const body = parsed.ok
-    ? renderCompanionReport(parsed.value, stamp, currentHeadSha)
-    : renderCompanionNotice(stamp, currentHeadSha);
+    ? renderCompanionReport(parsed.value, run, currentHeadSha)
+    : renderCompanionNotice(run, currentHeadSha);
   if (existing !== null && existing.body === body) {
     logger?.info("companion: report unchanged; skipping", meta);
     return { outcome: "skipped_unchanged" };
   }
+  let outcome: "created" | "updated";
   try {
-    if (existing !== null) {
-      await github.updateIssueComment(existing.id, body);
+    // A comment a person deleted since the lookup is replaced, not lost.
+    if (
+      existing !== null &&
+      (await github.updateIssueComment(existing.id, body))
+    ) {
+      outcome = "updated";
     } else {
       await github.createIssueComment(stamp.prNumber, body);
+      outcome = "created";
     }
   } catch (error) {
-    const failureReason =
-      error instanceof Error ? error.message : String(error);
+    const failureReason = errorMessage(error);
     logger?.error("companion: write failed", { ...meta, failureReason });
     return { outcome: "post_failed", failureReason };
   }
@@ -350,13 +381,60 @@ export async function executeCompanionReport({
       reason: parsed.reason,
     });
   }
-  return {
-    outcome: existing !== null ? "updated" : "created",
-    report: parsed.ok ? "parsed" : "notice",
-  };
+  await convergeOnOneComment({ github, run, body, logger, meta });
+  return { outcome, report: parsed.ok ? "parsed" : "notice" };
+}
+
+/**
+ * Two runs that finished together may each have posted, and a run started
+ * earlier may have edited the comment after this one: re-read once, keep the
+ * newest run's comment (restoring this run's body if an older run wrote over
+ * it) and delete every other marked copy. Best-effort: a duplicate left
+ * behind is noise the next run removes, never a lost report.
+ */
+async function convergeOnOneComment({
+  github,
+  run,
+  body,
+  logger,
+  meta,
+}: {
+  github: CompanionReportGitHub;
+  run: CompanionReportRun;
+  body: string;
+  logger?: ReviewLogger;
+  meta: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    const marked = await listMarked(github, run.stamp);
+    const keep = newestOf(marked);
+    if (keep === null) return;
+    if (keep.at < run.requestedAt) {
+      await github.updateIssueComment(keep.id, body);
+    }
+    for (const comment of marked) {
+      if (comment.id !== keep.id) {
+        await github.deleteIssueComment(comment.id);
+      }
+    }
+  } catch (error) {
+    logger?.warn("companion: convergence failed (a duplicate may remain)", {
+      ...meta,
+      error: errorMessage(error),
+    });
+  }
 }
 
 type Octokit = Awaited<ReturnType<typeof getOctokitForApp>>;
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    error.status === 404
+  );
+}
 
 export function createOctokitCompanionReportClient(
   octokit: Octokit,
@@ -369,8 +447,14 @@ export function createOctokitCompanionReportClient(
         octokit.rest.issues.listComments,
         { owner, repo, issue_number: prNumber, per_page: 100 },
       );
+      // A Bot account with the App's login: a person whose login merely
+      // equals the App's name (isBotAuthor compares without `[bot]`) never
+      // counts, whatever they type.
       return comments
-        .filter((comment) => isBotAuthor(comment.user?.login))
+        .filter(
+          (comment) =>
+            comment.user?.type === "Bot" && isBotAuthor(comment.user.login),
+        )
         .map((comment) => ({ id: comment.id, body: comment.body ?? "" }));
     },
     async createIssueComment(prNumber, body) {
@@ -382,17 +466,35 @@ export function createOctokitCompanionReportClient(
       });
     },
     async updateIssueComment(commentId, body) {
-      await octokit.rest.issues.updateComment({
-        owner,
-        repo,
-        comment_id: commentId,
-        body,
-      });
+      try {
+        await octokit.rest.issues.updateComment({
+          owner,
+          repo,
+          comment_id: commentId,
+          body,
+        });
+        return true;
+      } catch (error) {
+        if (isNotFound(error)) return false;
+        throw error;
+      }
+    },
+    async deleteIssueComment(commentId) {
+      try {
+        await octokit.rest.issues.deleteComment({
+          owner,
+          repo,
+          comment_id: commentId,
+        });
+      } catch (error) {
+        // Already gone (the other converging run deleted it first).
+        if (!isNotFound(error)) throw error;
+      }
     },
   };
 }
 
-const logger: Logger = {
+const logger: ReviewLogger = {
   info: (message, meta) => console.log(`[companion-report] ${message}`, meta),
   warn: (message, meta) => console.warn(`[companion-report] ${message}`, meta),
   error: (message, meta) =>
@@ -455,12 +557,12 @@ export async function handleCompanionReportAtFinish({
     } catch (error) {
       logger.warn("PR head read failed — writing without the head check", {
         threadId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     const outcome = await executeCompanionReport({
       github: createOctokitCompanionReportClient(octokit, stamp.repoFullName),
-      stamp,
+      run: { stamp, requestedAt: new Date(thread.createdAt).getTime() },
       terminalText,
       currentHeadSha,
       logger,
@@ -490,7 +592,7 @@ export async function handleCompanionReportAtFinish({
   } catch (error) {
     console.error("[companion-report] finish hook failed (non-fatal)", {
       threadId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
