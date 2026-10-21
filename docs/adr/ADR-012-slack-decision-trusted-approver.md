@@ -223,13 +223,17 @@ as under A) or a Slack identity `(slack_team_id, slack_user_id)`.
 
 - The trusted source was chosen on evidence (the first external org's recorded setup facts) before
   any decision code exists.
-- Every option keeps the existing mention confirmation untouched.
-- Under A, A′, B and C a leaked org-app secret cannot forge an approval.
+- The existing mention confirmation stays untouched.
+- A leaked org-app secret cannot forge an approval: org-route knowledge actions are refused.
+- Deciders do not need platform accounts; a Slack-keyed owner entry is enough.
 
 **Negative / watch**
 
-- Under A, A′ and C an org that owns its Slack app loses one-click approval in Slack.
-- Under D, repudiation is possible by design; telemetry must be able to exclude those rows.
+- An org that owns its Slack app cannot decide from Slack until a later ADR adds a path (option C
+  is the candidate).
+- Offboarding of Slack-keyed owners follows Slack, not the platform: an owner-map entry outlives
+  the person's workspace membership until an admin removes it.
+- Telemetry that counts owner decisions must treat both `identity_source` values.
 - Known pre-existing items handed to Phase 15 (EW5), not decided here: `retry_task_creation`
   re-runs a mention as the original poster taken from `action.value`, not the clicker
   (`handle-request.ts:87-110`), and `handle-request.ts:90-93` logs the retry data including
@@ -239,14 +243,14 @@ as under A) or a Slack identity `(slack_team_id, slack_user_id)`.
 
 Phase 15 must ship tests for:
 
-- the owner/delegate matrix on each route kind (owner, delegate, non-owner, unlinked Slack user).
-  An unlinked Slack user is refused under A, B and C; under A′ that user decides only when the
-  owner map names their `(slack_team_id, slack_user_id)`, and is refused otherwise;
-- under A′, a Slack-keyed owner deciding without a platform account, and the same Slack user id
-  refused when it arrives from a different team, an unbound installation, or an installation bound
-  to another org;
-- a forged org-route payload naming an owner, refused (A, A′, B, C) or recorded with
-  `identity_source = org_app_asserted` (D);
+- the owner/delegate matrix on the platform route: a platform-user owner, a Slack-keyed owner
+  without a platform account, a delegate of each kind, a non-owner, and an unlinked Slack user who
+  is not named by a Slack-keyed entry (refused);
+- the same Slack user id refused when it arrives from a different team, an unbound installation,
+  or an installation bound to another org;
+- a forged org-route payload naming an owner: refused and logged, and no decision row is written;
+- each decision row carries `identity_source = platform_linked` or `platform_slack`, matching the
+  owner-map entry that matched;
 - a refusal reply that does not leak org membership;
 - a `view_submission` carrying a forged user, treated the same as a forged click;
 - attribution logs that carry ids only.
