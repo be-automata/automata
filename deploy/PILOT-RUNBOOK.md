@@ -1131,10 +1131,15 @@ is no other toggle.
 - The `somnio-skills` pack (`skills/dora-metrics`, `skills/react-health-audit`,
   `skills/security-audit`, `skills/flutter-best-practices`,
   `skills/flutter-health-audit`, `skills/dart-model-from-json`,
-  `skills/react-best-practices` + LICENSE; the Flutter and React standards
-  from upstream `agent-rules/rules/<stack>/` are vendored inside their
-  best-practices skill dir) at
-  `/usr/local/lib/automata-batteries/somnio-skills@<sha>/`.
+  `skills/react-best-practices` + LICENSE) at
+  `/usr/local/lib/automata-batteries/somnio-skills@<sha>/`. The Flutter and
+  React standards from upstream `agent-rules/rules/<stack>/` are vendored
+  inside their best-practices skill dir. Three skills get an automata adapter
+  `SKILL.md` (`packages/worker/deploy/batteries/somnio-skills/`) and keep the
+  upstream one as `UPSTREAM-SKILL.md`: the best-practices adapters read the
+  vendored standards instead of the target repo's copy or a WebFetch of
+  upstream `main`, and the flutter-health-audit adapter skips the FVM/Flutter
+  install of Step 0 when the run has no `flutter` on PATH.
 - A **build-only** Dart SDK at `/usr/local/lib/automata-batteries/dart-sdk@3.13.5/`
   (top dir 0700, sha256-checked before extraction, extracted with
   `python3 -m zipfile`). There is no `/usr/local/bin/dart`: agents never need

@@ -118,7 +118,12 @@
           "src": "skills/flutter-best-practices",
           "dest": "skills/flutter-best-practices",
           "gitId": "ed9e0550ad2cfb8df1c5318b5e7ecfb4fdca3097",
-          "exclude": [".agent/workflows/flutter_best_practices.md"]
+          "exclude": ["SKILL.md", ".agent/workflows/flutter_best_practices.md"]
+        },
+        {
+          "src": "skills/flutter-best-practices/SKILL.md",
+          "dest": "skills/flutter-best-practices/UPSTREAM-SKILL.md",
+          "gitId": "3cd6738e6b1aa5112dc12230e33a56e7ce7e8cba"
         },
         {
           "src": "agent-rules/rules/flutter",
@@ -129,7 +134,12 @@
           "src": "skills/flutter-health-audit",
           "dest": "skills/flutter-health-audit",
           "gitId": "42b104d85dee7ded738946ebe8f4951b57def403",
-          "exclude": [".agent/workflows/flutter_health_audit.md"]
+          "exclude": ["SKILL.md", ".agent/workflows/flutter_health_audit.md"]
+        },
+        {
+          "src": "skills/flutter-health-audit/SKILL.md",
+          "dest": "skills/flutter-health-audit/UPSTREAM-SKILL.md",
+          "gitId": "c8f8ff5a39d47ff0e7a97418dfc2ec6f1ce616c3"
         },
         {
           "src": "skills/dart-model-from-json",
@@ -140,7 +150,12 @@
           "src": "skills/react-best-practices",
           "dest": "skills/react-best-practices",
           "gitId": "a94386bf9e0e893c2d9f01595a93bbab7e0fc75e",
-          "exclude": [".agent/workflows/react_best_practices.md"]
+          "exclude": ["SKILL.md", ".agent/workflows/react_best_practices.md"]
+        },
+        {
+          "src": "skills/react-best-practices/SKILL.md",
+          "dest": "skills/react-best-practices/UPSTREAM-SKILL.md",
+          "gitId": "a45aaa012c00532cf0c7232b8f2cd96cefe2edf9"
         },
         {
           "src": "agent-rules/rules/react",
@@ -151,6 +166,20 @@
           "src": "LICENSE",
           "dest": "LICENSE",
           "gitId": "0cdd8a5c076691ebe0980ca7e8d2f741778894d4"
+        }
+      ],
+      "overlays": [
+        {
+          "from": "packages/worker/deploy/batteries/somnio-skills/flutter-best-practices/SKILL.md",
+          "dest": "skills/flutter-best-practices/SKILL.md"
+        },
+        {
+          "from": "packages/worker/deploy/batteries/somnio-skills/flutter-health-audit/SKILL.md",
+          "dest": "skills/flutter-health-audit/SKILL.md"
+        },
+        {
+          "from": "packages/worker/deploy/batteries/somnio-skills/react-best-practices/SKILL.md",
+          "dest": "skills/react-best-practices/SKILL.md"
         }
       ]
     }

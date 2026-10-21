@@ -661,6 +661,13 @@ function parsePubspecLock(text: string): Map<string, PubLockEntry> {
   return entries;
 }
 
+/** somnio-skills skills whose upstream SKILL.md is replaced by an automata adapter. */
+const ADAPTED_SOMNIO_SKILLS = [
+  "flutter-best-practices",
+  "flutter-health-audit",
+  "react-best-practices",
+] as const;
+
 function readBatteriesManifest(): BatteriesManifest {
   const parsed: unknown = JSON.parse(
     read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
@@ -741,7 +748,6 @@ describe("#batteries (phase 3): batteries.json", () => {
     );
     expect(pack.sha).toBe("8db3d0d57682087aebebd4526a53c72eb30246b9");
     expect(pack.license).toBe("MIT");
-    expect(pack.overlays).toBeUndefined();
     expect(pack.allowedHelperRefs).toBeUndefined();
     expect(pack.subpaths).toEqual([
       {
@@ -772,7 +778,12 @@ describe("#batteries (phase 3): batteries.json", () => {
         src: "skills/flutter-best-practices",
         dest: "skills/flutter-best-practices",
         gitId: "ed9e0550ad2cfb8df1c5318b5e7ecfb4fdca3097",
-        exclude: [".agent/workflows/flutter_best_practices.md"],
+        exclude: ["SKILL.md", ".agent/workflows/flutter_best_practices.md"],
+      },
+      {
+        src: "skills/flutter-best-practices/SKILL.md",
+        dest: "skills/flutter-best-practices/UPSTREAM-SKILL.md",
+        gitId: "3cd6738e6b1aa5112dc12230e33a56e7ce7e8cba",
       },
       {
         src: "agent-rules/rules/flutter",
@@ -783,7 +794,12 @@ describe("#batteries (phase 3): batteries.json", () => {
         src: "skills/flutter-health-audit",
         dest: "skills/flutter-health-audit",
         gitId: "42b104d85dee7ded738946ebe8f4951b57def403",
-        exclude: [".agent/workflows/flutter_health_audit.md"],
+        exclude: ["SKILL.md", ".agent/workflows/flutter_health_audit.md"],
+      },
+      {
+        src: "skills/flutter-health-audit/SKILL.md",
+        dest: "skills/flutter-health-audit/UPSTREAM-SKILL.md",
+        gitId: "c8f8ff5a39d47ff0e7a97418dfc2ec6f1ce616c3",
       },
       {
         src: "skills/dart-model-from-json",
@@ -794,7 +810,12 @@ describe("#batteries (phase 3): batteries.json", () => {
         src: "skills/react-best-practices",
         dest: "skills/react-best-practices",
         gitId: "a94386bf9e0e893c2d9f01595a93bbab7e0fc75e",
-        exclude: [".agent/workflows/react_best_practices.md"],
+        exclude: ["SKILL.md", ".agent/workflows/react_best_practices.md"],
+      },
+      {
+        src: "skills/react-best-practices/SKILL.md",
+        dest: "skills/react-best-practices/UPSTREAM-SKILL.md",
+        gitId: "a45aaa012c00532cf0c7232b8f2cd96cefe2edf9",
       },
       {
         src: "agent-rules/rules/react",
@@ -807,26 +828,40 @@ describe("#batteries (phase 3): batteries.json", () => {
         gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
       },
     ]);
+    expect(pack.overlays).toEqual(
+      ADAPTED_SOMNIO_SKILLS.map((skill) => ({
+        from: `packages/worker/deploy/batteries/somnio-skills/${skill}/SKILL.md`,
+        dest: `skills/${skill}/SKILL.md`,
+      })),
+    );
   });
 
-  it("vendors the somnio standards rules inside the skill that reads them", () => {
-    // The best-practices skills read `agent-rules/rules/<stack>/*.md` local-first
-    // (else a live, unpinned fetch from upstream main). Under the skill dir the
-    // relative path resolves to the pinned copy; a top-level skills/agent-rules
-    // dir would fail the installer's "every skills/* dir has a SKILL.md" check.
-    const rules = packById("somnio-skills").subpaths.filter((s) =>
-      s.src.startsWith("agent-rules/"),
-    );
-    expect(rules.map((s) => [s.src, s.dest])).toEqual([
-      [
-        "agent-rules/rules/flutter",
-        "skills/flutter-best-practices/agent-rules/rules/flutter",
-      ],
-      [
-        "agent-rules/rules/react",
-        "skills/react-best-practices/agent-rules/rules/react",
-      ],
-    ]);
+  it("adapts the somnio skills that would leave the box", () => {
+    // Upstream best-practices read `agent-rules/rules/<stack>/` from the TARGET
+    // repo, else WebFetch it from upstream main (unpinned, and fenced on the
+    // box); flutter-health-audit stops unless it can install Flutter via FVM.
+    // Each adapter SKILL.md overrides that much, then defers to the renamed
+    // upstream skill.
+    const dests = packById("somnio-skills").subpaths.map((s) => s.dest);
+    const adapter = (skill: string) =>
+      read(
+        path.join(
+          repoRoot,
+          `packages/worker/deploy/batteries/somnio-skills/${skill}/SKILL.md`,
+        ),
+      );
+    for (const skill of ADAPTED_SOMNIO_SKILLS) {
+      expect(adapter(skill)).toMatch(new RegExp(`^---\\nname: ${skill}\\n`));
+      expect(adapter(skill)).toContain("${CLAUDE_SKILL_DIR}/UPSTREAM-SKILL.md");
+      expect(dests).toContain(`skills/${skill}/UPSTREAM-SKILL.md`);
+    }
+    for (const stack of ["flutter", "react"]) {
+      const skill = `${stack}-best-practices`;
+      expect(dests).toContain(`skills/${skill}/agent-rules/rules/${stack}`);
+      expect(adapter(skill)).toContain(
+        `\${CLAUDE_SKILL_DIR}/agent-rules/rules/${stack}/`,
+      );
+    }
   });
 
   it("pins a standalone pnpm for the audit checks, at the path the runner uses", () => {
