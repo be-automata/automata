@@ -192,6 +192,10 @@ export async function handlePullRequestUpdated(
 }
 
 const AUTOMATION_CONCURRENCY = 5;
+// #447: issue automations run in waitUntil, which Workers cancels 30s after the
+// response. A batch of 5 took ~5s in prod, so 20s leaves room for the runs in
+// flight when the last one starts.
+const ISSUE_AUTOMATION_START_BUDGET_MS = 20_000;
 
 async function runPullRequestAutomations(
   event: PullRequestEvent,
@@ -693,9 +697,18 @@ async function runIssueAutomations(
   deliveryId: string | undefined,
 ): Promise<void> {
   // One waitUntil budget for all of them: at most AUTOMATION_CONCURRENCY in
-  // flight, a free lane takes the next at once, no pause between runs.
+  // flight, a free lane takes the next at once, no pause between runs. Workers
+  // cancels waitUntil work 30s after the response, so no run starts past
+  // ISSUE_AUTOMATION_START_BUDGET_MS: one never started is named in the log
+  // below, where one cut off mid-run would leave no trace.
+  const startedAt = Date.now();
   const failures: unknown[] = [];
+  const notStarted: string[] = [];
   await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    if (Date.now() - startedAt > ISSUE_AUTOMATION_START_BUDGET_MS) {
+      notStarted.push(automation.id);
+      return;
+    }
     try {
       await handleIssueAutomation(event, automation, deliveryId);
     } catch (error) {
@@ -703,8 +716,20 @@ async function runIssueAutomations(
     }
   });
   console.log(
-    `Successfully handled ${automations.length - failures.length} issue automations`,
+    `Successfully handled ${automations.length - notStarted.length - failures.length} issue automations (delivery ${deliveryId ?? "unknown"})`,
   );
+  if (notStarted.length > 0) {
+    console.error(
+      "[github webhook] issue automations not started: past the waitUntil budget",
+      {
+        deliveryId: deliveryId ?? null,
+        eventName: `issues.${event.action}`,
+        repoFullName: event.repository.full_name,
+        issueNumber: event.issue.number,
+        automationIds: notStarted,
+      },
+    );
+  }
   if (failures.length > 0) {
     console.error(
       `Error handling ${failures.length} issue automations (delivery ${deliveryId ?? "unknown"}): ${failures.map(errorText).join(", ")}`,
@@ -1045,8 +1070,7 @@ async function handleIssueAutomation(
 // skill but the chassis has no task-creation path for. Each creates one org-
 // attributed task (shadow when the installation is in shadow mode). See
 // mirror-intake.ts + deploy/PILOT-RUNBOOK.md. These intentionally propagate a
-// WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8);
-// on pull_request.closed they run after the ack and the skip is only logged.
+// WebhookSkip for an unbound installation so the route fast-acks 2xx (WI-8).
 // ---------------------------------------------------------------------------
 
 // pull_request.review_requested + pull_request.closed(merged=true)

@@ -1715,11 +1715,12 @@ describe("GitHub webhook route", () => {
         prNumber: pr.number,
         createIfNotFound: false,
       });
-      // Not a self-heal fix PR: one lookup, no GitHub client. #447: the route
-      // defers exactly the two closed handlers (mirror intake, self-heal
-      // settle); the settle itself defers nothing more.
+      // Not a self-heal fix PR: one lookup, no GitHub client.
+      // #447 assertion change (was not.toHaveBeenCalled): the route now defers
+      // the self-heal settle on purpose, exactly once; mirror intake stays
+      // awaited (a failure there must still 500) and the settle defers nothing.
       expect(createSelfHealOctokit).not.toHaveBeenCalled();
-      expect(waitUntil).toHaveBeenCalledTimes(2);
+      expect(waitUntil).toHaveBeenCalledTimes(1);
     });
 
     it("other pull_request actions do not reach the self-heal handler", async () => {

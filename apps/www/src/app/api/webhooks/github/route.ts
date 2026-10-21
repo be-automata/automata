@@ -95,21 +95,23 @@ export async function POST(request: NextRequest) {
   // Mirror-intake (pilot): event classes prod routes to a skill but the
   // chassis has no task-creation path for. Each creates an org-attributed shadow
   // task (see mirror-intake.ts).
-  webhooks.on("pull_request.review_requested", async ({ payload }) => {
-    await handlePullRequestMirror(payload);
-  });
-  // #447: the closed delivery acks before its slow work. The merged-PR mirror
-  // task (an installation lookup, the tracker context, a thread) and the
-  // self-heal fix PR settle (R5: one DB lookup, then the GitHub reads of a
-  // merge; observation only, never merges) run after the 2xx; a failure is
-  // logged with the delivery id so an operator can redeliver it.
+  //
+  // #447: the merged-PR mirror task stays awaited on pull_request.closed. An
+  // unexpected failure there must still 500, because the red mark in GitHub's
+  // delivery log is the operator's only signal to redeliver a lost merged-PR
+  // audit until durable ingress (#448) exists. Its p50 (4.6s) is well inside
+  // the 10s limit; a WebhookSkip still fast-acks with `skipped: true` (WI-8).
+  webhooks.on(
+    ["pull_request.review_requested", "pull_request.closed"],
+    async ({ payload }) => {
+      await handlePullRequestMirror(payload);
+    },
+  );
+  // R5: a self-heal fix PR a person merged or closed. A sibling of the closed
+  // handlers above: one DB lookup by (repo, pr_number), then the GitHub reads
+  // of a merge. Observation only; never merges, never throws (its failures were
+  // only ever logged), so #447 runs it after the 2xx at no loss of signal.
   webhooks.on("pull_request.closed", ({ id, payload }) => {
-    deferWebhookWork({
-      deliveryId: id,
-      eventName: "pull_request.closed",
-      label: "mirror intake",
-      work: () => handlePullRequestMirror(payload),
-    });
     deferWebhookWork({
       deliveryId: id,
       eventName: "pull_request.closed",

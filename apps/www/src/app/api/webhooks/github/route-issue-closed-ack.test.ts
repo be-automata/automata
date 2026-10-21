@@ -201,23 +201,29 @@ describe("#447: issue and closed deliveries ack before their work", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  // protects=pull_request.closed acks while the merged-PR mirror task and the
-  //   self-heal fix PR settle are still pending (p50 4.6s before #447);
-  // fails_when=either closed handler is awaited before the reply again, or
-  //   either stops being started for a closed delivery;
+  // protects=pull_request.closed acks while the self-heal fix PR settle is
+  //   still pending, and the merged-PR mirror task is still awaited;
+  // fails_when=the settle is awaited before the reply again, stops being
+  //   started for a closed delivery, or the mirror task is deferred (its
+  //   failure would then lose the 500 an operator redelivers from);
   // no_claim=that the status sync (updateGitHubPR) is off the reply path; it
-  //   is not, and this case stubs it as untracked.
-  it("pull_request.closed returns 200 while mirror intake and the self-heal settle are pending", async () => {
-    const mirror = gate();
+  //   is not, and this case stubs the PR as untracked.
+  it("pull_request.closed returns 200 while the self-heal settle is pending, after mirror intake settles", async () => {
     const settle = gate();
-    vi.mocked(createMirrorTask).mockImplementation(() => mirror.opened);
+    let mirrorFinished = false;
+    vi.mocked(createMirrorTask).mockImplementation(async () => {
+      await Promise.resolve();
+      mirrorFinished = true;
+      return undefined as never;
+    });
     vi.mocked(handleSelfHealPrClosed).mockImplementation(() => settle.opened);
 
     const response = await POST(await prClosedRequest());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ success: true });
-    expect(waitUntil).toHaveBeenCalledTimes(2);
+    expect(mirrorFinished).toBe(true);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
     expect(createMirrorTask).toHaveBeenCalledWith(
       expect.objectContaining({
         repoFullName: REPO,
@@ -226,43 +232,35 @@ describe("#447: issue and closed deliveries ack before their work", () => {
     );
     expect(handleSelfHealPrClosed).toHaveBeenCalledTimes(1);
 
-    mirror.release();
     settle.release();
     await waitUntilResolved();
     expect(consoleError).not.toHaveBeenCalled();
   });
 
-  // protects=an operator can find and redeliver a delivery whose work failed
-  //   after the ack (GitHub saw a 2xx, so its log shows success);
-  // fails_when=a deferred failure is swallowed, or logged without the
-  //   x-github-delivery id, or turns the already-sent reply into a 5xx;
+  // protects=the operator's redelivery signal for a merged-PR audit: an
+  //   unexpected mirror-task failure on pull_request.closed marks the delivery
+  //   failed (5xx) in GitHub's delivery log, as before #447;
+  // fails_when=the mirror task moves after the ack and its failure is only
+  //   logged behind a 200;
   // no_claim=any automatic retry; there is none until #448.
-  it("a closed-PR failure after the ack is logged with the delivery id", async () => {
+  it("a closed-PR mirror failure still returns 500", async () => {
     vi.mocked(createMirrorTask).mockRejectedValue(new Error("db down"));
     vi.mocked(handleSelfHealPrClosed).mockResolvedValue();
 
     const response = await POST(await prClosedRequest());
-    expect(response.status).toBe(200);
-    await waitUntilResolved();
 
-    expect(consoleError).toHaveBeenCalledWith(
-      expect.stringContaining("deferred work failed"),
-      expect.objectContaining({
-        deliveryId: DELIVERY_ID,
-        eventName: "pull_request.closed",
-        label: "mirror intake",
-        error: expect.stringContaining("db down"),
-      }),
-    );
+    expect(response.status).toBe(500);
+    await waitUntilResolved();
+    expect(handleSelfHealPrClosed).toHaveBeenCalledTimes(1);
   });
 
-  // protects=WI-8 survives the move: an unbound installation on a deferred
-  //   closed delivery is a logged skip naming the delivery, not an error;
-  // fails_when=a WebhookSkip from deferred work is logged as a failure, or the
-  //   skip log loses the delivery id or category;
-  // no_claim=the response body's `skipped` flag, which a deferred skip can no
-  //   longer set (a documented behavior change).
-  it("a WebhookSkip after the ack is logged as a skip with the delivery id", async () => {
+  // protects=WI-8 on pull_request.closed: an unbound installation in the
+  //   mirror task fast-acks with `skipped: true` and its category, the body and
+  //   `[github webhook] skipped` log the pilot runbook reads;
+  // fails_when=the skip turns into a 5xx, or the body loses `skipped` or the
+  //   category;
+  // no_claim=the skip log's detail fields beyond the delivery id and category.
+  it("a closed-PR WebhookSkip still fast-acks with skipped: true", async () => {
     vi.mocked(createMirrorTask).mockRejectedValue(
       new WebhookSkip("unmapped_installation", "No org bound", {
         repoFullName: REPO,
@@ -271,18 +269,21 @@ describe("#447: issue and closed deliveries ack before their work", () => {
     vi.mocked(handleSelfHealPrClosed).mockResolvedValue();
 
     const response = await POST(await prClosedRequest());
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ success: true });
-    await waitUntilResolved();
 
-    expect(consoleError).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      skipped: true,
+      category: "unmapped_installation",
+    });
     expect(consoleLog).toHaveBeenCalledWith(
-      "[github webhook] deferred work skipped",
+      "[github webhook] skipped",
       expect.objectContaining({
         deliveryId: DELIVERY_ID,
         category: "unmapped_installation",
       }),
     );
+    await waitUntilResolved();
   });
 
   // protects=a failed issue automation run names the delivery it came from;
@@ -301,6 +302,49 @@ describe("#447: issue and closed deliveries ack before their work", () => {
     expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining(`(delivery ${DELIVERY_ID})`),
       expect.any(Error),
+    );
+  });
+
+  // protects=issue automations past the waitUntil budget are named, not lost:
+  //   Workers cancels waitUntil work 30s after the response, so no run starts
+  //   after 20s and the ones not started are logged with the delivery id;
+  // fails_when=a run starts past the budget, or the not-started automations
+  //   are dropped without a log naming them and the delivery;
+  // no_claim=that runs already in flight finish inside the 30s cap, or the
+  //   real per-run latency in prod.
+  it("issue automations past the start budget are not started and are logged with the delivery id", async () => {
+    vi.mocked(getIssueAutomationsForRepo).mockResolvedValue(
+      Array.from({ length: 7 }, (_, i) => issueAutomation(`issue-${i}`)),
+    );
+    const request = await issueOpenedRequest();
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    // Each run takes 25s of the budget: the first 5 lanes start at t=0, and
+    // the 6th and 7th would start past 20s.
+    vi.mocked(runIssueAutomation).mockImplementation(async () => {
+      // Yield first, so all 5 lanes start before any run spends the clock.
+      await Promise.resolve();
+      now += 25_000;
+      return undefined as never;
+    });
+
+    try {
+      const response = await POST(request);
+      expect(response.status).toBe(200);
+      await waitUntilResolved();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(runIssueAutomation).toHaveBeenCalledTimes(5);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[github webhook] issue automations not started: past the waitUntil budget",
+      expect.objectContaining({
+        deliveryId: DELIVERY_ID,
+        eventName: "issues.opened",
+        issueNumber: 42,
+        automationIds: ["issue-5", "issue-6"],
+      }),
     );
   });
 });

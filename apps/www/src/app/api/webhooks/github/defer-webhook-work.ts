@@ -1,3 +1,5 @@
+import { redactSecrets } from "@terragon/utils/redact";
+
 import { waitUntil } from "@/lib/wait-until";
 
 import { findWebhookSkip } from "./webhook-skip";
@@ -12,10 +14,14 @@ export interface DeferredWebhookWork {
   work: () => Promise<unknown>;
 }
 
+/**
+ * An error's stack (or message) for a log line, with credential material
+ * redacted: a failed git or HTTP call can echo a token or a connection string.
+ */
 export function errorText(error: unknown): string {
-  return error instanceof Error
-    ? (error.stack ?? error.message)
-    : String(error);
+  return redactSecrets(
+    error instanceof Error ? (error.stack ?? error.message) : String(error),
+  );
 }
 
 /**
