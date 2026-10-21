@@ -5,6 +5,10 @@ import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
 import { BOX_SLOTS_MAX } from "./slot-limits";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
+  parseContainerRunsConfig,
+  type ContainerRunsConfig,
+} from "./container-config";
+import {
   ADMISSION_BACKOFF,
   ADMISSION_DEFERRAL_BUDGET_S,
   sumBackoffSeconds,
@@ -233,6 +237,12 @@ export interface WorkerConfig {
   maintBatch: number;
   /** Optional loopback /healthz port. null → no new listener (default). */
   healthPort: number | null;
+  /**
+   * ADR-013 P1: the DEV-ONLY container run path (container-config.ts). null —
+   * the default, and always in production — is the host-uid path, unchanged.
+   * Set only when `WORKER_DEV_CONTAINER_RUNS=1`; deleted by the release PR.
+   */
+  containerRuns: ContainerRunsConfig | null;
 }
 
 function defaultDaemonDist(): string {
@@ -563,6 +573,15 @@ export function loadWorkerConfig(
     }
   }
 
+  // ADR-013 P1: parsed before the uid-drop pairings below, which it relaxes
+  // (a run container is fenced by the container, not by a slot account).
+  // null unless WORKER_DEV_CONTAINER_RUNS=1, so every refusal below is
+  // byte-for-byte what it was for a host-model box.
+  const containerRuns = parseContainerRunsConfig(
+    env,
+    memoryMaxBytes,
+    parseBytesEnv,
+  );
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
   if (agentUser) {
     assertAgentUser(agentUser);
@@ -583,7 +602,9 @@ export function loadWorkerConfig(
   // the operator asked for a ceiling, the box booted happily, and every run went
   // uncapped with one 'skipped' line to show for it. Rejecting here fails at
   // boot AND at every run, because every caller loads this config.
-  if (memoryMaxBytes > 0 && !agentUser) {
+  // A container run takes the ceiling as `--memory` instead (ADR-013), so the
+  // uid drop is not what makes it enforceable there.
+  if (memoryMaxBytes > 0 && !agentUser && !containerRuns) {
     throw new Error(
       "WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty: the per-run " +
         "memory ceiling caps the AGENT, which only exists as a separate process " +
@@ -599,7 +620,9 @@ export function loadWorkerConfig(
   // without either is a misconfiguration, not a degraded mode — refuse here,
   // at boot AND at every run, since every caller loads this config.
   const boxSlots = parseBoxSlots(env.WORKER_BOX_SLOTS);
-  if (boxSlots > 1 && !agentUser) {
+  // Container runs: each run is its own container (pid, mount and network
+  // namespaces), so the slot accounts are not the fence between them.
+  if (boxSlots > 1 && !agentUser && !containerRuns) {
     throw new Error(
       `WORKER_BOX_SLOTS=${boxSlots} but WORKER_AGENT_USER is empty: concurrent ` +
         "runs are fenced from each other by running each slot as its own agent " +
@@ -753,6 +776,7 @@ export function loadWorkerConfig(
     slotMinAgeS: parsePositiveInt(env.HATCHET_SLOT_MIN_AGE_S, 600),
     maintIntervalS: parsePositiveInt(env.HATCHET_MAINT_INTERVAL_S, 60),
     maintBatch: parsePositiveInt(env.HATCHET_MAINT_BATCH, 100),
+    containerRuns,
     healthPort: (() => {
       const n = Number(env.WORKER_HEALTH_PORT);
       return env.WORKER_HEALTH_PORT?.trim() && Number.isFinite(n) && n > 0

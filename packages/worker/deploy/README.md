@@ -350,6 +350,66 @@ cat /usr/local/lib/automata-batteries/harness.sha256   # absent = last harness i
 A harness failure never invalidates the review batteries' `manifest.sha256`;
 it only leaves `harness.sha256.invalid` behind.
 
+## Container runs (DEV/TEST ONLY until the ADR-013 release PR)
+
+[ADR-013](../../../docs/adr/ADR-013-image-per-run-execution.md) moves every agent run into a
+fresh container from the pinned batteries image. Until its release PR the container path is
+**dark**: the worker takes it only with `WORKER_DEV_CONTAINER_RUNS=1`, set by hand on a throwaway
+box and **never on the production box** (no provisioning step writes it). Unset, `0` or any other
+value is the host-uid path, unchanged. With it on, the worker logs a boot `WARNING` and refuses to
+boot unless the rootless daemon answers and the pinned digest is already in its store; it then
+removes every run container a dead worker of this box left behind (label `automata.box`).
+
+| Variable                         | Default                            | Meaning                                                                                            |
+| -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `WORKER_DEV_CONTAINER_RUNS`      | unset (off)                        | Exactly `1` turns the container path on.                                                           |
+| `WORKER_BATTERIES_IMAGE`         | none (required when on)            | `ghcr.io/be-automata/automata-batteries@sha256:<digest>`; a tag is refused. Never pulled by a run. |
+| `WORKER_CONTAINER_DOCKER_SOCKET` | `/run/automata-docker/docker.sock` | The rootless daemon's socket (group `automata-docker`).                                            |
+| `WORKER_RUN_MEMORY_MAX`          | none (required when on)            | The slot tuple's ceiling, used as `--memory` and `--memory-swap`.                                  |
+| `WORKER_RUN_TASKS_MAX`           | 4096                               | `--pids-limit`.                                                                                    |
+| `WORKER_CONTAINER_CPUS`          | 2                                  | `--cpus`.                                                                                          |
+| `WORKER_CONTAINER_TMP_SIZE`      | 1G                                 | The `/tmp` tmpfs cap (counts against `--memory`).                                                  |
+| `WORKER_CONTAINER_SHM_SIZE`      | 512M                               | `--shm-size` (counts against `--memory`).                                                          |
+| `WORKER_CONTAINER_RUN_GID`       | unset (no hand-over)               | The rootless daemon user's primary gid: the run dir is handed to it (setgid, group rw).            |
+
+The slot tuple (`WORKER_BOX_SLOTS=3`, `WORKER_GLOBAL_MAX_RUNS=3`, `WORKER_PER_ORG_MAX_RUNS=2`)
+works unchanged; with containers on it does not need `WORKER_AGENT_USER`. A container run gets no
+network (`--network none`) and, until C3 (#430) bridges the egress proxy and brokers over unix
+sockets, no route to the control plane either: this path is for proving the container lifecycle,
+not for serving real runs.
+
+Install the rootless daemon on the throwaway box (root; idempotent; never on production):
+
+```bash
+packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata
+packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata --check   # verify only
+```
+
+It creates `automata-runner` (no login, no sudo) with its own subuid/subgid range, the
+`automata-docker` group (the worker joins it), cgroup v2 delegation for
+`user@<uid>.service` (`Delegate=cpu cpuset io memory pids`), lingering, and the user unit
+`linux/automata-runner-docker.service`. Then pull by digest, verify, and prove the limits, which
+is the ADR-013 P0 blocker. The first published digest (C1) is
+`sha256:d4c75aa6ecd404a5771c0ab441518b1def1ac569ea8f130c11afc90a5ca7d56f` (not `sha256:17c1197a…`,
+which is its one-layer attestation manifest). It takes **12.5 GB** on disk per daemon store: the
+rootless daemon keeps its own copy (data root `~automata-runner/docker`), so check `df` first and
+drop any copy in the root daemon's store that nothing uses.
+
+```bash
+img=ghcr.io/be-automata/automata-batteries@sha256:d4c75aa6ecd404a5771c0ab441518b1def1ac569ea8f130c11afc90a5ca7d56f
+uid=$(id -u automata-runner)
+sudo -u automata-runner env XDG_RUNTIME_DIR=/run/user/$uid \
+  docker -H unix:///run/automata-docker/docker.sock pull "$img"
+sudo -u automata env DOCKER_HOST=unix:///run/automata-docker/docker.sock \
+  deploy/images/batteries/verify.sh "$img"
+sudo -u automata packages/worker/deploy/linux/prove-container-limits.sh \
+  /run/automata-docker/docker.sock "$img"
+```
+
+`prove-container-limits.sh` prints one `PASS`/`FAIL` line per probe (memory OOM-kill, pids with a
+control run, cpu throttling, and `docker rm -f` reaping a `setsid` child) and exits 0 only when all
+pass.
+
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
 The worker consumes the compiled daemon (`packages/daemon/dist/`), not its source.

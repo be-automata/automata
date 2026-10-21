@@ -17,6 +17,11 @@ import { reapAgentUidEscapees } from "./uid-reaper";
 import { runAsAgent } from "./agent-command";
 import { DaemonProcess } from "./daemon-process";
 import {
+  ContainerDaemonProcess,
+  type RunDaemon,
+} from "./container-daemon-process";
+import { CONTAINER_WORKSPACE } from "./container-argv";
+import {
   runSelfHealChecks,
   type SelfHealCheckResult,
 } from "./self-heal-checks";
@@ -1102,7 +1107,7 @@ async function runAgentInner(
     // died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
   };
-  let daemonForPoll: DaemonProcess | null = null;
+  let daemonForPoll: RunDaemon | null = null;
   // #371: this run's headroom reservation (set under the slot, below).
   let reservation: Reservation | null = null;
 
@@ -1422,13 +1427,18 @@ async function runAgentInner(
     // pgid) and is killed as one set — kill(2) bounds `-1` to the issuing
     // account, so a sibling slot's live run is out of reach (#205). Never
     // throws; on a disabled agent uid it is a no-op.
-    await reapAgentUidEscapees({
-      agentUser: config.agentUser,
-      phase: "admission",
-      threadId: input.threadId,
-      runNamespaceRoot: config.runNamespaceRoot,
-      log: admissionLog,
-    });
+    // ADR-013 P1 (dev-only switch): a container run has no agent uid to
+    // scan; its predecessor is removed by slot name in
+    // ContainerDaemonProcess.start(), before its own container is created.
+    if (!config.containerRuns) {
+      await reapAgentUidEscapees({
+        agentUser: config.agentUser,
+        phase: "admission",
+        threadId: input.threadId,
+        runNamespaceRoot: config.runNamespaceRoot,
+        log: admissionLog,
+      });
+    }
     const pulled =
       config.boxTrust === "owner"
         ? await pullAgentCredentials(wwwOpts, signal)
@@ -1444,15 +1454,29 @@ async function runAgentInner(
     // production before the seed landed. Credits/box-key runs need the seed
     // just as much: review mode does not care where the model credential
     // comes from.
-    materialised = await materialiseAgentCredentials({
-      credentials: pulled.credentials,
-      agent: pulled.agent,
-      run,
-      agentUser: config.agentUser,
-      seed: batterySeed,
-      foregroundOnly,
-      batteries: { log: admissionLog },
-    });
+    materialised = await materialiseAgentCredentials(
+      config.containerRuns
+        ? {
+            // ADR-013: the HOME built here is a STAGING dir the container
+            // run copies into the image's HOME volume. No packs are linked
+            // (the image installs every battery), the settings are composed
+            // per lane at copy-in, and the trust seed names /workspace.
+            credentials: pulled.credentials,
+            agent: pulled.agent,
+            run,
+            trustWorkdir: CONTAINER_WORKSPACE,
+            batteries: { log: admissionLog },
+          }
+        : {
+            credentials: pulled.credentials,
+            agent: pulled.agent,
+            run,
+            agentUser: config.agentUser,
+            seed: batterySeed,
+            foregroundOnly,
+            batteries: { log: admissionLog },
+          },
+    );
   } catch (err) {
     await abandon();
     throw err;
@@ -1603,25 +1627,54 @@ async function runAgentInner(
   if (taskOutcome.readTokenLine !== undefined) {
     step(taskOutcome.readTokenLine);
   }
-  const daemon = new DaemonProcess(
-    config,
-    input,
-    workdir,
-    materialised,
-    egressProxy?.url ?? null,
-    broker,
-    {
-      secrets: {
-        installationToken: secrets.installationToken,
-        daemonToken: secrets.daemonToken,
-        ...(secrets.repoEnv !== undefined ? { repoEnv: secrets.repoEnv } : {}),
+  const hostDaemon = (): DaemonProcess =>
+    new DaemonProcess(
+      config,
+      input,
+      workdir,
+      materialised,
+      egressProxy?.url ?? null,
+      broker,
+      {
+        secrets: {
+          installationToken: secrets.installationToken,
+          daemonToken: secrets.daemonToken,
+          ...(secrets.repoEnv !== undefined
+            ? { repoEnv: secrets.repoEnv }
+            : {}),
+        },
+        lane,
+        ...(taskOutcome.githubReadToken !== undefined
+          ? { githubReadToken: taskOutcome.githubReadToken }
+          : {}),
       },
-      lane,
-      ...(taskOutcome.githubReadToken !== undefined
-        ? { githubReadToken: taskOutcome.githubReadToken }
-        : {}),
-    },
-  );
+    );
+  // ADR-013 P1: only with WORKER_DEV_CONTAINER_RUNS=1 (never set in
+  // production) does the run go into a container; everything around the
+  // spawn — admission, slot, ledger, brokers, poll, teardown order — is the
+  // same code either way.
+  const containerDaemon = config.containerRuns
+    ? new ContainerDaemonProcess(config, input, run, materialised, lane, {
+        secrets: {
+          daemonToken: secrets.daemonToken,
+          ...(secrets.repoEnv !== undefined
+            ? { repoEnv: secrets.repoEnv }
+            : {}),
+        },
+        // The bot-identity precondition runs on the host against the
+        // brokers, exactly as on the host path, then its scratch is removed.
+        hostPreflight: async () => {
+          const probe = hostDaemon();
+          try {
+            await probe.preflightGhAuth();
+          } finally {
+            probe.teardown();
+          }
+        },
+        log: admissionLog,
+      })
+    : null;
+  const daemon: RunDaemon = containerDaemon ?? hostDaemon();
   daemonForPoll = daemon;
   // Exactly one fix-check report per fix run: the check's, or "aborted".
   let fixReported = false;
@@ -1651,7 +1704,11 @@ async function runAgentInner(
 
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
-    step(`daemon spawned: pid=${daemon.pid ?? "unknown"}`);
+    step(
+      containerDaemon
+        ? containerDaemon.spawnedLine()
+        : `daemon spawned: pid=${daemon.pid ?? "unknown"}`,
+    );
     // #371: from here the run's own cgroup says what anonymous memory the
     // kernel already charges it (what Committed_AS counts); the headroom
     // reservation counts only the remainder.
@@ -1739,15 +1796,18 @@ async function runAgentInner(
         egressProxyUrl: egressProxy?.url ?? null,
         baseSha: fixBaseSha,
         lockLost: boxLock?.lost === true,
-        teardown: () => daemon.teardown(),
+        teardown: () => void daemon.teardown(),
+        // A container run's "reap" is its removal (awaited, idempotent).
         reap: () =>
-          reapAgentUidEscapees({
-            agentUser: config.agentUser,
-            phase: "teardown",
-            threadId: input.threadId,
-            runNamespaceRoot: config.runNamespaceRoot,
-            log: admissionLog,
-          }),
+          containerDaemon
+            ? containerDaemon.teardown()
+            : reapAgentUidEscapees({
+                agentUser: config.agentUser,
+                phase: "teardown",
+                threadId: input.threadId,
+                runNamespaceRoot: config.runNamespaceRoot,
+                log: admissionLog,
+              }),
         gitBroker,
         ghBroker,
         runStartedAt,
@@ -1768,7 +1828,9 @@ async function runAgentInner(
       // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
-      daemon.teardown();
+      // A container run resolves only once its container is gone (rm -f -v);
+      // a host run's teardown is synchronous, so awaiting it changes nothing.
+      await daemon.teardown();
       // #371: idempotent — a run that never reached its first progress poll still
       // frees its headroom reservation here.
       reservation?.release();
@@ -1781,7 +1843,10 @@ async function runAgentInner(
       // died mid-run, so the kernel already freed it) means another run may
       // legitimately own the box now — its live agent would be collateral of
       // a uid-wide kill, so the scan is skipped and logged instead.
-      if (boxLock?.lost) {
+      if (containerDaemon) {
+        // ADR-013: the container's removal above replaced the uid-wide scan:
+        // every process of the run lived in the container's pid namespace.
+      } else if (boxLock?.lost) {
         admissionLog(
           `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
         );

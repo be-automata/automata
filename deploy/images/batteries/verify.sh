@@ -30,6 +30,7 @@ fi
 docker run --rm -i --platform linux/amd64 --network none \
   --cap-drop ALL --security-opt no-new-privileges --init \
   --read-only --tmpfs /tmp -v /home/agent -v /opt/flutter \
+  -v /opt/somnio-ai-tools/agent-rules/adapters \
   --entrypoint /bin/bash "$image" -s <<'IN_CONTAINER'
 set -uo pipefail
 fail=0
@@ -108,19 +109,21 @@ fi
 # The per-run Somnio agent-rules step (ADR-013 "Run path") against a checkout
 # that tracks its own CLAUDE.md: install, restore what the repo tracks, exclude
 # the rest. The checkout must end up clean.
+# Chained with && on purpose: bash ignores `set -e` inside a subshell used as
+# an `if` condition, so a failing installer used to fall through to a vacuous
+# "checkout clean" (the CLI wrote nothing, exit 70, read-only adapters dir).
 repo="$(mktemp -d)"
 if (
-  set -e
-  cd "$repo"
-  git init -q .
-  printf '# repo\n' >CLAUDE.md
-  git add CLAUDE.md
-  git -c user.name=v -c user.email=v@v commit -qm init
-  somnio -q rules install --agent claude --project --stacks typescript </dev/null >/dev/null 2>&1
-  git diff --name-only -z | xargs -0r git checkout --
-  git ls-files --others --exclude-standard | sed 's|^|/|' >>.git/info/exclude
-  test -s .claude/rules/typescript/best-practices.md
-  test -z "$(git status --porcelain)"
+  cd "$repo" &&
+    git init -q . &&
+    printf '# repo\n' >CLAUDE.md &&
+    git add CLAUDE.md &&
+    git -c user.name=v -c user.email=v@v commit -qm init &&
+    somnio -q rules install --agent claude --project --stacks typescript </dev/null >/dev/null 2>&1 &&
+    test -s .claude/rules/typescript/best-practices.md &&
+    { git diff --name-only -z | xargs -0r git checkout --; } &&
+    { git ls-files --others --exclude-standard | sed 's|^|/|' >>.git/info/exclude; } &&
+    test -z "$(git status --porcelain)"
 ) >/dev/null 2>&1; then
   ok somnio-rules "installed, tracked files restored, checkout clean"
 else
