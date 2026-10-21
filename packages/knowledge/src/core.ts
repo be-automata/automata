@@ -32,3 +32,4 @@ export type {
 } from "./claims";
 export * from "./op-key";
 export * from "./reanchor";
+export * from "./evidence-class";

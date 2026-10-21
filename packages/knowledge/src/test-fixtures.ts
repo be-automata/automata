@@ -68,6 +68,31 @@ If SSO sign-in loops back to the sign-in page, clear the ag_session cookie and s
 
 The SSO loop was fixed in version 2.4.1.
 `,
+  "repo/ratelimit.py": `RATE_LIMIT_PER_MINUTE = 120
+BURST_ALLOWANCE = 20
+
+
+def window_seconds() -> int:
+    return 60
+`,
+  "repo/config.yaml": `limits:
+  api:
+    requests_per_minute: 120
+  seats:
+    max_free: 3
+`,
+  "repo/README.md": `# Limits
+
+The API allows 120 requests per minute per workspace.
+`,
+  "wiki/limits-faq.md": `# Limits FAQ
+
+The API allows 120 requests per minute.
+
+Bursts may exceed the limit by 20 requests.
+
+The limits README states 120 requests per minute per workspace.
+`,
 };
 
 export const SEED = [
@@ -91,6 +116,28 @@ export const SEED = [
     id: "sso-fixed-in",
     statement: "The SSO loop was fixed in version 2.4.1.",
     evidence: ["ticket://SUP-12#/resolution/fixedIn"],
+  },
+];
+
+/** A second page grounded on whitespace-significant code and config (py, yaml) and on a prose repo file. */
+export const LIMITS_PAGE = "limits-faq";
+
+export const LIMITS_SEED = [
+  {
+    id: "api-rate",
+    statement: "The API allows 120 requests per minute.",
+    evidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L3-L3"],
+  },
+  {
+    id: "burst",
+    statement: "Bursts may exceed the limit by 20 requests.",
+    evidence: ["repo://ratelimit.py#L2-L2"],
+  },
+  {
+    id: "readme-rate",
+    statement:
+      "The limits README states 120 requests per minute per workspace.",
+    evidence: ["repo://README.md#L3-L3"],
   },
 ];
 
@@ -139,6 +186,19 @@ export function useCorpus(): { root: string; sc: Sidecar } {
   const { root, cleanup } = makeCorpus();
   onTestFinished(cleanup);
   return { root, sc: generateSidecar(root, PAGE, pageOf(root), SEED) };
+}
+
+export const limitsPageOf = (root: string) =>
+  readFileSync(join(root, "wiki", `${LIMITS_PAGE}.md`), "utf8");
+
+/** A fresh corpus with the limits page's sidecar, removed when the current test finishes. */
+export function useLimitsCorpus(): { root: string; sc: Sidecar } {
+  const { root, cleanup } = makeCorpus();
+  onTestFinished(cleanup);
+  return {
+    root,
+    sc: generateSidecar(root, LIMITS_PAGE, limitsPageOf(root), LIMITS_SEED),
+  };
 }
 
 /** Materialize the corpus into a fresh temp directory; call the returned cleanup when done. */
