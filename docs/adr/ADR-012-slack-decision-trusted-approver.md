@@ -190,7 +190,7 @@ the chosen option and the facts behind it.
 
 **Negative / watch**
 
-- Under A and C an org that owns its Slack app loses one-click approval in Slack.
+- Under A, A′ and C an org that owns its Slack app loses one-click approval in Slack.
 - Under D, repudiation is possible by design; telemetry must be able to exclude those rows.
 - Known pre-existing items handed to Phase 15 (EW5), not decided here: `retry_task_creation`
   re-runs a mention as the original poster taken from `action.value`, not the clicker
@@ -201,10 +201,12 @@ the chosen option and the facts behind it.
 
 Phase 15 must ship tests for:
 
-- the owner/delegate matrix on each route kind (owner, delegate, non-owner, unlinked Slack user);
+- the owner/delegate matrix on each route kind (owner, delegate, non-owner, unlinked Slack user).
+  An unlinked Slack user is refused under A, B, C and D; under A′ that user decides only when the
+  owner map names their `(slack_team_id, slack_user_id)`, and is refused otherwise;
 - under A′, a Slack-keyed owner deciding without a platform account, and the same Slack user id
   from a different team refused;
-- a forged org-route payload naming an owner, refused (A, B, C) or recorded with
+- a forged org-route payload naming an owner, refused (A, A′, B, C) or recorded with
   `identity_source = org_app_asserted` (D);
 - a refusal reply that does not leak org membership;
 - a `view_submission` carrying a forged user, treated the same as a forged click;
