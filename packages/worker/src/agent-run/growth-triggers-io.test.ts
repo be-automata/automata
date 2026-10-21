@@ -12,9 +12,13 @@ import {
   GROWTH_RUNS_PAGE_LIMIT,
   GROWTH_SNAPSHOT_FILENAME,
   GROWTH_SNAPSHOT_MODE,
+  GROWTH_WEBHOOK_BACKOFF_CAP_MS,
+  MALFORMED_RUN_ROW,
   postWebhook,
   readMemSample,
   readRunWindow,
+  TENANT_SIGNALS_OFF,
+  UNRECOGNIZED_PAGE,
   type GrowthTriggerDeps,
   type WriteSnapshot,
 } from "./growth-triggers-io";
@@ -400,6 +404,62 @@ describe("readRunWindow", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a page whose rows are all unrecognizable is unreadable, never an empty window (N1)", async () => {
+    const fetchImpl = engineFetch(() =>
+      jsonResponse(page([{ foo: 1 }, "row", null, { actionId: 7 }], 1, 1)),
+    );
+    expect(
+      await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).toEqual({ kind: "unreadable", reason: UNRECOGNIZED_PAGE });
+  });
+
+  it("one malformed :run row makes the read unreadable, on any page (N1)", async () => {
+    const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
+    const bad = { ...rawRow(), createdAt: "not-a-time" };
+    const fetchImpl = engineFetch((offset) =>
+      offset === 0
+        ? jsonResponse(page(full, 1, 2))
+        : jsonResponse(page([rawRow(), bad], 2, 2)),
+    );
+    expect(
+      await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).toEqual({ kind: "unreadable", reason: MALFORMED_RUN_ROW });
+  });
+
+  it("non-:run rows are still skipped silently, even a page of nothing else (N1)", async () => {
+    const failure = (createdAt?: string) => ({
+      ...rawRow({ actionId: "agent-run:on-failure-task" }),
+      ...(createdAt !== undefined ? { createdAt } : {}),
+    });
+    const fetchImpl = engineFetch(() =>
+      jsonResponse(
+        page([rawRow({ id: "a" }), failure("garbage"), { foo: 1 }], 1, 1),
+      ),
+    );
+    const r = await readRunWindow({
+      ...base,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(r.kind).toBe("rows");
+    if (r.kind === "rows") expect(r.rows.map((row) => row.id)).toEqual(["a"]);
+
+    const onlyFailures = engineFetch(() =>
+      jsonResponse(page([failure(), failure("garbage")], 1, 1)),
+    );
+    expect(
+      await readRunWindow({
+        ...base,
+        fetchImpl: onlyFailures as unknown as typeof fetch,
+      }),
+    ).toEqual({ kind: "rows", rows: [] });
   });
 
   it("past the deadline → unreadable without a request", async () => {
@@ -1689,6 +1749,170 @@ describe("armGrowthTriggers (final review: engine cache, clear text)", () => {
     expect(share[1]?.text).toContain(
       "no longer over for org-a (announced in the last 24 h)",
     );
+    handle?.stop();
+  });
+});
+
+describe("armGrowthTriggers (adversarial review N1/N2/N6)", () => {
+  const tickAt = async (
+    h: Harness,
+    handle: ReturnType<typeof armGrowthTriggers>,
+    k: number,
+  ) => {
+    h.clock.ms = NOW + k * 300_000;
+    return handle?.tick();
+  };
+
+  it.each([
+    ["an all-unrecognizable page", [{ foo: 1 }, { bar: 2 }], UNRECOGNIZED_PAGE],
+    [
+      "one malformed :run row",
+      [...CLEAN, { ...rawRow(), createdAt: "garbage" }],
+      MALFORMED_RUN_ROW,
+    ],
+  ])(
+    "%s reads unknown and never clears a firing trigger (N1)",
+    async (_name, rows, reason) => {
+      const h = harness();
+      h.deps.engineRefreshMs = 0;
+      const handle = armGrowthTriggers(ENV_ON, h.deps);
+      await handle?.firstTick;
+      expect(h.posts.map((p) => p.state)).toEqual(["fired"]);
+
+      h.setEngine(() => jsonResponse(page(rows, 1, 1)));
+      const r = await tickAt(h, handle, 1);
+      expect(h.posts.map((p) => p.state)).toEqual(["fired"]);
+      expect(r?.snapshot?.triggers.supersede_waste).toMatchObject({
+        verdict: "unknown",
+        reason,
+        firing: true,
+      });
+      handle?.stop();
+    },
+  );
+
+  it("timed-out POSTs back off 1, 2, 4, … ticks up to the 1 h cap; a delivery resets it (N2)", async () => {
+    expect(GROWTH_WEBHOOK_BACKOFF_CAP_MS).toBe(3_600_000);
+    const h = harness();
+    h.deps.engineRefreshMs = 0;
+    let tick = 0;
+    let sinkTimesOut = true;
+    const attempts: Array<[number, string]> = [];
+    const inner = h.deps.fetchImpl;
+    if (inner === undefined) throw new Error("harness has a fetchImpl");
+    h.deps.fetchImpl = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        if (urlOf(input) === WEBHOOK_URL) {
+          const body = JSON.parse(String(init?.body)) as GrowthWebhookBody;
+          attempts.push([tick, body.state]);
+          if (sinkTimesOut) {
+            throw new DOMException("late", "TimeoutError");
+          }
+        }
+        return inner(input, init);
+      },
+    ) as unknown as typeof fetch;
+    const handle = armGrowthTriggers(ENV_ON, h.deps);
+    await handle?.firstTick;
+    for (tick = 1; tick <= 39; tick++) await tickAt(h, handle, tick);
+
+    // 300 s ticks: the cap is 12 ticks (1 h). Never dropped: every attempt is the fire.
+    const fireTicks = attempts.map(([t]) => t);
+    expect(fireTicks).toEqual([0, 1, 3, 7, 15, 27, 39]);
+    expect(fireTicks.slice(1).map((t, i) => t - (fireTicks[i] ?? 0))).toEqual([
+      1, 2, 4, 8, 12, 12,
+    ]);
+    expect(attempts.every(([, state]) => state === "fired")).toBe(true);
+    const failed = () =>
+      h.logs.filter((l) => l.startsWith("growth.webhook_failed "));
+    expect(failed()).toHaveLength(1);
+    expect(failed()[0]).toContain('"reason":"timeout"');
+
+    // The sink recovers: the fire is delivered at the next due attempt (tick 51).
+    sinkTimesOut = false;
+    for (tick = 40; tick <= 51; tick++) await tickAt(h, handle, tick);
+    expect(attempts.slice(7)).toEqual([[51, "fired"]]);
+    expect(h.posts.at(-1)?.state).toBe("fired");
+
+    // A new timeout streak (the clear) starts again at one tick apart.
+    sinkTimesOut = true;
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    for (tick = 52; tick <= 56; tick++) await tickAt(h, handle, tick);
+    expect(attempts.slice(8)).toEqual([
+      [52, "cleared"],
+      [53, "cleared"],
+      [55, "cleared"],
+    ]);
+
+    // The transition stops applying (over again, held by the tick-51 fire): backoff reset,
+    // so the next clear is attempted at once rather than at tick 59.
+    h.setEngine(() => jsonResponse(page(WASTEFUL, 1, 1)));
+    tick = 57;
+    await tickAt(h, handle, tick);
+    h.setEngine(() => jsonResponse(page(CLEAN, 1, 1)));
+    tick = 58;
+    await tickAt(h, handle, tick);
+    expect(attempts.slice(11)).toEqual([[58, "cleared"]]);
+    handle?.stop();
+  });
+
+  it("tenant signals off: no engine resolve or fetch, run triggers unknown, ram_swap still fires (N6)", async () => {
+    const seeded = JSON.stringify({
+      triggers: {
+        supersede_waste: {
+          firing: true,
+          lastFiredAt: new Date(NOW - 3_600_000).toISOString(),
+        },
+      },
+    });
+    const h = harness({ snapshotText: seeded });
+    h.deps.engineRefreshMs = 0;
+    h.deps.readText = vi.fn(async (p: string) =>
+      p === "/proc/meminfo"
+        ? "MemTotal:       16000000 kB\nMemAvailable:    1000000 kB\n"
+        : VMSTAT,
+    );
+    const handle = armGrowthTriggers(
+      { ...ENV_ON, WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: "off" },
+      h.deps,
+    );
+    await handle?.firstTick;
+    for (const k of [1, 2, 3]) await tickAt(h, handle, k);
+
+    expect(h.deps.resolveEngine).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(h.deps.fetchImpl as unknown as typeof fetch)
+        .mock.calls.map(([input]) => urlOf(input))
+        .filter((u) => u !== WEBHOOK_URL),
+    ).toEqual([]);
+    expect(h.posts.map((p) => [p.trigger, p.state])).toEqual([
+      ["ram_swap", "fired"],
+    ]);
+    // A snapshot every tick; the seeded firing trigger is neither cleared nor re-fired.
+    const last = h.writes.at(-1)?.snapshot.triggers;
+    for (const id of [
+      "queue_wait_p90",
+      "client_share",
+      "scale_composite",
+      "supersede_waste",
+    ] as const) {
+      expect(last?.[id]).toMatchObject({
+        verdict: "unknown",
+        reason: TENANT_SIGNALS_OFF,
+      });
+    }
+    expect(TENANT_SIGNALS_OFF).toBe("tenant signals off on this box");
+    expect(last?.supersede_waste.firing).toBe(true);
+    expect(last?.ram_swap).toMatchObject({ verdict: "over", firing: true });
+    expect(h.writes.length).toBeGreaterThanOrEqual(4);
+    expect(
+      h.logs.filter(
+        (l) =>
+          l.startsWith("growth.trigger_unknown ") &&
+          l.includes(TENANT_SIGNALS_OFF),
+      ),
+    ).toHaveLength(4);
     handle?.stop();
   });
 });

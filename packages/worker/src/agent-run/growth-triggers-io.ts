@@ -23,6 +23,7 @@ import {
   announcedOrgIds,
   buildSnapshot,
   buildWebhookBody,
+  classifyRunRow,
   commitTransition,
   decideTransition,
   dedupeStatesFromSnapshot,
@@ -32,7 +33,6 @@ import {
   growthWindow,
   parseMemTotalAvailable,
   parsePswpin,
-  parseRunRow,
   pruneMemSamples,
   type GrowthSnapshot,
   type GrowthTriggerId,
@@ -90,6 +90,14 @@ const PROC_MEMINFO = "/proc/meminfo";
 const PROC_VMSTAT = "/proc/vmstat";
 /** The fixed phrase for a read or POST that ran out of tick budget. */
 const DEADLINE_EXCEEDED = "tick deadline exceeded";
+/** N1: a run task the reader cannot place in time (e.g. no parseable `createdAt`). */
+export const MALFORMED_RUN_ROW = "engine read: malformed run row";
+/** N1: a non-empty page with no row in the engine's row shape. */
+export const UNRECOGNIZED_PAGE = "engine read: no recognizable row on a page";
+/** N6: the reason the run triggers read `unknown` on a box with tenant signals off. */
+export const TENANT_SIGNALS_OFF = "tenant signals off on this box";
+/** N2: the longest a timed-out POST's retry is backed off. */
+export const GROWTH_WEBHOOK_BACKOFF_CAP_MS = 3_600_000;
 
 /** The error's class name only (`TimeoutError`, `AbortError`, `TypeError`) — never its message. */
 function errorName(err: unknown): string {
@@ -272,6 +280,14 @@ async function fetchRunsPage(
  * Rows are deduped by engine id across pages: offset paging over a collection that
  * grows while it is read can shift a row onto the next page, and counting it twice
  * would inflate every time sum. Rows with no id are kept as they are.
+ *
+ * A MALFORMED READ IS UNKNOWN, NEVER UNDER. A run task (`actionId` ends `:run`) that
+ * cannot be placed in time, or a non-empty page none of whose rows has the engine's row
+ * shape, makes the whole read `unreadable` with a fixed reason: silently dropping those
+ * rows would hand the evaluator a window with less run time than the box had (or none),
+ * which reads as `under` and would clear a firing trigger. Recognisable non-run rows
+ * (`:on-failure-task`, …) are still skipped silently, as is a stray unrecognisable row on
+ * a page that also carries recognisable ones.
  */
 export async function readRunWindow(
   input: ReadRunWindowInput,
@@ -314,11 +330,20 @@ export async function readRunWindow(
     if (bounded.value.kind === "unreadable") return bounded.value;
     const parsed = bounded.value.page;
 
+    let recognized = 0;
     for (const raw of parsed.rows) {
-      const row = parseRunRow(raw);
-      if (row === null) continue;
-      if (row.id === null) anonymousRows.push(row);
-      else rowsById.set(row.id, row);
+      const c = classifyRunRow(raw);
+      if (c.kind === "unrecognized") continue;
+      recognized += 1;
+      if (c.kind === "malformed_run") {
+        return { kind: "unreadable", reason: MALFORMED_RUN_ROW };
+      }
+      if (c.kind === "skip") continue;
+      if (c.row.id === null) anonymousRows.push(c.row);
+      else rowsById.set(c.row.id, c.row);
+    }
+    if (parsed.rows.length > 0 && recognized === 0) {
+      return { kind: "unreadable", reason: UNRECOGNIZED_PAGE };
     }
 
     const more =
@@ -539,6 +564,10 @@ function defaultReadSnapshot(filePath: string): string | null {
  * `deps.resolveEngine` failing throws a FIXED-phrase Error naming only the cause's class:
  * the boot site prints what arm throws, and a resolver's message could carry a URL.
  *
+ * `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS=off` (N6): the engine is neither resolved nor
+ * read; the four run-based triggers read `unknown` (TENANT_SIGNALS_OFF) every tick — no
+ * fire, no clear — and ram_swap and the snapshot are unaffected.
+ *
  * Otherwise seeds the dedupe states from the existing snapshot (a restart does not
  * re-fire), arms an unref'd interval and fires one immediate tick. A tick:
  *   1. reads the run window (bounded by half the interval) when it is due — the tick's
@@ -549,7 +578,8 @@ function defaultReadSnapshot(filePath: string): string | null {
  *   2. evaluates every trigger (unreadable → `unknown`, logged once per streak; state
  *      unchanged);
  *   3. for each fire/clear transition POSTs the webhook and commits the transition only
- *      when delivered (V2: a failed POST retries next tick; `growth.webhook_failed` is
+ *      when delivered (V2: a failed POST retries next tick — after a TIMED-OUT POST the
+ *      retry backs off 1, 2, 4, … ticks, capped at 1 h, see postBackoff; `growth.webhook_failed` is
  *      logged once per (trigger, state, reason) streak — a tick with no transition for that
  *      trigger ends the streak — `growth.webhook_recovered` on the next delivery); each POST is bounded by min(10 s, interval / 2, time left before
  *      0.95 × interval); a delivered transition is persisted to the snapshot at once, so
@@ -564,9 +594,10 @@ export function armGrowthTriggers(
   const config = loadGrowthTriggerConfig(env);
   if (config === null) return null;
 
-  let engine: GrowthEngineTarget;
+  // Tenant signals off (N6): the engine is never read, so it is not resolved either.
+  let engine: GrowthEngineTarget | null = null;
   try {
-    engine = deps.resolveEngine();
+    if (config.tenantSignals) engine = deps.resolveEngine();
   } catch (err) {
     // Not the cause's message, and no `cause`: console.error prints both, and a resolver
     // error can carry the engine URL or a credential-bearing value.
@@ -644,6 +675,21 @@ export function armGrowthTriggers(
   // code, else error name), and one `growth.snapshot_write_recovered` on the first write
   // after it: a read-only snapshot dir must not write a line per persist per tick.
   let snapshotFailureLogged: string | null = null;
+  // N2: a sink that accepts the connection and answers only after the timeout (or never)
+  // would otherwise be re-sent the same alert every tick. After the k-th CONSECUTIVE
+  // timed-out POST of a (trigger, state) transition, the next attempt waits 2^(k−1) ticks
+  // (attempts 1, 2, 4, … ticks apart), capped at GROWTH_WEBHOOK_BACKOFF_CAP_MS. The
+  // transition itself is never dropped: it stays uncommitted and is retried when due.
+  // Cleared on delivery, on a non-timeout outcome, and when the transition no longer
+  // applies (no transition, or the other state).
+  const backoffCapTicks = Math.max(
+    1,
+    Math.floor(GROWTH_WEBHOOK_BACKOFF_CAP_MS / intervalMs),
+  );
+  const postBackoff = new Map<
+    GrowthTriggerId,
+    { state: "fired" | "cleared"; timeouts: number; ticksToSkip: number }
+  >();
 
   const runTick = async (): Promise<GrowthSnapshot> => {
     const startMs = now();
@@ -662,6 +708,9 @@ export function armGrowthTriggers(
       startMs < cached.readAtMs ||
       startMs - cached.readAtMs >= engineRefreshMs;
     const readRuns = async (): Promise<RunsReading> => {
+      if (engine === null) {
+        return { kind: "unreadable", reason: TENANT_SIGNALS_OFF };
+      }
       if (!engineDue && cached !== null) return cached.runs;
       const reading = await readRunWindow({
         apiUrl: engine.apiUrl,
@@ -778,9 +827,21 @@ export function armGrowthTriggers(
         // No transition ends this trigger's failure streak: a later outage with the same
         // reason is a new incident and is logged again.
         webhookFailureLogged.delete(id);
+        postBackoff.delete(id);
         continue;
       }
       const state = transition.action === "fire" ? "fired" : "cleared";
+      const backoff = postBackoff.get(id);
+      if (backoff !== undefined && backoff.state !== state) {
+        postBackoff.delete(id);
+      } else if (backoff !== undefined && backoff.ticksToSkip > 0) {
+        // Backed off after timeouts: not attempted, not committed, retried when due.
+        postBackoff.set(id, {
+          ...backoff,
+          ticksToSkip: backoff.ticksToSkip - 1,
+        });
+        continue;
+      }
       const body = buildWebhookBody({
         evaluation,
         boxId: deps.boxId,
@@ -801,6 +862,18 @@ export function armGrowthTriggers(
               fetchImpl,
             );
       states[id] = commitTransition(current, transition, result.delivered);
+      if (!result.delivered && result.reason === "timeout") {
+        const timeouts = (postBackoff.get(id)?.timeouts ?? 0) + 1;
+        postBackoff.set(id, {
+          state,
+          timeouts,
+          ticksToSkip: Math.min(2 ** (timeouts - 1), backoffCapTicks) - 1,
+        });
+      } else if (result.delivered || result.reason !== DEADLINE_EXCEEDED) {
+        // Delivered, or failed some other way: the timeout streak is over. A tick that
+        // ran out of budget before POSTing says nothing about the sink and keeps it.
+        postBackoff.delete(id);
+      }
       if (result.delivered) {
         persist();
         if (webhookFailureLogged.has(id)) {
@@ -869,6 +942,7 @@ export function armGrowthTriggers(
     sustainS: config.sustainS,
     ramFraction: config.ramFraction,
     questionnaire: config.questionnaire,
+    tenantSignals: config.tenantSignals,
   });
   const firstTick = tick();
 

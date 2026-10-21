@@ -51,6 +51,13 @@ const SCALE_PRS_PER_DAY_THRESHOLD = 100;
 const SCALE_COMPOSITE_MIN_ARMS = 2;
 /** REVIEW-lane CANCELLED run time over all run time must exceed this (#372 AC 9). */
 const SUPERSEDE_WASTE_THRESHOLD = 0.2;
+/**
+ * The swap arm's rate floor: `pswpin` must rise by at least this many pages per second
+ * on average across the sustained window (Δpswpin ÷ Δt), not merely tick up. A box that
+ * pages in a handful of cold pages per sample is not short of RAM; 10 pages/s (~40 KiB/s
+ * at 4 KiB pages) sustained for the whole window is a working set that does not fit.
+ */
+export const SWAP_IN_MIN_PAGES_PER_S = 10;
 /** A trigger that stays over re-fires at most once per this window. */
 export const GROWTH_REFIRE_MS = DAY_MS;
 
@@ -179,22 +186,38 @@ function parseLane(value: unknown): RunDisplayLane | null {
 }
 
 /**
- * Raw engine row → RunRow, or null when it is not a run task or cannot be placed in time.
+ * What one raw engine row is:
+ *  - `run`: a run task placed in time;
+ *  - `skip`: a recognisable task row that is not a run task (`:on-failure-task`, …);
+ *  - `malformed_run`: a run task (`actionId` ends `:run`) that cannot be placed in time;
+ *  - `unrecognized`: not an object, or no string `actionId` — not the engine's row shape.
+ * The reader turns the last two into `unreadable` (see readRunWindow): dropping them
+ * silently would understate every run signal and could clear a firing trigger.
+ */
+export type RunRowClass =
+  | { kind: "run"; row: RunRow }
+  | { kind: "skip" }
+  | { kind: "malformed_run" }
+  | { kind: "unrecognized" };
+
+/**
+ * Raw engine row → its RunRowClass.
  *
  * Only `actionId`s ending `:run` are run tasks (`agent-run:run`, `agent-run-newest:run`,
- * …); `:on-failure-task` rows and anything else are ignored — counting them would double
- * the time of every failed run. A row without a parseable `createdAt` cannot be assigned
- * to a UTC day and is dropped. `additionalMetadata` values are strings as written by www
- * (`prNumber: "42"`); a missing or malformed field becomes null, never a throw — rows
- * dispatched before OD-0 have no `orgId` and are the `unattributed` bucket.
+ * …); `:on-failure-task` rows and anything else are skipped — counting them would double
+ * the time of every failed run. A run task without a parseable `createdAt` cannot be
+ * assigned to a UTC day: it is `malformed_run`, never a silent drop. `additionalMetadata`
+ * values are strings as written by www (`prNumber: "42"`); a missing or malformed field
+ * becomes null, never a throw — rows dispatched before OD-0 have no `orgId` and are the
+ * `unattributed` bucket.
  */
-export function parseRunRow(raw: unknown): RunRow | null {
-  if (typeof raw !== "object" || raw === null) return null;
+export function classifyRunRow(raw: unknown): RunRowClass {
+  if (typeof raw !== "object" || raw === null) return { kind: "unrecognized" };
   const r = raw as Record<string, unknown>;
-  const actionId = typeof r.actionId === "string" ? r.actionId : null;
-  if (!actionId?.endsWith(":run")) return null;
+  if (typeof r.actionId !== "string") return { kind: "unrecognized" };
+  if (!r.actionId.endsWith(":run")) return { kind: "skip" };
   const createdAtMs = parseTimestampMs(r.createdAt);
-  if (createdAtMs === null) return null;
+  if (createdAtMs === null) return { kind: "malformed_run" };
   const metaRaw = r.additionalMetadata;
   const meta =
     typeof metaRaw === "object" && metaRaw !== null && !Array.isArray(metaRaw)
@@ -208,16 +231,25 @@ export function parseRunRow(raw: unknown): RunRow | null {
       ? (engineMetaRaw as Record<string, unknown>)
       : {};
   return {
-    id: nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId),
-    status: typeof r.status === "string" ? r.status : "",
-    createdAtMs,
-    startedAtMs: parseTimestampMs(r.startedAt),
-    finishedAtMs: parseTimestampMs(r.finishedAt),
-    orgId: nonEmptyString(meta.orgId),
-    repoFullName: nonEmptyString(meta.repoFullName),
-    prNumber: parsePrNumber(meta.prNumber),
-    lane: parseLane(meta.lane),
+    kind: "run",
+    row: {
+      id: nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId),
+      status: typeof r.status === "string" ? r.status : "",
+      createdAtMs,
+      startedAtMs: parseTimestampMs(r.startedAt),
+      finishedAtMs: parseTimestampMs(r.finishedAt),
+      orgId: nonEmptyString(meta.orgId),
+      repoFullName: nonEmptyString(meta.repoFullName),
+      prNumber: parsePrNumber(meta.prNumber),
+      lane: parseLane(meta.lane),
+    },
   };
+}
+
+/** Raw engine row → RunRow, or null for anything classifyRunRow does not call a `run`. */
+export function parseRunRow(raw: unknown): RunRow | null {
+  const c = classifyRunRow(raw);
+  return c.kind === "run" ? c.row : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -725,8 +757,11 @@ interface RamSwapInput {
  *  - RAM: the contiguous over-threshold streak ending at the newest sample started at a
  *    sample at least `sustainMs` old — a single spike is a build, not a box that is full;
  *  - swap: `pswpin` strictly increased across every consecutive pair over a streak whose
- *    base sample is at least `sustainMs` old — the box is paging IN continuously, which a
- *    one-off swap-out of cold pages never does.
+ *    base sample is at least `sustainMs` old, AND it rose by at least
+ *    SWAP_IN_MIN_PAGES_PER_S on average over that window (Δpswpin ÷ Δt from the newest
+ *    sample at or before the cutoff to the newest sample) — the box is paging IN
+ *    continuously and at a real rate, which a one-off swap-out of cold pages, or a trickle
+ *    of a page per sample, never does.
  * Samples are contiguous in the list; a tick with no sample (a failed read) does not
  * break a streak, it only makes that tick `unknown`.
  *
@@ -762,16 +797,26 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
   }
   const ramSustained = ramStreakStart !== null && ramStreakStart.atMs <= cutoff;
 
-  let swapBase: MemSample = latest;
+  // Walk back while pswpin strictly increases; the streak spans the window once it
+  // reaches a sample at or before the cutoff. The rate is measured from THAT sample (the
+  // newest one at or before the cutoff), not from the streak's oldest: the window is what
+  // must be sustained, and pruneMemSamples keeps exactly that sample, so the verdict does
+  // not depend on how much older history happens to be retained.
+  let swapWindowBase: MemSample | null = null;
   for (let i = sorted.length - 1; i >= 1; i--) {
     const cur = sorted[i];
     const prev = sorted[i - 1];
     if (cur === undefined || prev === undefined) break;
     if (cur.pswpin === null || prev.pswpin === null) break;
     if (cur.pswpin <= prev.pswpin) break;
-    swapBase = prev;
+    if (prev.atMs <= cutoff) {
+      swapWindowBase = prev;
+      break;
+    }
   }
-  const swapSustained = swapBase !== latest && swapBase.atMs <= cutoff;
+  const swapSustained =
+    swapWindowBase !== null &&
+    swapInRate(swapWindowBase, latest) >= SWAP_IN_MIN_PAGES_PER_S;
 
   const util = round(ramUtilisation(latest));
   const sustainS = Math.round(input.sustainMs / 1000);
@@ -782,8 +827,16 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
     threshold: input.ramFraction,
     summary:
       `box RAM ${round(util * 100, 1)}% used (threshold > ${round(input.ramFraction * 100, 1)}% ` +
-      `sustained ≥ ${sustainS}s: ${ramSustained}; pswpin rising ≥ ${sustainS}s: ${swapSustained})`,
+      `sustained ≥ ${sustainS}s: ${ramSustained}; pswpin rising ≥ ${SWAP_IN_MIN_PAGES_PER_S} pages/s ` +
+      `over ≥ ${sustainS}s: ${swapSustained})`,
   };
+}
+
+/** Average pages/s paged in from `base` to `latest`; 0 when the span is empty or unknown. */
+function swapInRate(base: MemSample, latest: MemSample): number {
+  const spanS = (latest.atMs - base.atMs) / 1000;
+  if (spanS <= 0 || base.pswpin === null || latest.pswpin === null) return 0;
+  return (latest.pswpin - base.pswpin) / spanS;
 }
 
 // ---------------------------------------------------------------------------

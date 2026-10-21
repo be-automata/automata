@@ -389,7 +389,11 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
   `WORKER_GLOBAL_MAX_RUNS` and one org holds the queue, raising the global cap moves
   nothing.
 - `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
-  window → add a second shared box on the same tenant.
+  window → add a second shared box on the same tenant. Swap-in counts only at a real
+  rate: `pswpin` must rise on every sample of the window AND average at least
+  `SWAP_IN_MIN_PAGES_PER_S` = 10 pages/s (Δpswpin ÷ Δt over the sustained window, ~40 KiB/s
+  at 4 KiB pages). A trickle of a page or two per sample is cold pages coming back, not a
+  box short of RAM.
 - `client_share` — one client > 40 % of attributed run time (needs ≥ 3 orgs holding run
   time: on a two-org box one org is always ≥ 50 %, so it never fires) → split that client
   to its own box. Reads `unknown` while more than 5 % of run time is
@@ -414,19 +418,27 @@ running on the engine, so its wait is not engine queue wait either. The pressure
 up only as deferrals: read the `box.headroom_rejected` / `box.headroom_deferred_wait`
 journal lines alongside both triggers before concluding the box has room.
 
-| Knob                                 | Default | Notes                                                 |
-| :----------------------------------- | :------ | :---------------------------------------------------- |
-| `WORKER_ALERT_WEBHOOK_URL`           | unset   | Unset = OFF, silent, nothing else is read. See below. |
-| `WORKER_GROWTH_TRIGGER_INTERVAL_S`   | 300     | Floor 30, ceiling 86400 (one day).                    |
-| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`    | 900     | Floor 60; must be ≥ 2 × interval.                     |
-| `WORKER_GROWTH_TRIGGER_RAM_FRACTION` | 0.70    | 0 < x < 1.                                            |
-| `WORKER_ENTERPRISE_QUESTIONNAIRE`    | unset   | `1` turns on the composite's manual arm.              |
+| Knob                                   | Default | Notes                                                 |
+| :------------------------------------- | :------ | :---------------------------------------------------- |
+| `WORKER_ALERT_WEBHOOK_URL`             | unset   | Unset = OFF, silent, nothing else is read. See below. |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`     | 300     | Floor 30, ceiling 86400 (one day).                    |
+| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`      | 900     | Floor 60, ceiling 86400; must be ≥ 2 × interval.      |
+| `WORKER_GROWTH_TRIGGER_RAM_FRACTION`   | 0.70    | 0 < x < 1.                                            |
+| `WORKER_ENTERPRISE_QUESTIONNAIRE`      | unset   | `1` turns on the composite's manual arm.              |
+| `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS` | `on`    | `on` or `off`; anything else refuses boot. See below. |
+
+The sustain ceiling is the 24 h dedupe window, like the interval's: a window longer than a
+day could not be announced inside the window that holds its re-fire. With both capped, the
+2 × rule makes 43200 the largest usable interval.
 
 `WORKER_ALERT_WEBHOOK_URL` must be `https:`. Plain `http:` is accepted only when the
 host is a loopback literal (`127.0.0.0/8`, `::1`) or a private IPv4 literal
 (`10/8`, `172.16/12`, `192.168/16`) — the URL is a credential and must not cross a
 network in cleartext. Any hostname, `localhost` included, is refused over `http:`: a name
-goes through the resolver. Use https, or the IP literal.
+goes through the resolver. Use https, or the IP literal. A URL with credentials before the
+host (`https://user:pass@host/…`, or just `user@`) is refused too: fetch rejects such a URL,
+so every alert would fail. Put the sink's token in the path or query instead. The refusal
+names the knob and the rule, never the URL.
 
 A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
 Under `Restart=always` that is a crash loop which stops every run lane on the box, not
@@ -445,6 +457,13 @@ again within the day is not re-announced, and the snapshot carries the live verd
 failed POST is not recorded and is retried next tick; `growth.webhook_failed` is logged
 once per (trigger, state, reason) streak — a tick with no transition for that trigger
 ends the streak — and `growth.webhook_recovered` on the next delivery.
+A POST that TIMES OUT is backed off, since a sink that accepts late may already have
+posted it: after the k-th consecutive timeout of the same transition the next attempt
+waits 2^(k−1) ticks (attempts 1, 2, 4, 8, … ticks apart), capped at 1 h (12 ticks at the
+default 300 s interval; every tick when the interval is ≥ 1 h). The alert is never
+dropped: it stays pending until delivered. The backoff resets on delivery, on any
+non-timeout outcome, and when the transition stops applying (the trigger goes back to
+no transition is pending). Other failures (non-2xx, unreachable, redirect) retry every tick.
 
 The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
 `until` = 00:00 UTC today, so today's partial day is never paged in. Because the window
@@ -452,7 +471,12 @@ only moves at 00:00 UTC, the engine is re-read at most hourly: a tick reads it w
 window changed (the first tick of a new UTC day) or the last successful read is ≥ 3600 s
 old, and otherwise re-evaluates the cached rows. RAM/swap is still sampled every tick. A
 failed read leaves the cache's age as it was, so the next tick retries (and that tick's
-run triggers read `unknown`).
+run triggers read `unknown`). A malformed read is `unknown` too, never `under`: a run row
+(`actionId` ending `:run`) the reader cannot place in time, or a non-empty page none of
+whose rows has the engine's row shape, makes the whole read unreadable (`engine read:
+malformed run row` / `engine read: no recognizable row on a page`) instead of silently
+dropping rows — a window with rows missing would read low and could clear a firing
+trigger. Non-run rows (`:on-failure-task`) are still skipped.
 
 State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
 atomically every tick, and again right after each delivered alert so a worker that dies
@@ -466,12 +490,16 @@ time is unattributed, `client_share` and the scale composite's clients arm read
 composite then fires only if the other two arms hold, and reads `unknown` when the
 clients arm could decide it.
 
-**One box per tenant sends alerts.** The four run-based triggers (`queue_wait_p90`,
-`client_share`, `scale_composite`, `supersede_waste`) read the whole engine TENANT, not
-this box's runs. With more than one box on a tenant, every box evaluates the same rows
-and sends identical alerts. There is one box today; when a second joins, set
-`WORKER_ALERT_WEBHOOK_URL` on one box only, until a per-box filter exists. (`ram_swap`
-is per box and is lost on the boxes left without the URL.) The webhook URL is a secret: it is never logged — keep it in
+**One box per tenant sends tenant alerts.** The four run-based triggers
+(`queue_wait_p90`, `client_share`, `scale_composite`, `supersede_waste`) read the whole
+engine TENANT, not this box's runs. With more than one box on a tenant, every box
+evaluates the same rows and would send identical alerts. Set
+`WORKER_GROWTH_TRIGGER_TENANT_SIGNALS=off` on every box but one per tenant, and keep
+`WORKER_ALERT_WEBHOOK_URL` set on all of them, so each box keeps its own `ram_swap` alert
+(which is per box). With `off` the box neither resolves nor reads the engine; the four
+run-based triggers read `unknown` with reason `tenant signals off on this box` (no fire,
+no clear — a trigger restored as firing stays firing) and the snapshot is still written
+every tick. The webhook URL is a secret: it is never logged — keep it in
 `worker-box.env`, never in the unit file or the repo.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)

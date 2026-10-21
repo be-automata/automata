@@ -5,6 +5,7 @@ import {
   AUTHORIZED_MOVES,
   buildSnapshot,
   buildWebhookBody,
+  classifyRunRow,
   commitTransition,
   DAY_MS,
   decideTransition,
@@ -21,6 +22,7 @@ import {
   parsePswpin,
   parseRunRow,
   pruneMemSamples,
+  SWAP_IN_MIN_PAGES_PER_S,
   type GrowthTriggerId,
   type MemSample,
   type RunRow,
@@ -154,6 +156,26 @@ describe("parseRunRow", () => {
   it("drops a row with no parseable createdAt", () => {
     expect(parseRunRow({ ...base, createdAt: "garbage" })).toBeNull();
     expect(parseRunRow({ ...base, createdAt: undefined })).toBeNull();
+  });
+
+  it("classifies: a malformed :run row is not a skip, and a shapeless row is unrecognized (N1)", () => {
+    expect(classifyRunRow(base).kind).toBe("run");
+    expect(classifyRunRow({ ...base, createdAt: "garbage" })).toEqual({
+      kind: "malformed_run",
+    });
+    expect(classifyRunRow({ ...base, createdAt: undefined })).toEqual({
+      kind: "malformed_run",
+    });
+    expect(
+      classifyRunRow({
+        ...base,
+        actionId: "agent-run:on-failure-task",
+        createdAt: "garbage",
+      }),
+    ).toEqual({ kind: "skip" });
+    for (const raw of [null, "row", 7, { ...base, actionId: undefined }]) {
+      expect(classifyRunRow(raw)).toEqual({ kind: "unrecognized" });
+    }
   });
 
   it("tolerates missing or invalid optional fields", () => {
@@ -902,35 +924,87 @@ describe("RAM / swap", () => {
     expect(evalRam([sample(20, 0.7), sample(0, 0.7)]).verdict).toBe("under");
   });
 
-  it("fires on pswpin strictly increasing over ≥ sustain even with low RAM", () => {
+  it("fires on pswpin strictly increasing over ≥ sustain at ≥ the rate floor, even with low RAM", () => {
+    expect(SWAP_IN_MIN_PAGES_PER_S).toBe(10);
+    // 15 min = 900 s; exactly 10 pages/s on average = 9000 pages, unevenly spread.
     expect(
       evalRam([
         sample(15, 0.2, 100),
         sample(10, 0.2, 110),
         sample(5, 0.2, 111),
-        sample(0, 0.2, 200),
+        sample(0, 0.2, 9_100),
       ]).verdict,
     ).toBe("over");
   });
 
+  it("a trickle of one page per sample over the whole window is not sustained swap (N4)", () => {
+    const r = evalRam([
+      sample(15, 0.2, 100),
+      sample(10, 0.2, 101),
+      sample(5, 0.2, 102),
+      sample(0, 0.2, 103),
+    ]);
+    expect(r.verdict).toBe("under");
+    expect(r.summary).toContain(
+      `pswpin rising ≥ ${SWAP_IN_MIN_PAGES_PER_S} pages/s over ≥ 900s: false`,
+    );
+    // Just under the floor (8999 pages in 900 s) is still under; strictly rising throughout.
+    expect(
+      evalRam([
+        sample(15, 0.2, 0),
+        sample(10, 0.2, 3_000),
+        sample(5, 0.2, 6_000),
+        sample(0, 0.2, 8_999),
+      ]).verdict,
+    ).toBe("under");
+  });
+
+  it("the rate is measured over the sustained window, not over older retained history (N4)", () => {
+    // A heavy burst 30 min ago, a trickle across the last 15 min: the window is a trickle.
+    const samples = [
+      sample(30, 0.2, 0),
+      sample(15, 0.2, 1_000_000),
+      sample(10, 0.2, 1_000_001),
+      sample(5, 0.2, 1_000_002),
+      sample(0, 0.2, 1_000_003),
+    ];
+    expect(evalRam(samples).verdict).toBe("under");
+    expect(evalRam(pruneMemSamples(samples, NOW, SUSTAIN)).verdict).toBe(
+      "under",
+    );
+    // ≥ 10 pages/s across the window → sustained, with or without the older sample.
+    const heavy = [
+      sample(30, 0.2, 0),
+      sample(15, 0.2, 10),
+      sample(10, 0.2, 5_000),
+      sample(5, 0.2, 10_000),
+      sample(0, 0.2, 20_000),
+    ];
+    expect(evalRam(heavy).verdict).toBe("over");
+    expect(evalRam(pruneMemSamples(heavy, NOW, SUSTAIN)).verdict).toBe("over");
+  });
+
   it("a flat pswpin step, a too-short streak, or a null counter breaks the swap arm", () => {
     expect(
-      evalRam([sample(15, 0.2, 100), sample(10, 0.2, 100), sample(0, 0.2, 200)])
-        .verdict,
+      evalRam([
+        sample(15, 0.2, 100),
+        sample(10, 0.2, 100),
+        sample(0, 0.2, 20_000),
+      ]).verdict,
     ).toBe("under");
     expect(
       evalRam([
         sample(15, 0.2, 100),
         sample(10, 0.2, 100),
-        sample(5, 0.2, 110),
-        sample(0, 0.2, 120),
+        sample(5, 0.2, 10_000),
+        sample(0, 0.2, 20_000),
       ]).verdict,
     ).toBe("under");
     expect(
       evalRam([
         sample(15, 0.2, 100),
         sample(10, 0.2, null),
-        sample(0, 0.2, 200),
+        sample(0, 0.2, 20_000),
       ]).verdict,
     ).toBe("under");
   });

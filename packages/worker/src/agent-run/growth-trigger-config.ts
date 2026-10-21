@@ -25,6 +25,12 @@ const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
 export const GROWTH_TRIGGER_INTERVAL_CEILING_S = GROWTH_REFIRE_MS / 1000;
 export const GROWTH_TRIGGER_SUSTAIN_DEFAULT_S = 900;
 const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
+/**
+ * The dedupe window again: a "sustained" condition that must last longer than a day would
+ * be announced after the window that holds its re-fire has already turned over, and the
+ * /proc sample buffer (sustain ÷ interval samples) would grow without a bound worth having.
+ */
+export const GROWTH_TRIGGER_SUSTAIN_CEILING_S = GROWTH_REFIRE_MS / 1000;
 export const GROWTH_TRIGGER_RAM_FRACTION_DEFAULT = 0.7;
 
 interface GrowthTriggerConfig {
@@ -36,6 +42,11 @@ interface GrowthTriggerConfig {
   ramFraction: number;
   /** `WORKER_ENTERPRISE_QUESTIONNAIRE=1`: the scale composite's manual arm. */
   questionnaire: boolean;
+  /**
+   * `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS`: false (`off`) skips the engine read; the four
+   * run-based (tenant-wide) triggers then read `unknown`, while ram_swap is unaffected.
+   */
+  tenantSignals: boolean;
 }
 
 /**
@@ -47,20 +58,17 @@ function parseCadenceKnob(spec: {
   raw: string | undefined;
   defaultValue: number;
   floor: number;
-  /** Inclusive; absent = unbounded. `hint` says why, as `floorHint` does for the floor. */
-  ceiling?: { value: number; hint: string };
+  /** Inclusive. `hint` says why, as `floorHint` does for the floor. */
+  ceiling: { value: number; hint: string };
   floorHint: string;
 }): number {
   const v = (spec.raw ?? "").trim();
   if (!v) return spec.defaultValue;
   const n = Number(v);
   if (!Number.isInteger(n)) {
-    const bounds =
-      spec.ceiling === undefined
-        ? `>= ${spec.floor}`
-        : `>= ${spec.floor} and <= ${spec.ceiling.value}`;
     throw new Error(
-      `${spec.name} must be an integer ${bounds}, got ${JSON.stringify(v)}`,
+      `${spec.name} must be an integer >= ${spec.floor} and <= ${spec.ceiling.value}, ` +
+        `got ${JSON.stringify(v)}`,
     );
   }
   if (n < spec.floor) {
@@ -68,7 +76,7 @@ function parseCadenceKnob(spec: {
       `${spec.name}=${n} is below the floor of ${spec.floor} s (${spec.floorHint})`,
     );
   }
-  if (spec.ceiling !== undefined && n > spec.ceiling.value) {
+  if (n > spec.ceiling.value) {
     throw new Error(
       `${spec.name}=${n} is above the ceiling of ${spec.ceiling.value} s (${spec.ceiling.hint})`,
     );
@@ -88,6 +96,16 @@ function parseRamFraction(raw: string | undefined): number {
   return n;
 }
 
+/** `on` (default, also blank) | `off`; anything else is refused. The value is not a secret. */
+function parseTenantSignals(raw: string | undefined): boolean {
+  const v = (raw ?? "").trim();
+  if (v === "" || v === "on") return true;
+  if (v === "off") return false;
+  throw new Error(
+    `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS must be "on" or "off", got ${JSON.stringify(v)}`,
+  );
+}
+
 function parseWebhookUrl(v: string): string {
   let url: URL;
   try {
@@ -96,6 +114,15 @@ function parseWebhookUrl(v: string): string {
     // The value itself is withheld: it is a credential.
     throw new Error(
       "WORKER_ALERT_WEBHOOK_URL is not a valid URL (value withheld: it may be a secret)",
+    );
+  }
+  // Userinfo (`user:pass@host`) is refused: fetch rejects a URL that carries credentials,
+  // so every alert would fail, and it is one more place a secret could be copied from.
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(
+      "WORKER_ALERT_WEBHOOK_URL must not carry credentials in the URL (no user:password@ " +
+        "before the host; put the sink's token in the path or query) " +
+        "(value withheld: it may be a secret)",
     );
   }
   if (url.protocol === "https:") return v;
@@ -157,6 +184,10 @@ export function loadGrowthTriggerConfig(
     raw: env.WORKER_GROWTH_TRIGGER_SUSTAIN_S,
     defaultValue: GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
     floor: GROWTH_TRIGGER_SUSTAIN_FLOOR_S,
+    ceiling: {
+      value: GROWTH_TRIGGER_SUSTAIN_CEILING_S,
+      hint: `a longer window could not be announced inside the ${formatHours(GROWTH_REFIRE_MS)} dedupe window it serves`,
+    },
     floorHint: "it must also be ≥ 2 × WORKER_GROWTH_TRIGGER_INTERVAL_S",
   });
   // A sustained window shorter than two ticks is "sustained" over a single sample: one
@@ -175,5 +206,6 @@ export function loadGrowthTriggerConfig(
     sustainS,
     ramFraction: parseRamFraction(env.WORKER_GROWTH_TRIGGER_RAM_FRACTION),
     questionnaire: env.WORKER_ENTERPRISE_QUESTIONNAIRE === "1",
+    tenantSignals: parseTenantSignals(env.WORKER_GROWTH_TRIGGER_TENANT_SIGNALS),
   };
 }

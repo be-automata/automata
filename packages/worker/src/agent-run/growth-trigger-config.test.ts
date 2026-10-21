@@ -4,6 +4,7 @@ import {
   GROWTH_TRIGGER_INTERVAL_CEILING_S,
   GROWTH_TRIGGER_INTERVAL_DEFAULT_S,
   GROWTH_TRIGGER_RAM_FRACTION_DEFAULT,
+  GROWTH_TRIGGER_SUSTAIN_CEILING_S,
   GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
   loadGrowthTriggerConfig,
 } from "./growth-trigger-config";
@@ -41,6 +42,7 @@ describe("loadGrowthTriggerConfig", () => {
       sustainS: GROWTH_TRIGGER_SUSTAIN_DEFAULT_S,
       ramFraction: GROWTH_TRIGGER_RAM_FRACTION_DEFAULT,
       questionnaire: false,
+      tenantSignals: true,
     });
     expect(GROWTH_TRIGGER_INTERVAL_DEFAULT_S).toBe(300);
     expect(GROWTH_TRIGGER_SUSTAIN_DEFAULT_S).toBe(900);
@@ -66,6 +68,24 @@ describe("loadGrowthTriggerConfig", () => {
       expect(message).toMatch(/WORKER_ALERT_WEBHOOK_URL/);
       expect(message).not.toContain("SECRETTOKEN");
       expect(message).not.toContain("hooks.example.com");
+    }
+  });
+
+  it("refuses credentials in the URL (N3), naming the knob and the rule without the URL", () => {
+    for (const bad of [
+      "https://user:SECRETTOKEN@hooks.example.com/topic",
+      "https://SECRETTOKEN@hooks.example.com/topic",
+      "https://:SECRETTOKEN@hooks.example.com/topic",
+      "http://user:SECRETTOKEN@127.0.0.1/topic",
+    ]) {
+      const message = refusal(bad);
+      expect(message).toMatch(
+        /^WORKER_ALERT_WEBHOOK_URL must not carry credentials in the URL/,
+      );
+      expect(message).toContain("user:password@");
+      expect(message).not.toContain("SECRETTOKEN");
+      expect(message).not.toContain("hooks.example.com");
+      expect(message).not.toContain("127.0.0.1");
     }
   });
 
@@ -139,25 +159,26 @@ describe("loadGrowthTriggerConfig", () => {
     );
   });
 
-  it("an unbounded knob's integer error names only the floor", () => {
+  it("the sustain knob's integer error names both bounds", () => {
     expect(() =>
       load({
         WORKER_GROWTH_TRIGGER_INTERVAL_S: "30",
         WORKER_GROWTH_TRIGGER_SUSTAIN_S: "60.5",
       }),
     ).toThrow(
-      'WORKER_GROWTH_TRIGGER_SUSTAIN_S must be an integer >= 60, got "60.5"',
+      'WORKER_GROWTH_TRIGGER_SUSTAIN_S must be an integer >= 60 and <= 86400, got "60.5"',
     );
   });
 
   it("caps the interval at one day, naming the knob and the bound", () => {
     expect(GROWTH_TRIGGER_INTERVAL_CEILING_S).toBe(86_400);
+    // With sustain capped at one day too, the 2 × rule bounds the usable interval at half a day.
     expect(
       load({
-        WORKER_GROWTH_TRIGGER_INTERVAL_S: "86400",
-        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "172800",
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "43200",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86400",
       })?.intervalS,
-    ).toBe(86_400);
+    ).toBe(43_200);
     expect(() =>
       load({
         WORKER_GROWTH_TRIGGER_INTERVAL_S: "86401",
@@ -166,6 +187,22 @@ describe("loadGrowthTriggerConfig", () => {
     ).toThrow(
       "WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s " +
         "(a slower tick could not hold the 24 h dedupe window it serves)",
+    );
+  });
+
+  it("caps the sustain window at one day (N5), naming the knob and the bound", () => {
+    expect(GROWTH_TRIGGER_SUSTAIN_CEILING_S).toBe(86_400);
+    expect(load({ WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86400" })?.sustainS).toBe(
+      86_400,
+    );
+    expect(() => load({ WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86401" })).toThrow(
+      "WORKER_GROWTH_TRIGGER_SUSTAIN_S=86401 is above the ceiling of 86400 s " +
+        "(a longer window could not be announced inside the 24 h dedupe window it serves)",
+    );
+    expect(() =>
+      load({ WORKER_GROWTH_TRIGGER_SUSTAIN_S: "1000000000" }),
+    ).toThrow(
+      /WORKER_GROWTH_TRIGGER_SUSTAIN_S=1000000000 is above the ceiling/,
     );
   });
 
@@ -217,6 +254,28 @@ describe("loadGrowthTriggerConfig", () => {
         /WORKER_GROWTH_TRIGGER_RAM_FRACTION must be a number with 0 < x < 1/,
       );
     }
+  });
+
+  it("reads tenant signals as on (default) or off, refusing anything else (N6)", () => {
+    expect(load({})?.tenantSignals).toBe(true);
+    expect(
+      load({ WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: "on" })?.tenantSignals,
+    ).toBe(true);
+    expect(
+      load({ WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: " " })?.tenantSignals,
+    ).toBe(true);
+    expect(
+      load({ WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: "off" })?.tenantSignals,
+    ).toBe(false);
+    for (const bad of ["OFF", "0", "false", "no", "of"]) {
+      expect(() => load({ WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: bad })).toThrow(
+        `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS must be "on" or "off", got ${JSON.stringify(bad)}`,
+      );
+    }
+    // Unset webhook: the knob is never read, so a bad value cannot stop the boot.
+    expect(
+      loadGrowthTriggerConfig({ WORKER_GROWTH_TRIGGER_TENANT_SIGNALS: "bad" }),
+    ).toBeNull();
   });
 
   it("reads the questionnaire flag only as exactly '1'", () => {
