@@ -107,6 +107,20 @@ describe("excludeBotSenders", () => {
     expect(runPullRequestAutomation).toHaveBeenCalledTimes(2);
   });
 
+  it("a PR companion reuses the same filter: a bot push starts no companion run, a human push does", async () => {
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
+      automation({
+        includeAllAuthors: true,
+        excludeBotSenders: true,
+        companion: true,
+      }),
+    ]);
+    await handleAndDrain(event("synchronize", APP));
+    expect(runPullRequestAutomation).not.toHaveBeenCalled();
+    await handleAndDrain(event("synchronize", HUMAN));
+    expect(runPullRequestAutomation).toHaveBeenCalledTimes(1);
+  });
+
   it("an automation without the filter keeps today's behaviour (bots trigger)", async () => {
     vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValue([
       automation({ includeAllAuthors: true }),

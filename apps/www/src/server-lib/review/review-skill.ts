@@ -598,6 +598,86 @@ export function isMentionLaneStamp(
 }
 
 /**
+ * The PR companion lane's skills (advisory, emit-only, one PR comment). Each
+ * is pushed and onboarded under its own name; the BODY decides the stack.
+ */
+export const FLUTTER_COMPANION_SKILL_NAME = "flutter-pr-companion";
+export const REACT_COMPANION_SKILL_NAME = "react-pr-companion";
+export const COMPANION_SKILL_NAMES = [
+  FLUTTER_COMPANION_SKILL_NAME,
+  REACT_COMPANION_SKILL_NAME,
+] as const;
+
+/**
+ * The kind of the one block a companion run emits. The opener is three
+ * backticks, `json`, a space, then this kind (companion-report-finish.ts).
+ */
+export const COMPANION_REPORT_KIND = "companion-report";
+
+/** Must equal the writer's tagged opener (pinned by companion-report-finish.test.ts). */
+const COMPANION_REPORT_OPENER = "```json companion-report";
+
+/**
+ * Contract check for a companion skill: the control plane posts only what the
+ * agent emits in ONE tagged `json companion-report` block, so a body that
+ * cannot teach that block would answer every PR with the no-report notice.
+ * The block must carry `findings` with severities, the body must end with a
+ * `## Hard rules` section (its absence means truncation), there is no second
+ * block after the Hard rules (the writer reads the LAST one), and the body
+ * never teaches a `"verdict"` key: a companion report is never a review
+ * (ADR-009), so a verdict contract means the wrong skill was pushed.
+ * indexOf, not one regex (a repo-controlled override body).
+ */
+export function assertCompanionSkillContract(
+  body: string,
+  sourceLabel: string,
+): void {
+  const fail = (what: string): never => {
+    throw new Error(
+      `Companion skill from ${sourceLabel} ${what} — wrong content or a ` +
+        `truncated skill. Refusing to dispatch a companion whose report ` +
+        `could not be parsed.`,
+    );
+  };
+  const opener = body.indexOf(COMPANION_REPORT_OPENER);
+  if (opener < 0) fail(`has no "${COMPANION_REPORT_OPENER}" block`);
+  const kind = body.indexOf(`"${COMPANION_REPORT_KIND}"`, opener);
+  const findings = kind < 0 ? -1 : body.indexOf('"findings"', kind);
+  const severity = findings < 0 ? -1 : body.indexOf('"severity"', findings);
+  if (kind < 0 || findings < 0 || severity < 0) {
+    fail(
+      `has no "${COMPANION_REPORT_KIND}" contract with "findings" and "severity"`,
+    );
+  }
+  if (body.indexOf("```", severity) < 0) fail("has an unclosed report block");
+  if (body.includes('"verdict"')) {
+    fail('teaches a "verdict" key (a companion report is never a review)');
+  }
+  const hard = body.search(/^## Hard rules\s*$/m);
+  if (hard < 0) fail('has no "## Hard rules" section');
+  if (body.indexOf(COMPANION_REPORT_OPENER, hard) >= 0) {
+    fail(
+      `has a second "${COMPANION_REPORT_OPENER}" block after the Hard rules`,
+    );
+  }
+}
+
+/** The automation-skill stamp of a companion-lane thread. */
+export type CompanionLaneThreadStamp = AutomationSkillStamp & {
+  companion: NonNullable<AutomationSkillStamp["companion"]>;
+};
+
+/** True for a thread a PR companion automation started. */
+export function isCompanionLaneStamp(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): sourceMetadata is CompanionLaneThreadStamp {
+  return (
+    sourceMetadata?.type === "automation-skill" &&
+    sourceMetadata.companion !== undefined
+  );
+}
+
+/**
  * Per-skill body validators — THE single registry shared by every surface that
  * accepts or dispatches a skill body: the resolver (read side,
  * resolve-review-skill.ts) and the write surfaces (API route PUT, dashboard
@@ -627,6 +707,8 @@ const SKILL_VALIDATORS: Record<
   [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
   [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,
   [MENTION_SKILL_NAME]: assertMentionSkillContract,
+  [FLUTTER_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
+  [REACT_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
 };
 
 export function validateSkillBody(

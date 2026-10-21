@@ -14,10 +14,13 @@ export async function createReviewAutomation({
   userId,
   orgId,
   triggerType = "pull_request",
+  companion = false,
 }: {
   userId: string;
   orgId: string;
   triggerType?: "pull_request" | "github_mention";
+  /** A `pull_request` automation that opts into the PR companion lane. */
+  companion?: boolean;
 }): Promise<string> {
   const automation = await createAutomation({
     db,
@@ -30,7 +33,9 @@ export async function createReviewAutomation({
       branchName: "main",
       enabled: true,
       triggerType,
-      triggerConfig: {},
+      triggerConfig: companion
+        ? { filter: { companion: true }, on: { open: true } }
+        : {},
       action: {
         type: "user_message",
         config: {

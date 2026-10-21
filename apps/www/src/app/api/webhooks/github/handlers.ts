@@ -23,6 +23,7 @@ import {
 import {
   PullRequestTriggerConfig,
   IssueTriggerConfig,
+  isCompanionAutomation,
 } from "@terragon/shared/automations";
 import {
   runPullRequestAutomation,
@@ -134,10 +135,13 @@ export async function handlePullRequestUpdated(
     // moves it backwards. Best-effort; a failure never blocks the runs. This
     // handler only receives head-affecting actions (opened / ready_for_review
     // / synchronize).
+    // Review automations only: the desired head feeds the review lane's
+    // discard+recheck, which a PR companion never takes part in.
     if (deliveryId) {
       const orgIds = [
         ...new Set(
           automations
+            .filter((a) => !isCompanionAutomation(a))
             .map((a) => a.organizationId)
             .filter((o): o is string => o !== null),
         ),

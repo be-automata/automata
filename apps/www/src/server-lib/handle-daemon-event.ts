@@ -774,6 +774,30 @@ async function handleThreadFinish({
         }),
       ),
   );
+  // The PR companion lane's terminal writer: one advisory PR comment, never a
+  // review. It no-ops for any thread a companion automation did not stamp
+  // (the review executor above never matches a companion: isReviewThread is
+  // false for it). A companion thread always carries its PR number, so a
+  // thread without one skips the thread read entirely.
+  if (prNumber !== null) {
+    waitUntil(
+      import("@/server-lib/review/companion-report-finish")
+        .then(({ handleCompanionReportAtFinish }) =>
+          handleCompanionReportAtFinish({
+            db,
+            userId,
+            threadId,
+            threadChatId,
+          }),
+        )
+        .catch((error) =>
+          console.error("[companion-report] finish-hook failed (non-fatal)", {
+            threadId,
+            error,
+          }),
+        ),
+    );
+  }
 
   // ADR-003 F3 (S12 fix — DECOUPLED): the daemon token is NO LONGER revoked here.
   // Revoking at thread-finish let the background revoke beat the worker's next

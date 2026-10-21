@@ -275,6 +275,48 @@ describe("runSupersedeSweep (#125 C4)", () => {
       "plane-offline",
     );
   });
+
+  it("rule (ii) never sweeps a PR COMPANION thread: no run row is its normal state (rule (iii) still reconciles it)", async () => {
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: {
+        organizationId: orgId,
+        triggerType: "pull_request",
+        repoFullName: "be-automata/automata",
+        triggerConfig: {
+          on: { open: true, update: true },
+          filter: { companion: true },
+        },
+      },
+    });
+    const companion = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: 6,
+        automationId: automation.id,
+      },
+    });
+    await db
+      .update(threadTable)
+      .set({ status: "booting", createdAt: new Date(Date.now() - N - 60_000) })
+      .where(eq(threadTable.id, companion.threadId));
+    const listRuns = vi.fn(async () => [
+      { externalId: "run-c", status: "RUNNING" as AgentRunStatus },
+    ]);
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns,
+    });
+    expect(report.orphans).not.toContain(companion.threadId);
+    expect((await threadRow(companion.threadId)).terminalCause).toBeNull();
+  });
 });
 
 /**

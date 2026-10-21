@@ -20,9 +20,12 @@ import {
   GitHubMentionTriggerConfig,
   AutomationTriggerType,
   AutomationAction,
+  isCompanionAutomation,
+  validateCompanionAutomation,
 } from "@terragon/shared/automations";
 import {
   AccessTier,
+  CompanionLaneStamp,
   DBUserMessage,
   MentionLaneStamp,
   ThreadTrustContext,
@@ -138,7 +141,16 @@ export async function runAutomation({
      * for the thread: the agent pushes its own fix to the PR head, and the
      * lane never auto-commits or opens a pull request.
      */
-    stampExtra?: { selfHealAttemptId?: string; mention?: MentionLaneStamp };
+    stampExtra?: {
+      selfHealAttemptId?: string;
+      mention?: MentionLaneStamp;
+      /**
+       * The PR companion lane: the PR and head the run reports on. Like
+       * `mention` it turns git checkpointing off: a companion never commits,
+       * pushes or opens a pull request.
+       */
+      companion?: CompanionLaneStamp;
+    };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -305,6 +317,9 @@ export async function runAutomation({
             ...(options?.stampExtra?.mention
               ? { mention: options.stampExtra.mention }
               : {}),
+            ...(options?.stampExtra?.companion
+              ? { companion: options.stampExtra.companion }
+              : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
@@ -312,6 +327,7 @@ export async function runAutomation({
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing:
             options?.stampExtra?.mention !== undefined ||
+            options?.stampExtra?.companion !== undefined ||
             (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
@@ -545,6 +561,14 @@ export async function validateAutomationCreationOrUpdate({
     triggerConfig,
     action: updates.action ?? automationOrNull?.action,
   });
+  const companionError = validateCompanionAutomation({
+    triggerType,
+    triggerConfig,
+    action: updates.action ?? automationOrNull?.action,
+  });
+  if (companionError !== null) {
+    throw new UserFacingError(companionError);
+  }
   if (triggerType) {
     switch (triggerType) {
       case "schedule": {
@@ -751,6 +775,28 @@ export async function runPullRequestAutomation({
     // this automation+PR are left entirely to the engine's per-PR concurrency
     // (the policy variant superseded/queued/discarded them at dispatch) and to
     // the C4 sweep's typed terminals. The pre-#165 archival block lived here.
+    // A PR companion touches no other thread either: it is not on the review
+    // plan (no prKey), so the engine never supersedes it or by it, and its
+    // terminal writer only ever edits its own marked comment.
+
+    // The PR companion lane: stamp the PR + head the report describes, so the
+    // finish writer posts ONE comment and never mistakes the run for a review.
+    let companion: CompanionLaneStamp | undefined;
+    if (isCompanionAutomation(automation)) {
+      if (automation.action.type !== "skill_message") {
+        // Unreachable through the write boundary (validateCompanionAutomation):
+        // a hand-written row must not dispatch a run that could never report.
+        throw new Error(
+          `Companion automation ${automationId} has no skill_message action`,
+        );
+      }
+      companion = {
+        repoFullName,
+        prNumber,
+        headSha,
+        skillName: automation.action.config.skillName,
+      };
+    }
 
     const runAutomationResult = await runAutomation({
       userId,
@@ -772,6 +818,7 @@ export async function runPullRequestAutomation({
         // read instead of fetching the same PR again.
         pullRequest: pr,
         trustContext,
+        ...(companion ? { stampExtra: { companion } } : {}),
         transformMessage: (message: DBUserMessage) => {
           return {
             ...message,
