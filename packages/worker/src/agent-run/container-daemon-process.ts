@@ -42,9 +42,10 @@ const execFileAsync = promisify(execFile);
 
 /**
  * What the workflow drives, on either path: the host-uid `DaemonProcess` and
- * this class both satisfy it. `teardown()` may be async here (a container is
- * removed through the daemon); the workflow awaits it either way, and the
- * slot is released only after it settles (ADR-007 I2, ADR-013 I6).
+ * this class both satisfy it. `teardown()` returns a promise here (a container
+ * is removed through the daemon) and nothing on the host path; the workflow
+ * awaits the promise, and the slot is released only after it settles
+ * (ADR-007 I2, ADR-013 I6).
  */
 export interface RunDaemon {
   readonly pid: number | undefined;
@@ -55,6 +56,30 @@ export interface RunDaemon {
   teardown(): void | Promise<void>;
   agentFailure(): unknown | null;
   memoryStarvation(): unknown | null;
+}
+
+/**
+ * The workflow's teardown step for either daemon. The host daemon's teardown
+ * is synchronous and returns nothing, so this returns undefined and the
+ * caller awaits nothing: the host path's ordering is unchanged. A container's
+ * returns a promise that never rejects: a removal that kept failing is logged
+ * (`container.teardown_failed`) and the run's teardown carries on. Holding
+ * the slot forever would wedge the box, the brokers, proxy and credential
+ * must still close, and the next run on this slot removes the leftover by
+ * name before it creates its own (fail-closed), so the two never coexist.
+ */
+export function settleDaemonTeardown(
+  daemon: Pick<RunDaemon, "teardown">,
+  threadId: string,
+  log: (line: string) => void,
+): Promise<void> | undefined {
+  const pending = daemon.teardown();
+  if (!(pending instanceof Promise)) return undefined;
+  return pending.catch((err: unknown) => {
+    log(
+      `container.teardown_failed ${JSON.stringify({ thread: threadId, error: err instanceof Error ? err.message : String(err) })}`,
+    );
+  });
 }
 
 /** The run dir's socket subdir, bind-mounted at /run/automata. */
@@ -96,7 +121,14 @@ export interface ContainerDaemonDeps {
   log?: (line: string) => void;
   /** Socket wait budget (tests shorten it). */
   socketTimeoutMs?: number;
+  /** `docker rm -f -v` attempts before teardown gives up (default 4). */
+  removeAttempts?: number;
+  /** First backoff between removal attempts, doubled each time (default 2 s; tests shorten it). */
+  retryDelayMs?: number;
 }
+
+const DEFAULT_REMOVE_ATTEMPTS = 4;
+const DEFAULT_REMOVE_RETRY_MS = 2_000;
 
 /**
  * The container-run twin of `DaemonProcess` (ADR-013 "Run path" 2-7), behind
@@ -108,7 +140,8 @@ export interface ContainerDaemonDeps {
  *               wait for the daemon socket.
  *   teardown(): read `.State.OOMKilled`, then `docker rm -f -v` (SIGKILL to the
  *               whole pid namespace, anonymous volumes removed), and confirm
- *               the container is gone. Idempotent; resolves only once it is.
+ *               the container is gone, retried with backoff. Idempotent;
+ *               resolves only once it is, rejects after the last attempt.
  *
  * Container removal replaces the uid reaper for these runs: every process of
  * the run lives in the container's pid namespace under `--init`, so a
@@ -467,9 +500,12 @@ export class ContainerDaemonProcess implements RunDaemon {
 
   /**
    * Remove the container: OOM flag first (it dies with the container), then
-   * `docker rm -f -v`, then confirm it is gone. Idempotent — every caller
-   * awaits the same promise — and it rejects only if the container could not
-   * be removed, so the workflow never releases the slot over a live one.
+   * `docker rm -f -v`, then confirm it is gone, retried with backoff while the
+   * caller still holds the slot. Idempotent — every caller awaits the same
+   * promise. It rejects only when the container is still there after every
+   * attempt: the caller logs that and lets the slot go rather than hold it
+   * forever, and the next run on this slot removes the leftover by name
+   * before it creates (start(), fail-closed: it cannot coexist with it).
    */
   teardown(): Promise<void> {
     this.teardownPromise ??= this.doTeardown();
@@ -477,30 +513,61 @@ export class ContainerDaemonProcess implements RunDaemon {
   }
 
   private async doTeardown(): Promise<void> {
-    const id = this.containerId;
+    // No id but start() ran: `docker create` may have failed or timed out
+    // after the daemon made the container. The slot's name finds it.
+    const target = this.containerId ?? (this.startedAt ? this.name : null);
+    try {
+      if (target) await this.removeConfirmed(target);
+    } finally {
+      try {
+        this.child?.kill("SIGKILL");
+      } catch {
+        // the attach child is already gone with the container
+      }
+      this.child = null;
+      await fs.promises
+        .rm(this.socketDir, { recursive: true, force: true })
+        .catch(() => {});
+    }
+  }
+
+  private async removeConfirmed(target: string): Promise<void> {
     const t0 = Date.now();
-    if (id) {
-      await this.refreshState();
-      const removed = await this.runtime.remove(id);
-      const after = await this.runtime.inspectState(id).catch(() => null);
-      if (after) {
-        throw new Error(
-          `run container ${id.slice(0, 12)} still exists after docker rm -f (status ${after.status}); the slot is not released`,
-        );
+    const attempts = Math.max(
+      1,
+      this.deps.removeAttempts ?? DEFAULT_REMOVE_ATTEMPTS,
+    );
+    const short = this.containerId ? target.slice(0, 12) : target;
+    await this.refreshState();
+    let lastProblem = "";
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let removed = false;
+      try {
+        removed = await this.runtime.remove(target);
+        const after = await this.runtime.inspectState(target);
+        if (!after) {
+          this.log(
+            `container.removed ${JSON.stringify({ id: short, name: this.name, thread: this.input.threadId, removed, oomKilled: this.oomKilled(), attempt, ms: Date.now() - t0 })}`,
+          );
+          return;
+        }
+        lastProblem = `still exists after docker rm -f (status ${after.status})`;
+      } catch (err) {
+        lastProblem = err instanceof Error ? err.message : String(err);
       }
       this.log(
-        `container.removed ${JSON.stringify({ id: id.slice(0, 12), name: this.name, thread: this.input.threadId, removed, oomKilled: this.oomKilled(), ms: Date.now() - t0 })}`,
+        `container.remove_retry ${JSON.stringify({ id: short, thread: this.input.threadId, attempt, of: attempts, problem: lastProblem })}`,
       );
+      if (attempt < attempts) {
+        await delay(
+          (this.deps.retryDelayMs ?? DEFAULT_REMOVE_RETRY_MS) *
+            2 ** (attempt - 1),
+        );
+      }
     }
-    try {
-      this.child?.kill("SIGKILL");
-    } catch {
-      // the attach child is already gone with the container
-    }
-    this.child = null;
-    await fs.promises
-      .rm(this.socketDir, { recursive: true, force: true })
-      .catch(() => {});
+    throw new Error(
+      `run container ${short} could not be removed after ${attempts} attempts: ${lastProblem}`,
+    );
   }
 }
 

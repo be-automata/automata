@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -106,5 +107,78 @@ describe("install-rootless-docker.sh + automata-runner-docker.service (ADR-013 D
     );
     expect(script).toMatch(/usermod -aG "\$GROUP" "\$u"/);
     expect(script).toMatch(/d \$SOCK_DIR 0750 \$RUNNER \$GROUP -/);
+  });
+});
+
+describe("prove-container-limits.sh: each PASS needs its evidence (fake docker)", () => {
+  /**
+   * A fake `docker` answering each probe as an enforcing daemon would, and a
+   * fake `uname` saying Linux, so the rm probe's host-pid check runs here
+   * too. `TOP_PIDS` is what `docker top` reports for the rm probe.
+   */
+  function prove(topPids: string) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prove-"));
+    try {
+      fs.writeFileSync(path.join(dir, "uname"), "#!/bin/bash\necho Linux\n", {
+        mode: 0o755,
+      });
+      fs.writeFileSync(
+        path.join(dir, "docker"),
+        [
+          "#!/bin/bash",
+          "shift 2 # -H unix://…",
+          'all="$*"',
+          'case "$all" in',
+          '  "run -d "*) echo cid ;;',
+          '  "version "*) echo 27.0.0 ;;',
+          '  "info "*) echo "cgroup v2" ;;',
+          '  "inspect "*"-mem") echo "true 137" ;;',
+          '  "inspect "*) exit 1 ;;',
+          '  "run "*"-mem "*) exit 137 ;;',
+          '  "run "*"--pids-limit 64 "*) echo 60 ;;',
+          '  "run "*"--pids-limit 1024 "*) echo 203 ;;',
+          '  "run "*"--cpus 0.5 "*) printf "nr_throttled 9\\nthrottled_usec 900\\n" ;;',
+          '  "top "*) echo PID; printf "%s\\n" $TOP_PIDS ;;',
+          '  "rm "*) : ;;',
+          '  *) echo "fake docker: unexpected $all" >&2; exit 99 ;;',
+          "esac",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      return spawnSync(
+        "bash",
+        [
+          path.join(repoRoot, linux("prove-container-limits.sh")),
+          "/run/fake.sock",
+          "img@sha256:00",
+        ],
+        {
+          encoding: "utf8",
+          env: { PATH: `${dir}:${process.env.PATH}`, TOP_PIDS: topPids },
+          timeout: 30_000,
+        },
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // card: protects=an enforcing daemon passes every probe; fails_when=a probe misreads a real limit; no_claim=a real daemon (the box run)
+  it("all four probes pass against an enforcing daemon", () => {
+    // Two pids no process can have: nothing survives the removal.
+    const r = prove("4194301 4194302");
+    expect(r.stdout).toMatch(/^PASS memory /m);
+    expect(r.stdout).toMatch(/^PASS pids /m);
+    expect(r.stdout).toMatch(/^PASS cpus /m);
+    expect(r.stdout).toMatch(/^PASS rm /m);
+    expect(r.status).toBe(0);
+  });
+
+  // card: protects=a container process still alive after `docker rm -f` FAILS the rm probe even when it belongs to another uid (a rootless container's processes are subordinate uids, so `kill -0` from the worker is EPERM for live ones); fails_when=a live pid of another account counts as gone; no_claim=pid reuse within the 1 s settle
+  it("rm: a surviving process of another uid is caught", () => {
+    // pid 1 is alive and never the test runner's own, like a container's.
+    const r = prove(`1 4194302`);
+    expect(r.stdout).toMatch(/^FAIL rm .*host pid\(s\) 1 still alive/m);
+    expect(r.status).toBe(1);
   });
 });

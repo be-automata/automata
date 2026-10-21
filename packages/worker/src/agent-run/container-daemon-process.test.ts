@@ -10,6 +10,7 @@ import { assertHardenedArgv } from "./container-argv";
 import {
   ContainerDaemonProcess,
   handOverRunDir,
+  settleDaemonTeardown,
 } from "./container-daemon-process";
 import type { ContainerRuntime, ContainerState } from "./container-runtime";
 /** The terminal OOM failure (resourceLimitFailure: a NonRetryableError carrying the ResourceLimitError text). */
@@ -267,12 +268,56 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     expect(rt.child.killed).toEqual(["SIGKILL"]);
   });
 
-  // card: protects=a container that survives `docker rm -f` makes teardown REJECT, so the workflow cannot release the slot over it (ADR-013 I6); fails_when=teardown resolves; no_claim=how the workflow surfaces the rejection
-  it("teardown rejects when the container is still there", async () => {
-    const rt = fakeRuntime({ stillThere: true });
-    const d = make("task", rt);
+  // card: protects=a transient `docker rm` failure is retried while the slot is still held, and teardown resolves once the container is confirmed gone; fails_when=one failed rm rejects the teardown (a leaked container) or the retry skips the confirm; no_claim=real daemon error shapes
+  it("teardown retries a failing docker rm, then confirms the container is gone", async () => {
+    const rt = fakeRuntime();
+    const d = make("task", rt, { retryDelayMs: 1 });
     await d.start();
+    rt.remove.mockClear();
+    const realRemove = rt.remove.getMockImplementation();
+    let failures = 2;
+    rt.remove.mockImplementation(async (id: string) => {
+      if (failures-- > 0) throw new Error("docker rm: daemon busy");
+      return realRemove!(id);
+    });
+    await expect(d.teardown()).resolves.toBeUndefined();
+    expect(rt.remove).toHaveBeenCalledTimes(3);
+  });
+
+  // card: protects=a `docker rm` that never succeeds ends in a REJECTION after a bounded number of attempts, so the caller can log it and let the slot go (never held forever); fails_when=teardown retries without bound or resolves over a live container; no_claim=the workflow's handling (workflow.ts)
+  it("teardown gives up after a bounded number of attempts", async () => {
+    const rt = fakeRuntime({ stillThere: true });
+    const d = make("task", rt, { retryDelayMs: 1, removeAttempts: 3 });
+    await d.start();
+    rt.remove.mockClear();
     await expect(d.teardown()).rejects.toThrow(/still exists/);
+    expect(rt.remove).toHaveBeenCalledTimes(3);
+    expect(rt.child.killed).toEqual(["SIGKILL"]);
+  });
+
+  // card: protects=a `docker create` that failed or timed out AFTER the daemon made the container (no id came back) is still removed, by the slot's name; fails_when=teardown removes nothing when the id is unknown; no_claim=which daemon errors leave a container behind
+  it("teardown removes by slot name when create returned no id", async () => {
+    const rt = fakeRuntime();
+    rt.create.mockImplementation(async () => {
+      rt.calls.push("create");
+      throw new Error("docker create timed out");
+    });
+    const d = make("task", rt);
+    await expect(d.start()).rejects.toThrow(/timed out/);
+    rt.remove.mockClear();
+    rt.inspectState.mockResolvedValue(null);
+    await d.teardown();
+    expect(rt.remove).toHaveBeenCalledWith(
+      expect.stringMatching(/^automata-run-w-\d+-[0-9a-f]+-0$/),
+    );
+  });
+
+  // card: protects=teardown before start ever ran touches no container (nothing could exist); fails_when=it removes by name for a run that never tried to create; no_claim=-
+  it("teardown before start removes nothing", async () => {
+    const rt = fakeRuntime();
+    const d = make("task", rt);
+    await d.teardown();
+    expect(rt.remove).not.toHaveBeenCalled();
   });
 
   // card: protects=mid-run: a clean exit 0 is not a failure, a SIGKILL'd exit with OOMKilled is a ResourceLimitError, and a child OOM while the container lives is memory starvation; fails_when=a good run fails or an OOM goes unattributed; no_claim=Docker's OOM event timing
@@ -294,6 +339,36 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     await vi.waitFor(() => expect(String(d.memoryStarvation())).toMatch(OOM));
     rt.child.exit(137);
     await vi.waitFor(() => expect(String(d.agentFailure())).toMatch(OOM));
+  });
+});
+
+describe("settleDaemonTeardown (the workflow's teardown step)", () => {
+  // card: protects=switch OFF: the host daemon's synchronous teardown runs once and NOTHING is returned to await, so the host path's finally keeps its exact ordering; fails_when=a promise (an extra await tick) is returned for the host daemon or teardown is skipped; no_claim=the rest of the finally block
+  it("host daemon: teardown runs synchronously, nothing to await", () => {
+    let calls = 0;
+    const out = settleDaemonTeardown(
+      { teardown: () => void calls++ },
+      "thr_1",
+      () => {},
+    );
+    expect(out).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  // card: protects=a container whose removal kept failing is LOGGED and the teardown carries on (brokers, credential wipe and slot release still run), never thrown out of the finally; fails_when=the rejection propagates or goes unlogged; no_claim=the next admission's by-name removal (start() tests)
+  it("container daemon: a failed removal is logged, never thrown", async () => {
+    const lines: string[] = [];
+    const out = settleDaemonTeardown(
+      { teardown: () => Promise.reject(new Error("rm kept failing")) },
+      "thr_1",
+      (l) => lines.push(l),
+    );
+    await expect(out).resolves.toBeUndefined();
+    expect(lines).toEqual([
+      expect.stringMatching(
+        /^container\.teardown_failed .*"thread":"thr_1".*rm kept failing/,
+      ),
+    ]);
   });
 });
 

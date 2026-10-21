@@ -62,12 +62,15 @@ assert() {
 }
 
 # ── the run sandbox as the image sees it ────────────────────────────────────
-assert runtime-user "$(id -un) uid=$(id -u), not root" test "$(id -u)" != 0
+# Every assertion must fail closed: a numeric test errors (and so fails) on an
+# empty `id -u`, and a missing /workspace is a failure, not "not writable".
+assert runtime-user "$(id -un) uid=$(id -u), not root" test "$(id -u)" -ne 0
 assert no-capabilities "CapEff is zero" grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/self/status
 assert no-new-privs "NoNewPrivs is set" grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status
 # /workspace is the agent's own dir in the image (a run bind-mounts its clone
 # there); unmounted, only the read-only rootfs can make it unwritable.
-assert readonly-rootfs "agent-owned /workspace is not writable" test ! -w /workspace
+assert readonly-rootfs "agent-owned /workspace is not writable" \
+  bash -c 'test -d /workspace && ! test -w /workspace'
 assert writable-home "$HOME is writable" touch "$HOME/.probe"
 
 # ── no per-run policy baked in (ADR-013 I1) ─────────────────────────────────
@@ -78,7 +81,14 @@ assert batteries-hooks "settings.batteries.json present" test -s "$HOME/.claude/
 # ── batteries, against the pins the image records from its own ARG lines ───
 # shellcheck disable=SC1091 # inside the image
 . /opt/automata/pins.env
-check node             "v${NODE_VERSION}" node --version
+# An empty pin would turn its `check` into "exits 0" (grep -F "" matches
+# anything), so every pin a check compares against must be set.
+for pin in NODE_VERSION PNPM_VERSION CLAUDE_CODE_VERSION GH_VERSION RUFLO_VERSION \
+  CHROMIUM_VERSION CHROMIUM_REVISION BUN_VERSION FLUTTER_VERSION SOMNIO_VERSION_LINE \
+  ACTIONLINT_VERSION GITLEAKS_VERSION SHELLCHECK_VERSION; do
+  if [ -z "${!pin:-}" ]; then bad pins "$pin is empty in /opt/automata/pins.env"; fi
+done
+check node            "v${NODE_VERSION}" node --version
 check npm              ""              npm --version
 check pnpm             "${PNPM_VERSION}" pnpm --version
 check claude           "${CLAUDE_CODE_VERSION}" claude --version

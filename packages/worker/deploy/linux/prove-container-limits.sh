@@ -104,7 +104,10 @@ alive=""
 count=0
 for p in $pids; do
   count=$((count + 1))
-  if [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null; then alive="$alive $p"; fi
+  # `ps -p`, not `kill -0`: the container's processes run as subordinate uids,
+  # so a signal probe from the worker account is EPERM for every one of them,
+  # alive or not, and the probe would pass vacuously.
+  if [[ "$p" =~ ^[0-9]+$ ]] && ps -p "$p" >/dev/null 2>&1; then alive="$alive $p"; fi
 done
 if [ "$(uname -s)" != Linux ]; then
   # Docker Desktop/OrbStack: those pids live in a VM, invisible from here.

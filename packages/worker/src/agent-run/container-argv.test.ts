@@ -226,6 +226,29 @@ describe("assertHardenedArgv: the post-build check", () => {
     ["--mount", "type=bind,src=/etc,dst=/host-etc"],
     ["--mount", "type=volume,src=shared,dst=/shared"],
     ["--device", "/dev/kvm"],
+    // The `--flag=value` spelling must not slip past the value checks.
+    ["--security-opt=seccomp=unconfined"],
+    ["--mount=type=bind,src=/etc,dst=/host-etc"],
+    ["--user=0"],
+    ["--memory=0"],
+    // Aliases, short forms and flags outside the baseline.
+    ["--net", "host"],
+    ["-u", "0"],
+    ["-e", "X=1"],
+    ["--env-file", "/etc/shadow"],
+    ["--runtime", "runc"],
+    ["--sysctl", "kernel.shmmax=1"],
+    ["--oom-kill-disable"],
+    ["--cgroup-parent", "/"],
+    ["--gpus", "all"],
+    ["--group-add", "999"],
+    ["--tmpfs", "/workspace"],
+    // A volume with driver options is a bind mount in disguise.
+    [
+      "--mount",
+      "type=volume,dst=/x,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/",
+    ],
+    ["--mount", "type=bind,src=/etc,dst=/x,bind-propagation=rshared"],
   ])("refuses %j", (...extra) => {
     expect(() => assertHardenedArgv(insert(good(), ...extra), spec())).toThrow(
       /container argv refused/,

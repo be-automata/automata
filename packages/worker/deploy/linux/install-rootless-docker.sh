@@ -33,9 +33,11 @@ umask 022
 #   - lingering for the runner (its user manager runs without a login);
 #   - the user unit automata-runner-docker.service (this dir), enabled and
 #     started in the runner's user manager;
-#   - verifies, AS THE WORKER ACCOUNT, that the socket answers, that the daemon
-#     is rootless on cgroup v2, and that the runner's user manager delegates
-#     the cpu, memory and pids controllers.
+#   - verifies (also all `--check` does): the worker is in the group, the
+#     runner has its subuid/subgid ranges and lingers, its user manager
+#     delegates the cpu, memory and pids controllers, and, AS THE WORKER
+#     ACCOUNT, that the socket answers and the daemon is rootless on cgroup v2.
+#     It does not prove the limits are enforced: prove-container-limits.sh does.
 #
 # Usage: install-rootless-docker.sh [--worker-user NAME] [--check]
 #   --worker-user  the worker's account (default: automata)
@@ -91,15 +93,31 @@ verify() {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
   }
-  if id -nG "$worker_user" | tr ' ' '\n' | grep -qx "$GROUP"; then
+  if id -nG "$worker_user" | tr ' ' '\n' | grep -x "$GROUP" >/dev/null; then
     echo "ok   worker-group        $worker_user is in $GROUP"
   else
     echo "FAIL worker-group        $worker_user is not in $GROUP"
     fail=1
   fi
+  # Each id range is what maps container uids to unprivileged host ids, and
+  # linger is what keeps the daemon up with nobody logged in.
+  for f in /etc/subuid /etc/subgid; do
+    if grep -q "^$RUNNER:[0-9]*:$SUBID_COUNT\$" "$f" 2>/dev/null; then
+      echo "ok   ${f#/etc/}-range        $RUNNER has its $SUBID_COUNT ids"
+    else
+      echo "FAIL ${f#/etc/}-range        no $RUNNER:<start>:$SUBID_COUNT line in $f"
+      fail=1
+    fi
+  done
+  if [ "$(loginctl show-user "$RUNNER" --property=Linger --value 2>/dev/null || true)" = yes ]; then
+    echo "ok   linger              $RUNNER lingers"
+  else
+    echo "FAIL linger              $RUNNER does not linger (its daemon stops at logout/reboot)"
+    fail=1
+  fi
   ctrl="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
   for c in cpu memory pids; do
-    if [ -r "$ctrl" ] && tr ' ' '\n' <"$ctrl" | grep -qx "$c"; then
+    if [ -r "$ctrl" ] && tr ' ' '\n' <"$ctrl" | grep -x "$c" >/dev/null; then
       echo "ok   delegated-$c        user@$uid.service"
     else
       echo "FAIL delegated-$c        not in $ctrl"
@@ -161,9 +179,12 @@ if ! id -u "$RUNNER" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "$RUNNER_HOME" --shell /usr/sbin/nologin "$RUNNER"
 fi
 for u in "$RUNNER" "$worker_user"; do
-  if ! id -nG "$u" | tr ' ' '\n' | grep -qx "$GROUP"; then
+  if ! id -nG "$u" | tr ' ' '\n' | grep -x "$GROUP" >/dev/null; then
     log "adding $u to $GROUP"
     usermod -aG "$GROUP" "$u"
+    if [ "$u" = "$worker_user" ]; then
+      log "a RUNNING worker gets $GROUP only when it restarts"
+    fi
   fi
 done
 # One range per file, placed after every existing range so no two accounts

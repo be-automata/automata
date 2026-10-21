@@ -379,25 +379,51 @@ export function buildContainerCreateArgv(spec: ContainerRunSpec): string[] {
   return argv;
 }
 
-/** Flags no run container may carry, whatever built the argv (ADR-013 I2/I3). */
-const FORBIDDEN_FLAGS = [
-  "--privileged",
-  "--cap-add",
-  "--device",
-  "--pid",
-  "--ipc",
-  "--uts",
-  "--userns",
-  "--cgroupns",
-  "--volumes-from",
-  "--add-host",
-  "--publish",
-  "-p",
-  "-P",
-  "--publish-all",
-  "-v",
-  "--volume",
-];
+/**
+ * The ONLY options a run container's argv may carry, with their arity (0 = a
+ * boolean flag, 1 = takes the next token as its value). An allowlist, not a
+ * denylist: Docker has aliases (`--net`), short forms (`-u`, `-e`), the
+ * `--flag=value` spelling and new flags every release, and a denylist misses
+ * whichever one it did not name. Anything not here — `--privileged`,
+ * `--cap-add`, host namespaces, `-v`, `--env-file`, `--runtime`, `--sysctl` —
+ * is refused, and so is any `--flag=value` token.
+ */
+const ALLOWED_OPTIONS: ReadonlyMap<string, 0 | 1> = new Map([
+  ["--name", 1],
+  ["--pull", 1],
+  ["--label", 1],
+  ["--init", 0],
+  ["--network", 1],
+  ["--cap-drop", 1],
+  ["--security-opt", 1],
+  ["--read-only", 0],
+  ["--user", 1],
+  ["--workdir", 1],
+  ["--log-driver", 1],
+  ["--memory", 1],
+  ["--memory-swap", 1],
+  ["--pids-limit", 1],
+  ["--cpus", 1],
+  ["--tmpfs", 1],
+  ["--shm-size", 1],
+  ["--mount", 1],
+  ["--group-add", 1],
+  ["--env", 1],
+  ["--entrypoint", 1],
+]);
+
+/** `--mount` keys a run container may use, per mount type. */
+const VOLUME_MOUNT_KEYS = new Set(["type", "dst", "destination", "target"]);
+const BIND_MOUNT_KEYS = new Set([
+  "type",
+  "src",
+  "source",
+  "dst",
+  "destination",
+  "target",
+  "readonly",
+  "ro",
+]);
 
 /**
  * Re-check a built argv against the baseline. Exported for the tests and for
@@ -418,19 +444,30 @@ export function assertHardenedArgv(
       "argv is not a `create` of the pinned image reference",
     );
   }
-  const opts = argv.slice(1, imageAt);
   const fail = (why: string): never => {
     throw new ContainerSpecError(`container argv refused: ${why}`);
   };
-  const valuesOf = (flag: string): string[] =>
-    opts.flatMap((a, i) => (a === flag ? [opts[i + 1] ?? ""] : []));
-  for (const a of opts) {
-    const flag = a.split("=")[0] ?? "";
-    if (FORBIDDEN_FLAGS.includes(flag)) fail(`forbidden flag ${flag}`);
-    if (a.startsWith("--network=") || a.startsWith("--net=")) {
-      fail("network must be given as `--network none`");
+  // Tokenise the option section against the allowlist: every token is a
+  // known flag or the value right after one.
+  const parsed: Array<[string, string | null]> = [];
+  for (let i = 1; i < imageAt; i++) {
+    const flag = argv[i] ?? "";
+    const arity = ALLOWED_OPTIONS.get(flag);
+    if (arity === undefined) {
+      fail(
+        `flag ${JSON.stringify(flag)} is not on the run-container allowlist`,
+      );
+    }
+    if (arity === 1) {
+      if (i + 1 >= imageAt) fail(`${flag} has no value`);
+      parsed.push([flag, argv[++i] ?? ""]);
+    } else {
+      parsed.push([flag, null]);
     }
   }
+  const has = (flag: string): boolean => parsed.some(([f]) => f === flag);
+  const valuesOf = (flag: string): string[] =>
+    parsed.flatMap(([f, v]) => (f === flag && v !== null ? [v] : []));
   const one = (flag: string, expected: string) => {
     const vs = valuesOf(flag);
     if (vs.length !== 1 || vs[0] !== expected) {
@@ -444,8 +481,18 @@ export function assertHardenedArgv(
   one("--memory", `${spec.limits.memoryBytes}b`);
   one("--memory-swap", `${spec.limits.memoryBytes}b`);
   one("--pids-limit", String(spec.limits.pidsLimit));
+  one("--log-driver", "none");
+  one("--entrypoint", "/bin/bash");
   for (const required of ["--init", "--read-only"]) {
-    if (!opts.includes(required)) fail(`missing ${required}`);
+    if (!has(required)) fail(`missing ${required}`);
+  }
+  // Container gid 0 (the run-dir hand-over group) is the only extra group.
+  for (const g of valuesOf("--group-add")) {
+    if (g !== "0") fail(`--group-add ${JSON.stringify(g)} (only 0 is allowed)`);
+  }
+  for (const t of valuesOf("--tmpfs")) {
+    if (!t.startsWith("/tmp:"))
+      fail(`--tmpfs ${JSON.stringify(t)} (only /tmp)`);
   }
   const secOpts = valuesOf("--security-opt");
   if (secOpts.length !== 1 || secOpts[0] !== "no-new-privileges") {
@@ -462,14 +509,20 @@ export function assertHardenedArgv(
       }),
     );
     const type = fields.get("type");
-    if (type === "volume") {
-      if (fields.has("src") || fields.has("source")) {
-        fail(`named volumes are not allowed: ${mount}`);
+    const allowedKeys =
+      type === "volume"
+        ? VOLUME_MOUNT_KEYS
+        : type === "bind"
+          ? BIND_MOUNT_KEYS
+          : fail(`mount type ${JSON.stringify(type)} is not allowed`);
+    for (const key of fields.keys()) {
+      // `src` on a volume names a shared volume; `volume-opt` can make an
+      // anonymous one a bind of any host path; propagation leaks mounts.
+      if (!allowedKeys.has(key)) {
+        fail(`mount option ${JSON.stringify(key)} is not allowed: ${mount}`);
       }
-      continue;
     }
-    if (type !== "bind")
-      fail(`mount type ${JSON.stringify(type)} is not allowed`);
+    if (type === "volume") continue;
     const src = fields.get("src") ?? fields.get("source") ?? "";
     if (/docker\.sock|containerd\.sock|\/var\/run\b|^\/run\/user\b/.test(src)) {
       fail(`a daemon socket or runtime dir may never be mounted: ${src}`);

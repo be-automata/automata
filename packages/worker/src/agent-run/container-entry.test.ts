@@ -211,6 +211,41 @@ describe("buildEntryScript: the Somnio rules step and the env file (run under ba
     expect(exclude).toContain("/.claude/rules/weird\\[1\\]\\*.md\n");
   });
 
+  // card: protects=a repo that already tracks its own .claude/ keeps it byte-for-byte: a rewritten tracked file is restored, a tracked file the installer DELETED comes back, and only the installer's additions are excluded; fails_when=the repo's settings or rule is lost, or one of its own paths lands in .git/info/exclude; no_claim=the real CLI's clean_adapter scope (integration suite)
+  it("a repo with its own tracked .claude/ keeps it: rewrites restored, deletions undone", () => {
+    fs.mkdirSync(path.join(ws, ".claude/rules"), { recursive: true });
+    fs.writeFileSync(path.join(ws, ".claude/settings.json"), '{"own":1}\n');
+    fs.writeFileSync(path.join(ws, ".claude/rules/own.md"), "own rule\n");
+    git("add", ".");
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "own");
+    // An installer that also rewrites and deletes what the repo tracks.
+    fs.writeFileSync(
+      path.join(bin, "somnio"),
+      [
+        "#!/bin/bash",
+        "printf '{}' >.claude/settings.json",
+        "rm -f .claude/rules/own.md",
+        "mkdir -p '.claude/rules/typescript'",
+        "printf 'rule\\n' >.claude/rules/typescript/best-practices.md",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const r = runEntry({ AUTOMATA_SOMNIO_STACKS: "typescript" }, "true");
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(
+      fs.readFileSync(path.join(ws, ".claude/settings.json"), "utf8"),
+    ).toBe('{"own":1}\n');
+    expect(fs.readFileSync(path.join(ws, ".claude/rules/own.md"), "utf8")).toBe(
+      "own rule\n",
+    );
+    expect(git("status", "--porcelain")).toBe("");
+    const exclude = fs.readFileSync(path.join(ws, ".git/info/exclude"), "utf8");
+    expect(exclude).toContain("/.claude/rules/typescript/best-practices.md\n");
+    expect(exclude).not.toContain("own.md");
+    expect(exclude).not.toContain("settings.json");
+  });
+
   // card: protects=a failing installer never fails the run and still leaves the checkout clean; fails_when=the entry exits non-zero or the checkout is dirty; no_claim=partial-install semantics of the real CLI
   it("a failing installer is reported, the checkout still ends clean, the command still runs", () => {
     const r = runEntry(

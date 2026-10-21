@@ -18,6 +18,7 @@ import { runAsAgent } from "./agent-command";
 import { DaemonProcess } from "./daemon-process";
 import {
   ContainerDaemonProcess,
+  settleDaemonTeardown,
   type RunDaemon,
 } from "./container-daemon-process";
 import { CONTAINER_WORKSPACE } from "./container-argv";
@@ -1454,29 +1455,19 @@ async function runAgentInner(
     // production before the seed landed. Credits/box-key runs need the seed
     // just as much: review mode does not care where the model credential
     // comes from.
-    materialised = await materialiseAgentCredentials(
-      config.containerRuns
-        ? {
-            // ADR-013: the HOME built here is a STAGING dir the container
-            // run copies into the image's HOME volume. No packs are linked
-            // (the image installs every battery), the settings are composed
-            // per lane at copy-in, and the trust seed names /workspace.
-            credentials: pulled.credentials,
-            agent: pulled.agent,
-            run,
-            trustWorkdir: CONTAINER_WORKSPACE,
-            batteries: { log: admissionLog },
-          }
-        : {
-            credentials: pulled.credentials,
-            agent: pulled.agent,
-            run,
-            agentUser: config.agentUser,
-            seed: batterySeed,
-            foregroundOnly,
-            batteries: { log: admissionLog },
-          },
-    );
+    materialised = await materialiseAgentCredentials({
+      credentials: pulled.credentials,
+      agent: pulled.agent,
+      run,
+      batteries: { log: admissionLog },
+      ...(config.containerRuns
+        ? // ADR-013: the HOME built here is a STAGING dir the container run
+          // copies into the image's HOME volume. No packs are linked (the
+          // image installs every battery), the settings are composed per
+          // lane at copy-in, and the trust seed names /workspace.
+          { trustWorkdir: CONTAINER_WORKSPACE }
+        : { agentUser: config.agentUser, seed: batterySeed, foregroundOnly }),
+    });
   } catch (err) {
     await abandon();
     throw err;
@@ -1796,7 +1787,12 @@ async function runAgentInner(
         egressProxyUrl: egressProxy?.url ?? null,
         baseSha: fixBaseSha,
         lockLost: boxLock?.lost === true,
-        teardown: () => void daemon.teardown(),
+        // A container teardown is a promise: never left unhandled here (an
+        // unhandled rejection kills the worker); the finally below awaits
+        // the same memoised promise and logs its failure.
+        teardown: () => {
+          void Promise.resolve(daemon.teardown()).catch(() => {});
+        },
         // A container run's "reap" is its removal (awaited, idempotent).
         reap: () =>
           containerDaemon
@@ -1828,9 +1824,17 @@ async function runAgentInner(
       // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
-      // A container run resolves only once its container is gone (rm -f -v);
-      // a host run's teardown is synchronous, so awaiting it changes nothing.
-      await daemon.teardown();
+      // A container run's teardown resolves once its container is gone
+      // (rm -f -v, retried with backoff while this run still holds the slot);
+      // a host run's is synchronous and returns nothing, so nothing is awaited.
+      // A removal that kept failing is logged, never thrown (see
+      // settleDaemonTeardown for why the slot still goes).
+      const containerGone = settleDaemonTeardown(
+        daemon,
+        input.threadId,
+        admissionLog,
+      );
+      if (containerGone) await containerGone;
       // #371: idempotent — a run that never reached its first progress poll still
       // frees its headroom reservation here.
       reservation?.release();
