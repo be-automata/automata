@@ -82,6 +82,30 @@ equally well, so a modal adds friction for honest users and nothing against a se
 - **Residual risk:** an org that owns its app cannot decide in Slack. This is a capability gap,
   not a security gap.
 
+### Option A′: platform-app route, owners keyed by Slack identity
+
+- **Trusted source:** `payload.user.id` and `payload.team.id` under the platform signature, used
+  as-is. The same trust as A: the platform alone holds the signing secret, so Slack built the
+  payload. What changes is the owner map, not the trust root: an owner or delegate may be named by
+  `(slack_team_id, slack_user_id)` instead of by platform user, so a workspace member decides
+  without a platform account or an OpenID link.
+- **Routes accepted:** `/api/webhooks/slack` only, exactly as A. The team in the payload must be the
+  workspace bound to the claim's org (`route-fence.ts:33-59`); a click from any other team is
+  refused.
+- **Setup facts that favour it:** the org's workspace runs the platform app, and the people who
+  should decide are workspace members (for example everyone in the org's alerts channel) who will
+  not sign in to the platform.
+- **Phase 15 code implied:** owner-map entries that hold either a platform user id or a Slack
+  identity; an org-admin flow to name Slack users as owners or delegates; the same route-kind
+  check, refusal reply and log line as A. Decision rows record `identity_source = platform_slack`
+  with the linked platform user id null.
+- **Residual risk:** offboarding follows Slack, not the platform: a person removed from the
+  workspace stops being able to click, but their owner-map entry stays until an admin removes it,
+  and a reused or reassigned Slack account inherits it. Decisions are attributed to a Slack
+  identity, not a platform user, so telemetry that counts "owner decisions" must treat both kinds.
+  Non-repudiation is as strong as A, because the identity still comes from a payload the org
+  cannot forge.
+
 ### Option B: org route with a platform-held second factor
 
 - **Trusted source:** the click only opens a confirmation, which the platform verifies with
@@ -123,6 +147,7 @@ equally well, so a modal adds friction for honest users and nothing against a se
 | Option | Org-route payload identity trusted | Decides in Slack on org app | New trust root | UX friction |
 | ------ | ---------------------------------- | --------------------------- | -------------- | ----------- |
 | A      | No (refused)                       | No                          | None           | Low         |
+| A′     | No (refused)                       | No                          | None           | Lowest      |
 | B      | No (second factor)                 | Opens only                  | www session    | Medium      |
 | C      | No (not used)                      | No (link)                   | www session    | High        |
 | D      | Yes (labelled)                     | Yes                         | Org secret     | Lowest      |
@@ -131,7 +156,11 @@ equally well, so a modal adds friction for honest users and nothing against a se
 
 **A as the default, with C as the fallback** for orgs that cannot install the platform app. A reuses
 the fence that already exists (`route-fence.ts:33-59` serves a workspace through exactly one app)
-and adds no new trust root. This is a recommendation only: the final choice depends on the Slack
+and adds no new trust root. **A′ is the same route with a wider owner map**: choose it, alone or
+alongside A, when the deciders are workspace members who will not hold platform accounts. The
+setup check found exactly that for the first external org: the platform app is installed, the org
+owns no app, and the intended deciders are members of its workspace and alerts channel, of whom
+only the platform owner has linked Slack. This is a recommendation only: the final choice depends on the Slack
 setup facts of the first external org, recorded in a local investigation note, and is made when
 this ADR moves to Accepted. The ADR names no organisation.
 
@@ -146,9 +175,10 @@ the chosen option and the facts behind it.
 2. Resolve the decider identity only from the chosen option's trusted source.
 3. Refuse and log any decider who is not the claim owner or a named delegate (DEC-03). Only the
    mapped owner or a named delegate can decide; the org admin or the owner names delegates.
-4. Every decision row stores `slack_team_id`, `slack_user_id`, the linked platform user id, the
-   route kind and an `identity_source` value, so the decision is signed with the approver's
-   verified Slack identity by the control plane.
+4. Every decision row stores `slack_team_id`, `slack_user_id`, the linked platform user id (null
+   under A′ when the decider has no platform account), the route kind and an `identity_source`
+   value, so the decision is signed with the approver's verified Slack identity by the control
+   plane.
 5. A refusal reply never reveals org membership to an unverified payload (the rule at
    `route-fence.ts:132`).
 
@@ -158,7 +188,7 @@ the chosen option and the facts behind it.
 
 - The trusted source is chosen on evidence before any decision code exists.
 - Every option keeps the existing mention confirmation untouched.
-- Under A, B and C a leaked org-app secret cannot forge an approval.
+- Under A, A′, B and C a leaked org-app secret cannot forge an approval.
 
 **Negative / watch**
 
@@ -174,6 +204,8 @@ the chosen option and the facts behind it.
 Phase 15 must ship tests for:
 
 - the owner/delegate matrix on each route kind (owner, delegate, non-owner, unlinked Slack user);
+- under A′, a Slack-keyed owner deciding without a platform account, and the same Slack user id
+  from a different team refused;
 - a forged org-route payload naming an owner, refused (A, B, C) or recorded with
   `identity_source = org_app_asserted` (D);
 - a refusal reply that does not leak org membership;
