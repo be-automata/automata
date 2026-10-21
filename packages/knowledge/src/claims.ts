@@ -9,11 +9,19 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
+import { classifyEvidence, type EvidenceClass } from "./evidence-class";
 import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
 
 export interface EvidencePin {
   uri: string;
+  /**
+   * Identity of the pinned span's content, in one of two self-describing forms:
+   * - bare 16 hex: whitespace-collapsed (prose pins, and legacy pins written before ENG-03; a legacy
+   *   bare hash on a code file keeps verifying whitespace-tolerantly until its next repin or update);
+   * - `x:` + 16 hex: the exact text, whitespace and line endings included (code and config pins).
+   * The stored form, never the URI, decides how the hash is compared.
+   */
   hash: string;
 }
 export interface Claim {
@@ -73,9 +81,28 @@ export class InvalidEvidenceUriError extends Error {
 
 const sha = (s: string) =>
   createHash("sha256").update(s).digest("hex").slice(0, 16);
-/** The identity of a span's content. Whitespace-only edits must not flip a claim. */
+/** The identity of a prose span's content. Whitespace-only edits must not flip a prose claim. */
 const fingerprint = (text: string) => sha(text.replace(/\s+/g, " ").trim());
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+/** Marks a hash of the exact text (code and config), so a stored hash says how to compare it. */
+const EXACT_HASH_PREFIX = "x:";
+type HashMode = EvidenceClass;
+function hashAs(mode: HashMode, text: string): string {
+  // Exact: the text as resolved, no trim and no CRLF normalization (a line-ending change is a change).
+  return mode === "exact" ? EXACT_HASH_PREFIX + sha(text) : fingerprint(text);
+}
+const modeOfHash = (hash: string): HashMode =>
+  hash.startsWith(EXACT_HASH_PREFIX) ? "exact" : "prose";
+/** The class a new pin on this URI gets. Comparing an existing pin uses modeOfHash instead. */
+function classOfUri(uri: string): HashMode {
+  const { scheme, target } = parseUri(uri);
+  return classifyEvidence(scheme, target);
+}
+const matchesHash = (stored: string, text: string) =>
+  hashAs(modeOfHash(stored), text) === stored;
+/** A stale span as the updater sees it: exact text keeps its indentation, prose is collapsed. */
+const nowText = (mode: HashMode, text: string) =>
+  mode === "exact" ? text.replace(/\n$/, "") : norm(text);
 const slug = (s: string) =>
   s
     .toLowerCase()
@@ -217,15 +244,19 @@ export function pin(root: string, uri: string): EvidencePin {
       uri,
       `cannot pin: ${"missing" in r ? r.missing : "the anchor names several places"}`,
     );
-  return { uri, hash: fingerprint(r.text) };
+  return { uri, hash: hashAs(classOfUri(uri), r.text) };
 }
 
-// Window indexes keyed by (content, width), least recently used evicted past the cap. Keyed by content,
+// Window indexes keyed by (content, width, hash mode), least recently used evicted past the cap. Keyed by content,
 // not path, so a worker that checks out every run into a fresh directory reuses them and stays bounded.
 const WINDOW_INDEX_CAP = 64;
 const WINDOW_INDEX = new Map<string, Map<string, number[]>>();
-function windowIndex(text: string, width: number): Map<string, number[]> {
-  const key = `${sha(text)}\0${width}`;
+function windowIndex(
+  text: string,
+  width: number,
+  mode: HashMode,
+): Map<string, number[]> {
+  const key = `${sha(text)}\0${width}\0${mode}`;
   const cached = WINDOW_INDEX.get(key);
   if (cached) {
     WINDOW_INDEX.delete(key);
@@ -235,7 +266,7 @@ function windowIndex(text: string, width: number): Map<string, number[]> {
   const lines = text.split("\n");
   const idx = new Map<string, number[]>();
   for (let i = 0; i + width <= lines.length; i++) {
-    const h = fingerprint(lines.slice(i, i + width).join("\n"));
+    const h = hashAs(mode, lines.slice(i, i + width).join("\n"));
     const list = idx.get(h);
     if (list) list.push(i + 1);
     else idx.set(h, [i + 1]);
@@ -254,11 +285,12 @@ function spansWithHash(
   hash: string,
 ): string[] | null {
   const { scheme, target, anchor } = parseUri(uri);
+  const mode = modeOfHash(hash);
   if (scheme === "doc") {
     const sections = readSections(root, target, uri);
     return sections
       ? sections
-          .filter((s) => fingerprint(s.body) === hash)
+          .filter((s) => hashAs(mode, s.body) === hash)
           .map((s) => `doc://${target}#${s.slug}`)
       : null;
   }
@@ -268,7 +300,7 @@ function spansWithHash(
   const file = sourceFile(root, "repo", target, uri);
   if (!file) return null;
   const text = readFileSync(file, "utf8");
-  return (windowIndex(text, width).get(hash) ?? []).map((s) =>
+  return (windowIndex(text, width, mode).get(hash) ?? []).map((s) =>
     repoUri(target, [s, s + width - 1]),
   );
 }
@@ -302,8 +334,14 @@ export function checkEvidence(root: string, e: EvidencePin): EvidenceStatus {
         code: r.code,
       }
     );
-  if (fingerprint(r.text) === e.hash) return { kind: "fresh", uri: e.uri };
-  return relocated() ?? { kind: "stale", uri: e.uri, now: norm(r.text) };
+  if (matchesHash(e.hash, r.text)) return { kind: "fresh", uri: e.uri };
+  return (
+    relocated() ?? {
+      kind: "stale",
+      uri: e.uri,
+      now: nowText(modeOfHash(e.hash), r.text),
+    }
+  );
 }
 
 const holds = (k: EvidenceStatus["kind"]) => k === "fresh" || k === "relocated";
@@ -525,7 +563,7 @@ function acceptableEvidence(
       }
       const r = resolve(root, uri);
       if (!("text" in r)) return false;
-      const spans = spansWithHash(root, uri, fingerprint(r.text));
+      const spans = spansWithHash(root, uri, hashAs(classOfUri(uri), r.text));
       return spans === null || spans.length === 1;
     } catch (e) {
       // Malformed or out-of-corpus model output is a review, not a crash.
@@ -546,7 +584,9 @@ function atLocation(
 ): EvidenceStatus | null {
   if (e.kind !== "stale") return e;
   const r = resolve(root, uri);
-  return "text" in r ? { kind: "stale", uri: e.uri, now: norm(r.text) } : null;
+  return "text" in r
+    ? { kind: "stale", uri: e.uri, now: nowText(classOfUri(uri), r.text) }
+    : null;
 }
 
 const describe = (e: EvidenceStatus) => {
