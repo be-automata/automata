@@ -304,7 +304,7 @@ its header:
   Docker's default seccomp profile; gstack's browse runs with `--no-sandbox` (the container is the
   sandbox). Measured in P0.
 - **Image size.** The spike build was 9.0 GB unpacked; without the standalone Dart SDK and the
-  build-only pub cache it is about 8.4 GB. Two digests are kept during a rollout, so budget about
+  build-only pub and bun caches it is 8.26 GB (CI build, 2026-10-21). Two digests are kept during a rollout, so budget about
   20 GB of rootless Docker root. P0 records size and `df` headroom on the box.
 - **Cold start.** `create` (which populates the HOME and Flutter volumes from the image) + copy-in +
   `start`. Measured on a laptop under amd64 emulation: about 3 s with HOME alone, 13-18 s with

@@ -78,7 +78,7 @@ writes `WORKER_BATTERIES_IMAGE=ghcr.io/be-automata/automata-batteries@sha256:…
 It authenticates with `GITHUB_TOKEN` (`packages: write`) only.
 
 The package is **public**: the org is on GitHub Free, where private packages are capped at 500 MB,
-and the image is about 8.4 GB with no secrets in it. GitHub has no API to change package
+and the image is about 8.3 GB with no secrets in it. GitHub has no API to change package
 visibility, so after the **first** push an org owner does it once by hand: github.com → the
 `be-automata` org → Packages → `automata-batteries` → Package settings → Danger Zone → Change
 visibility → Public. Check the same page's "Manage Actions access" lists this repository with

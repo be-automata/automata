@@ -105,13 +105,15 @@ EOF
 # ca-certificates is bootstrapped from the live (signed) archive first; the
 # snapshot install below then moves it to the snapshot's version
 # (--allow-downgrades), so the finished image holds snapshot packages only.
-# The snapshot host drops connections under load: apt retries each fetch.
+# The snapshot host drops connections and answers 502/503 under load: apt
+# retries each fetch, and a missing index fails the update here instead of
+# surfacing later as "no installation candidate".
 RUN echo 'Acquire::Retries "8";' >/etc/apt/apt.conf.d/80-retries; \
     snap=(); if [ -n "${APT_SNAPSHOT}" ]; then \
       apt-get update; apt-get install -y --no-install-recommends ca-certificates; \
       snap=(--snapshot "${APT_SNAPSHOT}" --allow-downgrades); \
     fi; \
-    apt-get update "${snap[@]:0:2}"; \
+    apt-get update --error-on=any "${snap[@]:0:2}"; \
     apt-get install -y --no-install-recommends "${snap[@]}" \
       ca-certificates curl git jq unzip xz-utils zip less procps file \
       python3 socat openssh-client build-essential \
