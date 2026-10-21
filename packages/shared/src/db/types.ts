@@ -151,7 +151,24 @@ export type ThreadSourceMetadata =
       // The org-owned mention lane: set ONLY on threads a mention started.
       // The finish hook replies to this comment as the App (emit-only).
       mention?: MentionLaneStamp;
+      // The PR companion lane: set ONLY on threads a companion automation
+      // started. The finish hook posts (or edits) its one PR comment.
+      companion?: CompanionLaneStamp;
     };
+
+/**
+ * The pull request a PR companion run reports on. Written at intake from the
+ * same `pulls.get` read the run is dispatched from; `headSha` is the commit
+ * the report describes (the finish writer prints it and never overwrites a
+ * report about the PR's current head with one about an older commit).
+ */
+export type CompanionLaneStamp = {
+  repoFullName: string;
+  prNumber: number;
+  headSha: string;
+  /** The skill that produced the report: one comment per (PR, skill). */
+  skillName: string;
+};
 
 /**
  * The mention a mention-lane thread answers. Written at intake from the

@@ -14,6 +14,8 @@ export const USAGE =
   "               --enable|--disable [--mention] [--dry-run]\n" +
   "  mention:   pnpm exec tsx deploy/onboard-review-repo.ts <orgSlug> <owner/repo> <skillName> \\\n" +
   "               --mention --model <model> [--enable|--disable] [--dry-run]\n" +
+  "  companion: pnpm exec tsx deploy/onboard-review-repo.ts <orgSlug> <owner/repo> \\\n" +
+  "               --companion <skillName> --model <model> [--enable|--disable] [--dry-run]\n" +
   "\n" +
   "Configure upserts the repo's review settings (block tolerance, draft reviews,\n" +
   "classic mode, 120 turns, supersede policy inherited) and ONE pull_request\n" +
@@ -21,7 +23,10 @@ export const USAGE =
   "--mention instead upserts ONE org-lane github_mention automation named\n" +
   "'GitHub mention (<skillName>)' (no settings row), created disabled unless --enable.\n" +
   "Flip only changes that automation's enabled flag (with --mention, the mention\n" +
-  "automation's). --dry-run prints the diff\n" +
+  "automation's). --companion upserts ONE advisory pull_request automation named\n" +
+  "'PR companion (<skillName>)' (filter.companion, permission mode review, no\n" +
+  "settings row): it reports as one PR comment and never as a review.\n" +
+  "--dry-run prints the diff\n" +
   "and writes nothing. DATABASE_URL must point at the target Postgres.";
 
 /** Fixed per the cutover spec: the legacy lane's turn budget, classic mode. */
@@ -30,16 +35,29 @@ export const REVIEW_MODE = "classic";
 /** pull_request automations ignore the branch (isRepoBranchRelevant), but the column is NOT NULL. */
 export const AUTOMATION_BRANCH_NAME = "main";
 
+/** The automation a run targets: the PR review, the mention lane or a PR companion. */
+export type OnboardLane = "review" | "mention" | "companion";
+
 export type OnboardArgs =
   | { kind: "help" }
   | {
       kind: "flip";
-      /** Which automation the flip targets: the PR review or the mention lane. */
-      lane: "review" | "mention";
+      /** Which automation the flip targets: the PR review, the mention lane or a companion. */
+      lane: OnboardLane;
       orgSlug: string;
       repoFullName: string;
       skillName: string;
       enabled: boolean;
+      dryRun: boolean;
+    }
+  | {
+      kind: "configure-companion";
+      orgSlug: string;
+      repoFullName: string;
+      skillName: string;
+      model: string;
+      /** undefined = create disabled, leave an existing row's flag as is. */
+      enabled: boolean | undefined;
       dryRun: boolean;
     }
   | {
@@ -78,6 +96,7 @@ const BOOLEAN_FLAGS = [
   "--disable",
   "--dry-run",
   "--mention",
+  "--companion",
 ];
 const VALUE_FLAGS = ["--tolerance", "--model"];
 
@@ -152,11 +171,22 @@ export function parseOnboardArgs(
       : undefined;
   const dryRun = seen.has("--dry-run");
 
-  if (seen.has("--mention")) {
+  if (seen.has("--mention") && seen.has("--companion")) {
+    throw new OnboardArgsError(
+      "--mention and --companion are mutually exclusive.",
+    );
+  }
+  const sideLane = seen.has("--mention")
+    ? ("mention" as const)
+    : seen.has("--companion")
+      ? ("companion" as const)
+      : null;
+  if (sideLane !== null) {
+    const laneFlag = `--${sideLane}`;
     for (const flag of ["--tolerance", "--drafts"]) {
       if (seen.has(flag)) {
         throw new OnboardArgsError(
-          `${flag} is a review-lane flag and is not used with --mention.`,
+          `${flag} is a review-lane flag and is not used with ${laneFlag}.`,
         );
       }
     }
@@ -164,12 +194,12 @@ export function parseOnboardArgs(
     if (model === undefined) {
       if (enabled === undefined) {
         throw new OnboardArgsError(
-          "Nothing to do: pass --model to configure the mention lane, or --enable/--disable to flip it.",
+          `Nothing to do: pass --model to configure the ${sideLane} lane, or --enable/--disable to flip it.`,
         );
       }
       return {
         kind: "flip",
-        lane: "mention",
+        lane: sideLane,
         orgSlug,
         repoFullName,
         skillName,
@@ -181,7 +211,8 @@ export function parseOnboardArgs(
       throw new OnboardArgsError(`--model is not a known model: ${model}`);
     }
     return {
-      kind: "configure-mention",
+      kind:
+        sideLane === "mention" ? "configure-mention" : "configure-companion",
       orgSlug,
       repoFullName,
       skillName,
@@ -328,6 +359,74 @@ export function buildMentionAutomation<Model extends string>({
     },
     disableGitCheckpointing: true,
   };
+}
+
+/** The companion automation's upsert key within (organization, repo). */
+export function companionAutomationName(skillName: string): string {
+  return `PR companion (${skillName})`;
+}
+
+/**
+ * The PR companion automation (minus owner/org/enabled) a `--companion`
+ * configure run upserts: a pull_request automation that opts into the
+ * companion lane. It runs on every author's opened / updated PR except bot
+ * pushes (the review lane's routing), pinned to the `review` permission mode
+ * (emit-only), and its thread never auto-commits or opens a pull request. It
+ * writes no settings row: drafts follow the repo's review draft policy.
+ */
+export function buildCompanionAutomation<Model extends string>({
+  repoFullName,
+  skillName,
+  model,
+}: {
+  repoFullName: string;
+  skillName: string;
+  model: Model;
+}) {
+  return {
+    name: companionAutomationName(skillName),
+    triggerType: "pull_request" as const,
+    triggerConfig: {
+      filter: {
+        includeAllAuthors: true,
+        excludeBotSenders: true,
+        companion: true,
+      },
+      on: { open: true, update: true },
+      permissionMode: "review" as const,
+    },
+    repoFullName,
+    branchName: AUTOMATION_BRANCH_NAME,
+    action: {
+      type: "skill_message" as const,
+      config: { skillName, version: "latest", model },
+    },
+    disableGitCheckpointing: true,
+  };
+}
+
+/** The automation name a run targets in its lane. */
+export function laneAutomationName(
+  lane: OnboardLane,
+  skillName: string,
+): string {
+  switch (lane) {
+    case "mention":
+      return mentionAutomationName(skillName);
+    case "companion":
+      return companionAutomationName(skillName);
+    case "review":
+      return reviewAutomationName(skillName);
+  }
+}
+
+/** True for a stored pull_request automation that is a PR companion. */
+export function isCompanionRow(row: { triggerConfig: unknown }): boolean {
+  const config = row.triggerConfig as
+    | { filter?: { companion?: unknown } | null }
+    | null
+    | undefined;
+  return config?.filter?.companion === true;
 }
 
 /**

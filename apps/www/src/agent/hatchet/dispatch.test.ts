@@ -506,6 +506,65 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     expect(reviewRow!.errorMessage).not.toBe("superseded");
     vi.unstubAllGlobals();
   });
+
+  it("a PR COMPANION and the review on the same PR never touch each other's thread or run", async () => {
+    const reviewAutomation = await makeAutomation("pull_request");
+    const companionAutomation = await createReviewAutomation({
+      userId: user.id,
+      orgId,
+      companion: true,
+    });
+    const dispatch = async (
+      t: { threadId: string; threadChatId: string },
+      runId: string,
+    ) => {
+      const f = routedFetch(runId);
+      vi.stubGlobal("fetch", f.mock);
+      await dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature",
+      });
+      vi.unstubAllGlobals();
+      return f;
+    };
+    const readRow = async (threadId: string) =>
+      (
+        await db.query.thread.findMany({
+          where: (t, { eq }) => eq(t.id, threadId),
+        })
+      )[0]!;
+
+    // Review, then companion, then a newer review, on PR 300.
+    const review = await makePRThread(reviewAutomation, 300);
+    await dispatch(review, "run-review");
+    const companion = await makePRThread(companionAutomation, 300);
+    const companionFetch = await dispatch(companion, "run-companion");
+    const newerReview = await makePRThread(reviewAutomation, 300);
+    const newerFetch = await dispatch(newerReview, "run-review-2");
+
+    expect(companionFetch.cancelBodies).toHaveLength(0);
+    expect(newerFetch.cancelBodies).toHaveLength(0);
+    // The companion took the legacy plan (no per-PR concurrency key), so the
+    // engine's per-PR supersession can never reach it, nor it the review.
+    expect(triggerBody(companionFetch.mock).workflowName).toBe("agent-run");
+    expect(triggerBody(companionFetch.mock).input.prKey).toBeUndefined();
+    expect(triggerBody(newerFetch.mock).workflowName).toBe("agent-run-newest");
+
+    for (const id of [review.threadId, companion.threadId]) {
+      const row = await readRow(id);
+      expect(row.archived).toBe(false);
+      expect(row.errorMessage).not.toBe("superseded");
+      expect(row.status).toBe("booting");
+    }
+    // The review generation stamp stays the review's; none on the companion.
+    expect((await readRow(review.threadId)).activeRunExternalId).toBe(
+      "run-review",
+    );
+    expect((await readRow(companion.threadId)).activeRunExternalId).toBeNull();
+  });
 });
 
 describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", () => {
@@ -1109,6 +1168,54 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     expect(vi.mocked(resolveTaskAgentFromRows)).not.toHaveBeenCalled();
   });
 
+  describe("PR companion (a pull_request automation that is NOT a review)", () => {
+    const companionThread = async (prNumber: number) =>
+      createBootingPRThread({
+        userId: user.id,
+        orgId,
+        automationId: await createReviewAutomation({
+          userId: user.id,
+          orgId,
+          companion: true,
+        }),
+        prNumber,
+      });
+
+    it("dispatches on the legacy plan: no prKey, no supersede policy, no review settings, no fence stamp — so the worker resolves lane=pr", async () => {
+      await setTaskBatteries(REPO, ["somnio-skills"]);
+      const t = await companionThread(921);
+      const f = routedHatchetFetch("run-companion");
+      vi.stubGlobal("fetch", f.mock);
+      await dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: REPO,
+        branch: "feature",
+      });
+      const body = triggerBody(f.mock);
+      vi.unstubAllGlobals();
+      expect(body.workflowName).toBe("agent-run");
+      for (const key of [
+        "prKey",
+        "supersedePolicy",
+        "deliveryId",
+        "recheckOnComplete",
+        "reviewAgent",
+      ]) {
+        expect(key in body.input).toBe(false);
+      }
+      expect(body.input.prNumber).toBe(921);
+      // Task packs reach it, as on every pr-lane run.
+      expect(body.input.taskAgent).toEqual({ batteries: ["somnio-skills"] });
+      const [row] = await db
+        .select({ activeRunExternalId: threadTable.activeRunExternalId })
+        .from(threadTable)
+        .where(eq(threadTable.id, t.threadId));
+      expect(row!.activeRunExternalId).toBeNull();
+    });
+  });
+
   it("a personal (no-org) thread neither carries taskAgent nor reads the setting", async () => {
     const t = await createTestThread({ db, userId: user.id });
     const input = await dispatchAndRead(t);
@@ -1275,6 +1382,24 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       const input = await dispatchAndRead(await reviewThread(912));
       expect("repoEnv" in input).toBe(false);
       expect((await unsealInput(input)).repoEnv).toBeUndefined();
+    });
+
+    it("a PR companion run never carries the variables nor a work branch", async () => {
+      await setRepoEnv({ YOUTRACK_AGENT_TOKEN: "perm:agent" });
+      const t = await createBootingPRThread({
+        userId: user.id,
+        orgId,
+        automationId: await createReviewAutomation({
+          userId: user.id,
+          orgId,
+          companion: true,
+        }),
+        prNumber: 922,
+      });
+      const input = await dispatchAndRead(t, "main");
+      expect("repoEnv" in input).toBe(false);
+      expect((await unsealInput(input)).repoEnv).toBeUndefined();
+      expect("workBranch" in input).toBe(false);
     });
   });
 

@@ -6,6 +6,7 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
+import { isCompanionAutomation } from "@terragon/shared/automations";
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import { promoteLastKnownGood } from "@terragon/shared/model/repo-skills";
 import type { ThreadSourceMetadata } from "@terragon/shared";
@@ -43,11 +44,16 @@ import { PR_MERGED_SKILL_NAME } from "./review-skill";
  */
 
 /**
- * A review thread = one dispatched from a `pull_request`-triggered automation
- * (the PR-review path). Mention threads are `github_mention`; those keep the
- * mention-reply path and must NOT run the review executor.
+ * Which PR-automation lane a thread's automation belongs to:
+ *   - `review`: a `pull_request` automation without the companion flag (the
+ *     PR-review path: review plan, verdict writer, sweeps);
+ *   - `companion`: a `pull_request` automation with `filter.companion: true`
+ *     (advisory, one PR comment, never a review);
+ *   - null: anything else (no automation, a mention, an issue, a schedule).
  */
-export async function isReviewThread({
+export type PrAutomationLane = "review" | "companion";
+
+export async function getPrAutomationLane({
   db,
   userId,
   automationId,
@@ -57,15 +63,32 @@ export async function isReviewThread({
   userId: string;
   automationId: string | null;
   organizationId?: string | null;
-}): Promise<boolean> {
-  if (!automationId) return false;
+}): Promise<PrAutomationLane | null> {
+  if (!automationId) return null;
   const automation = await getAutomation({
     db,
     userId,
     automationId,
     organizationId,
   });
-  return automation?.triggerType === "pull_request";
+  if (automation?.triggerType !== "pull_request") return null;
+  return isCompanionAutomation(automation) ? "companion" : "review";
+}
+
+/**
+ * A review thread = one dispatched from a `pull_request`-triggered automation
+ * (the PR-review path). Mention threads are `github_mention`; those keep the
+ * mention-reply path and must NOT run the review executor. A PR companion
+ * automation is `pull_request` too, but it is NOT a review: it never gets the
+ * review plan, the verdict writer or the review sweep.
+ */
+export async function isReviewThread(args: {
+  db: DB;
+  userId: string;
+  automationId: string | null;
+  organizationId?: string | null;
+}): Promise<boolean> {
+  return (await getPrAutomationLane(args)) === "review";
 }
 
 type WorkFailedByOutcome = Record<ReviewFromIntentOutcome["outcome"], boolean> &

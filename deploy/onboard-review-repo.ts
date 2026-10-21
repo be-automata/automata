@@ -33,6 +33,17 @@
  *   DATABASE_URL=postgres://... pnpm exec tsx deploy/onboard-review-repo.ts \
  *     <orgSlug> <owner/repo> github-mention --mention --model <model> [--enable]
  *
+ * `--companion` (the PR companion lane) writes NO settings row and upserts,
+ * keyed by (organization, repo, name 'PR companion (<skill>)'), ONE
+ * pull_request automation: trigger on open + update, filter includeAllAuthors
+ * + excludeBotSenders + companion, permissionMode 'review', action
+ * skill_message { skillName, version 'latest', model },
+ * disableGitCheckpointing true, owned by the org owner, created DISABLED
+ * unless --enable. It runs next to the review automation and reports as one
+ * PR comment, never as a review.
+ *   DATABASE_URL=postgres://... pnpm exec tsx deploy/onboard-review-repo.ts \
+ *     <orgSlug> <owner/repo> --companion flutter-pr-companion --model <model> [--enable]
+ *
  * `--dry-run` prints the field diff and writes nothing. Unknown flags are a
  * hard error. Re-running with the same arguments is a no-op.
  */
@@ -60,13 +71,15 @@ import {
   OnboardArgsError,
   USAGE,
   type OnboardArgs,
+  type OnboardLane,
+  buildCompanionAutomation,
   buildMentionAutomation,
   buildReviewAutomation,
   buildReviewSettingsPatch,
   diffFields,
-  mentionAutomationName,
+  isCompanionRow,
+  laneAutomationName,
   parseOnboardArgs,
-  reviewAutomationName,
   stableStringify,
 } from "./lib/onboard-review-repo-args";
 
@@ -111,13 +124,20 @@ const desired =
           ...args,
           model: AIModelSchema.parse(args.model),
         })
-      : null;
-const lane: "review" | "mention" =
+      : args.kind === "configure-companion"
+        ? buildCompanionAutomation({
+            ...args,
+            model: AIModelSchema.parse(args.model),
+          })
+        : null;
+const lane: OnboardLane =
   args.kind === "flip"
     ? args.lane
     : args.kind === "configure-mention"
       ? "mention"
-      : "review";
+      : args.kind === "configure-companion"
+        ? "companion"
+        : "review";
 if (desired) assertSchemaKeeps(desired);
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -155,7 +175,8 @@ async function listLaneAutomations() {
 function assertSchemaKeeps(
   automation:
     | ReturnType<typeof buildReviewAutomation>
-    | ReturnType<typeof buildMentionAutomation>,
+    | ReturnType<typeof buildMentionAutomation>
+    | ReturnType<typeof buildCompanionAutomation>,
 ) {
   const trigger = {
     type: automation.triggerType,
@@ -172,7 +193,7 @@ function assertSchemaKeeps(
         `The automation ${label} schema in this checkout drops fields of\n` +
           `  ${stableStringify(input)}\n(parsed: ${stableStringify(parsed)}).\n` +
           `Run this script from a checkout whose packages/shared/src/automations ` +
-          `knows filter.excludeBotSenders, filter.orgLane and skill_message.model.`,
+          `knows filter.excludeBotSenders, filter.orgLane, filter.companion and skill_message.model.`,
       );
     }
   }
@@ -191,10 +212,7 @@ async function main(parsed: RunArgs) {
     fail(`Org '${parsed.orgSlug}' has no members. Add an owner first.`);
   }
 
-  const name =
-    lane === "mention"
-      ? mentionAutomationName(parsed.skillName)
-      : reviewAutomationName(parsed.skillName);
+  const name = laneAutomationName(lane, parsed.skillName);
   const repoKey = parsed.repoFullName.toLowerCase();
   const all = await listLaneAutomations();
   const matches = all.filter(
@@ -211,12 +229,19 @@ async function main(parsed: RunArgs) {
     );
   }
   const existing = matches[0];
-  const others = all.filter(
-    (a) =>
-      a.enabled &&
-      a.repoFullName.toLowerCase() === repoKey &&
-      a.id !== existing?.id,
-  );
+  // A companion is not a review lane: it neither collides with the review
+  // automation nor with another companion skill (each has its own comment),
+  // so only same-lane rows warn.
+  const others =
+    lane === "companion"
+      ? []
+      : all.filter(
+          (a) =>
+            a.enabled &&
+            a.repoFullName.toLowerCase() === repoKey &&
+            a.id !== existing?.id &&
+            !isCompanionRow(a),
+        );
   for (const other of others) {
     console.warn(
       lane === "mention"
@@ -234,9 +259,9 @@ async function main(parsed: RunArgs) {
     if (!existing) {
       fail(
         `No automation '${name}' for ${parsed.repoFullName} in '${parsed.orgSlug}'. ` +
-          (lane === "mention"
-            ? `Run with --mention --model to create it first.`
-            : `Run with --tolerance and --model to create it first.`),
+          (lane === "review"
+            ? `Run with --tolerance and --model to create it first.`
+            : `Run with --${lane} --model to create it first.`),
       );
     }
     if (existing.enabled === parsed.enabled) {
@@ -321,7 +346,8 @@ async function upsertLaneAutomation(
   parsed: Exclude<RunArgs, { kind: "flip" }>,
   desired:
     | ReturnType<typeof buildReviewAutomation>
-    | ReturnType<typeof buildMentionAutomation>,
+    | ReturnType<typeof buildMentionAutomation>
+    | ReturnType<typeof buildCompanionAutomation>,
   org: { id: string; slug: string },
   ownerUserId: string,
   name: string,

@@ -1768,6 +1768,10 @@ export async function findOrphanRemoteThreads({
         isNotNull(schema.thread.organizationId),
         isNotNull(schema.thread.githubPRNumber),
         eq(schema.automations.triggerType, "pull_request"),
+        // A PR companion automation is not a review: dispatch never records
+        // a run row for it, so "no row" is its normal state, not an orphan.
+        // Rule (iii) still reconciles a companion run that died unreported.
+        sql`coalesce(${schema.automations.triggerConfig} -> 'filter' ->> 'companion', 'false') <> 'true'`,
         lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
       ),
     );

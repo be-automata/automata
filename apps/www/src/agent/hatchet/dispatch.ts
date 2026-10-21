@@ -27,7 +27,7 @@ import {
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
-import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
+import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
 import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
@@ -998,17 +998,23 @@ export async function dispatchAgentRun({
     // not the `u:${userId}` concurrency fallback. Determined from the already-loaded
     // thread (its automationId), so no extra fetch. The narrowed object is null unless
     // all conditions hold (so `organizationId`/`prNumber` are non-null downstream).
+    // A PR companion automation is `pull_request` too, but it is NOT a review:
+    // no plan, so no prKey/supersedePolicy, and the worker resolves lane=`pr`
+    // (task packs seed; the review-lane fences stay with the permission mode).
+    const prLane =
+      orgSettings !== undefined && prNumber !== undefined
+        ? await getPrAutomationLane({
+            db,
+            userId,
+            automationId: thread?.automationId ?? null,
+            organizationId: orgSettings.organizationId,
+          })
+        : null;
     const reviewContext =
-      orgSettings !== undefined &&
-      prNumber !== undefined &&
-      (await isReviewThread({
-        db,
-        userId,
-        automationId: thread?.automationId ?? null,
-        organizationId: orgSettings.organizationId,
-      }))
+      orgSettings !== undefined && prNumber !== undefined && prLane === "review"
         ? { ...orgSettings, prNumber }
         : null;
+    const isCompanionRun = prLane === "companion";
 
     // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
     // legacy plan (no extension, no opts, byte-identical payload — IRON
@@ -1068,8 +1074,13 @@ export async function dispatchAgentRun({
     }
     // A plain task run: not a review, not a self-heal fix (taskPlan is only
     // set when orgSettings is).
+    // A companion run executes untrusted PR content with no write outlet, like
+    // a review: it never receives the owner's repo environment (long-lived
+    // API keys) and never gets a work branch.
     const isPlainTaskRun =
-      taskPlan !== undefined && selfHealPlan.selfHeal === undefined;
+      taskPlan !== undefined &&
+      selfHealPlan.selfHeal === undefined &&
+      !isCompanionRun;
     const repoEnv = isPlainTaskRun
       ? await getExecutionPlaneRunEnvironment({
           db,

@@ -50,6 +50,13 @@ export const AutomationTriggerSchema = z.discriminatedUnion("type", [
         // (dependabot, the App's own pushes) — the legacy orchestrator's
         // routing rule. Absent = today's behaviour (bots trigger too).
         excludeBotSenders: z.boolean().optional(),
+        // The PR companion lane: an advisory, emit-only run next to the
+        // classic review. It reports as ONE PR conversation comment, never as
+        // a review or a verdict, never goes through the review plan (no
+        // supersede key, no review finish hook, no approve floor) and is
+        // pinned to the `review` permission mode. Absent = a review
+        // automation (today's behaviour). See validateCompanionAutomation.
+        companion: z.boolean().optional(),
       }),
       // The events to trigger on.
       on: z.object({
@@ -144,6 +151,62 @@ export type GitHubMentionTrigger = Extract<
   { type: "github_mention" }
 >;
 export type GitHubMentionTriggerConfig = GitHubMentionTrigger["config"];
+
+/**
+ * True for a `pull_request` automation that opted into the PR companion lane
+ * (`triggerConfig.filter.companion: true`). Every other automation, including
+ * every `pull_request` automation without the flag, is not a companion: a
+ * review automation stays a review.
+ */
+export function isCompanionAutomation(
+  automation:
+    | { triggerType: AutomationTriggerType; triggerConfig: unknown }
+    | null
+    | undefined,
+): boolean {
+  if (automation?.triggerType !== "pull_request") return false;
+  const config = automation.triggerConfig as
+    | { filter?: { companion?: unknown } | null }
+    | null
+    | undefined;
+  return config?.filter?.companion === true;
+}
+
+/**
+ * The write-boundary check for a companion automation: null when the
+ * automation is not a companion or is a valid one, else the reason. A
+ * companion:
+ *   - runs a skill (`skill_message`): its terminal writer parses the skill's
+ *     `companion-report` block, so a free-form message could never report;
+ *   - is emit-only: a configured `permissionMode` other than `review` is
+ *     refused rather than silently tightened, so the stored config says what
+ *     runs (the dispatch resolver pins `review` regardless).
+ */
+export function validateCompanionAutomation({
+  triggerType,
+  triggerConfig,
+  action,
+}: {
+  triggerType: AutomationTriggerType | undefined;
+  triggerConfig: unknown;
+  action: { type: string } | null | undefined;
+}): string | null {
+  if (
+    triggerType === undefined ||
+    !isCompanionAutomation({ triggerType, triggerConfig })
+  ) {
+    return null;
+  }
+  if (action?.type !== "skill_message") {
+    return "A PR companion automation must run a skill (skill_message action).";
+  }
+  const permissionMode = (triggerConfig as { permissionMode?: unknown })
+    .permissionMode;
+  if (permissionMode !== undefined && permissionMode !== "review") {
+    return "A PR companion automation is emit-only: its permission mode can only be 'review'.";
+  }
+  return null;
+}
 
 export const triggerTypeLabels: Record<AutomationTriggerType, string> = {
   schedule: "Schedule",

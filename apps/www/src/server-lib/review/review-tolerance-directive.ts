@@ -6,6 +6,7 @@ import type {
 } from "@terragon/shared/db/types";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
+import { isCompanionAutomation } from "@terragon/shared/automations";
 import { buildReviewToleranceDirective } from "@terragon/review/severity-policy";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { isMentionLaneStamp } from "./review-skill";
@@ -92,7 +93,11 @@ export async function computeReviewToleranceDirective({
         organizationId: thread.organizationId ?? null,
       })) ?? null)
     : null;
-  const isReview = automation?.triggerType === "pull_request";
+  // A PR companion is `pull_request` but never a review: it emits advisory
+  // findings, has no verdict, so no tolerance floor applies to it.
+  const isReview =
+    automation?.triggerType === "pull_request" &&
+    !isCompanionAutomation(automation);
   // An org-lane mention on a PR submits its review through the review lane's
   // writer and floor (mention-reply-finish runs it for exactly this stamp), so
   // its agent needs the same tolerance guidance: without it, findings below

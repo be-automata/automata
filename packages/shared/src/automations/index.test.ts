@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { AutomationTriggerSchema, type AutomationTrigger } from "./index";
+import {
+  AutomationTriggerSchema,
+  isCompanionAutomation,
+  validateCompanionAutomation,
+  type AutomationTrigger,
+} from "./index";
 
 function parseIssue(config: unknown) {
   return AutomationTriggerSchema.safeParse({ type: "issue", config });
@@ -92,4 +97,111 @@ describe("AutomationTriggerSchema other trigger types round-trip", () => {
       expect(result.data).toEqual(sample);
     });
   }
+});
+
+describe("PR companion (filter.companion)", () => {
+  const companion = {
+    type: "pull_request" as const,
+    config: {
+      filter: {
+        includeAllAuthors: true,
+        excludeBotSenders: true,
+        companion: true,
+      },
+      on: { open: true, update: true },
+      permissionMode: "review" as const,
+    },
+  };
+  const skill = {
+    type: "skill_message",
+    config: { skillName: "flutter-pr-companion", version: "latest" },
+  };
+
+  it("round-trips the flag (zod keeps it)", () => {
+    const result = AutomationTriggerSchema.safeParse(companion);
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual(companion);
+  });
+
+  it("rejects a non-boolean flag", () => {
+    expect(
+      AutomationTriggerSchema.safeParse({
+        ...companion,
+        config: { ...companion.config, filter: { companion: "yes" } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("isCompanionAutomation: only a pull_request automation with the flag set to true", () => {
+    expect(
+      isCompanionAutomation({
+        triggerType: "pull_request",
+        triggerConfig: companion.config,
+      }),
+    ).toBe(true);
+    expect(
+      isCompanionAutomation({
+        triggerType: "pull_request",
+        triggerConfig: { filter: {}, on: { open: true } },
+      }),
+    ).toBe(false);
+    expect(
+      isCompanionAutomation({
+        triggerType: "pull_request",
+        triggerConfig: { filter: { companion: false }, on: { open: true } },
+      }),
+    ).toBe(false);
+    expect(
+      isCompanionAutomation({
+        triggerType: "github_mention",
+        triggerConfig: { filter: { companion: true } },
+      }),
+    ).toBe(false);
+    expect(
+      isCompanionAutomation({ triggerType: "pull_request", triggerConfig: {} }),
+    ).toBe(false);
+    expect(isCompanionAutomation(null)).toBe(false);
+  });
+
+  it("validateCompanionAutomation: skill action required, emit-only mode", () => {
+    const check = (triggerConfig: unknown, action: { type: string } = skill) =>
+      validateCompanionAutomation({
+        triggerType: "pull_request",
+        triggerConfig,
+        action,
+      });
+    expect(check(companion.config)).toBeNull();
+    const { permissionMode: _mode, ...unpinned } = companion.config;
+    expect(check(unpinned)).toBeNull();
+    expect(check(companion.config, { type: "user_message" })).toMatch(
+      /must run a skill/,
+    );
+    expect(
+      validateCompanionAutomation({
+        triggerType: "pull_request",
+        triggerConfig: companion.config,
+        action: null,
+      }),
+    ).toMatch(/must run a skill/);
+    expect(check({ ...companion.config, permissionMode: "allowAll" })).toMatch(
+      /emit-only/,
+    );
+    expect(check({ ...companion.config, permissionMode: "plan" })).toMatch(
+      /emit-only/,
+    );
+    // Not a companion: nothing to say, whatever the action or mode.
+    expect(
+      check(
+        { filter: {}, on: { open: true }, permissionMode: "allowAll" },
+        { type: "user_message" },
+      ),
+    ).toBeNull();
+    expect(
+      validateCompanionAutomation({
+        triggerType: undefined,
+        triggerConfig: companion.config,
+        action: undefined,
+      }),
+    ).toBeNull();
+  });
 });
