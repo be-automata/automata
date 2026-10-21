@@ -34,6 +34,10 @@ import {
   parseCodexRateLimitMessage,
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
+import {
+  classifyProviderResult,
+  PROVIDER_UNAVAILABLE_ERROR,
+} from "@/agent/msg/classify-provider-result";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import {
@@ -87,6 +91,9 @@ export async function handleDaemonEvent({
     "messages",
     JSON.stringify(messages, null, 2),
   );
+  // The reference time for a provider-limit reset (#441): stored messages
+  // carry no timestamp, so "resets 5pm" means the next 5pm after now.
+  const receivedAt = Date.now();
   const [threadChat, thread] = await Promise.all([
     getThreadChat({
       db,
@@ -347,6 +354,23 @@ export async function handleDaemonEvent({
         })
       : [];
 
+  // #441: a run the provider refused (usage limit, subscription disabled,
+  // credit exhausted). Classified from THIS batch only, against the server
+  // clock now. The thread stays TERMINAL: a classified worker-plane run must
+  // never take the legacy `queued-agent-rate-limit` route below, which keeps
+  // it "working" until its timeout. The legacy sandbox plane keeps that
+  // route exactly as before when the old parser fired (AC7).
+  const providerUnavailable =
+    threadChat.agent === "claudeCode"
+      ? classifyProviderResult(dbMessages, { now: receivedAt })
+      : null;
+  const legacyRateLimitRoute =
+    isRateLimited && !!rateLimitResetTime && !!thread.codesandboxId;
+  if (providerUnavailable && !legacyRateLimitRoute) {
+    isRateLimited = false;
+    rateLimitResetTime = undefined;
+  }
+
   const threadChatUpdates: ThreadChatInsert = {
     appendMessages: [...dbMessages, ...messagesToAppend],
     sessionId: sessionId ?? threadChat.sessionId ?? null,
@@ -358,6 +382,9 @@ export async function handleDaemonEvent({
     if (isPromptTooLong) {
       threadChatUpdates.errorMessage = "prompt-too-long";
       threadChatUpdates.errorMessageInfo = null;
+    } else if (providerUnavailable && !legacyRateLimitRoute) {
+      threadChatUpdates.errorMessage = PROVIDER_UNAVAILABLE_ERROR;
+      threadChatUpdates.errorMessageInfo = JSON.stringify(providerUnavailable);
     } else if (customErrorMessage) {
       threadChatUpdates.errorMessage = "agent-generic-error";
       threadChatUpdates.errorMessageInfo = customErrorMessage;

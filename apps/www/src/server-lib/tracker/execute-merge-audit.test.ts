@@ -973,3 +973,44 @@ describe("executeMergeAudit", () => {
     });
   });
 });
+
+describe("executeMergeAudit — provider_unavailable (#441)", () => {
+  // Card: protects=a provider-refused audit run names the cause, writes no
+  // ticket, and asks to correct only a run-failure notice
+  // (`replace-notice`); fails_when=it says "did not produce a usable
+  // result", touches the tracker, or uses `replace` (which could overwrite a
+  // posted audit); no_claim=the real client's gating (merge-audit-finish
+  // suite).
+  it("posts the provider notice with replace-notice and changes no ticket", async () => {
+    const tracker = fakeTracker([issue("ACME-1")]);
+    const comments = fakeComments();
+    const outcome = await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText: "",
+      providerUnavailable: {
+        kind: "usage_limit",
+        window: "weekly",
+        resetsAt: Date.UTC(2026, 9, 22, 17, 0),
+      },
+      config: config("live"),
+      tracker: tracker.client,
+      comments: comments.client,
+      logger,
+    });
+    expect(outcome).toEqual({
+      outcome: "degraded_comment",
+      reason: "provider_unavailable: usage_limit",
+    });
+    expect(tracker.client.getIssue).not.toHaveBeenCalled();
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    expect(comments.upserts).toHaveLength(1);
+    expect(comments.upserts[0]!.mode).toBe("replace-notice");
+    expect(comments.upserts[0]!.body).toContain(
+      "The audit run for ACME-1 could not run. The connected Claude subscription hit its weekly usage limit; it resets at 17:00 UTC on 22 Oct. No ticket was changed.",
+    );
+    expect(comments.upserts[0]!.body).not.toContain(
+      "did not produce a usable result",
+    );
+  });
+});

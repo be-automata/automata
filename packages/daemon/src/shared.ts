@@ -251,6 +251,22 @@ export type ClaudeMessage =
       session_id: string;
     }
 
+  // The CLI's rate-limit state for the subscription it runs on. A `rejected`
+  // status means the run was refused by a usage limit (#441). Every field
+  // inside is optional: the CLI owns this shape, and a missing field must
+  // degrade to "unknown", never to a parse failure.
+  | {
+      type: "rate_limit_event";
+      rate_limit_info?: {
+        status?: string;
+        /** Epoch SECONDS. */
+        resetsAt?: number;
+        rateLimitType?: string;
+        utilization?: number;
+      };
+      session_id?: string;
+    }
+
   // Emitted as the first message at the start of a conversation
   | {
       type: "system";

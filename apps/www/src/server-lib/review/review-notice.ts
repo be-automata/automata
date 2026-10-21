@@ -3,6 +3,11 @@ import type {
   ReviewLogger,
 } from "@terragon/review/state/review-github-client";
 import { sanitizeInline } from "@/server-lib/tracker/merge-audit";
+import {
+  describeProviderUnavailable,
+  providerUnavailableRetryWhen,
+  type ProviderUnavailable,
+} from "@/agent/msg/classify-provider-result";
 
 /**
  * The no-verdict notice (ADR-009). A review run that produced NO verdict — the
@@ -20,6 +25,11 @@ import { sanitizeInline } from "@/server-lib/tracker/merge-audit";
  *    re-reads the same silent run adds nothing.
  *  - A VERDICT RETIRES THE NOTICE: once a real review posts at HEAD the notice
  *    is deleted, so a PR never shows "no verdict" next to a verdict.
+ *  - A PROVIDER CAUSE CORRECTS THE NOTICE IN PLACE (#441): when the notice at
+ *    a commit names a different cause class than the one being reported (a
+ *    generic "no verdict" vs "the Claude subscription hit its limit"), the
+ *    existing comment is edited, never duplicated. Generic causes among
+ *    themselves still dedupe on the commit alone (#220).
  */
 
 export type NoVerdictCause =
@@ -33,7 +43,13 @@ export type NoVerdictCause =
    * it is enforced here so the guarantee does not depend on which skill body a
    * repo happens to run.
    */
-  | "agent_comment_without_findings";
+  | "agent_comment_without_findings"
+  /**
+   * The provider refused the run (#441): the connected Claude subscription hit
+   * a usage limit, its organization disabled Claude Code access, or the API
+   * credit ran out. The classification travels as `provider`.
+   */
+  | "provider_unavailable";
 
 /** A comment in the PR conversation (the GitHub issue-comment surface). */
 export interface PrConversationComment {
@@ -54,16 +70,34 @@ export interface ReviewNoticeClient {
     body: string,
   ): Promise<void>;
   deleteConversationComment(repo: string, commentId: number): Promise<void>;
+  updateConversationComment(
+    repo: string,
+    commentId: number,
+    body: string,
+  ): Promise<void>;
 }
 
 /** Everything the single writer may do on a PR: post reviews, keep the notice. */
 export type ReviewWriterClient = ReviewGitHubClient & ReviewNoticeClient;
 
-const NOTICE_MARKER_PATTERN = /^<!-- automata:review-notice sha=([\w.-]+) -->/;
+const NOTICE_MARKER_PATTERN =
+  /^<!-- automata:review-notice sha=([\w.-]+)(?: cause=([a-z_]+))? -->/;
 const REASON_MAX_LENGTH = 600;
+const PROVIDER_CAUSE: NoVerdictCause = "provider_unavailable";
 
-function reviewNoticeMarker(sha: string): string {
-  return `<!-- automata:review-notice sha=${sha} -->`;
+/**
+ * Generic notices keep the original marker (so every notice already on a PR
+ * still parses); only a provider notice names its cause in the marker.
+ */
+function reviewNoticeMarker(sha: string, cause: NoVerdictCause): string {
+  return cause === PROVIDER_CAUSE
+    ? `<!-- automata:review-notice sha=${sha} cause=${cause} -->`
+    : `<!-- automata:review-notice sha=${sha} -->`;
+}
+
+/** The two classes a same-commit notice is compared by. */
+function causeClass(cause: string | undefined): "provider" | "generic" {
+  return cause === PROVIDER_CAUSE ? "provider" : "generic";
 }
 
 /**
@@ -90,6 +124,9 @@ function describeCause(cause: NoVerdictCause, reason: string): string {
       return `the review agent reported that it could not review this commit: ${detail}`;
     case "agent_comment_without_findings":
       return `the review agent left a note instead of a verdict: ${detail}`;
+    case "provider_unavailable":
+      // Rendered by renderReviewNotice's own branch; kept for exhaustiveness.
+      return "the Claude provider refused the run.";
   }
 }
 
@@ -97,15 +134,36 @@ export function renderReviewNotice(args: {
   sha: string;
   cause: NoVerdictCause;
   reason: string;
+  /** The classification, read only for `provider_unavailable`. */
+  provider?: ProviderUnavailable;
 }): string {
+  if (args.cause === PROVIDER_CAUSE) {
+    // Never names the account (epic #440 decision 5): the text is built from
+    // the classification alone, never from credential metadata.
+    const provider = args.provider ?? { kind: "usage_limit" };
+    return [
+      reviewNoticeMarker(args.sha, args.cause),
+      `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** ${describeProviderUnavailable(provider)} Nothing was approved or blocked.`,
+      "",
+      `**Next:** push a new commit ${providerUnavailableRetryWhen(provider)}, or have a teammate review.`,
+    ].join("\n");
+  }
   return [
-    reviewNoticeMarker(args.sha),
+    reviewNoticeMarker(args.sha, args.cause),
     `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** Nothing was approved or blocked. This is not a pass.`,
     "",
     `**Why:** ${describeCause(args.cause, args.reason)}`,
     "",
     "**Next:** push a new commit to trigger a fresh review, or have a teammate review this commit.",
   ].join("\n");
+}
+
+interface OwnNotice {
+  id: number;
+  sha: string;
+  /** The cause named in the marker; undefined for a generic notice. */
+  cause: string | undefined;
+  body: string;
 }
 
 interface NoticeTarget {
@@ -124,15 +182,25 @@ interface NoticeTarget {
 async function listOwnNotices(
   target: NoticeTarget,
   purpose: string,
-): Promise<Array<{ id: number; sha: string }>> {
+): Promise<OwnNotice[]> {
   try {
     const comments = await target.github.listConversationComments(
       target.repoFullName,
       target.prNumber,
     );
     return comments.flatMap((comment) => {
-      const sha = reviewNoticeSha(comment, target.botLogin);
-      return sha ? [{ id: comment.id, sha }] : [];
+      if (comment.user?.login !== target.botLogin) return [];
+      const match = NOTICE_MARKER_PATTERN.exec(comment.body);
+      return match
+        ? [
+            {
+              id: comment.id,
+              sha: match[1]!,
+              cause: match[2],
+              body: comment.body,
+            },
+          ]
+        : [];
     });
   } catch (err) {
     target.logger?.warn(`review-notice: comment lookup failed (${purpose})`, {
@@ -146,7 +214,7 @@ async function listOwnNotices(
 
 async function deleteNotices(
   target: NoticeTarget,
-  notices: Array<{ id: number; sha: string }>,
+  notices: OwnNotice[],
 ): Promise<void> {
   for (const notice of notices) {
     try {
@@ -168,6 +236,7 @@ async function deleteNotices(
 
 export type PublishReviewNoticeResult =
   | { result: "posted" }
+  | { result: "updated"; commentId: number }
   | { result: "duplicate_at_commit"; commentId: number }
   | { result: "post_failed"; failureReason: string };
 
@@ -176,12 +245,43 @@ export type PublishReviewNoticeResult =
  * path it serves cannot be allowed to turn a missing verdict into an exception.
  */
 export async function publishReviewNotice(
-  args: NoticeTarget & { sha: string; cause: NoVerdictCause; reason: string },
+  args: NoticeTarget & {
+    sha: string;
+    cause: NoVerdictCause;
+    reason: string;
+    provider?: ProviderUnavailable;
+  },
 ): Promise<PublishReviewNoticeResult> {
   const existing = await listOwnNotices(args, "per-commit dedup");
   const atCommit = existing.find((notice) => notice.sha === args.sha);
   if (atCommit) {
-    return { result: "duplicate_at_commit", commentId: atCommit.id };
+    const body = renderReviewNotice(args);
+    const sameClass = causeClass(atCommit.cause) === causeClass(args.cause);
+    // Same class: one notice per commit (#220). A provider notice whose text
+    // changed (a new reset time) is still corrected, never duplicated.
+    if (
+      sameClass &&
+      (args.cause !== PROVIDER_CAUSE || atCommit.body === body)
+    ) {
+      return { result: "duplicate_at_commit", commentId: atCommit.id };
+    }
+    try {
+      await args.github.updateConversationComment(
+        args.repoFullName,
+        atCommit.id,
+        body,
+      );
+    } catch (err) {
+      return {
+        result: "post_failed",
+        failureReason: err instanceof Error ? err.message : String(err),
+      };
+    }
+    await deleteNotices(
+      args,
+      existing.filter((notice) => notice.id !== atCommit.id),
+    );
+    return { result: "updated", commentId: atCommit.id };
   }
 
   try {

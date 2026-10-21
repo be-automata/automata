@@ -186,6 +186,8 @@ export const THREAD_ERROR_RULES = {
   "chatgpt-sub-required": CREDENTIAL,
   "invalid-codex-credentials": CREDENTIAL,
   "invalid-claude-credentials": CREDENTIAL,
+  // #441: the provider refused the run (usage limit, disabled access, credit).
+  "provider-unavailable": CREDENTIAL,
   "no-user-message": {
     class: "counted",
     reason: "agent_error",

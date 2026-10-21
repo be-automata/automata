@@ -14,6 +14,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
+import { providerUnavailableOfChat } from "@/agent/msg/classify-provider-result";
 import {
   createFileAtCommitReader,
   createOctokitReviewClient,
@@ -312,6 +313,7 @@ async function handleMergeAuditAtFinish({
     prNumber,
     terminalText: extractTerminalAgentText(threadChat?.messages ?? null),
     botLogin: resolveBotLogin(),
+    providerUnavailable: providerUnavailableOfChat(threadChat),
   });
   getPostHogServer().capture({
     distinctId: userId,
@@ -472,6 +474,8 @@ export async function handleReviewEffectAtFinish({
         // could. Neither gate can withhold a parsed verdict.
         reviewedSha: thread?.reviewedSha ?? null,
         runAbandoned: isAbandonedTerminalCause(thread?.terminalCause ?? null),
+        // #441: a run the provider refused names that cause on the PR.
+        providerUnavailable: providerUnavailableOfChat(threadChat),
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),
