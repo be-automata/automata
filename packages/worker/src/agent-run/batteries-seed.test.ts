@@ -548,7 +548,11 @@ describe("seedBatteries hooksOff:false (phase 7, task runs)", () => {
     });
     expect(await listTree(claudeDir())).toEqual([
       "skills",
+      "skills/dart-model-from-json",
       "skills/dora-metrics",
+      "skills/flutter-best-practices",
+      "skills/flutter-health-audit",
+      "skills/react-best-practices",
       "skills/react-health-audit",
       "skills/security-audit",
     ]);
@@ -637,7 +641,11 @@ describe("seedBatteries foregroundOnly (task runs)", () => {
     expect(await listTree(claudeDir())).toEqual([
       "settings.json",
       "skills",
+      "skills/dart-model-from-json",
       "skills/dora-metrics",
+      "skills/flutter-best-practices",
+      "skills/flutter-health-audit",
+      "skills/react-best-practices",
       "skills/react-health-audit",
       "skills/security-audit",
     ]);
@@ -1076,10 +1084,14 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       "gsd-core",
       "settings.json",
       "skills",
+      "skills/dart-model-from-json",
       "skills/dora-metrics",
+      "skills/flutter-best-practices",
+      "skills/flutter-health-audit",
       "skills/gsd-debug",
       "skills/gstack",
       "skills/investigate",
+      "skills/react-best-practices",
       "skills/react-health-audit",
       "skills/security-audit",
     ]);
@@ -1271,7 +1283,11 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       expect(await listTree(claudeDir())).toEqual([
         "settings.json",
         "skills",
+        "skills/dart-model-from-json",
         "skills/dora-metrics",
+        "skills/flutter-best-practices",
+        "skills/flutter-health-audit",
+        "skills/react-best-practices",
         "skills/react-health-audit",
         "skills/security-audit",
       ]);

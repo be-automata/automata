@@ -321,7 +321,11 @@ describe("materialiseAgentCredentials (D1)", () => {
           ".claude.json",
           ".claude/.credentials.json",
           ".claude/skills",
+          ".claude/skills/dart-model-from-json",
           ".claude/skills/dora-metrics",
+          ".claude/skills/flutter-best-practices",
+          ".claude/skills/flutter-health-audit",
+          ".claude/skills/react-best-practices",
           ".claude/skills/react-health-audit",
           ".claude/skills/security-audit",
         ]);
@@ -348,7 +352,11 @@ describe("materialiseAgentCredentials (D1)", () => {
           ".claude/.credentials.json",
           ".claude/settings.json",
           ".claude/skills",
+          ".claude/skills/dart-model-from-json",
           ".claude/skills/dora-metrics",
+          ".claude/skills/flutter-best-practices",
+          ".claude/skills/flutter-health-audit",
+          ".claude/skills/react-best-practices",
           ".claude/skills/react-health-audit",
           ".claude/skills/security-audit",
         ]);
