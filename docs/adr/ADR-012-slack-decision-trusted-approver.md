@@ -1,7 +1,7 @@
 # ADR-012: Which source is trusted to say who approved a knowledge decision made in Slack
 
-- **Status:** Proposed
-- **Date:** 2026-10-19
+- **Status:** Accepted (option A′, which includes A)
+- **Date:** 2026-10-19 (proposed), 2026-10-21 (accepted)
 - **Context source:** `apps/www/src/app/api/webhooks/slack/route-fence.ts:13-18` (a signature proves
   the app, not the payload claims), `route-fence.ts:33-59` (`getSlackInstallationForRoute`: a
   workspace is served by exactly one app), `route-fence.ts:84-140` (`confirmMentionForRoute`, the
@@ -159,39 +159,70 @@ equally well, so a modal adds friction for honest users and nothing against a se
 | C      | No (not used)                      | No (link)                   | www session    | High        |
 | D      | Yes (labelled)                     | Yes                         | Org secret     | Lowest      |
 
-## Recommendation (pending the partner-setup check)
-
-**A as the default, with C as the fallback** for orgs that cannot install the platform app. A reuses
-the fence that already exists (`route-fence.ts:33-59` serves a workspace through exactly one app)
-and adds no new trust root. **A′ is the same route with a wider owner map**: choose it, alone or
-alongside A, if the org runs the platform app, owns no app of its own, and its deciders are
-workspace members without linked platform accounts. This is a recommendation only: the final
-choice depends on the Slack setup facts of the first external org, recorded in a local
-investigation note, and is made when this ADR moves to Accepted. The ADR names no organisation.
-
 ## Decision
 
-Not yet taken. Status stays Proposed until the setup facts are in; the accepting change records
-the chosen option and the facts behind it.
+**Option A′ is accepted, and it includes A.** An owner-map entry may name a platform user (decided
+as under A) or a Slack identity `(slack_team_id, slack_user_id)`.
 
-## Phase 15 contract (holds under every option)
+- **Trusted source:** `payload.user.id` and `payload.team.id` of a `block_actions` (or
+  `view_submission`) request on the platform route `/api/webhooks/slack`, after the platform
+  signature is verified. Nothing else identifies a decider.
+- **Routes that accept knowledge decisions:** the platform route only, and only when the
+  installation for the payload's team is bound to the claim's org.
+- **Org route** (`/api/webhooks/slack/<orgId>`): a knowledge action is **refused and logged**. No
+  decision is written and no op changes. The refusal reply does not disclose org membership. The
+  payload identities on this route are forgeable by whoever holds the org's signing secret
+  (`route-fence.ts:13-18`), so they are never used. An org that runs its own Slack app therefore
+  cannot decide from Slack until a later ADR adds a path for it; option C is the candidate.
+- **Rationale:** for orgs on the platform app, the platform alone holds the signing secret, so the
+  payload identity is as trustworthy as an OpenID link. Requiring every decider to hold a platform
+  account and link Slack would refuse most real deciders, who are workspace members that never
+  sign in to the platform. A′ keeps A's trust root and adds only an owner-map shape and an
+  org-binding check. The setup facts of the first external org that led to this choice are
+  recorded in a local decision note. This ADR names no organisation.
+- **Not chosen:**
+  - A alone, because it refuses every decider without a linked platform account.
+  - B, because no org-owned app needs protecting yet, and it adds a two-step flow to every
+    decision.
+  - C, because it gives up one-tap decisions, which works against the time-to-decide exit
+    criterion. It remains the candidate for orgs that own their app.
+  - D, because it accepts forgeable attribution.
+- **Phase 10 scope:** Phase 10 shipped only the platform-route attribution log
+  (`block-action-attribution.ts`, plan 10-01). All enforcement below lands in Phase 15.
+
+## Phase 15 contract
 
 1. Verify the signature before parsing (unchanged, `handle-request.ts:37-51`).
-2. Resolve the decider identity only from the chosen option's trusted source.
-3. Refuse and log any decider who is not the claim owner or a named delegate (DEC-03). Only the
-   mapped owner or a named delegate can decide; the org admin or the owner names delegates.
-4. Every decision row stores `slack_team_id`, `slack_user_id`, the linked platform user id (null
-   under A′ when the decider has no linked platform account), the route kind and an `identity_source`
-   value, so the decision is signed with the approver's verified Slack identity by the control
-   plane.
-5. A refusal reply never reveals org membership to an unverified payload (the rule at
+2. **Route gate.** On `SlackRequestRoute` kind `"organization"`, knowledge `action_id`s are refused
+   with one log line (ids only) and a reply that does not disclose membership. They never reach
+   the decision writer.
+3. **Org binding.** On the platform route, look up the installation for `payload.team.id`. Refuse
+   unless its `organizationId` equals the claim's org. Refuse an unbound installation, or one bound
+   to another org. The existing fence (`route-fence.ts:33-59`) does not do this.
+4. **Owner/delegate check (DEC-03).** The decider must match an owner-map entry for the claim, as
+   the owner or a named delegate. A platform-user entry matches through the OpenID-linked Slack
+   account. A Slack-keyed entry matches `(slack_team_id, slack_user_id)` exactly. Any other
+   decider is refused and logged. The org admin or the owner names delegates, including
+   Slack-keyed ones, through an admin flow that can also remove them (offboarding).
+5. **Decision row identity.** `knowledge_decision` already holds `actor_user_id` (nullable),
+   `slack_user_id` and `route`. Phase 15 adds `slack_team_id` and `identity_source`:
+
+   - `platform_linked` when the decision matched through a platform-user entry (`actor_user_id`
+     set);
+   - `platform_slack` when it matched through a Slack-keyed entry (`actor_user_id` null if the
+     decider has no linked account).
+
+   No other `identity_source` value is valid under this decision.
+
+6. A refusal reply never reveals org membership to an unverified payload (the rule at
    `route-fence.ts:132`).
 
 ## Consequences
 
 **Positive**
 
-- The trusted source is chosen on evidence before any decision code exists.
+- The trusted source was chosen on evidence (the first external org's recorded setup facts) before
+  any decision code exists.
 - Every option keeps the existing mention confirmation untouched.
 - Under A, A′, B and C a leaked org-app secret cannot forge an approval.
 
@@ -223,8 +254,10 @@ Phase 15 must ship tests for:
 ## Anti-deviation invariants
 
 - No knowledge decision is applied from a payload identity on a route whose signing secret the
-  platform does not exclusively hold, unless the chosen option explicitly allows it with a
-  recorded `identity_source`.
+  platform does not exclusively hold. Under this decision that means no knowledge decision is
+  applied from the org route.
+- No knowledge decision is applied from a platform-route click unless the payload team's
+  installation is bound to the claim's org.
 - The existing mention confirmation (`confirmMentionForRoute`) is not weakened.
 - Attribution logs carry ids only, never message text.
 - Decision rows always record the verified identity source and the route kind.
