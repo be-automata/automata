@@ -1,8 +1,10 @@
 import { db } from "@/lib/db";
 import { getThreadChat } from "@terragon/shared/model/threads";
-import { computeReviewToleranceDirective } from "@/server-lib/review/review-tolerance-directive";
+import {
+  computeReviewToleranceDirective,
+  type ThreadForDirective,
+} from "@/server-lib/review/review-tolerance-directive";
 import { resolvePermissionModeForDispatch } from "@/server-lib/review/resolve-permission-mode";
-import type { ThreadTrustContext } from "@terragon/shared/db/types";
 import { getUserMessageToSend } from "@/lib/db-message-helpers";
 import { tryAutoCompactThread } from "@/server-lib/compact";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
@@ -57,12 +59,7 @@ export async function buildRemoteDaemonMessage({
    * Passed to computeReviewToleranceDirective so the always-on directive adds no
    * extra read. Omitted → the directive helper fetches the thread itself.
    */
-  thread?: {
-    automationId: string | null;
-    organizationId: string | null;
-    githubRepoFullName: string;
-    trustContext?: ThreadTrustContext | null;
-  } | null;
+  thread?: ThreadForDirective | null;
 }): Promise<RemoteDaemonMessage | null> {
   const threadChat = await getThreadChat({
     db,
@@ -126,7 +123,8 @@ export async function buildRemoteDaemonMessage({
 
   // Per-repo review tolerance (ADR-036) is MODE-AGNOSTIC: the directive telling the
   // agent which verdict its findings imply under the repo's floor is pure prompt
-  // guidance, injected for EVERY review thread regardless of REVIEW_SINGLE_WRITER
+  // guidance, injected for EVERY review thread (and every org-lane mention on a
+  // PR, whose review meets the same floor) regardless of REVIEW_SINGLE_WRITER
   // (see computeReviewToleranceDirective — it never reads the flag). This call is
   // ALSO the ONE `getAutomation` read the permission-mode resolver below reuses
   // (ADR-005 §3b: one read, not two) — the automation it returns carries the

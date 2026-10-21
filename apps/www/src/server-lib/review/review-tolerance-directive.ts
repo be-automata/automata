@@ -1,15 +1,21 @@
 import type { DB } from "@terragon/shared/db";
-import type { Automation, ThreadTrustContext } from "@terragon/shared/db/types";
+import type {
+  Automation,
+  ThreadSourceMetadata,
+  ThreadTrustContext,
+} from "@terragon/shared/db/types";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
 import { buildReviewToleranceDirective } from "@terragon/review/severity-policy";
 import { resolveApproveFloor } from "./resolve-approve-floor";
+import { isMentionLaneStamp } from "./review-skill";
 
 /** The minimal thread fields this helper reads (a subset of getThreadMinimal). */
-type ThreadForDirective = {
+export type ThreadForDirective = {
   automationId: string | null;
   organizationId: string | null;
   githubRepoFullName: string;
+  sourceMetadata?: ThreadSourceMetadata | null;
   trustContext?: ThreadTrustContext | null;
 };
 
@@ -18,7 +24,9 @@ type ThreadForDirective = {
  * prompt (ADR-036). The directive is pure prompt guidance — it tells the agent
  * which verdict its findings imply under the repo's floor, independent of the
  * (now unconditional) single-writer posting path — so it applies to every review
- * thread (a pull_request automation). Extracting it here keeps it unit-testable.
+ * thread (a pull_request automation) and to every org-lane mention on a PR,
+ * whose review goes through the same writer and floor. Extracting it here keeps
+ * it unit-testable.
  *
  * FULLY FUNCTIONAL (the former latent-under-false gap is CLOSED): the review
  * channel is now unconditionally single-writer — the control plane parses the
@@ -29,7 +37,8 @@ type ThreadForDirective = {
  *
  * Returns:
  *  - `directive`: the "\n\n---\n\n<directive>\n" block to append to the prompt,
- *    or "" when this is not a review thread (or the repo is unknown).
+ *    or "" when the thread is neither a review thread nor an org-lane mention
+ *    on a PR (or the repo is unknown).
  *  - `isReview`: whether this is a review thread — the caller uses this to gate
  *    the SINGLE-WRITER-only concerns (permissionMode="review" + server floor).
  *  - `automation`: the fetched automation row (or null when the thread has no
@@ -84,7 +93,17 @@ export async function computeReviewToleranceDirective({
       })) ?? null)
     : null;
   const isReview = automation?.triggerType === "pull_request";
-  if (!isReview || !thread?.githubRepoFullName) {
+  // An org-lane mention on a PR submits its review through the review lane's
+  // writer and floor (mention-reply-finish runs it for exactly this stamp), so
+  // its agent needs the same tolerance guidance: without it, findings below
+  // `warning` ship unquoted and are de-fanged at an `info` floor. Keyed on the
+  // stamp, not the trigger type: a legacy per-user mention has no floor
+  // behind it. Kept out of `isReview`, which gates the review-only permission
+  // cap: a mention may push a fix.
+  const sourceMetadata = thread?.sourceMetadata;
+  const isMentionOnPr =
+    isMentionLaneStamp(sourceMetadata) && sourceMetadata.mention.isPullRequest;
+  if ((!isReview && !isMentionOnPr) || !thread?.githubRepoFullName) {
     return { directive: "", isReview, automation, thread };
   }
   const policy = await resolveApproveFloor({

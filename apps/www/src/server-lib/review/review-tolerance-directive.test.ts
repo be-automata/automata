@@ -145,4 +145,116 @@ describe("computeReviewToleranceDirective (mode-agnostic)", () => {
     expect(isReview).toBe(false);
     expect(directive).toBe("");
   });
+
+  /**
+   * A thread shaped like the ones the mention lanes create: the org lane
+   * stamps `sourceMetadata.mention` (runAutomation's stampExtra); the legacy
+   * per-user lane does not, and its review never goes through the floor.
+   */
+  async function makeMentionThread({
+    repoFullName,
+    isPullRequest,
+    orgLane,
+  }: {
+    repoFullName: string;
+    isPullRequest: boolean;
+    orgLane: boolean;
+  }): Promise<string> {
+    const number = 7;
+    const automation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgId,
+        repoFullName,
+        triggerType: "github_mention",
+        triggerConfig: { filter: { orgLane } },
+      },
+    });
+    const { threadId } = await createTestThread({
+      db,
+      userId,
+      overrides: {
+        organizationId: orgId,
+        automationId: automation.id,
+        githubRepoFullName: repoFullName,
+        githubPRNumber: isPullRequest ? number : null,
+        githubIssueNumber: isPullRequest ? null : number,
+        sourceMetadata: orgLane
+          ? {
+              type: "automation-skill",
+              skillName: "github-mention",
+              contentSha: "sha",
+              source: "default",
+              mention: {
+                repoFullName,
+                issueOrPrNumber: number,
+                isPullRequest,
+                commentId: 1,
+                commentKind: "issue",
+                commenterLogin: "someone",
+              },
+            }
+          : {
+              type: "github-mention",
+              repoFullName,
+              issueOrPrNumber: number,
+              commentId: 1,
+            },
+      },
+    });
+    return threadId;
+  }
+
+  it("an org-lane mention on a PR gets the repo's directive but is not a review thread (no review permission cap)", async () => {
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      blockTolerance: "info",
+    });
+    const threadId = await makeMentionThread({
+      repoFullName: "acme/widgets",
+      isPullRequest: true,
+      orgLane: true,
+    });
+    const { directive, isReview } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(isReview).toBe(false);
+    expect(directive).toContain("Repository review tolerance: `info`");
+    expect(directive).toContain("EVERY finding — including `info`");
+  });
+
+  it("an org-lane mention on an issue gets no directive", async () => {
+    const threadId = await makeMentionThread({
+      repoFullName: "acme/widgets",
+      isPullRequest: false,
+      orgLane: true,
+    });
+    const { directive, isReview } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(isReview).toBe(false);
+    expect(directive).toBe("");
+  });
+
+  it("a legacy per-user mention on a PR gets no directive (no floor runs on its output)", async () => {
+    const threadId = await makeMentionThread({
+      repoFullName: "acme/widgets",
+      isPullRequest: true,
+      orgLane: false,
+    });
+    const { directive, isReview } = await computeReviewToleranceDirective({
+      db,
+      userId,
+      threadId,
+    });
+    expect(isReview).toBe(false);
+    expect(directive).toBe("");
+  });
 });
