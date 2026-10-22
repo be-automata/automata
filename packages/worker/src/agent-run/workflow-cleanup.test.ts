@@ -523,6 +523,35 @@ describe("#386: a redelivered run that already reached a terminal is refused, no
     expect(provisionWorkdir).not.toHaveBeenCalled();
   });
 
+  it("WORKER_RUN_TERMINAL_ROOT moves the ledger off the namespace root (durable across a boot-time /tmp wipe)", async () => {
+    const durable = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-386-"));
+    process.env.WORKER_RUN_TERMINAL_ROOT = durable;
+    try {
+      provisionWorkdir.mockClear();
+      provisionWorkdir.mockRejectedValueOnce(new Error("clone failed"));
+      await expect(
+        runFn(INPUT, { ...ctx(), workflowRunId: () => "run-ext-386d" }),
+      ).rejects.toThrow(/clone failed/);
+      expect(
+        fs.existsSync(path.join(durable, "run-terminals", "run-ext-386d.json")),
+      ).toBe(true);
+      expect(
+        fs.existsSync(
+          path.join(TEST_NAMESPACE_ROOT, "run-terminals", "run-ext-386d.json"),
+        ),
+      ).toBe(false);
+      const err = await runFn(INPUT, {
+        ...ctx(),
+        workflowRunId: () => "run-ext-386d",
+      }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NonRetryableError);
+      expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.WORKER_RUN_TERMINAL_ROOT;
+      fs.rmSync(durable, { recursive: true, force: true });
+    }
+  });
+
   it("a different workflow run of the same thread (a re-review) still runs", async () => {
     provisionWorkdir.mockClear();
     provisionWorkdir.mockRejectedValue(new Error("clone failed"));

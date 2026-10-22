@@ -276,8 +276,14 @@ not a rolling restart:
 > `run-terminal-redelivery.integration.test.ts`). Seen in prod when a run
 > deferring on memory headroom failed five minutes into a drain. The worker
 > therefore records every run id that reached a terminal in
-> `<WORKER_RUN_NAMESPACE_ROOT>/run-terminals/` (kept 24h; `PrivateTmp=no` keeps
-> it across a restart) and never re-executes a recorded id: a run whose first
+> `<WORKER_RUN_TERMINAL_ROOT>/run-terminals/` (kept 24h) and never re-executes a
+> recorded id. `WORKER_RUN_TERMINAL_ROOT` defaults to the run namespace root
+> under `/tmp`, which `PrivateTmp=no` keeps across a restart but Ubuntu's
+> tmpfiles (`D /tmp`) wipes at boot. On the execution box set it in
+> `worker-box.env` to a worker-only dir under the unit's `ReadWritePaths`
+> (`install -d -o automata -g automata -m 0700 /usr/local/automata/state`, then
+> `WORKER_RUN_TERMINAL_ROOT=/usr/local/automata/state`) so a reboot mid-drain
+> keeps the ledger. Of a recorded id, a run whose first
 > attempt returned completes as a no-op (output `outcome: already-terminal`,
 > engine COMPLETED); one whose first attempt failed is refused with
 > `RunAlreadyTerminalError` (engine FAILED). Either way no clone, no daemon, and

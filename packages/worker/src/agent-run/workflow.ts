@@ -477,7 +477,7 @@ async function runAgent(
   // engine records COMPLETED and onFailure never re-posts a terminal to www.
   return guardRunTerminal<AgentRunOutput>(
     {
-      root: loadWorkerConfig().runNamespaceRoot,
+      root: loadWorkerConfig().runTerminalRoot,
       runId: ctx.workflowRunId?.() || "",
       log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
       onAlreadyReturned: () => ({
