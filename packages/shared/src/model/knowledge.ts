@@ -7,6 +7,7 @@ import {
   knowledgeDecision,
   knowledgeOp,
   knowledgeUsageWindow,
+  organizationReviewSettings,
   type KnowledgeClaimState,
   type KnowledgeDecisionChoice,
   type KnowledgeDecisionRoute,
@@ -29,36 +30,108 @@ export function knowledgeWindowStart(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
 
+/** Why the engine is not running for an org. */
+export type KnowledgeGateReason = "engine_off" | "offboarded";
+
+/** The org-row columns the resolvers need. */
+export interface KnowledgeControlsRow {
+  knowledgeEngine: boolean | null;
+  knowledgeOffboardedAt: Date | null;
+  knowledgeBudgetMicroUsd: number | null;
+}
+
+/**
+ * Platform default ceiling for an org budget: $100 (5x the default cap). Used
+ * only when knowledge_platform_settings has no row or a NULL ceiling; the real
+ * ceiling is a platform-admin setting.
+ */
+export const KNOWLEDGE_BUDGET_CEILING_DEFAULT_MICRO_USD = 100_000_000;
+
+/**
+ * $10k validation bound for the ceiling and any org budget, even for platform
+ * admins. Validation only, never a ceiling.
+ */
+export const KNOWLEDGE_BUDGET_ABSOLUTE_MAX_MICRO_USD = 10_000_000_000;
+
+/**
+ * The single definition of ON. A missing row, NULL and false are OFF; an
+ * offboarded org is OFF even when the flag is true (offboarded wins).
+ */
+export function knowledgeGateReason(
+  row: KnowledgeControlsRow | undefined,
+): KnowledgeGateReason | null {
+  if (!row) return "engine_off";
+  if (row.knowledgeOffboardedAt) return "offboarded";
+  return row.knowledgeEngine === true ? null : "engine_off";
+}
+
+export function isKnowledgeEnabled(
+  row: KnowledgeControlsRow | undefined,
+): boolean {
+  return knowledgeGateReason(row) === null;
+}
+
+/** The org's monthly cap: its own budget, else the platform default. */
+export function effectiveKnowledgeBudgetMicroUsd(
+  row: Pick<KnowledgeControlsRow, "knowledgeBudgetMicroUsd"> | undefined,
+): number {
+  return row?.knowledgeBudgetMicroUsd ?? DEFAULT_KNOWLEDGE_CAP_MICRO_USD;
+}
+
+/**
+ * cap_exceeded and the gate reasons mean PAUSE: the caller defers and retries
+ * later (next window or after a raise), it never fails the job.
+ */
 export type KnowledgeReservation =
   | { ok: true; windowStart: Date; reservedMicroUsd: number }
-  | { ok: false; reason: "cap_exceeded"; windowStart: Date };
+  | { ok: false; reason: "cap_exceeded"; windowStart: Date; alerted: boolean }
+  | { ok: false; reason: KnowledgeGateReason };
 
 /**
  * Reserve `estimateMicroUsd` against the org's monthly window BEFORE a model
- * call. One conditional UPDATE does the check and the debit, so concurrent
- * jobs cannot both pass on the same remaining allowance. The caller settles
- * (or releases) the reservation afterwards; a retry reuses its reservation
- * instead of taking another.
+ * call. This is the choke point for all knowledge model spend: it checks the
+ * kill switch (live read, no cache) and takes the cap from the org's budget
+ * inside the database, so a caller cannot choose its own cap. One conditional
+ * UPDATE does the check and the debit, so concurrent jobs cannot both pass on
+ * the same remaining allowance. The first denial per window claims the cap
+ * alert exactly once. The caller settles (or releases) the reservation
+ * afterwards; settle is never gated.
  */
 export async function reserveKnowledgeBudget({
   db,
   organizationId,
   estimateMicroUsd,
   now = new Date(),
-  defaultCapMicroUsd = DEFAULT_KNOWLEDGE_CAP_MICRO_USD,
+  log = console,
 }: {
   db: DB;
   organizationId: string;
   estimateMicroUsd: number;
   now?: Date;
-  defaultCapMicroUsd?: number;
+  log?: Pick<Console, "error">;
 }): Promise<KnowledgeReservation> {
   if (!Number.isSafeInteger(estimateMicroUsd) || estimateMicroUsd < 0)
     throw new RangeError(`invalid estimate: ${estimateMicroUsd}`);
+  const [controls] = await db
+    .select({
+      knowledgeEngine: organizationReviewSettings.knowledgeEngine,
+      knowledgeOffboardedAt: organizationReviewSettings.knowledgeOffboardedAt,
+      knowledgeBudgetMicroUsd:
+        organizationReviewSettings.knowledgeBudgetMicroUsd,
+    })
+    .from(organizationReviewSettings)
+    .where(eq(organizationReviewSettings.organizationId, organizationId));
+  const gate = knowledgeGateReason(controls);
+  if (gate) return { ok: false, reason: gate };
+
   const windowStart = knowledgeWindowStart(now);
   await db
     .insert(knowledgeUsageWindow)
-    .values({ organizationId, windowStart, capMicroUsd: defaultCapMicroUsd })
+    .values({
+      organizationId,
+      windowStart,
+      capMicroUsd: sql`coalesce((select knowledge_budget_micro_usd from organization_review_settings where organization_id = ${organizationId}), ${DEFAULT_KNOWLEDGE_CAP_MICRO_USD})`,
+    })
     .onConflictDoNothing();
   const rows = await db
     .update(knowledgeUsageWindow)
@@ -73,9 +146,36 @@ export async function reserveKnowledgeBudget({
       ),
     )
     .returning({ windowStart: knowledgeUsageWindow.windowStart });
-  return rows.length === 1
-    ? { ok: true, windowStart, reservedMicroUsd: estimateMicroUsd }
-    : { ok: false, reason: "cap_exceeded", windowStart };
+  if (rows.length === 1)
+    return { ok: true, windowStart, reservedMicroUsd: estimateMicroUsd };
+
+  const claimed = await db
+    .update(knowledgeUsageWindow)
+    .set({ capAlertedAt: sql`now()` })
+    .where(
+      and(
+        eq(knowledgeUsageWindow.organizationId, organizationId),
+        eq(knowledgeUsageWindow.windowStart, windowStart),
+        isNull(knowledgeUsageWindow.capAlertedAt),
+      ),
+    )
+    .returning({
+      capMicroUsd: knowledgeUsageWindow.capMicroUsd,
+      reservedMicroUsd: knowledgeUsageWindow.reservedMicroUsd,
+      spentMicroUsd: knowledgeUsageWindow.spentMicroUsd,
+    });
+  const claim = claimed[0];
+  if (claim) {
+    // ids and integers only: never statements or partner content
+    log.error("[knowledge:budget-cap]", {
+      organizationId,
+      windowStart: windowStart.toISOString(),
+      capMicroUsd: claim.capMicroUsd,
+      reservedMicroUsd: claim.reservedMicroUsd,
+      spentMicroUsd: claim.spentMicroUsd,
+    });
+  }
+  return { ok: false, reason: "cap_exceeded", windowStart, alerted: !!claim };
 }
 
 /**
