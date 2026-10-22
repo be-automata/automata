@@ -130,7 +130,7 @@ describe("knowledge ceiling admin actions", () => {
 
   it("lowering the ceiling leaves an org budget unchanged", async () => {
     await loginAdmin();
-    const orgId = await createTestOrg({ db, name: "Lower" });
+    const orgId = await createTestOrg({ db, name: "Acme" });
     await db.insert(schema.organizationReviewSettings).values({
       organizationId: orgId,
       knowledgeBudgetMicroUsd: 80_000_000,
