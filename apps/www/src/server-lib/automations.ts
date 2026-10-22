@@ -689,6 +689,7 @@ export async function runPullRequestAutomation({
   prNumber,
   source,
   deliveryId,
+  expectedHeadSha,
 }: {
   userId: string;
   automationId: string;
@@ -698,6 +699,12 @@ export async function runPullRequestAutomation({
   source: "automated" | "manual";
   /** #127: originating webhook delivery id (absent for manual runs). */
   deliveryId?: string;
+  /**
+   * #107: a re-run of a failed review is for ONE head. When set, the run is
+   * not started (returns false) unless the PR is open and its head is still
+   * this sha, read from the same pulls.get the run derives everything from.
+   */
+  expectedHeadSha?: string;
 }): Promise<boolean> {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
@@ -751,6 +758,14 @@ export async function runPullRequestAutomation({
       throw prRead.error;
     }
     const pr = prRead.data;
+    if (
+      expectedHeadSha !== undefined &&
+      (pr.state !== "open" || pr.head.sha !== expectedHeadSha)
+    ) {
+      throw new Error(
+        `PR ${repoFullName}#${prNumber} is no longer open at ${expectedHeadSha} (state ${pr.state}, head ${pr.head.sha})`,
+      );
+    }
     const branchName = pr.head.ref;
     // #125 C5: the SHA this run reviews, from the SAME read — stamped on the
     // thread (reviewedSha) so the recheck reconciliation never re-reads GitHub.

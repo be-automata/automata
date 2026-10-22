@@ -42,11 +42,12 @@ PR's review state stays empty, which is the truth.
 
 A run has no verdict when any of these holds:
 
-| Cause                            | What happened                                                           |
-| :------------------------------- | :---------------------------------------------------------------------- |
-| `unparseable`                    | The control plane could not read an intent out of the run's output.     |
-| `agent_unable`                   | The agent emitted `{"verdict": "unable_to_review", "reason": …}`.       |
-| `agent_comment_without_findings` | The agent chose `comment` with no findings on a PR that is not a draft. |
+| Cause                            | What happened                                                                 |
+| :------------------------------- | :---------------------------------------------------------------------------- |
+| `unparseable`                    | The control plane could not read an intent out of the run's output.           |
+| `agent_unable`                   | The agent emitted `{"verdict": "unable_to_review", "reason": …}`.             |
+| `agent_comment_without_findings` | The agent chose `comment` with no findings on a PR that is not a draft.       |
+| `run_failed` (#107)              | The run failed (infra) before a verdict, and its automatic re-runs are spent. |
 
 The third cause is enforced server-side on purpose. Skill bodies are stored per repository and can
 lag the tracked file, so the guarantee must not depend on which body a repo runs.
@@ -92,7 +93,12 @@ Negative / watch:
   no-verdict run (dedup).
 - For up to six hours after rollout, a thread whose commit already carries a legacy degraded
   review can also receive a notice from the hourly sweep. It happens once per commit.
-- A no-verdict run is still not retried. A bounded automatic re-run is tracked in #107.
+- #107 amends this: a run that FAILED before a verdict (a run error recorded after the agent's
+  last message, or no agent message at all; never an agent that answered, never a provider
+  refusal) is re-dispatched for the same PR and head up to twice (~1 min, then ~3 min) before
+  the notice posts, and the notice then names the run's error (`run_failed`). Ledger:
+  `review_rerun` (one row per re-run; UNIQUE per (PR, head, attempt) and per failed thread).
+  A re-run is skipped when the PR closed, its head moved, or a verdict already sits at HEAD.
 
 ## Anti-deviation invariants
 
@@ -107,4 +113,6 @@ Negative / watch:
 `execute-review-from-intent.test.ts` ("ADR-009 — a non-verdict is never posted as a review"),
 `execute-review-from-intent.replay.test.ts` ("#220 no-verdict dedup"), `review-notice.test.ts`,
 `parse-review-intent.test.ts` ("unable_to_review"), `review-sweep.test.ts` (draft state reaches
-the executor), `skill-contract-drift.test.ts` (the skill's unable example parses).
+the executor), `skill-contract-drift.test.ts` (the skill's unable example parses),
+`execute-review-from-intent.rerun.test.ts` and `review-rerun.test.ts` (#107 deferral, bound,
+dispatch-time skips).
