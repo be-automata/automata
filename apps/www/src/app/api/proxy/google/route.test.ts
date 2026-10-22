@@ -2,16 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { NextRequest } from "next/server";
 import * as googleAIStudioRoute from "./[[...path]]/route";
 import { logGoogleUsage } from "./log-google-usage";
-import { auth } from "@/lib/auth";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      verifyApiKey: vi.fn(),
-    },
-  },
+vi.mock("@/lib/daemon-api-key", () => ({
+  verifyDaemonApiKey: vi.fn(),
 }));
 
 vi.mock("@terragon/shared/model/credits", () => ({
@@ -75,7 +72,7 @@ function createRequest({
 }
 
 describe("Google AI Studio proxy route", () => {
-  const verifyApiKeyMock = vi.mocked(auth.api.verifyApiKey);
+  const verifyDaemonApiKeyMock = vi.mocked(verifyDaemonApiKey);
   const getUserCreditBalanceMock = vi.mocked(getUserCreditBalance);
   const logUsageMock = vi.mocked(logGoogleUsage);
   const { POST } = googleAIStudioRoute;
@@ -83,11 +80,9 @@ describe("Google AI Studio proxy route", () => {
   beforeEach(async () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    verifyApiKeyMock.mockResolvedValue({
-      valid: true,
-      error: null,
-      key: { referenceId: "user-123" } as any,
-    });
+    verifyDaemonApiKeyMock.mockResolvedValue({
+      referenceId: "user-123",
+    } as any);
     getUserCreditBalanceMock.mockResolvedValue({
       totalCreditsCents: 1_000,
       totalUsageCents: 0,
@@ -159,7 +154,8 @@ describe("Google AI Studio proxy route", () => {
       path: fetchUrl.pathname,
       usage: responsePayload.usageMetadata,
       userId: "user-123",
-      organizationId: null,      model: "gemini-2.5-pro",
+      organizationId: null,
+      model: "gemini-2.5-pro",
     });
   });
 
@@ -201,9 +197,7 @@ describe("Google AI Studio proxy route", () => {
       }),
     });
 
-    expect(verifyApiKeyMock).toHaveBeenCalledWith({
-      body: { key: "another-daemon-token" },
-    });
+    expect(verifyDaemonApiKeyMock).toHaveBeenCalledWith("another-daemon-token");
 
     const fetchUrl = fetchMock.mock.calls[0]![0] as URL;
     expect(fetchUrl.searchParams.get("key")).toBe("test-google-ai-studio-key");
@@ -319,7 +313,8 @@ describe("Google AI Studio proxy route", () => {
           totalTokenCount: 15,
         },
         userId: "user-123",
-        organizationId: null,        model: "gemini-2.5-pro",
+        organizationId: null,
+        model: "gemini-2.5-pro",
       }),
     );
   });
@@ -506,5 +501,47 @@ describe("Google AI Studio proxy route", () => {
 
     expect(response.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 401 for an unknown, disabled or expired key", async () => {
+    verifyDaemonApiKeyMock.mockResolvedValueOnce(null);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 + Retry-After, not 401, when key verification is unavailable", async () => {
+    verifyDaemonApiKeyMock.mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503, not 401, when the credit lookup fails", async () => {
+    getUserCreditBalanceMock.mockRejectedValueOnce(new Error("Failed query"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -2,16 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { NextRequest } from "next/server";
 import * as aiSdkRoute from "./[[...path]]/route";
 import { logOpenRouterUsage } from "./log-usage";
-import { auth } from "@/lib/auth";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      verifyApiKey: vi.fn(),
-    },
-  },
+vi.mock("@/lib/daemon-api-key", () => ({
+  verifyDaemonApiKey: vi.fn(),
 }));
 
 vi.mock("@terragon/shared/model/credits", () => ({
@@ -75,7 +72,7 @@ function createRequest({
 }
 
 describe("OpenRouter proxy route", () => {
-  const verifyApiKeyMock = vi.mocked(auth.api.verifyApiKey);
+  const verifyDaemonApiKeyMock = vi.mocked(verifyDaemonApiKey);
   const getUserCreditBalanceMock = vi.mocked(getUserCreditBalance);
   const logUsageMock = vi.mocked(logOpenRouterUsage);
   const { POST } = aiSdkRoute;
@@ -83,11 +80,9 @@ describe("OpenRouter proxy route", () => {
   beforeEach(async () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    verifyApiKeyMock.mockResolvedValue({
-      valid: true,
-      error: null,
-      key: { referenceId: "user-123" } as any,
-    });
+    verifyDaemonApiKeyMock.mockResolvedValue({
+      referenceId: "user-123",
+    } as any);
     getUserCreditBalanceMock.mockResolvedValue({
       totalCreditsCents: 1_000,
       totalUsageCents: 0,
@@ -157,7 +152,8 @@ describe("OpenRouter proxy route", () => {
       path: "/api/v1/chat/completions",
       usage: responsePayload.usage,
       userId: "user-123",
-      organizationId: null,      model: responsePayload.model,
+      organizationId: null,
+      model: responsePayload.model,
     });
   });
 
@@ -183,9 +179,7 @@ describe("OpenRouter proxy route", () => {
       params: Promise.resolve({}),
     });
 
-    expect(verifyApiKeyMock).toHaveBeenCalledWith({
-      body: { key: "another-daemon-token" },
-    });
+    expect(verifyDaemonApiKeyMock).toHaveBeenCalledWith("another-daemon-token");
 
     const fetchHeaders =
       (fetchMock.mock.calls[0]![1]!.headers as Headers) ?? new Headers();
@@ -316,7 +310,8 @@ describe("OpenRouter proxy route", () => {
         total_tokens: 150,
       },
       userId: "user-123",
-      organizationId: null,      model: "qwen/qwen3-coder:exacto",
+      organizationId: null,
+      model: "qwen/qwen3-coder:exacto",
     });
   });
 
@@ -375,6 +370,48 @@ describe("OpenRouter proxy route", () => {
 
     expect(response.status).toBe(400);
     expect(await response.text()).toContain("Invalid model requested");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 401 for an unknown, disabled or expired key", async () => {
+    verifyDaemonApiKeyMock.mockResolvedValueOnce(null);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 + Retry-After, not 401, when key verification is unavailable", async () => {
+    verifyDaemonApiKeyMock.mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503, not 401, when the credit lookup fails", async () => {
+    getUserCreditBalanceMock.mockRejectedValueOnce(new Error("Failed query"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
