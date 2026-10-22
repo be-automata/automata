@@ -1,13 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { env } from "@terragon/env/pkg-shared";
 
-import { randomTestGitHubAccountId, randomTestPRNumber } from "./test-helpers";
+import { createDb } from "../db";
+import {
+  createTestUser,
+  randomTestGitHubAccountId,
+  randomTestPRNumber,
+} from "./test-helpers";
+
+const db = createDb(env.DATABASE_URL!);
 
 describe("test fixture ids (#452)", () => {
   // protects=fixture account ids stay unique across a whole suite run;
   // fails_when=the generator range is small enough that 20k draws collide
   // (the old 10^7 range collides with near certainty);
-  // no_claim=does not prove the account primary key is non-random, see the
-  // createTestUser test below.
+  // no_claim=does not prove the account primary key is independent; the
+  // createTestUser test below does.
   it("does not collide across 20,000 GitHub account ids", () => {
     const ids = Array.from({ length: 20_000 }, randomTestGitHubAccountId);
     expect(new Set(ids).size).toBe(ids.length);
@@ -32,5 +40,16 @@ describe("test fixture ids (#452)", () => {
       expect(n).toBeGreaterThan(0);
       expect(n).toBeLessThanOrEqual(2 ** 31 - 1);
     }
+  });
+
+  // protects=createTestUser gives the account row a primary key independent of
+  // its numeric GitHub accountId; fails_when=the row id is derived from (or
+  // equal to) the random accountId again; no_claim=does not prove uniqueness
+  // under load beyond the 20k generator test above.
+  it("createTestUser keys the account row independently of accountId", async () => {
+    const { githubAccount } = await createTestUser({ db });
+    expect(githubAccount.id).not.toBe(githubAccount.accountId);
+    expect(Number.isSafeInteger(Number(githubAccount.accountId))).toBe(true);
+    expect(Number.isNaN(Number(githubAccount.id))).toBe(true);
   });
 });
