@@ -1,3 +1,7 @@
+import {
+  describeProviderUnavailable,
+  type ProviderUnavailable,
+} from "@/agent/msg/classify-provider-result";
 import { escapeRegExp } from "./extract-ticket-keys";
 import type {
   CriterionVerdict,
@@ -547,6 +551,40 @@ export function renderPrComment({
 /** A PR comment that carries a single notice instead of an audit. */
 export function renderNoticeComment(prNumber: number, notice: string): string {
   return [...commentHeader(prNumber), "", notice].join("\n");
+}
+
+/** The generic notice for a run whose output held no usable audit. */
+export function renderUnusableAuditNotice(keys: readonly string[]): string {
+  return `The audit run for ${keys.join(", ")} did not produce a usable result, so no ticket was changed. Check the acceptance criteria by hand.`;
+}
+
+/**
+ * The notice for a run the provider refused (#441). Built from the
+ * classification alone: it never names the account (epic #440 decision 5).
+ */
+export function renderProviderAuditNotice(
+  keys: readonly string[],
+  provider: ProviderUnavailable,
+): string {
+  return `The audit run for ${keys.join(", ")} could not run. ${describeProviderUnavailable(provider)} No ticket was changed. Check the acceptance criteria by hand.`;
+}
+
+const REPLACEABLE_NOTICE_LINE =
+  /^The audit run for .+ (?:did not produce a usable result, so no ticket was changed\.|could not run\. )/;
+
+/**
+ * True when a marker comment is one of the two run-failure notices above —
+ * header, blank line, one notice line — and never an audit: only such a
+ * comment may be corrected in place by a later provider notice (#441).
+ */
+export function isReplaceableAuditNotice(body: string): boolean {
+  const lines = body.split("\n");
+  return (
+    lines.length === 4 &&
+    lines[1] === "## Post-merge ticket audit" &&
+    lines[2] === "" &&
+    REPLACEABLE_NOTICE_LINE.test(lines[3] ?? "")
+  );
 }
 
 /**

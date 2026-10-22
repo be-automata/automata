@@ -75,9 +75,38 @@ export function toDBMessage(claudeMessage: ClaudeMessage): DBMessage[] {
         ];
       }
       return [];
+    case "rate_limit_event": {
+      // Kept (#441): the structured signal classifyProviderResult reads
+      // first. Renders as nothing; never agent text.
+      const info = claudeMessage.rate_limit_info;
+      return [
+        {
+          type: "meta",
+          subtype: "rate-limit",
+          status: typeof info?.status === "string" ? info.status : "unknown",
+          rateLimitType:
+            typeof info?.rateLimitType === "string" ? info.rateLimitType : null,
+          resetsAt: finiteOrNull(info?.resetsAt),
+          utilization: finiteOrNull(info?.utilization),
+          overageCovered:
+            info?.isUsingOverage === true ||
+            info?.overageInUse === true ||
+            info?.overageStatus === "allowed" ||
+            info?.overageStatus === "allowed_warning",
+          session_id:
+            typeof claudeMessage.session_id === "string"
+              ? claudeMessage.session_id
+              : null,
+        },
+      ];
+    }
     default:
       return [];
   }
+}
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function convertUserMessage(

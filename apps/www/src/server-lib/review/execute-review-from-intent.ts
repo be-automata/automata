@@ -28,6 +28,7 @@ import {
   type NoVerdictCause,
   type ReviewWriterClient,
 } from "./review-notice";
+import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
 
 /**
  * The control-plane single writer for a review thread's effect (ADR-036 phase-2).
@@ -183,6 +184,13 @@ export interface ExecuteReviewFromIntentOpts {
    */
   prAuthoredByBot?: boolean;
   /**
+   * The run's provider classification (#441), from the thread chat's
+   * `provider-unavailable` error. Consulted ONLY when no intent parsed: the
+   * notice then names the provider cause instead of `unparseable`. Absent /
+   * null = today's notice.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
+  /**
    * verify-before-block's reader: a file at a commit (the GitHub contents API
    * with the App token). When set, every finding that blocks under the floor
    * policy must reproduce its quote at `intent.commit` or it is de-fanged
@@ -220,6 +228,15 @@ export async function executeReviewFromIntent(
     preferTaggedIntent: opts.preferTaggedIntent,
   });
   if (!parsed.ok) {
+    // #441: a run the provider refused has no verdict BECAUSE of the
+    // provider; say so instead of "no JSON intent block found".
+    if (parsed.source !== "agent" && opts.providerUnavailable) {
+      return await reportNoVerdict(opts, {
+        cause: "provider_unavailable",
+        reason: parsed.reason,
+        provider: opts.providerUnavailable,
+      });
+    }
     return await reportNoVerdict(opts, {
       cause: parsed.source === "agent" ? "agent_unable" : "unparseable",
       reason: parsed.reason,
@@ -521,7 +538,12 @@ function isBareCommentOnReadyPr(
  */
 async function reportNoVerdict(
   opts: ExecuteReviewFromIntentOpts,
-  noVerdict: { cause: NoVerdictCause; reason: string; commit?: string },
+  noVerdict: {
+    cause: NoVerdictCause;
+    reason: string;
+    commit?: string;
+    provider?: ProviderUnavailable;
+  },
 ): Promise<ReviewFromIntentOutcome> {
   const { github, repoFullName, prNumber, botLogin, currentHeadSha, logger } =
     opts;
@@ -576,6 +598,7 @@ async function reportNoVerdict(
     sha: currentHeadSha,
     cause,
     reason,
+    provider: noVerdict.provider,
     logger,
   });
   if (published.result === "duplicate_at_commit") {
@@ -608,7 +631,9 @@ async function reportNoVerdict(
     });
   } else {
     logger?.error(
-      "review-from-intent: NO VERDICT — posted a notice in the PR conversation",
+      published.result === "updated"
+        ? "review-from-intent: NO VERDICT — corrected the notice at this commit in place"
+        : "review-from-intent: NO VERDICT — posted a notice in the PR conversation",
       { repoFullName, prNumber, cause, reason },
     );
   }

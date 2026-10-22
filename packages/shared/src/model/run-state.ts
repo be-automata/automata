@@ -195,6 +195,13 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
           "The agent's credential was rejected, so the run stopped. Reconnect it, then retry.",
         action: "reconnect-credential",
       };
+    case "provider-unavailable":
+      return {
+        title: "Claude subscription unavailable",
+        reason:
+          "The connected Claude subscription refused the run (a usage limit, disabled access, or no credit). Retry after it is available again.",
+        action: "reconnect-credential",
+      };
     case "missing-gemini-credentials":
     case "missing-amp-credentials":
     case "chatgpt-sub-required":
@@ -285,6 +292,7 @@ const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
   "setup-script-failed": true,
   "prompt-too-long": true,
   "queue-limit-exceeded": true,
+  "provider-unavailable": true,
 };
 
 function isThreadErrorType(value: string): value is ThreadErrorType {

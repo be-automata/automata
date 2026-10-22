@@ -10,6 +10,8 @@ import {
 import { createTrackerClient } from "./tracker-client";
 import { resolveTrackerConfig, type TrackerConfig } from "./tracker-config";
 import { describeTrackerError } from "./tracker-types";
+import { isReplaceableAuditNotice } from "./merge-audit";
+import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
 
 /**
  * Thread-finish glue for the post-merge audit (ADR-008): binds the pure
@@ -77,6 +79,12 @@ export function createAuditCommentClient({
         return "created";
       }
       if (mode === "create-only") return "kept_existing";
+      if (
+        mode === "replace-notice" &&
+        !isReplaceableAuditNotice(own.body ?? "")
+      ) {
+        return "kept_existing";
+      }
       await octokit.rest.issues.updateComment({
         owner,
         repo,
@@ -96,6 +104,7 @@ export async function runMergeAuditAtFinish({
   prNumber,
   terminalText,
   botLogin,
+  providerUnavailable,
 }: {
   db: DB;
   /** The thread's user — the org owner the mirror task was attributed to. */
@@ -105,6 +114,8 @@ export async function runMergeAuditAtFinish({
   prNumber: number;
   terminalText: string;
   botLogin: string;
+  /** #441: the run's provider classification, when the provider refused it. */
+  providerUnavailable?: ProviderUnavailable | null;
 }): Promise<MergeAuditFinishOutcome> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const octokit = await getOctokitForApp({ owner, repo });
@@ -146,6 +157,7 @@ export async function runMergeAuditAtFinish({
       mergedBy: pr.merged_by?.login ?? null,
     },
     terminalText,
+    providerUnavailable,
     config,
     tracker: config ? createTrackerClient(config) : null,
     comments: createAuditCommentClient({

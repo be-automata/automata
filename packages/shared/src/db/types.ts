@@ -279,7 +279,8 @@ export type ThreadErrorType =
   | "git-checkpoint-push-failed"
   | "setup-script-failed"
   | "prompt-too-long"
-  | "queue-limit-exceeded";
+  | "queue-limit-exceeded"
+  | "provider-unavailable";
 export type ThreadErrorMessage = ThreadErrorType | string;
 export type GithubPRStatus = "draft" | "open" | "closed" | "merged";
 export type GithubCheckRunConclusion =

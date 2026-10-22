@@ -26,5 +26,11 @@ export function makeNoticeFake(author = "automata-ai-bot[bot]") {
       const index = comments.findIndex((comment) => comment.id === id);
       if (index >= 0) comments.splice(index, 1);
     }),
+    updateConversationComment: vi.fn(
+      async (_repo: string, id: number, body: string) => {
+        const comment = comments.find((candidate) => candidate.id === id);
+        if (comment) comment.body = body;
+      },
+    ),
   } satisfies ReviewNoticeClient & { comments: PrConversationComment[] };
 }

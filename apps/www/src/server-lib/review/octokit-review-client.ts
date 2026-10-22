@@ -139,6 +139,16 @@ export function createOctokitReviewClient(
       });
     },
 
+    async updateConversationComment(repo, commentId, body) {
+      const [owner, name] = parseRepoFullName(repo);
+      await octokit.rest.issues.updateComment({
+        owner,
+        repo: name,
+        comment_id: commentId,
+        body,
+      });
+    },
+
     async deleteConversationComment(repo, commentId) {
       const [owner, name] = parseRepoFullName(repo);
       await octokit.rest.issues.deleteComment({
