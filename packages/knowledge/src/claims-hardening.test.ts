@@ -133,7 +133,7 @@ describe("applyDraft never trusts the op kind", () => {
     const md = pageOf(root);
     const draft = await reconcile(root, md, sc, stubUpdater(), {
       sourceRev: SHA,
-      diff: diffOf(now, "@@ -2 +2 @@"),
+      diffs: [diffOf(now, "@@ -2 +2 @@")],
     });
     expect(draft.ops.find((o) => o.claimId === "seat-price")?.op).toBe(
       "review",
@@ -185,7 +185,7 @@ describe("reconcile with a diff", () => {
     const { llm } = counting();
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SHA,
-      diff: diffOf(now, "@@ -1,7 +1 @@"),
+      diffs: [diffOf(now, "@@ -1,7 +1 @@")],
     });
     const op = draft.ops.find((o) => o.claimId === "seat-price");
     expect(op?.op).not.toBe("retract");
@@ -203,7 +203,7 @@ describe("reconcile with a diff", () => {
     const { llm, seen } = counting();
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SHA,
-      diff: { path: "other.ts", hunks: [], oldText: "", newText: "" },
+      diffs: [{ path: "other.ts", hunks: [], oldText: "", newText: "" }],
     });
     expect(draft.ops.find((o) => o.claimId === "trial-length")).toMatchObject({
       op: "review",
@@ -225,7 +225,7 @@ describe("reconcile with a diff", () => {
     writeBilling(root, now);
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SHA,
-      diff: diffOf(now, "@@ -2,2 +2,3 @@"),
+      diffs: [diffOf(now, "@@ -2,2 +2,3 @@")],
     });
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "review",
@@ -242,7 +242,7 @@ describe("reconcile with a diff", () => {
     writeBilling(root, now);
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SHA,
-      diff: diffOf(now, "@@ -3 +2,0 @@"),
+      diffs: [diffOf(now, "@@ -3 +2,0 @@")],
     });
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "review",
@@ -255,7 +255,7 @@ describe("reconcile with a diff", () => {
     writeBilling(root, now);
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SHA,
-      diff: diffOf(now, "@@ -2,2 +1,0 @@"),
+      diffs: [diffOf(now, "@@ -2,2 +1,0 @@")],
     });
     expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
       op: "retract",

@@ -6,7 +6,12 @@
 //   2. Similarity only inside a changed hunk. git fuses an adjacent insert and edit into one hunk, so a
 //      position inside the hunk says nothing about where the old text went. Inside the hunk's mapped new
 //      range, the same-width window with the highest token overlap with the old text wins.
-//   3. The floor is enforced. Below the floor, or when two different windows tie for best, the caller
+//   3. A one-for-one line replacement is matched by position. When a hunk's old range is exactly the span
+//      (same start, same length) and its new range has the same length, the span re-anchors to that new
+//      range with score 1, whatever the token overlap: git says exactly these lines became exactly those.
+//      This is what keeps a value edit on a short line (`LIMIT = 120` -> `150`) out of review. A hunk that
+//      replaces more lines than the span, or changes the line count, gets no such shortcut (rule 2 applies).
+//   4. The floor is enforced. Below the floor, or when two different windows tie for best, the caller
 //      gets "review": a human locates the fact. Re-anchoring never guesses.
 
 export interface Hunk {
@@ -23,7 +28,13 @@ export const REANCHOR_FLOOR = 0.5;
 
 export type Reanchor =
   | { status: "shifted"; span: LineSpan; score: 1 }
-  | { status: "in-hunk"; span: LineSpan; score: number }
+  | {
+      status: "in-hunk";
+      span: LineSpan;
+      score: number;
+      /** "positional": a one-for-one replacement of exactly the span (rule 3); otherwise best token overlap. */
+      match: "positional" | "similarity";
+    }
   | {
       status: "review";
       reason: "below-floor" | "tie" | "narrowed";
@@ -120,9 +131,20 @@ export function reanchorSpan({
   if (!hunks.some((h) => touches(h, span)))
     return { status: "shifted", span: mapped, score: 1 };
 
+  const width = b - a + 1;
+  const exact = hunks.find(
+    (h) => h.oldStart === a && h.oldCount === width && h.newCount === width,
+  );
+  if (exact)
+    return {
+      status: "in-hunk",
+      span: [exact.newStart, exact.newStart + width - 1],
+      score: 1,
+      match: "positional",
+    };
+
   const oldTokens = tokensOf(oldLines.slice(a - 1, b).join("\n"));
   const [lo, hi] = mapped;
-  const width = b - a + 1;
   // Part of the span was deleted: no same-width window can hold the old text, so a human decides.
   if (hi - lo + 1 < width)
     return {
@@ -167,5 +189,5 @@ export function reanchorSpan({
       score,
       candidates: [best.span],
     };
-  return { status: "in-hunk", span: best.span, score };
+  return { status: "in-hunk", span: best.span, score, match: "similarity" };
 }

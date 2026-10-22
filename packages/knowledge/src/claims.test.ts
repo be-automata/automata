@@ -54,10 +54,22 @@ interface Scenario {
 const SCENARIOS: Scenario[] = [
   { name: "noop", mutate: () => {}, expect: ALL_FRESH, llmCalls: 0 },
   {
-    name: "whitespace-only code edit",
+    name: "whitespace-only code edit (exact pin, O7)",
     mutate: (r) =>
       edit(r, "repo/billing.ts", (s) =>
         s.replace("TRIAL_DAYS = 14;", "TRIAL_DAYS   =   14;"),
+      ),
+    expect: { ...ALL_FRESH, "trial-length": "conflict" },
+    llmCalls: 0,
+  },
+  {
+    name: "whitespace-only doc re-wrap (prose pin stays normalized)",
+    mutate: (r) =>
+      edit(r, "docs/pricing.md", (s) =>
+        s.replace(
+          "14-day free trial. No card required.",
+          "14-day free trial.\nNo card   required.",
+        ),
       ),
     expect: ALL_FRESH,
     llmCalls: 0,
@@ -386,7 +398,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
     const { llm, seen } = countingUpdater();
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
-      diff: diffOf(now, header),
+      diffs: [diffOf(now, header)],
     });
     return { draft, seen };
   }
