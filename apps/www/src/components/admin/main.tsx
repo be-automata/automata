@@ -52,6 +52,10 @@ const adminCategories: AdminCategory[] = [
     sections: [
       { title: "Feature Flags", href: "/internal/admin/feature-flags" },
       { title: "Top Banner", href: "/internal/admin/banner" },
+      {
+        title: "Knowledge Budget Ceiling",
+        href: "/internal/admin/knowledge",
+      },
     ],
   },
   {
