@@ -192,7 +192,13 @@ export function renderReviewNotice(args: {
   provider?: ProviderUnavailable;
   /** #107: how many automatic re-runs this commit already had. */
   reruns?: number;
+  /**
+   * #107: the run's thread id, the key that joins the notice to the worker
+   * logs and the stored messages. Absent = no Run line (callers that predate it).
+   */
+  threadId?: string;
 }): string {
+  const runLine = args.threadId ? ["", `**Run:** \`${args.threadId}\``] : [];
   if (args.cause === "provider_unavailable") {
     // Never names the account (epic #440 decision 5): the text is built from
     // the classification alone, never from credential metadata.
@@ -203,6 +209,7 @@ export function renderReviewNotice(args: {
       `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** ${describeProviderUnavailable(provider)} Nothing was approved or blocked.`,
       "",
       `**Next:** push a new commit ${providerUnavailableRetryWhen(provider)}, or have a teammate review.`,
+      ...runLine,
     ].join("\n");
   }
   return [
@@ -212,6 +219,7 @@ export function renderReviewNotice(args: {
     `**Why:** ${[describeCause(args.cause, args.reason), describeReruns(args.reruns)].filter((part) => part !== null).join(" ")}`,
     "",
     "**Next:** push a new commit to trigger a fresh review, or have a teammate review this commit.",
+    ...runLine,
   ].join("\n");
 }
 
@@ -301,6 +309,7 @@ export async function publishReviewNotice(
     reason: string;
     provider?: ProviderUnavailable;
     reruns?: number;
+    threadId?: string;
   },
 ): Promise<PublishReviewNoticeResult> {
   const existing = await listOwnNotices(args, "per-commit dedup");

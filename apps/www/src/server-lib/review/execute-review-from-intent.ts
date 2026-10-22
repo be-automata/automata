@@ -210,6 +210,12 @@ export interface ExecuteReviewFromIntentOpts {
    */
   runFailure?: RunFailure | null;
   /**
+   * #107: the review thread this run is. Rendered on the no-verdict notice so
+   * a reader can join it to the worker logs without forensics. Absent = no
+   * Run line.
+   */
+  threadId?: string;
+  /**
    * #107: schedules (or reports the spent budget of) the automatic re-run of
    * this commit. Called only for a `runFailure` whose notice could speak for
    * live HEAD. A throw is treated as "no re-run": the notice posts as before.
@@ -656,6 +662,7 @@ async function reportNoVerdict(
     reason,
     provider: noVerdict.provider,
     reruns,
+    threadId: opts.threadId,
     logger,
   });
   if (published.result === "duplicate_at_commit") {

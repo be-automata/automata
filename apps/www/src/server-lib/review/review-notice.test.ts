@@ -93,6 +93,40 @@ describe("renderReviewNotice", () => {
   });
 });
 
+describe("renderReviewNotice — the run's thread id (#107)", () => {
+  const THREAD = "3f2b8c1e-0d4a-4b6f-9a1e-7c5d2e8f9b10";
+
+  it("names the run's thread id, the forensic join key, on a generic notice", () => {
+    const body = renderReviewNotice({
+      sha: SHA,
+      cause: "run_failed",
+      reason: "",
+      threadId: THREAD,
+    });
+    expect(body).toContain(`**Run:** \`${THREAD}\``);
+    // The marker stays line 1, so the notice is still found and deduped.
+    expect(reviewNoticeSha({ id: 1, user: { login: BOT }, body }, BOT)).toBe(
+      SHA,
+    );
+  });
+
+  it("names it on a provider notice too, and never without an id", () => {
+    const withId = renderReviewNotice({
+      sha: SHA,
+      cause: "provider_unavailable",
+      reason: "",
+      threadId: THREAD,
+    });
+    expect(withId).toContain(`**Run:** \`${THREAD}\``);
+    const withoutId = renderReviewNotice({
+      sha: SHA,
+      cause: "unparseable",
+      reason: "no JSON intent block found in agent output",
+    });
+    expect(withoutId).not.toContain("**Run:**");
+  });
+});
+
 describe("reviewNoticeSha", () => {
   it("is null for another author and for a marker that is not the prefix", () => {
     const marker = `<!-- automata:review-notice sha=${SHA} -->`;
