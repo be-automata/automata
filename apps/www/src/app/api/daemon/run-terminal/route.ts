@@ -10,11 +10,7 @@ import {
   retireHatchetRun,
   getHatchetRunByExternalId,
 } from "@terragon/shared/model/hatchet-run";
-import {
-  TERMINAL_CAUSES,
-  type TerminalCause,
-} from "@terragon/shared/model/terminal-cause";
-import type { ThreadErrorMessage } from "@terragon/shared";
+import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 import { waitUntil } from "@/lib/wait-until";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 
@@ -49,24 +45,6 @@ const bodySchema = z.object({
     })
     .optional(),
 });
-
-/**
- * The user-visible error type a cause renders as (#437). `timeout` and
- * `out-of-memory` have dedicated chat cases; every other cause keeps
- * markThreadsTerminal's default (the `superseded` sentinel or NULL).
- */
-function errorMessageForCause(
-  cause: TerminalCause,
-): ThreadErrorMessage | undefined {
-  switch (cause) {
-    case "timeout":
-      return "request-timeout";
-    case "out-of-memory":
-      return "out-of-memory";
-    default:
-      return undefined;
-  }
-}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const r = await parseDaemonRequest(request, bodySchema);
@@ -138,7 +116,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     db,
     threadId,
     cause,
-    errorMessage: errorMessageForCause(cause),
     errorMessageInfo: detail?.info,
   });
   if (runRow) {

@@ -124,7 +124,6 @@ describe("markThreadsTerminal — the terminal write is ONE transaction", () => 
       db,
       threadIds: [threadId],
       cause: "timeout",
-      errorMessage: "request-timeout",
       errorMessageInfo: "The run reached its 30-minute limit.",
     });
     expect(moved).toEqual([threadId]);
@@ -173,7 +172,6 @@ describe("markThreadsTerminal — the terminal write is ONE transaction", () => 
       db,
       threadIds: [threadId],
       cause: "out-of-memory",
-      errorMessage: "out-of-memory",
       errorMessageInfo: "Memory limit 5000M reached (3 process(es) killed).",
     });
     const second = await markThreadsTerminal({

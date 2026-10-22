@@ -197,33 +197,38 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
   });
 });
 
+/** A thread with a live (reapable) run and a daemon token bound to it. */
+async function freshThread() {
+  const user = (await createTestUser({ db })).user;
+  const org = await createOrganization({
+    db,
+    name: "Org",
+    slug: `org-${nanoid(8).toLowerCase()}`,
+  });
+  const t = await createTestThread({
+    db,
+    userId: user.id,
+    overrides: { organizationId: org.id },
+  });
+  await db
+    .update(threadTable)
+    .set({ status: "working" })
+    .where(eq(threadTable.id, t.threadId));
+  vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
+    userId: user.id,
+    apiKeyId: "apikey_test",
+    organizationId: org.id,
+    threadChatId: t.threadChatId,
+    threadId: t.threadId,
+    tokenType: "daemon",
+  });
+  return t;
+}
+
 describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
   it("accepts every cause in the taxonomy and persists terminalCause", async () => {
-    // Reuse the outer describe's fixtures via a fresh thread per cause.
-    const user = (await createTestUser({ db })).user;
-    const org = await createOrganization({
-      db,
-      name: "Org",
-      slug: `org-${nanoid(8).toLowerCase()}`,
-    });
     for (const cause of ["stale-skipped", "discarded", "timeout"] as const) {
-      const t = await createTestThread({
-        db,
-        userId: user.id,
-        overrides: { organizationId: org.id },
-      });
-      await db
-        .update(threadTable)
-        .set({ status: "working" })
-        .where(eq(threadTable.id, t.threadId));
-      vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
-        userId: user.id,
-        apiKeyId: "apikey_test",
-        organizationId: org.id,
-        threadChatId: t.threadChatId,
-        threadId: t.threadId,
-        tokenType: "daemon",
-      });
+      const t = await freshThread();
       const res = await POST(
         req({
           threadId: t.threadId,
@@ -243,33 +248,6 @@ describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
 });
 
 describe("POST /api/daemon/run-terminal — detail.info and error mapping (#437)", () => {
-  async function freshThread() {
-    const user = (await createTestUser({ db })).user;
-    const org = await createOrganization({
-      db,
-      name: "Org",
-      slug: `org-${nanoid(8).toLowerCase()}`,
-    });
-    const t = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { organizationId: org.id },
-    });
-    await db
-      .update(threadTable)
-      .set({ status: "working" })
-      .where(eq(threadTable.id, t.threadId));
-    vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
-      userId: user.id,
-      apiKeyId: "apikey_test",
-      organizationId: org.id,
-      threadChatId: t.threadChatId,
-      threadId: t.threadId,
-      tokenType: "daemon",
-    });
-    return t;
-  }
-
   async function post(
     t: { threadId: string; threadChatId: string },
     cause: string,
@@ -298,27 +276,19 @@ describe("POST /api/daemon/run-terminal — detail.info and error mapping (#437)
     return r!;
   }
 
-  it("stores detail.info as errorMessageInfo", async () => {
-    // protects=the worker's salvage note reaching the thread the user sees;
-    // fails_when=detail.info is dropped or rejected; no_claim=the worker
-    // authoring that text (the worker side is not in this change).
+  it("maps timeout to the request-timeout error type and stores detail.info", async () => {
+    // protects=a timed-out run rendering "Request timed out" with the worker's
+    // salvage note, not a generic error; fails_when=errorMessage stays NULL or
+    // detail.info is dropped; no_claim=the worker authoring that text.
     const t = await freshThread();
     const info =
       "Unfinished work was saved to branch automata/x (commit 1234abcd).";
     const res = await post(t, "timeout", { info });
     expect(res.status).toBe(200);
-    expect((await row(t.threadId)).errorMessageInfo).toBe(info);
-  });
-
-  it("maps timeout to the request-timeout error type", async () => {
-    // protects=a timed-out run rendering "Request timed out", not a generic
-    // error; fails_when=errorMessage stays NULL; no_claim=none beyond protects.
-    const t = await freshThread();
-    await post(t, "timeout");
     expect(await row(t.threadId)).toEqual({
       terminalCause: "timeout",
       errorMessage: "request-timeout",
-      errorMessageInfo: null,
+      errorMessageInfo: info,
     });
   });
 
