@@ -28,6 +28,7 @@ import {
   SOURCE_SHA,
   useCorpus,
   writeBilling,
+  findOp,
 } from "./test-fixtures";
 
 const statuses = (root: string, sc: Sidecar) =>
@@ -246,9 +247,7 @@ describe("regression scenarios", () => {
       expect(draft.llmCalls).toBe(s.llmCalls);
       if (s.mode) expect(draft.mode).toBe(s.mode);
       for (const [id, want] of Object.entries(s.statement ?? {})) {
-        expect(
-          draft.ops.find((o) => o.claimId === id && o.op === "update")?.after,
-        ).toBe(want);
+        expect(findOp(draft.ops, id, "update")?.after).toBe(want);
       }
       const approve = draft.ops
         .filter((o) => o.op === "update" || o.op === "retract")
@@ -415,7 +414,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
     const { draft, seen } = await withDiff(now, "@@ -2 +2,2 @@");
     expect(seen).toContain("seat-price");
     // The updater reads the re-anchored span (35 / 3), not the old L2-L3 (20 / 35).
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "update",
       after: "Each seat costs $35 per month; workspaces get 3 free seats.",
       newEvidence: ["repo://billing.ts#L3-L4"],
@@ -430,7 +429,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
       ...TAIL,
     ];
     const { draft, seen } = await withDiff(now, "@@ -2 +2 @@");
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "review",
     });
     expect(seen).not.toContain("seat-price");
@@ -439,7 +438,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
   it("turns a span the diff deleted into a retract", async () => {
     const now = ["export const TRIAL_DAYS = 14;", ...TAIL];
     const { draft } = await withDiff(now, "@@ -2,2 +1,0 @@");
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "retract",
       why: "the merge deleted every span this fact was grounded on",
     });

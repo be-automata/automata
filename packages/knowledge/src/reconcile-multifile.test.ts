@@ -20,16 +20,16 @@ import {
   countingUpdater,
   diffOfFile,
   edit,
-  FIXTURES,
   limitsPageOf,
   pageOf,
   SOURCE_SHA,
   useCorpus,
   useLimitsCorpus,
   writeRepo,
+  repoFixture,
+  findOp,
+  emptyDiff,
 } from "./test-fixtures";
-
-const fixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
 
 /**
  * The SC1 merge: a py constant changes in place, a yaml value changes below an inserted comment line, and
@@ -37,33 +37,33 @@ const fixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
  * headers `git diff -U0` emits for exactly these edits.
  */
 function mutateLimits(root: string): ReconcileDiff[] {
-  const py = fixture("ratelimit.py").replace(
+  const py = repoFixture("ratelimit.py").replace(
     "RATE_LIMIT_PER_MINUTE = 120",
     "RATE_LIMIT_PER_MINUTE = 150",
   );
-  const yaml = `# tuned for the new plan\n${fixture("config.yaml").replace(
+  const yaml = `# tuned for the new plan\n${repoFixture("config.yaml").replace(
     "requests_per_minute: 120",
     "requests_per_minute: 150",
   )}`;
-  const readme = fixture("README.md").replace("# Limits", "# API limits");
+  const readme = repoFixture("README.md").replace("# Limits", "# API limits");
   writeRepo(root, "ratelimit.py", py);
   writeRepo(root, "config.yaml", yaml);
   writeRepo(root, "README.md", readme);
   return [
-    diffOfFile("ratelimit.py", fixture("ratelimit.py"), py, "@@ -1 +1 @@"),
+    diffOfFile("ratelimit.py", repoFixture("ratelimit.py"), py, "@@ -1 +1 @@"),
     diffOfFile(
       "config.yaml",
-      fixture("config.yaml"),
+      repoFixture("config.yaml"),
       yaml,
       "@@ -0,0 +1 @@\n@@ -3 +4 @@",
     ),
-    diffOfFile("README.md", fixture("README.md"), readme, "@@ -1 +1 @@"),
+    diffOfFile("README.md", repoFixture("README.md"), readme, "@@ -1 +1 @@"),
   ];
 }
 
 /** The trial moves from 14 to 30 days in code (billing.ts L1) and in the marketing doc. */
 function extendTrial(root: string): ReconcileDiff {
-  const billing = fixture("billing.ts").replace(
+  const billing = repoFixture("billing.ts").replace(
     "TRIAL_DAYS = 14",
     "TRIAL_DAYS = 30",
   );
@@ -73,7 +73,7 @@ function extendTrial(root: string): ReconcileDiff {
   );
   return diffOfFile(
     "billing.ts",
-    fixture("billing.ts"),
+    repoFixture("billing.ts"),
     billing,
     "@@ -1 +1 @@",
   );
@@ -88,13 +88,13 @@ describe("reconcile over a multi-file diff (SC1)", () => {
       sourceRev: SOURCE_SHA,
       diffs,
     });
-    expect(draft.ops.find((o) => o.claimId === "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "update",
       after: "The API allows 150 requests per minute.",
       newEvidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L4-L4"],
     });
-    expect(draft.ops.find((o) => o.claimId === "burst")).toBeUndefined();
-    expect(draft.ops.find((o) => o.claimId === "readme-rate")).toBeUndefined();
+    expect(findOp(draft.ops, "burst")).toBeUndefined();
+    expect(findOp(draft.ops, "readme-rate")).toBeUndefined();
     expect(draft.ops.some((o) => o.op === "review")).toBe(false);
     expect(draft.llmCalls).toBe(1);
     expect(seen).toEqual(["api-rate"]);
@@ -111,7 +111,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
       sourceRev: SOURCE_SHA,
       diffs,
     });
-    expect(draft.ops.find((o) => o.claimId === "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "update",
       newEvidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L4-L4"],
     });
@@ -126,7 +126,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
     // (`burst: 120`, 0.33) is below the floor: review, no model call.
     const { root, sc } = useLimitsCorpus();
     const [py] = mutateLimits(root);
-    const before = fixture("config.yaml");
+    const before = repoFixture("config.yaml");
     const yaml = before.replace(
       "  api:\n    requests_per_minute: 120\n  seats:",
       "  rate:\n    burst: 120\n  seat_caps:",
@@ -141,7 +141,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
         diffOfFile("config.yaml", before, yaml, "@@ -2,3 +2,3 @@"),
       ],
     });
-    const op = draft.ops.find((o) => o.claimId === "api-rate");
+    const op = findOp(draft.ops, "api-rate");
     expect(op?.op).toBe("review");
     expect(op?.why).toMatch(/^re-anchor below-floor \(similarity 0\.33\)/);
     expect(draft.llmCalls).toBe(0);
@@ -157,7 +157,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
       sourceRev: SOURCE_SHA,
       diffs: [billing, py as ReconcileDiff],
     });
-    expect(draft.ops.find((o) => o.claimId === "trial-length")).toMatchObject({
+    expect(findOp(draft.ops, "trial-length")).toMatchObject({
       op: "update",
       after: "Trials last 30 days and need no card.",
       newEvidence: ["repo://billing.ts#L1-L1", "doc://pricing#trial"],
@@ -174,7 +174,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
       sourceRev: SOURCE_SHA,
       diffs: [yaml as ReconcileDiff, readme as ReconcileDiff],
     });
-    const op = draft.ops.find((o) => o.claimId === "api-rate");
+    const op = findOp(draft.ops, "api-rate");
     expect(op?.op).toBe("review");
     expect(op?.why).toMatch(/^no diff for ratelimit\.py/);
     expect(seen).not.toContain("api-rate");
@@ -190,10 +190,15 @@ describe("reconcile over a multi-file diff (SC1)", () => {
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
       diffs: [
-        diffOfFile("billing.ts", fixture("billing.ts"), now, "@@ -1,7 +1 @@"),
+        diffOfFile(
+          "billing.ts",
+          repoFixture("billing.ts"),
+          now,
+          "@@ -1,7 +1 @@",
+        ),
       ],
     });
-    const op = draft.ops.find((o) => o.claimId === "seat-price");
+    const op = findOp(draft.ops, "seat-price");
     expect(op?.op).toBe("review");
     expect(op?.why).toMatch(/^re-anchor /);
   });
@@ -201,23 +206,11 @@ describe("reconcile over a multi-file diff (SC1)", () => {
   it.each([
     [
       "two entries with the same path",
-      [
-        { path: "billing.ts", hunks: [], oldText: "", newText: "" },
-        { path: "billing.ts", hunks: [], oldText: "", newText: "" },
-      ],
+      [emptyDiff("billing.ts"), emptyDiff("billing.ts")],
     ],
     [
       "a path equal to another entry's rename source",
-      [
-        {
-          path: "src/billing.ts",
-          oldPath: "billing.ts",
-          hunks: [],
-          oldText: "",
-          newText: "",
-        },
-        { path: "billing.ts", hunks: [], oldText: "", newText: "" },
-      ],
+      [emptyDiff("src/billing.ts", "billing.ts"), emptyDiff("billing.ts")],
     ],
   ])(
     "%s makes only that path ambiguous: its pins become reviews, reconcile does not throw",
@@ -228,7 +221,7 @@ describe("reconcile over a multi-file diff (SC1)", () => {
         sourceRev: SOURCE_SHA,
         diffs,
       });
-      const op = draft.ops.find((o) => o.claimId === "trial-length");
+      const op = findOp(draft.ops, "trial-length");
       expect(op?.op).toBe("review");
       expect(op?.why).toMatch(/^two diff entries name billing\.ts/);
       expect(draft.llmCalls).toBe(0);
@@ -246,13 +239,13 @@ describe("reconcile over a multi-file diff (SC1)", () => {
       diffs: [],
     });
     expect(empty).toEqual(none);
-    expect(empty.ops.find((o) => o.claimId === "trial-length")).toMatchObject({
+    expect(findOp(empty.ops, "trial-length")).toMatchObject({
       op: "update",
     });
   });
 });
 
-const PY = fixture("ratelimit.py");
+const PY = repoFixture("ratelimit.py");
 const MOVED = "limits/ratelimit.py";
 
 /** ratelimit.py moves to limits/ratelimit.py (optionally edited on the way); the old file is gone. */
@@ -268,9 +261,6 @@ function moveRatelimit(
   return diffOfFile(MOVED, PY, now, header, "ratelimit.py");
 }
 
-const opFor = (draft: Draft, claimId: string) =>
-  draft.ops.find((o) => o.claimId === claimId);
-
 describe("renames and deletions", () => {
   it("a pure rename re-pins mechanically onto the new path, applies, and is idempotent", async () => {
     const { root, sc } = useLimitsCorpus();
@@ -282,18 +272,18 @@ describe("renames and deletions", () => {
       diffs,
     });
     const burstPin = sc.claims.find((c) => c.id === "burst")?.evidence[0];
-    expect(opFor(draft, "burst")).toMatchObject({
+    expect(findOp(draft.ops, "burst")).toMatchObject({
       op: "repin",
       auto: true,
       newEvidence: [`repo://${MOVED}#L2-L2`],
       newEvidenceHash: [burstPin?.hash],
     });
-    expect(opFor(draft, "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "repin",
       auto: true,
       newEvidence: [`repo://${MOVED}#L1-L1`, "repo://config.yaml#L3-L3"],
     });
-    expect(opFor(draft, "readme-rate")).toBeUndefined();
+    expect(findOp(draft.ops, "readme-rate")).toBeUndefined();
     expect(draft.llmCalls).toBe(0);
     expect(seen).toEqual([]);
 
@@ -326,12 +316,12 @@ describe("renames and deletions", () => {
       sourceRev: SOURCE_SHA,
       diffs,
     });
-    expect(opFor(draft, "burst")).toMatchObject({
+    expect(findOp(draft.ops, "burst")).toMatchObject({
       op: "update",
       after: "Bursts may exceed the limit by 25 requests.",
       newEvidence: [`repo://${MOVED}#L2-L2`],
     });
-    expect(opFor(draft, "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "repin",
       newEvidence: [`repo://${MOVED}#L1-L1`, "repo://config.yaml#L3-L3"],
     });
@@ -393,21 +383,26 @@ describe("renames and deletions", () => {
       sourceRev: SOURCE_SHA,
       diffs: [diffOfFile("../ratelimit.py", PY, PY, "", "ratelimit.py")],
     });
-    expect(opFor(draft, "burst")).toMatchObject({ op: "review" });
-    expect(opFor(draft, "burst")?.why).toMatch(/outside the repository/);
+    expect(findOp(draft.ops, "burst")).toMatchObject({ op: "review" });
+    expect(findOp(draft.ops, "burst")?.why).toMatch(/outside the repository/);
   });
 
   it("a same-file relocation repin carries no proposal, exactly as before", async () => {
     const { root, sc } = useCorpus();
-    const now = `// header\n${fixture("billing.ts")}`;
+    const now = `// header\n${repoFixture("billing.ts")}`;
     writeRepo(root, "billing.ts", now);
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
       diffs: [
-        diffOfFile("billing.ts", fixture("billing.ts"), now, "@@ -0,0 +1 @@"),
+        diffOfFile(
+          "billing.ts",
+          repoFixture("billing.ts"),
+          now,
+          "@@ -0,0 +1 @@",
+        ),
       ],
     });
-    const op = opFor(draft, "seat-price");
+    const op = findOp(draft.ops, "seat-price");
     expect(op).toMatchObject({ op: "repin", auto: true });
     expect(Object.keys(op ?? {}).sort()).toEqual([
       "auto",
@@ -429,13 +424,13 @@ describe("renames and deletions", () => {
         {
           path: "billing.ts",
           hunks: parseHunks("@@ -1,7 +0,0 @@"),
-          oldText: fixture("billing.ts"),
+          oldText: repoFixture("billing.ts"),
           newText: "",
         },
       ],
     });
-    expect(opFor(draft, "seat-price")).toMatchObject({ op: "retract" });
-    expect(opFor(draft, "trial-length")).toMatchObject({ op: "review" });
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({ op: "retract" });
+    expect(findOp(draft.ops, "trial-length")).toMatchObject({ op: "review" });
   });
 });
 
@@ -475,7 +470,7 @@ describe("parser integration", () => {
       path: f.path,
       ...(f.oldPath ? { oldPath: f.oldPath } : {}),
       hunks: f.hunks,
-      oldText: fixture(f.oldPath ?? f.path),
+      oldText: repoFixture(f.oldPath ?? f.path),
       newText: readFileSync(join(root, "repo", f.path), "utf8"),
     }));
     const hunksByPath = (ds: ReconcileDiff[]) =>
@@ -492,7 +487,7 @@ describe("parser integration", () => {
     });
     expect(fromParser).toEqual(fromHand);
     expect(fromParser.ops.some((o) => o.op === "review")).toBe(false);
-    expect(opFor(fromParser, "api-rate")).toMatchObject({ op: "update" });
+    expect(findOp(fromParser.ops, "api-rate")).toMatchObject({ op: "update" });
   });
 
   it("a parsed pure rename feeds the rename repin", async () => {
@@ -517,7 +512,7 @@ describe("parser integration", () => {
       sourceRev: SOURCE_SHA,
       diffs: parsed,
     });
-    expect(opFor(draft, "burst")).toMatchObject({
+    expect(findOp(draft.ops, "burst")).toMatchObject({
       op: "repin",
       newEvidence: [`repo://${MOVED}#L2-L2`],
     });

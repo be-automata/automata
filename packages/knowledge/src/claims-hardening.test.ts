@@ -41,6 +41,9 @@ import {
   SOURCE_SHA as SHA,
   useCorpus as corpus,
   writeBilling,
+  findOp,
+  withClaim,
+  emptyDiff,
 } from "./test-fixtures";
 
 /** The sidecar's page version for `md` (sha256, 16 hex). */
@@ -135,9 +138,7 @@ describe("applyDraft never trusts the op kind", () => {
       sourceRev: SHA,
       diffs: [diffOf(now, "@@ -2 +2 @@")],
     });
-    expect(draft.ops.find((o) => o.claimId === "seat-price")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "seat-price")?.op).toBe("review");
     const ops = draft.ops.map((o) =>
       o.claimId === "seat-price" ? retargetOp(o, "update", "forced") : o,
     );
@@ -187,7 +188,7 @@ describe("reconcile with a diff", () => {
       sourceRev: SHA,
       diffs: [diffOf(now, "@@ -1,7 +1 @@")],
     });
-    const op = draft.ops.find((o) => o.claimId === "seat-price");
+    const op = findOp(draft.ops, "seat-price");
     expect(op?.op).not.toBe("retract");
     expect(op?.op === "update" || op?.op === "review").toBe(true);
   });
@@ -203,9 +204,9 @@ describe("reconcile with a diff", () => {
     const { llm, seen } = counting();
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SHA,
-      diffs: [{ path: "other.ts", hunks: [], oldText: "", newText: "" }],
+      diffs: [emptyDiff("other.ts")],
     });
-    expect(draft.ops.find((o) => o.claimId === "trial-length")).toMatchObject({
+    expect(findOp(draft.ops, "trial-length")).toMatchObject({
       op: "review",
     });
     expect(seen).not.toContain("trial-length");
@@ -227,7 +228,7 @@ describe("reconcile with a diff", () => {
       sourceRev: SHA,
       diffs: [diffOf(now, "@@ -2,2 +2,3 @@")],
     });
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "review",
     });
   });
@@ -244,7 +245,7 @@ describe("reconcile with a diff", () => {
       sourceRev: SHA,
       diffs: [diffOf(now, "@@ -3 +2,0 @@")],
     });
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "review",
     });
   });
@@ -257,7 +258,7 @@ describe("reconcile with a diff", () => {
       sourceRev: SHA,
       diffs: [diffOf(now, "@@ -2,2 +1,0 @@")],
     });
-    expect(draft.ops.find((o) => o.claimId === "seat-price")).toMatchObject({
+    expect(findOp(draft.ops, "seat-price")).toMatchObject({
       op: "retract",
       why: "the merge deleted every span this fact was grounded on",
     });
@@ -279,9 +280,7 @@ describe("updater answers are validated", () => {
       answering("Fixed in 2.4.2.", evidence),
       { sourceRev: SHA },
     );
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
   });
 
   it.each([
@@ -300,9 +299,7 @@ describe("updater answers are validated", () => {
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SHA,
     });
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
   });
 
   it("an evidence override wider than 200 lines becomes a review", async () => {
@@ -340,9 +337,7 @@ describe("updater answers are validated", () => {
         sourceRev: SHA,
       },
     );
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
   });
 
   it("duplicate answers yield one op, and a skipped claim yields a review", async () => {
@@ -365,9 +360,7 @@ describe("updater answers are validated", () => {
     expect(
       draft.ops.filter((o) => o.claimId === "sso-fixed-in").map((o) => o.after),
     ).toEqual(["Fixed in 2.4.2."]);
-    expect(draft.ops.find((o) => o.claimId === "sso-workaround")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-workaround")?.op).toBe("review");
   });
 });
 
@@ -495,9 +488,7 @@ describe("evidence URIs stay inside the corpus", () => {
       answering("Fixed in 2.4.2.", ["repo://../../etc/hosts#L1-L1"]),
       { sourceRev: SHA },
     );
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
   });
 });
 
@@ -541,9 +532,7 @@ describe("third roborev pass", () => {
       answering("Fixed in 2.4.2.", ["repo://src#L1-L1"]),
       { sourceRev: SHA },
     );
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
   });
 
   it("an approved retract is refused once its evidence is back", async () => {
@@ -555,9 +544,7 @@ describe("third roborev pass", () => {
     const draft = await reconcile(root, md, sc, stubUpdater(), {
       sourceRev: SHA,
     });
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")?.op).toBe(
-      "retract",
-    );
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("retract");
     writeFileSync(ticket, original);
     expect(() =>
       applyDraft(
@@ -605,7 +592,7 @@ describe("API follow-ups folded into #364", () => {
       sourceRev: SHA,
     });
     expect(draft.llmCalls).toBe(1);
-    expect(draft.ops.find((o) => o.claimId === "sso-fixed-in")).toMatchObject({
+    expect(findOp(draft.ops, "sso-fixed-in")).toMatchObject({
       op: "update",
       after: "Fixed in 2.4.2.",
     });
@@ -622,7 +609,7 @@ describe("API follow-ups folded into #364", () => {
     const draft = await reconcile(root, wrapped, page, stubUpdater(), {
       sourceRev: SHA,
     });
-    const op = draft.ops.find((o) => o.claimId === "sso-fixed-in");
+    const op = findOp(draft.ops, "sso-fixed-in");
     expect(op?.op).toBe("update");
     const out = applyDraft(root, wrapped, page, draft, [op?.id ?? ""]);
     expect(out.md).toContain("The SSO loop was fixed in version 2.4.2.");
@@ -661,18 +648,11 @@ describe("claims without evidence", () => {
 
   it("in a hand-built sidecar become a review, never a retract", async () => {
     const { root, sc } = corpus();
-    const bare = {
-      ...sc,
-      claims: sc.claims.map((c) =>
-        c.id === "seat-price" ? { ...c, evidence: [] } : c,
-      ),
-    };
+    const bare = withClaim(sc, "seat-price", (c) => ({ ...c, evidence: [] }));
     const draft = await reconcile(root, pageOf(root), bare, stubUpdater(), {
       sourceRev: SHA,
     });
-    expect(draft.ops.find((o) => o.claimId === "seat-price")?.op).toBe(
-      "review",
-    );
+    expect(findOp(draft.ops, "seat-price")?.op).toBe("review");
   });
 });
 
