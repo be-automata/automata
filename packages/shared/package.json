@@ -36,6 +36,7 @@
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/env": "workspace:*",
+    "@terragon/knowledge": "workspace:*",
     "@terragon/types": "workspace:*",
     "@terragon/utils": "workspace:*",
     "ai": "^5.0.59",
