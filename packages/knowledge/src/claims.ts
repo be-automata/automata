@@ -9,13 +9,16 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
-import { classifyEvidence, type EvidenceClass } from "./evidence-class";
+import {
+  classifyEvidence,
+  type EvidenceClass,
+  type EvidenceScheme,
+} from "./evidence-class";
 import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
 import {
   findRejection,
   type RejectedOp,
-  type RejectionCandidate,
   type SuppressedOp,
 } from "./rejections";
 import { compareValueSets, extractValues, type ValueExtractor } from "./values";
@@ -93,22 +96,21 @@ const fingerprint = (text: string) => sha(text.replace(/\s+/g, " ").trim());
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 /** Marks a hash of the exact text (code and config), so a stored hash says how to compare it. */
 const EXACT_HASH_PREFIX = "x:";
-type HashMode = EvidenceClass;
-function hashAs(mode: HashMode, text: string): string {
+function hashAs(mode: EvidenceClass, text: string): string {
   // Exact: the text as resolved, no trim and no CRLF normalization (a line-ending change is a change).
   return mode === "exact" ? EXACT_HASH_PREFIX + sha(text) : fingerprint(text);
 }
-const modeOfHash = (hash: string): HashMode =>
+const modeOfHash = (hash: string): EvidenceClass =>
   hash.startsWith(EXACT_HASH_PREFIX) ? "exact" : "prose";
 /** The class a new pin on this URI gets. Comparing an existing pin uses modeOfHash instead. */
-function classOfUri(uri: string): HashMode {
+function classOfUri(uri: string): EvidenceClass {
   const { scheme, target } = parseUri(uri);
   return classifyEvidence(scheme, target);
 }
 const matchesHash = (stored: string, text: string) =>
   hashAs(modeOfHash(stored), text) === stored;
 /** A stale span as the updater sees it: exact text keeps its indentation, prose is collapsed. */
-const nowText = (mode: HashMode, text: string) =>
+const nowText = (mode: EvidenceClass, text: string) =>
   mode === "exact" ? text.replace(/\n$/, "") : norm(text);
 const slug = (s: string) =>
   s
@@ -136,7 +138,7 @@ export function parseUri(uri: string) {
       uri,
       "target must stay inside its source",
     );
-  return { scheme: scheme as "repo" | "ticket" | "doc", target, anchor };
+  return { scheme: scheme as EvidenceScheme, target, anchor };
 }
 
 /**
@@ -261,7 +263,7 @@ const WINDOW_INDEX = new Map<string, Map<string, number[]>>();
 function windowIndex(
   text: string,
   width: number,
-  mode: HashMode,
+  mode: EvidenceClass,
 ): Map<string, number[]> {
   const key = `${sha(text)}\0${width}\0${mode}`;
   const cached = WINDOW_INDEX.get(key);
@@ -471,6 +473,12 @@ export interface DraftOp {
    * emits; a rejection is matched on it (ENG-02).
    */
   evidenceFingerprint?: string;
+  /**
+   * Where each pin was located when the op was raised (the pin itself when it did not move), in pin order.
+   * Set with evidenceFingerprint: a rejection carries it so a later merge that says nothing about a pin's
+   * file can still recognise the evidence the owner saw (a rejected op is never applied, so its pins stay put).
+   */
+  locatedEvidence?: string[];
   /** Identity of the proposed change (statement and new evidence fingerprints). update/reverify only. */
   proposalFingerprint?: string;
 }
@@ -494,6 +502,8 @@ export interface Draft {
   suppressed?: SuppressedOp[];
   llmCalls: number;
 }
+/** A draft as reconcile returns it: suppressed is always present. */
+export type ReconciledDraft = Draft & { suppressed: SuppressedOp[] };
 export interface ReconcileDiff {
   /** The repo:// target this diff covers, as a path in the NEW tree (e.g. "deploy/PILOT-RUNBOOK.md"). */
   path: string;
@@ -513,11 +523,9 @@ export interface ReconcileOptions {
    * narrowed spans become reviews, deleted spans become retracts or reviews, and line pins on files absent
    * from the diffs (nothing to locate them with) become reviews. A pin on a renamed file's old path is
    * re-targeted to its new path. Without diffs (or with an empty list), a stale line pin is assumed to have
-   * changed in place (positional re-pin). Passing both `diff` and `diffs` is an error.
+   * changed in place (positional re-pin).
    */
   diffs?: ReconcileDiff[];
-  /** @deprecated single-file form, kept for existing callers: the same as `diffs: [diff]`. */
-  diff?: ReconcileDiff;
   /** Replaces the deterministic token extractor (e.g. a model-extracted or typed-value variant). */
   extractValues?: ValueExtractor;
   /**
@@ -526,13 +534,6 @@ export interface ReconcileOptions {
    * the latest-only, ledger-sourced contract.
    */
   rejected?: readonly RejectedOp[];
-}
-
-export class ConflictingDiffOptionsError extends Error {
-  constructor() {
-    super("pass either diff or diffs, not both");
-    this.name = "ConflictingDiffOptionsError";
-  }
 }
 
 interface DiffLines {
@@ -552,11 +553,10 @@ type DiffIndex = Map<string, DiffLines | typeof AMBIGUOUS>;
  * Index the diffs once per reconcile, splitting each file's text once. Diff paths are untrusted and are only
  * ever map keys here: they become repo:// targets through repoUri and are read only through resolve().
  */
-function buildDiffIndex(options: ReconcileOptions): DiffIndex | undefined {
-  if (options.diff !== undefined && options.diffs !== undefined)
-    throw new ConflictingDiffOptionsError();
-  const diffs = options.diffs ?? (options.diff ? [options.diff] : undefined);
-  if (!diffs || diffs.length === 0) return undefined;
+function buildDiffIndex(
+  diffs: readonly ReconcileDiff[] = [],
+): DiffIndex | undefined {
+  if (diffs.length === 0) return undefined;
   const idx: DiffIndex = new Map();
   for (const diff of diffs) {
     const lines: DiffLines = {
@@ -650,44 +650,30 @@ function inDiffContext(
   if (!idx) return evidence;
   return evidence.map((e, j): EvidenceStatus => {
     if (e.kind !== "missing") return e;
-    const { scheme, target, anchor } = parseUri(e.uri);
-    const d = idx.get(target);
+    const { scheme, target } = parseUri(e.uri);
+    const d = scheme === "repo" ? idx.get(target) : undefined;
     if (!d) return e;
-    const stale: EvidenceStatus = { kind: "stale", uri: e.uri, now: "" };
+    const stale = { kind: "stale" as const, uri: e.uri, now: "" };
     // An ambiguous path: let locate() turn the pin into a review rather than a retraction.
-    if (d === AMBIGUOUS) return stale;
-    if (e.code === "past-eof") return stale;
-    if (
-      scheme !== "repo" ||
-      d.diff.oldPath !== target ||
-      d.diff.path === target
-    )
-      return e;
-    return renamed(root, e, pins[j], d, lineAnchor(e.uri, anchor)) ?? stale;
+    if (d === AMBIGUOUS || e.code === "past-eof") return stale;
+    // d was found by target, so target is either its new path or its rename source.
+    if (d.diff.path === target) return e;
+    return renamed(root, stale, pins[j], idx) ?? stale;
   });
 }
 
 /** A gone pin on a rename source that lands on identical text at the new path, or null. */
 function renamed(
   root: string,
-  e: EvidenceStatus,
+  stale: Extract<EvidenceStatus, { kind: "stale" }>,
   pinned: EvidencePin | undefined,
-  d: DiffLines,
-  span: LineSpan,
+  idx: DiffIndex,
 ): EvidenceStatus | null {
-  const r = reanchorSpan({
-    hunks: d.diff.hunks,
-    oldLines: d.oldLines,
-    newLines: d.newLines,
-    span,
-    floor: d.diff.floor,
-  });
-  if (r.status !== "shifted" && r.status !== "in-hunk") return null;
-  const newUri = newPathUri(d, r.span);
-  if (!newUri || !pinned) return null;
-  const now = resolve(root, newUri);
+  const l = locate(stale, idx);
+  if (l.kind !== "located" || !pinned) return null;
+  const now = resolve(root, l.uri);
   return "text" in now && matchesHash(pinned.hash, now.text)
-    ? { kind: "relocated", uri: e.uri, newUri }
+    ? { kind: "relocated", uri: stale.uri, newUri: l.uri }
     : null;
 }
 
@@ -726,13 +712,13 @@ function evidenceFingerprintOf(
   root: string,
   claim: Claim,
   ev: EvidenceStatus[],
-  idx: DiffIndex | undefined,
+  located: Located[],
 ): string {
   const pins = claim.evidence
     .map((p, j) => ({
       uri: p.uri,
       pinned: p.hash,
-      state: pinState(root, p, ev[j], idx),
+      state: pinState(root, p, ev[j], located[j]),
     }))
     .sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
   return sha(
@@ -745,11 +731,65 @@ function evidenceFingerprintOf(
   );
 }
 
+interface Sight {
+  fingerprint: () => string;
+  locatedEvidence: string[];
+  /** The rejection that still covers this evidence, or undefined. */
+  coveredBy: () => RejectedOp | undefined;
+}
+
+/**
+ * A stale line pin this merge says nothing about: no diffs at all, or none for its file. Its text has not
+ * moved since the last merge that did locate it, so a rejection's locatedEvidence still says where it is.
+ */
+function uninformed(e: EvidenceStatus | undefined, idx: DiffIndex | undefined) {
+  if (e?.kind !== "stale") return false;
+  const { scheme, target } = parseUri(e.uri);
+  return scheme === "repo" && !idx?.has(target);
+}
+
+/**
+ * True when the evidence, read at the rejection's located spans for the pins this merge says nothing about,
+ * is exactly what the owner saw. Only ever adds a suppression on an exact fingerprint match: a stale or
+ * unreadable location re-raises the op instead.
+ */
+function seenAtRejection(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+  located: Located[],
+  idx: DiffIndex | undefined,
+  r: RejectedOp,
+): boolean {
+  const at = r.locatedEvidence;
+  if (
+    !at ||
+    at.length !== located.length ||
+    !ev.some((e) => uninformed(e, idx))
+  )
+    return false;
+  try {
+    const relocated = located.map((l, j): Located => {
+      const uri = at[j];
+      if (!uninformed(ev[j], idx) || uri === undefined) return l;
+      parseUri(uri);
+      return { kind: "located", uri, score: 1 };
+    });
+    return (
+      evidenceFingerprintOf(root, claim, ev, relocated) ===
+      r.evidenceFingerprint
+    );
+  } catch (e) {
+    if (e instanceof InvalidEvidenceUriError) return false;
+    throw e;
+  }
+}
+
 function pinState(
   root: string,
   p: EvidencePin,
   e: EvidenceStatus | undefined,
-  idx: DiffIndex | undefined,
+  l: Located | undefined,
 ): string {
   if (!e) return "unchecked";
   switch (e.kind) {
@@ -761,8 +801,7 @@ function pinState(
     case "ambiguous":
       return `ambiguous:${e.candidates.length}`;
     case "stale": {
-      const l = locate(e, idx);
-      const r = l.kind === "located" ? resolve(root, l.uri) : null;
+      const r = l?.kind === "located" ? resolve(root, l.uri) : null;
       const text = r && "text" in r ? r.text : e.now;
       return `stale:${hashAs(modeOfHash(p.hash), text)}`;
     }
@@ -906,46 +945,69 @@ export async function reconcile(
   sc: Sidecar,
   llm: Updater,
   options: ReconcileOptions = {},
-): Promise<Draft> {
+): Promise<ReconciledDraft> {
   const report = checkPage(root, pageMd, sc);
   const before = llm.calls;
-  const idx = buildDiffIndex(options);
+  const idx = buildDiffIndex(options.diffs);
   const ops: DraftOp[] = [];
   const rejected = options.rejected ?? [];
   const suppressed: SuppressedOp[] = [];
-  /** A covered candidate is recorded in suppressed; returns whether it was. */
-  const suppress = (c: RejectionCandidate): boolean => {
-    const match = findRejection(c, rejected);
-    if (!match || c.evidenceFingerprint === undefined) return false;
+  /** A claim's evidence as an op on it would show it; the fingerprint is computed at most once, on demand. */
+  const sightOf = (
+    claim: Claim,
+    ev: EvidenceStatus[],
+    located: Located[],
+  ): Sight => {
+    let fp: string | undefined;
+    const fingerprint = () =>
+      (fp ??= evidenceFingerprintOf(root, claim, ev, located));
+    return {
+      fingerprint,
+      locatedEvidence: located.map((l, j) =>
+        l.kind === "located" ? l.uri : (claim.evidence[j]?.uri ?? ""),
+      ),
+      coveredBy: () =>
+        findRejection(
+          { claimId: claim.id, evidenceFingerprint: fingerprint() },
+          rejected,
+        ) ??
+        rejected.find(
+          (r) =>
+            r.claimId === claim.id &&
+            seenAtRejection(root, claim, ev, located, idx, r),
+        ),
+    };
+  };
+  /** A covered op is recorded in suppressed; returns whether it was. */
+  const suppress = (claimId: string, op: DraftOpKind, sight: Sight) => {
+    const match = sight.coveredBy();
+    if (!match) return false;
     suppressed.push({
-      claimId: c.claimId,
-      op: c.op,
+      claimId,
+      op,
       rejectedOpId: match.opId,
-      evidenceFingerprint: c.evidenceFingerprint,
+      evidenceFingerprint: match.evidenceFingerprint,
     });
     return true;
   };
   // ENG-02: every non-auto op carries what the owner saw; auto repins carry nothing and are never suppressed.
   const add = (
-    o: Omit<DraftOp, "id" | "auto" | "evidenceFingerprint">,
-    evidenceFingerprint: () => string,
+    o: Omit<DraftOp, "id" | "auto" | "evidenceFingerprint" | "locatedEvidence">,
+    sight: Sight,
   ) => {
     const auto = OP_KINDS[o.op].auto;
-    const op: DraftOp = {
+    if (!auto && suppress(o.claimId, o.op, sight)) return;
+    ops.push({
       ...o,
       id: opKey(o.op, sc.page, o.claimId, options.sourceRev),
       auto,
-    };
-    if (!auto) {
-      op.evidenceFingerprint = evidenceFingerprint();
-      if (suppress(op)) return;
-    }
-    ops.push(op);
-  };
-  /** Computed at most once per claim, and only when an op is about to be emitted. */
-  const fingerprintOf = (claim: Claim, ev: EvidenceStatus[]) => {
-    let fp: string | undefined;
-    return () => (fp ??= evidenceFingerprintOf(root, claim, ev, idx));
+      ...(auto
+        ? {}
+        : {
+            evidenceFingerprint: sight.fingerprint(),
+            locatedEvidence: sight.locatedEvidence,
+          }),
+    });
   };
   const baseOf = (claim: Claim, ev: EvidenceStatus[]) => ({
     claimId: claim.id,
@@ -954,13 +1016,15 @@ export async function reconcile(
   });
   const extract = options.extractValues ?? extractValues;
   // Each claim sent to the model, with the evidence fingerprint its answer's op will carry.
-  const work: { w: UpdateRequest; fp: string }[] = [];
+  const work: { w: UpdateRequest; fp: Sight }[] = [];
   // checkPage reports claims in sc.claims order.
   sc.claims.forEach((claim, i) => {
     const cr = report.claims[i];
     if (!cr) return;
     const ev = inDiffContext(cr.evidence, claim.evidence, idx, root);
-    const fp = fingerprintOf(claim, ev);
+    // Located once: the op and its evidence fingerprint must agree on where every pin landed.
+    const located = ev.map((e) => locate(e, idx));
+    const fp = sightOf(claim, ev, located);
     const status =
       cr.status === "orphaned" ? cr.status : claimStatus(ev.map((e) => e.kind));
     const fixed = FIXED_OPS[status];
@@ -974,7 +1038,6 @@ export async function reconcile(
         fp,
       );
     if (status !== "stale") return; // fresh
-    const located = ev.map((e) => locate(e, idx));
     const pins = located.filter(
       (l): l is Extract<Located, { kind: "located" }> => l.kind === "located",
     );
@@ -1037,10 +1100,7 @@ export async function reconcile(
       }
     }
     // A rejected update is suppressed before the model is asked: no call is spent on it.
-    if (
-      suppress({ claimId: claim.id, op: "update", evidenceFingerprint: fp() })
-    )
-      return;
+    if (suppress(claim.id, "update", fp)) return;
     work.push({
       w: {
         claim,
@@ -1048,7 +1108,7 @@ export async function reconcile(
         newEvidence: pins.map((l) => l.uri),
         reanchorScore: Math.min(...pins.map((l) => l.score)),
       },
-      fp: fp(),
+      fp,
     });
   });
   if (work.length > 0) {
@@ -1057,8 +1117,7 @@ export async function reconcile(
       const x = asked.get(u.id);
       if (!x) continue; // unknown or already-answered id: an updater answers each claim at most once
       asked.delete(u.id);
-      const { w } = x;
-      const fp = () => x.fp;
+      const { w, fp } = x;
       if (!isUsableAnswer(u)) {
         add(
           {
@@ -1086,7 +1145,7 @@ export async function reconcile(
       }
       const newEvidence = u.evidence ?? w.newEvidence;
       const newEvidenceHash = newEvidence.map((uri) => pin(root, uri).hash);
-      // A rejection that names this exact proposal suppresses it; a different proposal is raised.
+      // proposalFingerprint is audit data: a rejected update was already suppressed before the model.
       add(
         {
           ...baseOf(w.claim, w.evidence),
@@ -1111,7 +1170,7 @@ export async function reconcile(
           op: "review",
           why: "the updater returned no rewrite for this fact: a human must review it",
         },
-        () => fp,
+        fp,
       );
   }
   return {
@@ -1285,7 +1344,8 @@ function renamedEvidence(root: string, c: Claim, op: DraftOp): EvidencePin[] {
     const r = resolve(root, uri);
     if (!was || !("text" in r) || !matchesHash(was.hash, r.text))
       throw refuse();
-    const now = pin(root, uri);
+    // The same derivation as pin(), from the text already read.
+    const now = { uri, hash: hashAs(classOfUri(uri), r.text) };
     if (now.hash !== newEvidenceHash[j]) throw refuse();
     return now;
   });

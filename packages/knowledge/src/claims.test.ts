@@ -398,7 +398,7 @@ describe("D-2: re-anchoring is enforced inside reconcile", () => {
     const { llm, seen } = countingUpdater();
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
-      diff: diffOf(now, header),
+      diffs: [diffOf(now, header)],
     });
     return { draft, seen };
   }

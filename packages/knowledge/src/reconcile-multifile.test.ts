@@ -7,7 +7,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyDraft,
-  ConflictingDiffOptionsError,
   InvalidEvidenceUriError,
   reconcile,
   stubUpdater,
@@ -197,17 +196,6 @@ describe("reconcile over a multi-file diff (SC1)", () => {
     const op = draft.ops.find((o) => o.claimId === "seat-price");
     expect(op?.op).toBe("review");
     expect(op?.why).toMatch(/^re-anchor /);
-  });
-
-  it("passing both diff and diffs is refused", async () => {
-    const { root, sc } = useCorpus();
-    const billing = extendTrial(root);
-    await expect(
-      reconcile(root, pageOf(root), sc, stubUpdater(), {
-        diff: billing,
-        diffs: [billing],
-      }),
-    ).rejects.toBeInstanceOf(ConflictingDiffOptionsError);
   });
 
   it.each([

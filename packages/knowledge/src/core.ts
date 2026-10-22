@@ -24,6 +24,7 @@ export type {
   PageReport,
   ReconcileDiff,
   ReconcileOptions,
+  ReconciledDraft,
   Resolved,
   Sidecar,
   SourceValues,

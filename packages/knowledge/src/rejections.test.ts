@@ -14,6 +14,7 @@ import {
 import {
   findRejection,
   matchesRejection,
+  rejectionOf as ledgerRejectionOf,
   type RejectedOp,
   type RejectionCandidate,
 } from "./rejections";
@@ -21,6 +22,7 @@ import {
   BILLING_LINES,
   countingUpdater,
   diffOf,
+  diffOfFile,
   edit,
   pageOf,
   SOURCE_SHA,
@@ -38,20 +40,24 @@ const REJECTED: RejectedOp = {
 };
 const CANDIDATE: RejectionCandidate = {
   claimId: "trial-length",
-  op: "conflict",
   evidenceFingerprint: FP,
 };
 
 describe("matchesRejection", () => {
   it.each<[string, RejectionCandidate, RejectedOp, boolean]>([
-    ["same claim, op and evidence", CANDIDATE, REJECTED, true],
+    ["same claim and evidence", CANDIDATE, REJECTED, true],
+    [
+      "same evidence surfacing as another op kind",
+      CANDIDATE,
+      { ...REJECTED, op: "update" },
+      true,
+    ],
     [
       "different claim",
       { ...CANDIDATE, claimId: "seat-price" },
       REJECTED,
       false,
     ],
-    ["different op kind", { ...CANDIDATE, op: "review" }, REJECTED, false],
     [
       "different evidence fingerprint",
       { ...CANDIDATE, evidenceFingerprint: OTHER_FP },
@@ -60,33 +66,9 @@ describe("matchesRejection", () => {
     ],
     [
       "candidate without an evidence fingerprint",
-      { claimId: "trial-length", op: "conflict" },
+      { claimId: "trial-length" },
       REJECTED,
       false,
-    ],
-    [
-      "both proposal fingerprints, different",
-      { ...CANDIDATE, op: "update", proposalFingerprint: FP },
-      { ...REJECTED, op: "update", proposalFingerprint: OTHER_FP },
-      false,
-    ],
-    [
-      "both proposal fingerprints, equal",
-      { ...CANDIDATE, op: "update", proposalFingerprint: FP },
-      { ...REJECTED, op: "update", proposalFingerprint: FP },
-      true,
-    ],
-    [
-      "only the candidate has a proposal fingerprint",
-      { ...CANDIDATE, op: "update", proposalFingerprint: FP },
-      { ...REJECTED, op: "update" },
-      true,
-    ],
-    [
-      "only the rejection has a proposal fingerprint",
-      { ...CANDIDATE, op: "update" },
-      { ...REJECTED, op: "update", proposalFingerprint: FP },
-      true,
     ],
   ])("%s -> %s", (_name, candidate, rejected, expected) => {
     expect(matchesRejection(candidate, rejected)).toBe(expected);
@@ -104,7 +86,9 @@ describe("findRejection", () => {
 
   it("returns undefined when nothing matches or the list is empty", () => {
     expect(
-      findRejection(CANDIDATE, [{ ...REJECTED, op: "retract" }]),
+      findRejection(CANDIDATE, [
+        { ...REJECTED, evidenceFingerprint: OTHER_FP },
+      ]),
     ).toBeUndefined();
     expect(findRejection(CANDIDATE, [])).toBeUndefined();
   });
@@ -131,17 +115,9 @@ const opFor = (ops: DraftOp[], claimId: string, op?: DraftOp["op"]) => {
 
 /** The rejection a decision ledger would record for this op. */
 const rejectionOf = (o: DraftOp): RejectedOp => {
-  if (o.evidenceFingerprint === undefined)
-    throw new Error(`${o.id} carries no evidence fingerprint`);
-  return {
-    opId: o.id,
-    claimId: o.claimId,
-    op: o.op,
-    evidenceFingerprint: o.evidenceFingerprint,
-    ...(o.proposalFingerprint === undefined
-      ? {}
-      : { proposalFingerprint: o.proposalFingerprint }),
-  };
+  const r = ledgerRejectionOf(o);
+  if (!r) throw new Error(`${o.id} carries no evidence fingerprint`);
+  return r;
 };
 
 const trialInCode = (days: number) =>
@@ -212,7 +188,7 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     const moved = await run(root, sc, {
       sourceRev: LATER_SHA,
       rejected,
-      diff: diffOf(shifted, "@@ -0,0 +1 @@"),
+      diffs: [diffOf(shifted, "@@ -0,0 +1 @@")],
     });
     expect(moved.ops.filter((o) => o.claimId === "trial-length")).toEqual([]);
     expect(moved.suppressed).toEqual(covered);
@@ -331,12 +307,15 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     writeBilling(root, trialInCode(30));
     trialInDocs(root, 14, 30);
     const diff = { path: "other.ts", hunks: [], oldText: "", newText: "" };
-    const first = await run(root, sc, { sourceRev: SOURCE_SHA, diff });
+    const first = await run(root, sc, {
+      sourceRev: SOURCE_SHA,
+      diffs: [diff],
+    });
     const review = opFor(first.ops, "trial-length", "review");
     expect(review.why).toContain("no diff for");
     const later = await run(root, sc, {
       sourceRev: LATER_SHA,
-      diff,
+      diffs: [diff],
       rejected: [rejectionOf(review)],
     });
     expect(later.ops.filter((o) => o.claimId === "trial-length")).toEqual([]);
@@ -371,7 +350,7 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     expect(draft.suppressed).toEqual([]);
   });
 
-  it("a rejection for another claim or another op kind suppresses nothing", async () => {
+  it("a rejection for another claim suppresses nothing; one recorded under another op kind on the same evidence covers it", async () => {
     const { root, sc } = useCorpus();
     writeBilling(root, trialInCode(30));
     const c = opFor(
@@ -382,13 +361,18 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     const r = rejectionOf(c);
     const later = await run(root, sc, {
       sourceRev: LATER_SHA,
-      rejected: [
-        { ...r, claimId: "seat-price" },
-        { ...r, op: "review" },
-      ],
+      rejected: [{ ...r, claimId: "seat-price" }],
     });
     expect(opFor(later.ops, "trial-length").op).toBe("conflict");
     expect(later.suppressed).toEqual([]);
+    const asReview = await run(root, sc, {
+      sourceRev: LATER_SHA,
+      rejected: [{ ...r, op: "review" }],
+    });
+    expect(asReview.ops.filter((o) => o.claimId === "trial-length")).toEqual(
+      [],
+    );
+    expect(asReview.suppressed.map((x) => x.op)).toEqual(["conflict"]);
   });
 
   it("without rejections, suppressed is empty", async () => {
@@ -397,5 +381,102 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     const draft = await run(root, sc, { sourceRev: SOURCE_SHA });
     expect(draft.suppressed).toEqual([]);
     expect(draft.ops).toHaveLength(1);
+  });
+});
+
+describe("rejections across merges whose diffs omit the rejected file (ENG-02 with diffs)", () => {
+  /** A later merge that touches only a file nothing on the page pins. */
+  const unrelatedDiffs = [
+    diffOfFile("ratelimit.py", "LIMIT = 1\n", "LIMIT = 2\n", "@@ -1 +1 @@"),
+  ];
+  const inPlace = (lines: string[]) => [diffOf(lines, "@@ -1 +1 @@")];
+
+  it("a rejected update stays suppressed when the next merge's diffs do not touch its file", async () => {
+    const { root, sc } = useCorpus();
+    writeBilling(root, trialInCode(30));
+    trialInDocs(root, 14, 30);
+    const first = await run(root, sc, {
+      sourceRev: SOURCE_SHA,
+      diffs: inPlace(trialInCode(30)),
+    });
+    const u = opFor(first.ops, "trial-length", "update");
+    expect(u.locatedEvidence).toEqual(u.newEvidence);
+
+    unrelatedDocEdit(root);
+    const quiet = countingUpdater();
+    const later = await run(
+      root,
+      sc,
+      {
+        sourceRev: LATER_SHA,
+        diffs: unrelatedDiffs,
+        rejected: [rejectionOf(u)],
+      },
+      quiet.llm,
+    );
+    expect(later.ops.filter((o) => o.claimId === "trial-length")).toEqual([]);
+    expect(later.suppressed).toEqual([
+      {
+        claimId: "trial-length",
+        op: "review",
+        rejectedOpId: u.id,
+        evidenceFingerprint: u.evidenceFingerprint,
+      },
+    ]);
+    expect(quiet.seen).toEqual([]);
+  });
+
+  it("a rejected value conflict stays suppressed when the next merge's diffs do not touch its file", async () => {
+    const { root, sc } = useCorpus();
+    writeBilling(root, trialInCode(30));
+    const first = await run(root, sc, {
+      sourceRev: SOURCE_SHA,
+      diffs: inPlace(trialInCode(30)),
+    });
+    const c = opFor(first.ops, "trial-length", "conflict");
+
+    unrelatedDocEdit(root);
+    const later = await run(root, sc, {
+      sourceRev: LATER_SHA,
+      diffs: unrelatedDiffs,
+      rejected: [rejectionOf(c)],
+    });
+    expect(later.ops.filter((o) => o.claimId === "trial-length")).toEqual([]);
+    expect(later.suppressed.map((x) => x.rejectedOpId)).toEqual([c.id]);
+  });
+
+  it("a rejection survives later merges after the rejected merge shifted the pin, with or without diffs", async () => {
+    const { root, sc } = useCorpus();
+    const shifted = ["// billing constants", ...trialInCode(30)];
+    writeBilling(root, shifted);
+    trialInDocs(root, 14, 30);
+    const first = await run(root, sc, {
+      sourceRev: SOURCE_SHA,
+      diffs: [diffOf(shifted, "@@ -0,0 +1 @@\n@@ -1 +2 @@")],
+    });
+    const u = opFor(first.ops, "trial-length", "update");
+    expect(u.locatedEvidence?.[0]).toBe("repo://billing.ts#L2-L2");
+    const rejected = [rejectionOf(u)];
+
+    unrelatedDocEdit(root);
+    for (const diffs of [unrelatedDiffs, undefined]) {
+      const later = await run(root, sc, {
+        sourceRev: LATER_SHA,
+        rejected,
+        ...(diffs ? { diffs } : {}),
+      });
+      expect(later.ops.filter((o) => o.claimId === "trial-length")).toEqual([]);
+      expect(later.suppressed.map((x) => x.rejectedOpId)).toEqual([u.id]);
+    }
+
+    // The located text itself changes: the owner has not seen this, so it is raised again.
+    writeBilling(root, ["// billing constants", ...trialInCode(45)]);
+    const changed = await run(root, sc, {
+      sourceRev: LATER_SHA,
+      rejected,
+      diffs: unrelatedDiffs,
+    });
+    expect(opFor(changed.ops, "trial-length").op).toBe("review");
+    expect(changed.suppressed).toEqual([]);
   });
 });
