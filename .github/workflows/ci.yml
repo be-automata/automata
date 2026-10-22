@@ -226,7 +226,7 @@ jobs:
             src/agent-run/self-heal-box-lock.integration.test.ts \
             src/agent-run/admission-deferral.integration.test.ts \
             src/agent-run/payload-seal.integration.test.ts \
-            src/agent-run/burst.integration.test.ts
+            src/agent-run/burst.integration.test.ts \
             src/agent-run/run-terminal-redelivery.integration.test.ts
       - name: Tear down (always)
         if: always()
