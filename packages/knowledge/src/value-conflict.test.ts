@@ -8,14 +8,12 @@ import {
   generateSidecar,
   reconcile,
   stubUpdater,
-  type DraftOp,
   type ReconcileDiff,
 } from "./claims";
 import {
   countingUpdater,
   diffOfFile,
   edit,
-  FIXTURES,
   limitsPageOf,
   PAGE,
   pageOf,
@@ -23,10 +21,9 @@ import {
   useCorpus,
   useLimitsCorpus,
   writeRepo,
+  repoFixture,
+  findOp,
 } from "./test-fixtures";
-
-const opOf = (ops: DraftOp[], claimId: string) =>
-  ops.find((o) => o.claimId === claimId);
 
 /** Code and marketing both change the trial, to `code` and `docs` days respectively. */
 function changeTrial(root: string, code: string, docs: string): void {
@@ -46,7 +43,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, llm, {
       sourceRev: SOURCE_SHA,
     });
-    const op = opOf(draft.ops, "trial-length");
+    const op = findOp(draft.ops, "trial-length");
     expect(op).toMatchObject({
       op: "conflict",
       auto: false,
@@ -68,11 +65,11 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    expect(opOf(draft.ops, "trial-length")).toMatchObject({
+    expect(findOp(draft.ops, "trial-length")).toMatchObject({
       op: "update",
       after: "Trials last 30 days and need no card.",
     });
-    expect(opOf(draft.ops, "trial-length")?.sourceValues).toBeUndefined();
+    expect(findOp(draft.ops, "trial-length")?.sourceValues).toBeUndefined();
     expect(draft.llmCalls).toBe(1);
   });
 
@@ -84,7 +81,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    const op = opOf(draft.ops, "trial-length");
+    const op = findOp(draft.ops, "trial-length");
     expect(op?.op).toBe("conflict");
     expect(op).not.toHaveProperty("sourceValues");
     expect(op?.why).toBe(
@@ -99,7 +96,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    expect(opOf(draft.ops, "trial-length")?.op).toBe("update");
+    expect(findOp(draft.ops, "trial-length")?.op).toBe("update");
     expect(draft.llmCalls).toBe(1);
   });
 
@@ -121,7 +118,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    expect(opOf(draft.ops, "seat-price")?.op).toBe("update");
+    expect(findOp(draft.ops, "seat-price")?.op).toBe("update");
     expect(draft.llmCalls).toBe(1);
   });
 
@@ -132,7 +129,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
       sourceRev: SOURCE_SHA,
       extractValues: () => [],
     });
-    expect(opOf(draft.ops, "trial-length")?.op).toBe("update");
+    expect(findOp(draft.ops, "trial-length")?.op).toBe("update");
     expect(draft.llmCalls).toBe(1);
   });
 
@@ -143,7 +140,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
       sourceRev: SOURCE_SHA,
       extractValues: (text) => [text.includes("TRIAL_DAYS") ? "code" : "doc"],
     });
-    expect(opOf(draft.ops, "trial-length")).toMatchObject({
+    expect(findOp(draft.ops, "trial-length")).toMatchObject({
       op: "conflict",
       sourceValues: [
         { uri: "repo://billing.ts#L1-L1", values: ["code"] },
@@ -159,7 +156,7 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, pageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    expect(opOf(draft.ops, "sso-fixed-in")?.op).toBe("update");
+    expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("update");
     expect(draft.llmCalls).toBe(1);
   });
 
@@ -170,15 +167,13 @@ describe("value-aware conflicts (ENG-04 / E4)", () => {
     const draft = await reconcile(root, md, sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    const op = opOf(draft.ops, "trial-length");
+    const op = findOp(draft.ops, "trial-length");
     expect(op?.op).toBe("conflict");
     const out = applyDraft(root, md, sc, draft, op ? [op.id] : []);
     expect(out.md).toBe(md);
     expect(out.sc).toEqual(sc);
   });
 });
-
-const fixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
 
 /**
  * One merge over two files: the py rate limit changes in place to `py`, and the yaml one changes to `yaml`
@@ -188,21 +183,21 @@ function changeLimits(
   root: string,
   values: { py: string; yaml: string },
 ): ReconcileDiff[] {
-  const py = fixture("ratelimit.py").replace(
+  const py = repoFixture("ratelimit.py").replace(
     "RATE_LIMIT_PER_MINUTE = 120",
     `RATE_LIMIT_PER_MINUTE = ${values.py}`,
   );
-  const yaml = `# tuned for the new plan\n${fixture("config.yaml").replace(
+  const yaml = `# tuned for the new plan\n${repoFixture("config.yaml").replace(
     "requests_per_minute: 120",
     `requests_per_minute: ${values.yaml}`,
   )}`;
   writeRepo(root, "ratelimit.py", py);
   writeRepo(root, "config.yaml", yaml);
   return [
-    diffOfFile("ratelimit.py", fixture("ratelimit.py"), py, "@@ -1 +1 @@"),
+    diffOfFile("ratelimit.py", repoFixture("ratelimit.py"), py, "@@ -1 +1 @@"),
     diffOfFile(
       "config.yaml",
-      fixture("config.yaml"),
+      repoFixture("config.yaml"),
       yaml,
       "@@ -0,0 +1 @@\n@@ -3 +4 @@",
     ),
@@ -218,7 +213,7 @@ describe("cross-file value conflicts", () => {
       sourceRev: SOURCE_SHA,
       diffs,
     });
-    expect(opOf(draft.ops, "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "conflict",
       sourceValues: [
         { uri: "repo://ratelimit.py#L1-L1", values: ["150"] },
@@ -237,7 +232,7 @@ describe("cross-file value conflicts", () => {
       sourceRev: SOURCE_SHA,
       diffs,
     });
-    expect(opOf(draft.ops, "api-rate")).toMatchObject({
+    expect(findOp(draft.ops, "api-rate")).toMatchObject({
       op: "update",
       newEvidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L4-L4"],
     });
@@ -251,7 +246,7 @@ describe("cross-file value conflicts", () => {
     const draft = await reconcile(root, limitsPageOf(root), sc, stubUpdater(), {
       sourceRev: SOURCE_SHA,
     });
-    expect(opOf(draft.ops, "api-rate")?.op).toBe("update");
+    expect(findOp(draft.ops, "api-rate")?.op).toBe("update");
     expect(draft.llmCalls).toBe(1);
   });
 });

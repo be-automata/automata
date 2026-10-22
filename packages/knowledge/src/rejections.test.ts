@@ -28,6 +28,9 @@ import {
   SOURCE_SHA,
   useCorpus,
   writeBilling,
+  emptyDiff,
+  opFor,
+  withClaim,
 } from "./test-fixtures";
 
 const FP = "0123456789abcdef";
@@ -104,14 +107,6 @@ const run = (
   options: ReconcileOptions,
   llm: Updater = stubUpdater(),
 ) => reconcile(root, pageOf(root), sc, llm, options);
-
-const opFor = (ops: DraftOp[], claimId: string, op?: DraftOp["op"]) => {
-  const found = ops.find(
-    (o) => o.claimId === claimId && (op === undefined || o.op === op),
-  );
-  if (!found) throw new Error(`no ${op ?? "op"} for ${claimId}`);
-  return found;
-};
 
 /** The rejection a decision ledger would record for this op. */
 const rejectionOf = (o: DraftOp): RejectedOp => {
@@ -210,14 +205,10 @@ describe("rejection suppression (ENG-02 / O6)", () => {
       "trial-length",
       "conflict",
     );
-    const edited: Sidecar = {
-      ...sc,
-      claims: sc.claims.map((cl) =>
-        cl.id === "trial-length"
-          ? { ...cl, statement: "Trials run for 14 days and need no card." }
-          : cl,
-      ),
-    };
+    const edited = withClaim(sc, "trial-length", (cl) => ({
+      ...cl,
+      statement: "Trials run for 14 days and need no card.",
+    }));
     const later = await run(root, edited, {
       sourceRev: LATER_SHA,
       rejected: [rejectionOf(c)],
@@ -306,7 +297,7 @@ describe("rejection suppression (ENG-02 / O6)", () => {
     const { root, sc } = useCorpus();
     writeBilling(root, trialInCode(30));
     trialInDocs(root, 14, 30);
-    const diff = { path: "other.ts", hunks: [], oldText: "", newText: "" };
+    const diff = emptyDiff("other.ts");
     const first = await run(root, sc, {
       sourceRev: SOURCE_SHA,
       diffs: [diff],

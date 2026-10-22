@@ -15,6 +15,8 @@ import { onTestFinished } from "vitest";
 import {
   generateSidecar,
   stubUpdater,
+  type Claim,
+  type DraftOp,
   type ReconcileDiff,
   type Sidecar,
   type Updater,
@@ -179,6 +181,43 @@ export const diffOfFile = (
   oldText,
   newText,
 });
+
+/** A diff entry that names a file but changes none of its lines: only its path (and rename source) matter. */
+export const emptyDiff = (path: string, oldPath?: string): ReconcileDiff => ({
+  path,
+  ...(oldPath ? { oldPath } : {}),
+  hunks: [],
+  oldText: "",
+  newText: "",
+});
+
+/** The fixture text of `repo/<rel>`, i.e. the `oldText` side of a diff against the corpus. */
+export const repoFixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
+
+/** The sidecar with one claim changed; every other claim is untouched. */
+export const withClaim = (
+  sc: Sidecar,
+  id: string,
+  change: (c: Claim) => Claim,
+): Sidecar => ({
+  ...sc,
+  claims: sc.claims.map((c) => (c.id === id ? change(c) : c)),
+});
+
+/** The op on a claim (optionally of one kind), or undefined: for asserting that no op was raised. */
+export const findOp = (ops: DraftOp[], claimId: string, op?: DraftOp["op"]) =>
+  ops.find((o) => o.claimId === claimId && (op === undefined || o.op === op));
+
+/** The op on a claim (optionally of one kind); throws naming what is missing, so a failure reads plainly. */
+export function opFor(
+  ops: DraftOp[],
+  claimId: string,
+  op?: DraftOp["op"],
+): DraftOp {
+  const found = findOp(ops, claimId, op);
+  if (!found) throw new Error(`no ${op ?? "op"} for ${claimId}`);
+  return found;
+}
 
 /** Write `<root>/repo/<rel>`, creating parent directories. */
 export function writeRepo(root: string, rel: string, text: string): void {

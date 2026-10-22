@@ -23,6 +23,7 @@ import {
   SOURCE_SHA,
   useCorpus,
   useLimitsCorpus,
+  withClaim,
 } from "./test-fixtures";
 
 const EXACT = /^x:[0-9a-f]{16}$/;
@@ -213,15 +214,10 @@ describe("evidence identity (ENG-03 / O7)", () => {
     const uri = "repo://billing.ts#L1-L1";
     const pin = { uri, hash: legacyHash("export const TRIAL_DAYS = 14;") };
     const legacy: Sidecar = {
-      ...sc,
-      claims: sc.claims.map((c) =>
-        c.id === "trial-length"
-          ? {
-              ...c,
-              evidence: c.evidence.map((e) => (e.uri === uri ? pin : e)),
-            }
-          : c,
-      ),
+      ...withClaim(sc, "trial-length", (c) => ({
+        ...c,
+        evidence: c.evidence.map((e) => (e.uri === uri ? pin : e)),
+      })),
     };
     expect(checkEvidence(root, pin)).toEqual({ kind: "fresh", uri });
     expect(billingStatuses(root, legacy)).toEqual(BILLING_FRESH);
