@@ -111,6 +111,7 @@ describe("deploy/migrations", () => {
       "2026-10-08-organization-environment",
       "2026-10-14-environment-org-unique",
       "2026-10-19-knowledge-plane",
+      "2026-10-22-queued-at",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);
