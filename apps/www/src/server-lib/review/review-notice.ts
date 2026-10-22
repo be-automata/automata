@@ -52,7 +52,12 @@ export type NoVerdictCause =
    * a usage limit, its organization disabled Claude Code access, or the API
    * credit ran out. The classification travels as `provider`.
    */
-  | "provider_unavailable";
+  | "provider_unavailable"
+  /**
+   * #446: the queued review was retired at dequeue without running (its PR
+   * closed while it waited, or it waited longer than the queue allows).
+   */
+  | "queue_retired";
 
 /** A comment in the PR conversation (the GitHub issue-comment surface). */
 export interface PrConversationComment {
@@ -158,6 +163,8 @@ function describeCause(cause: NoVerdictCause, reason: string): string {
     case "provider_unavailable":
       // Rendered by renderReviewNotice's own branch; kept for exhaustiveness.
       return "the Claude provider refused the run.";
+    case "queue_retired":
+      return `this review was retired from the queue without running: ${detail}`;
   }
 }
 

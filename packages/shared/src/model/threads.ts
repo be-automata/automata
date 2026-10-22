@@ -18,6 +18,7 @@ import {
   ne,
   or,
   sql,
+  type SQL,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { publishBroadcastUserMessage } from "../broadcast-server";
@@ -452,6 +453,7 @@ export async function getThreadMinimal({
     errorMessageInfo,
     scheduleAt,
     reattemptQueueAt,
+    queuedAt,
     contextLength,
     permissionMode,
     messages,
@@ -805,6 +807,7 @@ type ThreadForThreadChatInfoFull = Pick<
   | "messages"
   | "activeRunExternalId"
   | "terminalCause"
+  | "queuedAt"
 > & {
   isUnread: boolean;
 };
@@ -847,6 +850,7 @@ function createLegacyThreadChatFull(
     // row, so these arrive from the same single read as status/errorMessage.
     activeRunExternalId: thread.activeRunExternalId,
     terminalCause: thread.terminalCause,
+    queuedAt: thread.queuedAt,
   };
 }
 
@@ -1297,6 +1301,41 @@ export async function getThreadBrokerContextBySandboxId({
 }
 
 /**
+ * #446: `queued_at` bookkeeping, written in the same statement as the status
+ * CAS so it can never disagree with the transition that caused it. `column` is
+ * the row that carries the status: `thread_chat.queued_at`, or
+ * `thread.queued_at` for a legacy thread (production's shape).
+ *  - entering `queued-tasks-concurrency` stamps it ONCE per queue period
+ *    (COALESCE): a re-queue after a failed start keeps the first instant, so a
+ *    run cannot extend its own life by bouncing off the cap;
+ *  - the agent actually starting (`booting` / `working`) clears it;
+ *  - a NEW queue period (a follow-up, schedule or draft entering `queued` from
+ *    anything but a queue state) clears it, so the next stamp is fresh.
+ * The dequeue (`queued-*` -> `queued`) leaves it alone: stale evaluation runs
+ * after the dequeue and must still see it.
+ */
+function queuedAtUpdate({
+  column,
+  fromStatus,
+  toStatus,
+}: {
+  column: typeof schema.thread.queuedAt | typeof schema.threadChat.queuedAt;
+  fromStatus: ThreadStatus;
+  toStatus: ThreadStatus;
+}): { queuedAt?: SQL | null } {
+  if (toStatus === "queued-tasks-concurrency") {
+    return { queuedAt: sql`COALESCE(${column}, now())` };
+  }
+  if (toStatus === "booting" || toStatus === "working") {
+    return { queuedAt: null };
+  }
+  if (toStatus === "queued" && !fromStatus.startsWith("queued-")) {
+    return { queuedAt: null };
+  }
+  return {};
+}
+
+/**
  * When we update thread statuses, we want to ensure that we're the ones who updated the thread status
  * from the current status to the new status.
  *
@@ -1337,7 +1376,15 @@ export async function updateThreadChatStatusAtomic({
     // from the current status to the new status.
     const updateResult = await db
       .update(schema.thread)
-      .set({ ...otherUpdates, status: toStatus })
+      .set({
+        ...otherUpdates,
+        ...queuedAtUpdate({
+          column: schema.thread.queuedAt,
+          fromStatus,
+          toStatus,
+        }),
+        status: toStatus,
+      })
       .where(
         and(
           eq(schema.thread.id, threadId),
@@ -1352,7 +1399,15 @@ export async function updateThreadChatStatusAtomic({
   } else {
     const updateResult = await db
       .update(schema.threadChat)
-      .set({ ...otherUpdates, status: toStatus })
+      .set({
+        ...otherUpdates,
+        ...queuedAtUpdate({
+          column: schema.threadChat.queuedAt,
+          fromStatus,
+          toStatus,
+        }),
+        status: toStatus,
+      })
       .where(
         and(
           eq(schema.threadChat.id, threadChatId),
@@ -1974,6 +2029,15 @@ type ThreadChatAndStatus = {
   threadId: string;
   threadChatId: string;
   status: ThreadStatus;
+  /**
+   * #446: read BEFORE the dequeue mutates the row. `queuedAt` is the
+   * queue-entry instant of whichever row carries the status (the chat row, or
+   * the thread row for a legacy thread); `updatedAt` is the fallback for rows
+   * queued before the column existed — the dequeue's CAS bumps `updated_at`,
+   * so it must be read here.
+   */
+  queuedAt?: Date | null;
+  updatedAt?: Date | null;
 };
 
 export async function getEligibleQueuedThreadChats({
@@ -2025,6 +2089,8 @@ export async function getEligibleQueuedThreadChats({
         columns: {
           id: true,
           status: true,
+          queuedAt: true,
+          updatedAt: true,
         },
         orderBy: (thread, { asc }) => asc(thread.createdAt),
       }),
@@ -2037,6 +2103,8 @@ export async function getEligibleQueuedThreadChats({
           id: true,
           threadId: true,
           status: true,
+          queuedAt: true,
+          updatedAt: true,
         },
         orderBy: (threadChat, { asc }) => asc(threadChat.createdAt),
       }),
@@ -2047,6 +2115,8 @@ export async function getEligibleQueuedThreadChats({
         threadId: thread.id,
         threadChatId: LEGACY_THREAD_CHAT_ID,
         status: thread.status,
+        queuedAt: thread.queuedAt,
+        updatedAt: thread.updatedAt,
       });
     }
     for (const threadChat of threadChats) {
@@ -2054,6 +2124,8 @@ export async function getEligibleQueuedThreadChats({
         threadId: threadChat.threadId,
         threadChatId: threadChat.id,
         status: threadChat.status,
+        queuedAt: threadChat.queuedAt,
+        updatedAt: threadChat.updatedAt,
       });
     }
     return result;
@@ -2073,6 +2145,9 @@ export async function atomicDequeueThreadChats({
       threadId: string;
       threadChatId: string;
       oldStatus: ThreadStatus;
+      /** Pre-dequeue values (see ThreadChatAndStatus). */
+      queuedAt: Date | null;
+      updatedAt: Date | null;
     }
   | undefined
 > {
@@ -2094,6 +2169,8 @@ export async function atomicDequeueThreadChats({
         threadId: threadChat.threadId,
         threadChatId: threadChat.threadChatId,
         oldStatus,
+        queuedAt: threadChat.queuedAt ?? null,
+        updatedAt: threadChat.updatedAt ?? null,
       };
     }
   }
