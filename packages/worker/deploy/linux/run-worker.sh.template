@@ -69,4 +69,15 @@ if [ -n "${WORKER_AGENT_USER:-}" ]; then
   export WORKER_DAEMON_DIST=/usr/local/automata/daemon/index.js
 fi
 
+# #386: the run-terminal ledger must outlive a REBOOT, not just a restart. Its
+# default (the run namespace root under /tmp) is wiped at boot by Ubuntu's
+# tmpfiles (`D /tmp`), and a reboot mid-drain would then let the engine's
+# redelivery re-execute a run that already ended. The launcher names a durable,
+# worker-only default under the unit's ReadWritePaths; worker-box.env may still
+# override it. Fail-open like the ledger itself: a dir that cannot be made is
+# logged, never a reason to refuse boot.
+export WORKER_RUN_TERMINAL_ROOT="${WORKER_RUN_TERMINAL_ROOT:-/usr/local/automata/state}"
+install -d -m 0700 "$WORKER_RUN_TERMINAL_ROOT" \
+  || echo "run-worker: could not create $WORKER_RUN_TERMINAL_ROOT; the run-terminal ledger will not survive a reboot" >&2
+
 exec node --import tsx src/hello/worker.ts

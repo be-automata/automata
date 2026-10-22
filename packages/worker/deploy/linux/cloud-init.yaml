@@ -251,6 +251,10 @@ write_files:
       # no user to name.
       install -d -m 0755 -o automata -g automata \
         /usr/local/automata /usr/local/automata/daemon
+      # #386: the run-terminal ledger (WORKER_RUN_TERMINAL_ROOT, named by
+      # run-worker.sh). Worker-only: it records which runs ended, and /tmp — the
+      # code default — is wiped at boot.
+      install -d -m 0700 -o automata -g automata /usr/local/automata/state
 
       # ── assertions: the box is provisioned only if these all hold ────────
       NODE_MAJOR="$NODE_MAJOR" node -e '

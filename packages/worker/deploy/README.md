@@ -277,17 +277,23 @@ not a rolling restart:
 > deferring on memory headroom failed five minutes into a drain. The worker
 > therefore records every run id that reached a terminal in
 > `<WORKER_RUN_TERMINAL_ROOT>/run-terminals/` (kept 24h) and never re-executes a
-> recorded id. `WORKER_RUN_TERMINAL_ROOT` defaults to the run namespace root
-> under `/tmp`, which `PrivateTmp=no` keeps across a restart but Ubuntu's
-> tmpfiles (`D /tmp`) wipes at boot. On the execution box set it in
-> `worker-box.env` to a worker-only dir under the unit's `ReadWritePaths`
-> (`install -d -o automata -g automata -m 0700 /usr/local/automata/state`, then
-> `WORKER_RUN_TERMINAL_ROOT=/usr/local/automata/state`) so a reboot mid-drain
-> keeps the ledger. Of a recorded id, a run whose first
-> attempt returned completes as a no-op (output `outcome: already-terminal`,
-> engine COMPLETED); one whose first attempt failed is refused with
-> `RunAlreadyTerminalError` (engine FAILED). Either way no clone, no daemon, and
-> the journal line reads `redelivered attempt refused, not re-executed`. A run
+> recorded id. In code `WORKER_RUN_TERMINAL_ROOT` defaults to the run namespace
+> root under `/tmp`, which `PrivateTmp=no` keeps across a restart but Ubuntu's
+> tmpfiles (`D /tmp`) wipes at boot, so on the execution box `run-worker.sh`
+> defaults it to `/usr/local/automata/state` (worker-only, under the unit's
+> `ReadWritePaths`, created by cloud-init and again by the launcher);
+> `worker-box.env` may override it. Boot logs
+> `[worker-boot] run-terminal ledger root=<path>` and warns when it is under
+> `/tmp`. Of a recorded id, a run whose first attempt returned completes as a
+> no-op (output `outcome: already-terminal`, engine COMPLETED, journal
+> `redelivered attempt completed as a no-op`); one whose first attempt failed is
+> refused with `RunAlreadyTerminalError` (engine FAILED, journal
+> `redelivered attempt refused, not re-executed`). Either way no clone, no
+> daemon, and one structured line
+> `run.redelivery_refused {"runId","prior","priorAt","gapMs","action":"noop"|"refused"}`.
+> After any restart with a run in flight, grep the unit's journal for
+> `run.redelivery_refused`. First seen live 2026-10-22: a 41 s drain the engine
+> REASSIGNED 29 s in, completed as a no-op. A run
 > that never ended (worker crash mid-run, #152) has no entry and is re-executed as before. A deferring run
 > (`box.headroom_deferred_wait`) holds the drain for up to its 12-minute budget,
 > and has no cgroup yet, so a cgroup idle check does not see it.

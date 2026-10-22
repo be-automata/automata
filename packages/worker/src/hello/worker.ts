@@ -35,6 +35,7 @@ import {
 } from "../agent-run/box-slots-boot";
 import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
+import { runTerminalRootBootLines } from "../agent-run/run-terminal-ledger";
 import { bootUidScan } from "../agent-run/uid-reaper";
 import {
   bootTimeSlotReclaim,
@@ -374,6 +375,13 @@ async function main() {
   const registrationConfig = bootCfg;
   const boxId = registrationConfig.boxId;
   console.log(`[worker-boot] box id: ${boxId}`);
+  const ledgerBoot = runTerminalRootBootLines(
+    registrationConfig.runTerminalRoot,
+  );
+  console.log(`[worker-boot] ${ledgerBoot.line}`);
+  if (ledgerBoot.warning) {
+    console.warn(`[worker-boot] WARNING: ${ledgerBoot.warning}`);
+  }
 
   // #204: prepare the delegated cgroup subtree once, at boot, before any run.
   //
