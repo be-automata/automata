@@ -259,6 +259,13 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
           "This run waited in the queue until it was stale, so it was retired without running.",
         action: "open-task",
       };
+    case "out-of-memory":
+      return {
+        title: "Ran out of memory",
+        reason:
+          "The run exceeded its memory limit and was stopped. Reduce parallelism and retry.",
+        action: "open-task",
+      };
     case "agent-not-responding":
     case "request-timeout":
       return {
@@ -301,6 +308,7 @@ const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
   "queue-limit-exceeded": true,
   "provider-unavailable": true,
   "queue-retired": true,
+  "out-of-memory": true,
 };
 
 function isThreadErrorType(value: string): value is ThreadErrorType {

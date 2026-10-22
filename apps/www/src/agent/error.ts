@@ -51,4 +51,5 @@ export const allThreadErrors: Record<ThreadErrorType, boolean> = {
   "queue-limit-exceeded": true,
   "provider-unavailable": true,
   "queue-retired": true,
+  "out-of-memory": true,
 };

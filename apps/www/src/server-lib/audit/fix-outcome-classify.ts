@@ -96,6 +96,13 @@ export const TERMINAL_CAUSE_RULES = {
     reason: "run_failed_unreported",
     execPlaneSignal: true,
   },
+  // #437: the typed name for an OOM kill, which landed as daemon-failed
+  // before; it keeps that rule so breaker inputs do not move.
+  "out-of-memory": {
+    class: "infra",
+    reason: "daemon_failed",
+    execPlaneSignal: true,
+  },
 } as const satisfies Record<TerminalCause, CauseRule>;
 
 const CREDENTIAL: CauseRule = {
@@ -226,6 +233,13 @@ export const THREAD_ERROR_RULES = {
   "prompt-too-long": {
     class: "counted",
     reason: "prompt_too_long",
+    execPlaneSignal: false,
+  },
+  // #437: the run's own processes hit its memory ceiling. Before the typed
+  // cause this landed as agent-generic-error, so it keeps that rule.
+  "out-of-memory": {
+    class: "counted",
+    reason: "agent_error",
     execPlaneSignal: false,
   },
 } as const satisfies Record<ThreadErrorType, CauseRule>;

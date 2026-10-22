@@ -210,33 +210,38 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
   });
 });
 
+/** A thread with a live (reapable) run and a daemon token bound to it. */
+async function freshThread() {
+  const user = (await createTestUser({ db })).user;
+  const org = await createOrganization({
+    db,
+    name: "Org",
+    slug: `org-${nanoid(8).toLowerCase()}`,
+  });
+  const t = await createTestThread({
+    db,
+    userId: user.id,
+    overrides: { organizationId: org.id },
+  });
+  await db
+    .update(threadTable)
+    .set({ status: "working" })
+    .where(eq(threadTable.id, t.threadId));
+  vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
+    userId: user.id,
+    apiKeyId: "apikey_test",
+    organizationId: org.id,
+    threadChatId: t.threadChatId,
+    threadId: t.threadId,
+    tokenType: "daemon",
+  });
+  return t;
+}
+
 describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
   it("accepts every cause in the taxonomy and persists terminalCause", async () => {
-    // Reuse the outer describe's fixtures via a fresh thread per cause.
-    const user = (await createTestUser({ db })).user;
-    const org = await createOrganization({
-      db,
-      name: "Org",
-      slug: `org-${nanoid(8).toLowerCase()}`,
-    });
     for (const cause of ["stale-skipped", "discarded", "timeout"] as const) {
-      const t = await createTestThread({
-        db,
-        userId: user.id,
-        overrides: { organizationId: org.id },
-      });
-      await db
-        .update(threadTable)
-        .set({ status: "working" })
-        .where(eq(threadTable.id, t.threadId));
-      vi.mocked(getDaemonTokenContext).mockResolvedValueOnce({
-        userId: user.id,
-        apiKeyId: "apikey_test",
-        organizationId: org.id,
-        threadChatId: t.threadChatId,
-        threadId: t.threadId,
-        tokenType: "daemon",
-      });
+      const t = await freshThread();
       const res = await POST(
         req({
           threadId: t.threadId,
@@ -252,5 +257,79 @@ describe("POST /api/daemon/run-terminal — typed causes (#125 C4)", () => {
         .where(eq(threadTable.id, t.threadId));
       expect(row!.terminalCause).toBe(cause);
     }
+  });
+});
+
+describe("POST /api/daemon/run-terminal — detail.info and error mapping (#437)", () => {
+  async function post(
+    t: { threadId: string; threadChatId: string },
+    cause: string,
+    detail?: Record<string, unknown>,
+  ) {
+    return POST(
+      req({
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        runExternalId: `run-${cause}`,
+        cause,
+        ...(detail ? { detail } : {}),
+      }),
+    );
+  }
+
+  async function row(threadId: string) {
+    const [r] = await db
+      .select({
+        terminalCause: threadTable.terminalCause,
+        errorMessage: threadTable.errorMessage,
+        errorMessageInfo: threadTable.errorMessageInfo,
+      })
+      .from(threadTable)
+      .where(eq(threadTable.id, threadId));
+    return r!;
+  }
+
+  it("maps timeout to the request-timeout error type and stores detail.info", async () => {
+    // protects=a timed-out run rendering "Request timed out" with the worker's
+    // salvage note, not a generic error; fails_when=errorMessage stays NULL or
+    // detail.info is dropped; no_claim=the worker authoring that text.
+    const t = await freshThread();
+    const info =
+      "Unfinished work was saved to branch automata/x (commit 1234abcd).";
+    const res = await post(t, "timeout", { info });
+    expect(res.status).toBe(200);
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: "timeout",
+      errorMessage: "request-timeout",
+      errorMessageInfo: info,
+    });
+  });
+
+  it("maps out-of-memory to the out-of-memory error type", async () => {
+    // protects=an OOM-killed run rendering "Ran out of memory" with readable
+    // info; fails_when=the cause is refused or errorMessage is not set;
+    // no_claim=the worker detecting OOM.
+    const t = await freshThread();
+    const info = "Memory limit 5000M reached (13 process(es) killed).";
+    const res = await post(t, "out-of-memory", { info });
+    expect(res.status).toBe(200);
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: "out-of-memory",
+      errorMessage: "out-of-memory",
+      errorMessageInfo: info,
+    });
+  });
+
+  it("400 when detail.info exceeds 300 chars, and the thread is untouched", async () => {
+    // protects=the 300-char cap on worker-authored text; fails_when=a longer
+    // string is persisted; no_claim=none beyond protects.
+    const t = await freshThread();
+    const res = await post(t, "timeout", { info: "x".repeat(301) });
+    expect(res.status).toBe(400);
+    expect(await row(t.threadId)).toEqual({
+      terminalCause: null,
+      errorMessage: null,
+      errorMessageInfo: null,
+    });
   });
 });

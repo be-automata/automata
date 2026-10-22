@@ -1096,6 +1096,26 @@ export async function setThreadActiveRun({
  */
 export const THREAD_SUPERSEDED_ERROR = "superseded";
 
+/**
+ * The `errorMessage` a typed terminal writes by default: the legacy
+ * `superseded` sentinel, or the user-visible error type the chat UI renders a
+ * dedicated case for (#437). Every other cause leaves it NULL.
+ */
+function defaultErrorMessageForCause(
+  cause: TerminalCause,
+): ThreadErrorMessage | null {
+  switch (cause) {
+    case "superseded":
+      return THREAD_SUPERSEDED_ERROR;
+    case "timeout":
+      return "request-timeout";
+    case "out-of-memory":
+      return "out-of-memory";
+    default:
+      return null;
+  }
+}
+
 export type ThreadGenerationCheck =
   | { ok: true }
   | {
@@ -1577,21 +1597,17 @@ export async function stopStalledThreads({
   //
   // markThreadsTerminal supplies all four: the typed cause, the threadChat write,
   // the reapable-status guard (idempotent under retry), and one transaction.
-  // `request-timeout` is passed through explicitly because the chat UI renders a
-  // dedicated case for it.
-  await markThreadsTerminal({
-    db,
-    threadIds,
-    cause: "timeout",
-    errorMessage: "request-timeout",
-  });
+  // Its default writes `request-timeout` for this cause, which the chat UI
+  // renders a dedicated case for.
+  await markThreadsTerminal({ db, threadIds, cause: "timeout" });
 }
 
 /**
  * Write ONE typed terminal to a set of threads (#125 C1/C4): status → complete,
- * `terminalCause` set. `errorMessage` carries the legacy `superseded` sentinel
- * ONLY for that cause (the pre-C4 contract the chat UI and old fence rows
- * read); every other cause leaves it NULL — the cause lives in ONE column.
+ * `terminalCause` set. `errorMessage` defaults per defaultErrorMessageForCause:
+ * the legacy `superseded` sentinel (the pre-C4 contract the chat UI and old
+ * fence rows read), a dedicated chat error type for `timeout` and
+ * `out-of-memory`, and NULL otherwise — the cause lives in ONE column.
  * Idempotent: only a reapable (non-terminal) thread transitions, so a retry,
  * a racing dispatch, or a second sweep tick never rewrites a terminal that a
  * thread legitimately reached. Broadcasts per moved thread so the UI reflects
@@ -1603,6 +1619,7 @@ export async function markThreadsTerminal({
   cause,
   supersededByThreadId,
   errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
@@ -1620,13 +1637,16 @@ export async function markThreadsTerminal({
   /** #125 C5: the newer run's thread when `cause === "superseded"` (chip link). */
   supersededByThreadId?: string | null;
   /**
-   * Override the `errorMessage` written alongside the terminal. Defaults to the
-   * legacy `superseded` sentinel for that cause and NULL otherwise. The stall
-   * watchdog passes `request-timeout`, which is a USER-VISIBLE error type the
-   * chat UI renders a dedicated case for (`chat-error.tsx`), so it must survive
-   * the move onto this typed-terminal path.
+   * Override the `errorMessage` written alongside the terminal. Defaults to
+   * defaultErrorMessageForCause(cause).
    */
   errorMessage?: ThreadErrorMessage | null;
+  /**
+   * #437: worker-authored detail shown under the error (e.g. the branch a
+   * timed-out run's work was saved to). Written on both tables with the
+   * terminal; omitted leaves the column untouched.
+   */
+  errorMessageInfo?: string | null;
 }): Promise<string[]> {
   if (threadIds.length === 0) return [];
   const terminal = {
@@ -1634,9 +1654,8 @@ export async function markThreadsTerminal({
     errorMessage:
       errorMessage !== undefined
         ? errorMessage
-        : cause === "superseded"
-          ? THREAD_SUPERSEDED_ERROR
-          : null,
+        : defaultErrorMessageForCause(cause),
+    ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
   };
   // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
   // TWO tables: threadChat carries the live `status`, the thread row carries the
@@ -1720,6 +1739,7 @@ export async function markThreadsTerminal({
         .set({
           terminalCause: cause,
           ...(supersededByThreadId ? { supersededByThreadId } : {}),
+          ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
         })
         .where(
           and(
@@ -1752,12 +1772,18 @@ export async function markThreadTerminal({
   threadId,
   cause,
   supersededByThreadId,
+  errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
   threadId: string;
   cause: TerminalCause;
   supersededByThreadId?: string | null;
+  /** See markThreadsTerminal. */
+  errorMessage?: ThreadErrorMessage | null;
+  /** See markThreadsTerminal. */
+  errorMessageInfo?: string | null;
   /** See markThreadsTerminal. */
   unchangedSince?: Date;
 }): Promise<boolean> {
@@ -1768,6 +1794,8 @@ export async function markThreadTerminal({
         threadIds: [threadId],
         cause,
         supersededByThreadId,
+        errorMessage,
+        errorMessageInfo,
         unchangedSince,
       })
     ).length > 0

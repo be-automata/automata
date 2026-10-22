@@ -14,7 +14,7 @@ describe("terminal causes (#125 C4)", () => {
       expect(d.label.length).toBeGreaterThan(0);
       expect(d.detail.length).toBeGreaterThan(0);
     }
-    expect(TERMINAL_CAUSES).toHaveLength(9);
+    expect(TERMINAL_CAUSES).toHaveLength(10);
   });
 
   it("isTerminalCause narrows strings; an unknown value is refused", () => {
@@ -44,10 +44,24 @@ describe("terminal causes (#125 C4)", () => {
     // sweepable (the no-verdict notice path), never abandoned.
     expect(sweepable.sort()).toEqual([
       "daemon-failed",
+      "out-of-memory",
       "publish-failed",
       "run-failed-unreported",
       "timeout",
     ]);
+  });
+
+  it("describes out-of-memory in plain words and keeps it sweepable (#437)", () => {
+    // protects=the label/detail a user reads for an OOM-killed run;
+    // fails_when=the cause is missing, reworded to raw JSON, or classed as
+    // abandoned (the run owned its work and failed); no_claim=none beyond protects.
+    expect(isTerminalCause("out-of-memory")).toBe(true);
+    expect(describeTerminalCause("out-of-memory")).toEqual({
+      label: "Ran out of memory",
+      detail:
+        "The run exceeded its memory limit and the kernel stopped it. Reduce parallelism (for example test workers) and retry.",
+    });
+    expect(isAbandonedTerminalCause("out-of-memory")).toBe(false);
   });
 
   it("isAbandonedTerminalCause treats NULL (a dropped finish event) as sweepable", () => {

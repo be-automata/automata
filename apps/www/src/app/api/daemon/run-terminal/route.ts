@@ -37,7 +37,13 @@ const bodySchema = z.object({
   threadChatId: z.string().min(1),
   runExternalId: z.string().min(1).max(256),
   cause: z.enum(TERMINAL_CAUSES),
-  detail: z.object({ policy: z.string().max(64).optional() }).optional(),
+  detail: z
+    .object({
+      policy: z.string().max(64).optional(),
+      // #437: worker-authored only (never agent output), shown under the error.
+      info: z.string().max(300).optional(),
+    })
+    .optional(),
 });
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -106,7 +112,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // lands first; the run row leaves the supersede-candidate set only once it
   // has, so a failed thread write leaves the row in_flight for the sweep.
   // Both writes are idempotent (reapable-status guard; status column).
-  const applied = await markThreadTerminal({ db, threadId, cause });
+  const applied = await markThreadTerminal({
+    db,
+    threadId,
+    cause,
+    errorMessageInfo: detail?.info,
+  });
   if (runRow) {
     await retireHatchetRun({
       db,

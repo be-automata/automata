@@ -17,6 +17,7 @@ export const TERMINAL_CAUSES = [
   "publish-failed",
   "plane-offline",
   "run-failed-unreported",
+  "out-of-memory",
 ] as const;
 export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
 
@@ -79,6 +80,12 @@ export function describeTerminalCause(cause: TerminalCause): {
         detail:
           "The run failed on the execution plane before it could report back (#380 sweep rule iii).",
       };
+    case "out-of-memory":
+      return {
+        label: "Ran out of memory",
+        detail:
+          "The run exceeded its memory limit and the kernel stopped it. Reduce parallelism (for example test workers) and retry.",
+      };
     default:
       return assertNever(cause);
   }
@@ -94,7 +101,7 @@ export function describeTerminalCause(cause: TerminalCause): {
  * commit the abandoned run never saw (observed on #140, 2026-08-25).
  *
  * The complement (`timeout`, `daemon-failed`, `publish-failed`,
- * `run-failed-unreported`, and a NULL cause — a dropped finish event) IS sweepable: that run owned the PR and
+ * `run-failed-unreported`, `out-of-memory`, and a NULL cause — a dropped finish event) IS sweepable: that run owned the PR and
  * either has a persisted verdict to republish or genuinely failed to reach one.
  */
 export const ABANDONED_TERMINAL_CAUSES = [

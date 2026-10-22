@@ -281,7 +281,8 @@ export type ThreadErrorType =
   | "prompt-too-long"
   | "queue-limit-exceeded"
   | "provider-unavailable"
-  | "queue-retired";
+  | "queue-retired"
+  | "out-of-memory";
 export type ThreadErrorMessage = ThreadErrorType | string;
 export type GithubPRStatus = "draft" | "open" | "closed" | "merged";
 export type GithubCheckRunConclusion =
