@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { isAgentWorking } from "@/agent/thread-status";
 import { revokeDaemonTokenById } from "@/lib/daemon-token";
@@ -17,7 +18,9 @@ import { waitUntil } from "@/lib/wait-until";
  * the agent is no longer working (complete/error/stopped), the worker's cue to
  * tear the daemon down and clean up.
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: NextRequest,
+): Promise<NextResponse> {
   const ctx = await getDaemonTokenContext(request);
   if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -94,4 +97,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     status: threadChat.status,
     terminal,
   });
-}
+});

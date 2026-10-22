@@ -1,9 +1,12 @@
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { handleDaemonEvent } from "@/server-lib/handle-daemon-event";
 import { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 
-export async function POST(request: Request) {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: Request,
+) {
   const json: DaemonEventAPIBody = await request.json();
   const {
     messages,
@@ -78,4 +81,4 @@ export async function POST(request: Request) {
   }
 
   return new Response("OK");
-}
+});
