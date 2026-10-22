@@ -3,12 +3,15 @@ import {
   getUserIdOrNull,
   getUserIdOrNullFromDaemonToken,
 } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { setTerminalActive } from "@/agent/sandbox-resource";
 import { db } from "@/lib/db";
 import { isSandboxTerminalSupported } from "@/lib/sandbox-terminal";
 
-export async function POST(request: Request) {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: Request,
+) {
   const userId =
     (await getUserIdOrNullFromDaemonToken(request)) ??
     (await getUserIdOrNull());
@@ -31,4 +34,4 @@ export async function POST(request: Request) {
   }
   await setTerminalActive({ sandboxId, expires: 60 * 5 }); // 5 minutes
   return NextResponse.json({ message: "ok" });
-}
+});

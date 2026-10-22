@@ -3,6 +3,7 @@ import {
   getUserIdOrNull,
   getUserIdOrNullFromDaemonToken,
 } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { getThread } from "@terragon/shared/model/threads";
 import { db } from "@/lib/db";
 import { getOrCreateEnvironment } from "@terragon/shared/model/environments";
@@ -13,7 +14,9 @@ import { isSandboxTerminalSupported } from "@/lib/sandbox-terminal";
 import { getPrimaryThreadChat } from "@terragon/shared/utils/thread-utils";
 import { getExecutionPlaneEnvironmentVariables } from "@/server-lib/env-audience";
 
-export async function POST(request: Request) {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: Request,
+) {
   const userId =
     (await getUserIdOrNullFromDaemonToken(request)) ??
     (await getUserIdOrNull());
@@ -80,4 +83,4 @@ export async function POST(request: Request) {
       agentCredentials,
     }),
   });
-}
+});
