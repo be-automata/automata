@@ -36,6 +36,13 @@ export class KnowledgeNotOffboardedError extends Error {
   }
 }
 
+export class KnowledgePurgeNotDueError extends Error {
+  constructor() {
+    super("knowledge offboard mark is still inside the purge grace period");
+    this.name = "KnowledgePurgeNotDueError";
+  }
+}
+
 export async function purgeKnowledgeData({
   db,
   organizationId,
@@ -56,6 +63,14 @@ export async function purgeKnowledgeData({
       .for("update");
     if (!settings || !settings.offboardedAt) {
       throw new KnowledgeNotOffboardedError();
+    }
+    // Re-check the grace under the lock: an undo + re-offboard after the sweep
+    // listed this org must not purge the fresh mark early.
+    if (
+      settings.offboardedAt.getTime() >
+      now.getTime() - KNOWLEDGE_PURGE_GRACE_MS
+    ) {
+      throw new KnowledgePurgeNotDueError();
     }
     // Children first, every delete keyed by organization_id (not only cascade).
     const decisions = await tx

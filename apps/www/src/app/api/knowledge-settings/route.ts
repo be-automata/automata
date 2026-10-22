@@ -161,6 +161,11 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // Log platform authority whenever the change needed it, even when the actor
+  // is also an org admin (an above-ceiling raise is platform-only).
+  let via: "org_admin" | "platform_admin" = orgAdmin
+    ? "org_admin"
+    : "platform_admin";
   if (patch.budgetMicroUsd !== undefined) {
     const [current, ceilingMicroUsd] = await Promise.all([
       getKnowledgeControls({ db, organizationId }),
@@ -181,6 +186,12 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       }
       return NextResponse.json({ error: "out_of_range" }, { status: 400 });
     }
+    if (
+      patch.budgetMicroUsd !== null &&
+      patch.budgetMicroUsd > ceilingMicroUsd
+    ) {
+      via = "platform_admin";
+    }
   }
 
   let controls: KnowledgeControls;
@@ -191,7 +202,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       actorUserId: ctx.userId,
       patch,
       expectedUpdatedAt,
-      via: orgAdmin ? "org_admin" : "platform_admin",
+      via,
     });
   } catch (error) {
     if (error instanceof KnowledgeControlsConflictError) {

@@ -84,13 +84,27 @@ describe("knowledge ceiling admin actions", () => {
     expect((await getKnowledgeCeilingAction()).ceilingMicroUsd).toBe(1);
   });
 
-  it.each([{ dollars: "" }, { reset: true }])(
-    "resets with %j",
+  it("resets only on an explicit reset", async () => {
+    await loginAdmin();
+    await setKnowledgeCeilingAction({ dollars: "50" });
+    expect(await setKnowledgeCeilingAction({ reset: true })).toEqual({
+      ok: true,
+    });
+    expect((await getKnowledgeCeilingAction()).isDefault).toBe(true);
+  });
+
+  it.each([{ dollars: "" }, { dollars: "   " }, {}])(
+    "a blank submit %j is invalid and keeps the ceiling",
     async (input) => {
       await loginAdmin();
       await setKnowledgeCeilingAction({ dollars: "50" });
-      expect(await setKnowledgeCeilingAction(input)).toEqual({ ok: true });
-      expect((await getKnowledgeCeilingAction()).isDefault).toBe(true);
+      expect(await setKnowledgeCeilingAction(input)).toEqual({
+        ok: false,
+        error: "invalid_amount",
+      });
+      expect((await getKnowledgeCeilingAction()).ceilingMicroUsd).toBe(
+        50_000_000,
+      );
     },
   );
 

@@ -12,6 +12,7 @@ import {
 import {
   KnowledgeNotOffboardedError,
   listKnowledgeOrgsDueForPurge,
+  KnowledgePurgeNotDueError,
   purgeKnowledgeData,
 } from "./knowledge-purge";
 import { createTestOrg, createTestUser } from "./test-helpers";
@@ -214,6 +215,21 @@ describe("knowledge purge", () => {
       purgeKnowledgeData({ db, organizationId: orgA }),
     ).rejects.toBeInstanceOf(KnowledgeNotOffboardedError);
     expect((await snapshot(orgA)).claims).toHaveLength(2);
+  });
+
+  it("refuses a fresh offboard mark inside the grace period and deletes nothing", async () => {
+    await seed(orgA);
+    // Undo + re-offboard after the sweep listed the org: the lock sees a new mark.
+    await markOffboarded(orgA, new Date(NOW.getTime() - DAY));
+    await expect(
+      purgeKnowledgeData({ db, organizationId: orgA, now: NOW }),
+    ).rejects.toBeInstanceOf(KnowledgePurgeNotDueError);
+    expect((await snapshot(orgA)).claims).toHaveLength(2);
+    const [row] = await db
+      .select()
+      .from(schema.organizationReviewSettings)
+      .where(eq(schema.organizationReviewSettings.organizationId, orgA));
+    expect(row?.knowledgePurgedAt).toBeNull();
   });
 
   it("deletes a stray row of the org that points at another org's claim", async () => {

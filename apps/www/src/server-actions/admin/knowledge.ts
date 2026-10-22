@@ -41,12 +41,15 @@ export const setKnowledgeCeilingAction = adminOnly(
     adminUser: User,
     input: { dollars?: string; reset?: boolean },
   ): Promise<{ ok: true } | { ok: false; error: "invalid_amount" }> {
-    const dollars = input.dollars?.trim() ?? "";
     let micro: number | null;
-    if (input.reset === true || dollars === "") {
+    if (input.reset === true) {
       micro = null;
     } else {
-      micro = parseDollarsToMicro(dollars);
+      // A blank field is not a reset: only the explicit reset loosens the ceiling.
+      if (typeof input.dollars !== "string" || input.dollars.trim() === "") {
+        return { ok: false, error: "invalid_amount" };
+      }
+      micro = parseDollarsToMicro(input.dollars.trim());
       if (micro === null || micro > KNOWLEDGE_BUDGET_ABSOLUTE_MAX_MICRO_USD) {
         return { ok: false, error: "invalid_amount" };
       }

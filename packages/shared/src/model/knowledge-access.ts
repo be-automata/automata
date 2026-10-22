@@ -84,59 +84,59 @@ export function forKnowledge({
       listActions: (limit?: number) =>
         listKnowledgeAdminActions({ ...scope, limit }),
       updateControls: (a: Bound<typeof updateKnowledgeControls>) =>
-        updateKnowledgeControls({ ...scope, ...a }),
+        updateKnowledgeControls({ ...a, ...scope }),
       offboard: (a: Bound<typeof offboardKnowledge>) =>
-        offboardKnowledge({ ...scope, ...a }),
+        offboardKnowledge({ ...a, ...scope }),
       clearOffboard: (a: Bound<typeof clearKnowledgeOffboard>) =>
-        clearKnowledgeOffboard({ ...scope, ...a }),
+        clearKnowledgeOffboard({ ...a, ...scope }),
     },
     store: {
       insertClaim: (a: Bound<typeof insertKnowledgeClaim>) =>
-        gated(() => insertKnowledgeClaim({ ...scope, ...a })),
+        gated(() => insertKnowledgeClaim({ ...a, ...scope })),
       insertPins: (a: Bound<typeof insertKnowledgePins>) =>
-        gated(() => insertKnowledgePins({ ...scope, ...a })),
+        gated(() => insertKnowledgePins({ ...a, ...scope })),
       insertOp: (a: Bound<typeof insertKnowledgeOp>) =>
-        gated(() => insertKnowledgeOp({ ...scope, ...a })),
+        gated(() => insertKnowledgeOp({ ...a, ...scope })),
       getClaim: (a: Bound<typeof getKnowledgeClaim>) =>
-        gated(() => getKnowledgeClaim({ ...scope, ...a })),
+        gated(() => getKnowledgeClaim({ ...a, ...scope })),
       listClaims: (a: Bound<typeof listKnowledgeClaims>) =>
-        gated(() => listKnowledgeClaims({ ...scope, ...a })),
+        gated(() => listKnowledgeClaims({ ...a, ...scope })),
       listOpenOps: (a: Bound<typeof listOpenKnowledgeOps> = {}) =>
-        gated(() => listOpenKnowledgeOps({ ...scope, ...a })),
+        gated(() => listOpenKnowledgeOps({ ...a, ...scope })),
       loadLatestRejections: (a: Bound<typeof loadLatestKnowledgeRejections>) =>
-        gated(() => loadLatestKnowledgeRejections({ ...scope, ...a })),
+        gated(() => loadLatestKnowledgeRejections({ ...a, ...scope })),
       insertIntent: (a: Bound<typeof insertKnowledgeIntent>) =>
-        gated(() => insertKnowledgeIntent({ ...scope, ...a })),
+        gated(() => insertKnowledgeIntent({ ...a, ...scope })),
       listPendingIntents: (a: Bound<typeof listPendingKnowledgeIntents> = {}) =>
-        gated(() => listPendingKnowledgeIntents({ ...scope, ...a })),
+        gated(() => listPendingKnowledgeIntents({ ...a, ...scope })),
       decideOp: (a: Bound<typeof decideKnowledgeOp>) =>
         gated(async () => {
           if (a.claimPatch?.statement !== undefined)
             assertStatement(a.claimPatch.statement, "claimPatch.statement");
-          return decideKnowledgeOp({ ...scope, ...a });
+          return decideKnowledgeOp({ ...a, ...scope });
         }),
       advanceCursor: (a: Bound<typeof advanceKnowledgeCursor>) =>
         gated(async () => {
           assertCursorFields(a.repoFullName, a.defaultBranch, a.toSha);
           if (a.fromSha !== null)
             assertCursorFields(a.repoFullName, a.defaultBranch, a.fromSha);
-          return advanceKnowledgeCursor({ ...scope, ...a });
+          return advanceKnowledgeCursor({ ...a, ...scope });
         }),
       observeHead: (a: Bound<typeof observeKnowledgeHead>) =>
         gated(async () => {
           assertCursorFields(a.repoFullName, a.defaultBranch, a.headSha);
-          return observeKnowledgeHead({ ...scope, ...a });
+          return observeKnowledgeHead({ ...a, ...scope });
         }),
       getCursor: (a: Bound<typeof getKnowledgeCursor>) =>
-        gated(() => getKnowledgeCursor({ ...scope, ...a })),
+        gated(() => getKnowledgeCursor({ ...a, ...scope })),
     },
     budget: {
       // Already gated inside: returns the gate reason itself.
       reserve: (a: Bound<typeof reserveKnowledgeBudget>) =>
-        reserveKnowledgeBudget({ ...scope, ...a }),
+        reserveKnowledgeBudget({ ...a, ...scope }),
       // Never gated: an Off org must still release its reservations.
       settle: (a: Bound<typeof settleKnowledgeBudget>) =>
-        settleKnowledgeBudget({ ...scope, ...a }),
+        settleKnowledgeBudget({ ...a, ...scope }),
     },
   };
 }

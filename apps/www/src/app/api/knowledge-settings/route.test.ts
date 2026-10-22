@@ -272,6 +272,18 @@ describe("/api/knowledge-settings", () => {
       expect((await put({ budgetMicroUsd: 150_000_000 })).status).toBe(200);
     });
 
+    it("an org admin who is also platform admin logs an above-ceiling raise via platform_admin", async () => {
+      vi.mocked(isPlatformAdmin).mockResolvedValue(true);
+      await put({ budgetMicroUsd: 150_000_000 });
+      expect(updateKnowledgeControls).toHaveBeenLastCalledWith(
+        expect.objectContaining({ via: "platform_admin" }),
+      );
+      await put({ budgetMicroUsd: 50_000_000 });
+      expect(updateKnowledgeControls).toHaveBeenLastCalledWith(
+        expect.objectContaining({ via: "org_admin" }),
+      );
+    });
+
     it("uses the DB ceiling, not the default", async () => {
       vi.mocked(getKnowledgeBudgetCeiling).mockResolvedValue(50_000_000);
       const res = await put({ budgetMicroUsd: 60_000_000 });

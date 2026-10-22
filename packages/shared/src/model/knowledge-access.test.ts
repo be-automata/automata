@@ -328,6 +328,19 @@ describe("forKnowledge", () => {
     ] as const;
     type Method = (typeof methods)[number];
 
+    it("a stray organizationId in a non-literal arg never overrides the bound org", async () => {
+      await turn(orgA, true);
+      await turn(orgB, true);
+      const claimId = k("cs");
+      await seed(orgA, claimId, k("os"));
+      // A parsed payload can carry extra keys that `Bound<>` cannot reject.
+      const payload = { repoFullName: REPO, organizationId: orgA };
+      expect(await acc(orgB).store.listClaims(payload)).toEqual({
+        ok: true,
+        value: [],
+      });
+    });
+
     it("lists every store method exactly once", () => {
       expect(Object.keys(acc("x").store).sort()).toEqual([...methods].sort());
     });

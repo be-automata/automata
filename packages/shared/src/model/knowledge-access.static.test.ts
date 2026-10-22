@@ -93,7 +93,7 @@ describe("knowledge accessor-only access", () => {
     expect(
       offenders(
         external,
-        /\b(knowledgeClaim|knowledgePin|knowledgeOp|knowledgeDecision|knowledgeCursor|knowledgeIntent)\b/,
+        /\b(knowledgeClaim|knowledgePin|knowledgeOp|knowledgeDecision|knowledgeCursor|knowledgeIntent|knowledgeUsageWindow|knowledgeAdminLog|knowledgePlatformSettings)\b/,
       ).filter((p) => !RAW_TABLE_ALLOW.has(p)),
     ).toEqual([]);
   });
