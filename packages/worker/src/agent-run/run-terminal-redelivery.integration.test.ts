@@ -150,6 +150,19 @@ describe.skipIf(!itEnabled)(
       return events.rows.map((e) => `${e.event_type}#${e.retry_count}`);
     }
 
+    /**
+     * The REASSIGNED event of the attempt worker A actually ran. It is not
+     * always attempt #0: a worker from an earlier drill in the same engine
+     * still counts as live until its heartbeat expires, so the engine can hand
+     * it attempt #0 first (ASSIGNED#0 then FAILED#0, never SENT_TO_WORKER or
+     * STARTED) and give A attempt #1. Seen on CI on 2026-10-22, failing both
+     * guarded cases. Keyed to A's STARTED#n, never just any REASSIGNED.
+     */
+    function reassignedOfStartedAttempt(events: string[]): string | null {
+      const started = events.find((e) => e.startsWith("STARTED#"));
+      return started ? `REASSIGNED#${started.slice("STARTED#".length)}` : null;
+    }
+
     /** One drill: returns how often the run fn body executed and whether B refused. */
     async function drill(guard: boolean, fail = false) {
       const label = `${guard ? "guarded" : "control"}${fail ? "-fail" : ""}-${Date.now().toString(36)}`;
@@ -182,7 +195,9 @@ describe.skipIf(!itEnabled)(
       const reassignDeadline = Date.now() + REASSIGN_WAIT_MS;
       while (
         Date.now() < reassignDeadline &&
-        !(await engineEvents(runId)).includes("REASSIGNED#0")
+        !(await engineEvents(runId)).some(
+          (e, _i, all) => e === reassignedOfStartedAttempt(all),
+        )
       ) {
         await new Promise((r) => setTimeout(r, 1_000));
       }
@@ -254,7 +269,17 @@ describe.skipIf(!itEnabled)(
           )
           .join("\n"),
       );
-      return { executions, refused, noop, ledger, aExit, engine };
+      const reassignedOfA = reassignedOfStartedAttempt(engine.events);
+      return {
+        executions,
+        refused,
+        noop,
+        ledger,
+        aExit,
+        engine,
+        aWasReassigned:
+          reassignedOfA !== null && engine.events.includes(reassignedOfA),
+      };
     }
 
     beforeAll(async () => {
@@ -273,7 +298,7 @@ describe.skipIf(!itEnabled)(
     it("control (no guard): the engine redelivers the drained run to the relaunched worker, which executes it AGAIN", async () => {
       const r = await drill(false);
       expect(r.aExit).toBe(0);
-      expect(r.engine.events).toContain("REASSIGNED#0");
+      expect(r.aWasReassigned).toBe(true);
       expect(r.executions).toBe(2);
     });
 
@@ -281,7 +306,7 @@ describe.skipIf(!itEnabled)(
       const r = await drill(true);
       expect(r.aExit).toBe(0);
       expect(r.ledger).toBe(true);
-      expect(r.engine.events).toContain("REASSIGNED#0");
+      expect(r.aWasReassigned).toBe(true);
       expect(r.noop).toBe(true);
       expect(r.refused).toBe(false);
       expect(r.executions).toBe(1);
@@ -292,7 +317,7 @@ describe.skipIf(!itEnabled)(
       const r = await drill(true, true);
       expect(r.aExit).toBe(0);
       expect(r.ledger).toBe(true);
-      expect(r.engine.events).toContain("REASSIGNED#0");
+      expect(r.aWasReassigned).toBe(true);
       expect(r.refused).toBe(true);
       expect(r.noop).toBe(false);
       expect(r.executions).toBe(1);
