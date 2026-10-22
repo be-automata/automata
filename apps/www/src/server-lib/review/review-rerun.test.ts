@@ -4,7 +4,9 @@ import { db } from "@/lib/db";
 import type { DBMessage } from "@terragon/shared/db/db-message";
 import { reviewRerun } from "@terragon/shared/db/schema";
 import {
+  claimDueReviewReruns,
   planReviewRerun,
+  REVIEW_RERUN_CLAIM_LEASE_MS,
   REVIEW_RERUN_MAX_ATTEMPTS,
 } from "@terragon/shared/model/review-rerun";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
@@ -243,6 +245,58 @@ describe("#107 re-run planner + dispatcher", () => {
         failedThreadId: threadId,
       }),
     ).toMatchObject({ kind: "dispatch_failed", defer: false });
+  });
+
+  it("a tick that died between claim and dispatch: the next tick past the lease expires the claim, never re-dispatches, and the failed run posts its notice", async () => {
+    const threadId = await failedReviewThread();
+    const planner = createRerunPlanner({
+      db,
+      threadId,
+      organizationId: orgId,
+      automationId,
+      repoFullName: REPO,
+      prNumber: PR,
+      now: () => t0,
+    })!;
+    await planner(HEAD);
+    // The dying tick: it claims, then the process is gone before dispatch.
+    const claimAt = new Date(t0.getTime() + 61_000);
+    const dead = (await claimDueReviewReruns({ db, now: claimAt })).filter(
+      (r) => r.failedThreadId === threadId,
+    );
+    expect(dead).toHaveLength(1);
+
+    // A tick inside the lease leaves the claim alone and dispatches nothing.
+    const d = deps();
+    const inside = await runReviewRerunDispatcher({
+      ...d,
+      now: () => new Date(claimAt.getTime() + 60_000),
+    });
+    expect(inside.expired).toBe(0);
+    expect((await rowOf(threadId))?.state).toBe("claimed");
+
+    // Past the lease: expired to failed, still never dispatched.
+    const past = await runReviewRerunDispatcher({
+      ...d,
+      now: () => new Date(claimAt.getTime() + REVIEW_RERUN_CLAIM_LEASE_MS),
+    });
+    expect(past.expired).toBeGreaterThanOrEqual(1);
+    expect(d.dispatch).not.toHaveBeenCalled();
+    expect(await rowOf(threadId)).toMatchObject({
+      state: "failed",
+      outcomeReason: "claim_expired",
+    });
+    // The failed run's next no-verdict pass (the hourly sweep) gets "post".
+    expect(
+      await createRerunPlanner({
+        db,
+        threadId,
+        organizationId: orgId,
+        automationId,
+        repoFullName: REPO,
+        prNumber: PR,
+      })!(HEAD),
+    ).toMatchObject({ defer: false, decision: "dispatch_failed" });
   });
 
   it("a dispatch that throws settles failed and never escapes the cron", async () => {

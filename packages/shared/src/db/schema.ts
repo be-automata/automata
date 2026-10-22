@@ -1983,8 +1983,9 @@ export const supersedeRecheck = pgTable(
  *    head, however many failed runs race to schedule one;
  *  - (failedThreadId): a failed run hands off to at most one re-run, so the
  *    finish hook and the hourly sweep reading the same thread converge.
- * `state` walks pending → dispatched | skipped | failed, each step a
- * compare-and-set on the previous state.
+ * `state` walks pending → claimed → dispatched | skipped | failed, each step
+ * a compare-and-set on the previous state; a claim whose lease lapses
+ * becomes failed (claim_expired).
  */
 export const reviewRerun = pgTable(
   "review_rerun",
@@ -2001,7 +2002,7 @@ export const reviewRerun = pgTable(
       .notNull()
       .references(() => thread.id, { onDelete: "cascade" }),
     state: text("state")
-      .$type<"pending" | "dispatched" | "skipped" | "failed">()
+      .$type<"pending" | "claimed" | "dispatched" | "skipped" | "failed">()
       .notNull()
       .default("pending"),
     /** Earliest dispatch time (the backoff). */

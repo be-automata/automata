@@ -17,7 +17,26 @@ export const REVIEW_RERUN_MAX_ATTEMPTS = 2;
 /** Backoff before attempt N (index N-1): ~1 min, then ~3 min. */
 export const REVIEW_RERUN_BACKOFF_MS: readonly number[] = [60_000, 180_000];
 
-export type ReviewRerunState = "pending" | "dispatched" | "skipped" | "failed";
+/**
+ * How long a claimed row may sit before its claimant is presumed dead (a
+ * deploy, an OOM, a cron timeout between the claim and the dispatch). A
+ * normal claim → dispatch takes seconds. Also how long a due row may wait
+ * unclaimed (the dispatcher cron not running) before it stops deferring.
+ */
+export const REVIEW_RERUN_CLAIM_LEASE_MS = 10 * 60_000;
+
+/**
+ * pending → claimed (a cron tick owns it, lease running) → dispatched (the
+ * re-run started) | skipped | failed. A claim whose lease lapses becomes
+ * `failed` (claim_expired), never re-claimed: the claimant may have started
+ * the run just before it died, and a second dispatch could double it.
+ */
+export type ReviewRerunState =
+  | "pending"
+  | "claimed"
+  | "dispatched"
+  | "skipped"
+  | "failed";
 
 export interface ReviewRerunRow {
   id: string;
@@ -27,6 +46,33 @@ export interface ReviewRerunRow {
   failedThreadId: string;
   state: ReviewRerunState;
   dueAt: Date;
+  updatedAt: Date;
+}
+
+const ROW_COLUMNS = {
+  id: reviewRerun.id,
+  prKey: reviewRerun.prKey,
+  headSha: reviewRerun.headSha,
+  attempt: reviewRerun.attempt,
+  failedThreadId: reviewRerun.failedThreadId,
+  state: reviewRerun.state,
+  dueAt: reviewRerun.dueAt,
+  updatedAt: reviewRerun.updatedAt,
+};
+
+/**
+ * A row nobody will move any more: claimed with a lapsed lease, or pending
+ * long past due (the dispatcher is not running). It must not defer a notice:
+ * ADR-009 forbids leaving a PR with neither a re-run nor a notice.
+ */
+export function isStalledReviewRerun(
+  row: Pick<ReviewRerunRow, "state" | "dueAt" | "updatedAt">,
+  now: Date,
+): boolean {
+  const cutoff = now.getTime() - REVIEW_RERUN_CLAIM_LEASE_MS;
+  if (row.state === "claimed") return row.updatedAt.getTime() <= cutoff;
+  if (row.state === "pending") return row.dueAt.getTime() <= cutoff;
+  return false;
 }
 
 /**
@@ -51,7 +97,10 @@ export type ReviewRerunDecision =
    * re-runs that were actually dispatched (what the notice may claim).
    */
   | { kind: "exhausted"; defer: false; attempts: number }
-  /** This run's own re-run could not be dispatched: post the notice. */
+  /**
+   * This run's own re-run could not be dispatched (refused, errored, or its
+   * claim lapsed): post the notice.
+   */
   | { kind: "dispatch_failed"; defer: false; attempts: number };
 
 function backoffFor(attempt: number): number {
@@ -68,15 +117,7 @@ async function rowsForHead(
   headSha: string,
 ): Promise<ReviewRerunRow[]> {
   return await db
-    .select({
-      id: reviewRerun.id,
-      prKey: reviewRerun.prKey,
-      headSha: reviewRerun.headSha,
-      attempt: reviewRerun.attempt,
-      failedThreadId: reviewRerun.failedThreadId,
-      state: reviewRerun.state,
-      dueAt: reviewRerun.dueAt,
-    })
+    .select(ROW_COLUMNS)
     .from(reviewRerun)
     .where(and(eq(reviewRerun.prKey, prKey), eq(reviewRerun.headSha, headSha)))
     .orderBy(asc(reviewRerun.attempt));
@@ -85,11 +126,12 @@ async function rowsForHead(
 function decideFromRows(
   rows: ReviewRerunRow[],
   failedThreadId: string,
+  now: Date,
 ): ReviewRerunDecision | null {
   const dispatched = rows.filter((row) => row.state === "dispatched").length;
   const own = rows.find((row) => row.failedThreadId === failedThreadId);
   if (own) {
-    return own.state === "failed"
+    return own.state === "failed" || isStalledReviewRerun(own, now)
       ? { kind: "dispatch_failed", defer: false, attempts: dispatched }
       : {
           kind: "already_handed_off",
@@ -98,7 +140,12 @@ function decideFromRows(
           state: own.state,
         };
   }
-  const pending = rows.find((row) => row.state === "pending");
+  // A live re-run (waiting, or claimed within its lease) owns the head.
+  const pending = rows.find(
+    (row) =>
+      (row.state === "pending" || row.state === "claimed") &&
+      !isStalledReviewRerun(row, now),
+  );
   if (pending) {
     return { kind: "pending_for_head", defer: true, attempt: pending.attempt };
   }
@@ -129,7 +176,7 @@ export async function planReviewRerun({
   now?: Date;
 }): Promise<ReviewRerunDecision> {
   const rows = await rowsForHead(db, prKey, headSha);
-  const decided = decideFromRows(rows, failedThreadId);
+  const decided = decideFromRows(rows, failedThreadId, now);
   if (decided) return decided;
 
   const attempt = Math.max(0, ...rows.map((row) => row.attempt)) + 1;
@@ -147,7 +194,7 @@ export async function planReviewRerun({
   // and answer from the winner's row.
   const after = await rowsForHead(db, prKey, headSha);
   return (
-    decideFromRows(after, failedThreadId) ?? {
+    decideFromRows(after, failedThreadId, now) ?? {
       // Unreachable while the indexes hold; defer rather than double-schedule.
       kind: "pending_for_head",
       defer: true,
@@ -157,9 +204,11 @@ export async function planReviewRerun({
 }
 
 /**
- * Claim the re-runs that are due. Each row moves pending → dispatched by a
- * compare-and-set, so two overlapping cron ticks never dispatch one row twice.
- * The claimant then dispatches or settles the row as skipped / failed.
+ * Claim the re-runs that are due. Each row moves pending → claimed by a
+ * compare-and-set (stamping the lease start), so two overlapping cron ticks
+ * never dispatch one row twice. The claimant then marks it dispatched, or
+ * settles it skipped / failed; a claimant that dies leaves a claim that
+ * `expireStaleReviewRerunClaims` turns into `failed` once the lease lapses.
  */
 export async function claimDueReviewReruns({
   db,
@@ -180,24 +229,32 @@ export async function claimDueReviewReruns({
   for (const { id } of due) {
     const [row] = await db
       .update(reviewRerun)
-      .set({ state: "dispatched" })
+      .set({ state: "claimed", updatedAt: now })
       .where(and(eq(reviewRerun.id, id), eq(reviewRerun.state, "pending")))
-      .returning({
-        id: reviewRerun.id,
-        prKey: reviewRerun.prKey,
-        headSha: reviewRerun.headSha,
-        attempt: reviewRerun.attempt,
-        failedThreadId: reviewRerun.failedThreadId,
-        state: reviewRerun.state,
-        dueAt: reviewRerun.dueAt,
-      });
+      .returning(ROW_COLUMNS);
     if (row) claimed.push(row);
   }
   return claimed;
 }
 
+/** The claimed re-run started. Only a `claimed` row moves. */
+export async function markReviewRerunDispatched({
+  db,
+  id,
+}: {
+  db: DB;
+  id: string;
+}): Promise<boolean> {
+  const rows = await db
+    .update(reviewRerun)
+    .set({ state: "dispatched" })
+    .where(and(eq(reviewRerun.id, id), eq(reviewRerun.state, "claimed")))
+    .returning({ id: reviewRerun.id });
+  return rows.length > 0;
+}
+
 /**
- * Settle a claimed row that was not dispatched. Only a `dispatched` row moves,
+ * Settle a claimed row that was not dispatched. Only a `claimed` row moves,
  * so a settle never rewrites a row another path already settled.
  */
 export async function settleReviewRerun({
@@ -214,7 +271,35 @@ export async function settleReviewRerun({
   const rows = await db
     .update(reviewRerun)
     .set({ state, outcomeReason: reason })
-    .where(and(eq(reviewRerun.id, id), eq(reviewRerun.state, "dispatched")))
+    .where(and(eq(reviewRerun.id, id), eq(reviewRerun.state, "claimed")))
     .returning({ id: reviewRerun.id });
   return rows.length > 0;
+}
+
+/**
+ * Claims whose lease lapsed (the claimant died between the claim and the
+ * dispatch) become `failed` with reason `claim_expired`. They are never
+ * re-claimed: the dead claimant may already have started the run. The failed
+ * run's next no-verdict pass then posts the notice. Returns the expired rows.
+ */
+export async function expireStaleReviewRerunClaims({
+  db,
+  now = new Date(),
+}: {
+  db: DB;
+  now?: Date;
+}): Promise<ReviewRerunRow[]> {
+  return await db
+    .update(reviewRerun)
+    .set({ state: "failed", outcomeReason: "claim_expired" })
+    .where(
+      and(
+        eq(reviewRerun.state, "claimed"),
+        lte(
+          reviewRerun.updatedAt,
+          new Date(now.getTime() - REVIEW_RERUN_CLAIM_LEASE_MS),
+        ),
+      ),
+    )
+    .returning(ROW_COLUMNS);
 }

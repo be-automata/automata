@@ -195,7 +195,7 @@ export async function runScheduledTasksCron(): Promise<void> {
       "@/server-lib/review/review-rerun"
     );
     const r = await runReviewRerunDispatcher({ db });
-    if (r.dispatched + r.skipped + r.failed > 0) {
+    if (r.dispatched + r.skipped + r.failed + r.expired > 0) {
       console.log("[cron:scheduled] review re-runs", r);
     }
   } catch (error) {

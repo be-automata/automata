@@ -5,6 +5,8 @@ import type { DBMessage } from "@terragon/shared/db/db-message";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import {
   claimDueReviewReruns,
+  expireStaleReviewRerunClaims,
+  markReviewRerunDispatched,
   planReviewRerun,
   settleReviewRerun,
   type ReviewRerunDecision,
@@ -205,22 +207,38 @@ async function dispatchOne(
  * Dispatch the re-runs that are due. Never throws: it rides the every-minute
  * cron next to scheduled-thread processing. A row that fails to dispatch is
  * settled `failed`, which makes the failed run's next no-verdict pass (the
- * hourly sweep) post the notice instead of deferring forever.
+ * hourly sweep) post the notice instead of deferring forever. So is a claim
+ * whose claimant died before it dispatched (lease lapsed): it is expired to
+ * `failed` at the start of every tick, never re-dispatched.
  */
 export async function runReviewRerunDispatcher(
   deps: ReviewRerunDispatcherDeps,
-): Promise<{ dispatched: number; skipped: number; failed: number }> {
-  const counts = { dispatched: 0, skipped: 0, failed: 0 };
+): Promise<{
+  dispatched: number;
+  skipped: number;
+  failed: number;
+  expired: number;
+}> {
+  const counts = { dispatched: 0, skipped: 0, failed: 0, expired: 0 };
   if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return counts;
   const full = {
     db: deps.db,
     readPr: deps.readPr ?? readPrStateForRerun,
     dispatch: deps.dispatch ?? dispatchRerunThroughAutomation,
   };
-  const claimed = await claimDueReviewReruns({
-    db: deps.db,
-    now: deps.now?.(),
-  });
+  const now = deps.now?.() ?? new Date();
+  const expired = await expireStaleReviewRerunClaims({ db: deps.db, now });
+  counts.expired = expired.length;
+  for (const row of expired) {
+    console.warn("[review-rerun] re-run claim expired before dispatch", {
+      rerunId: row.id,
+      failedThreadId: row.failedThreadId,
+      prKey: row.prKey,
+      headSha: row.headSha,
+      attempt: row.attempt,
+    });
+  }
+  const claimed = await claimDueReviewReruns({ db: deps.db, now });
   for (const row of claimed) {
     let outcome: RerunDispatchOutcome;
     try {
@@ -245,6 +263,25 @@ export async function runReviewRerunDispatcher(
     };
     if (outcome.result === "dispatched") {
       console.log("[review-rerun] re-dispatched a failed review", meta);
+      try {
+        const marked = await markReviewRerunDispatched({
+          db: deps.db,
+          id: row.id,
+        });
+        if (!marked) {
+          console.warn(
+            "[review-rerun] re-run started but its claim was no longer held",
+            meta,
+          );
+        }
+      } catch (error) {
+        // The run started; the claim lapses to failed and the notice may post
+        // beside it — a verdict from the re-run then retires that notice.
+        console.error("[review-rerun] could not mark a re-run dispatched", {
+          ...meta,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       continue;
     }
     console.warn(`[review-rerun] re-run ${outcome.result}`, {
