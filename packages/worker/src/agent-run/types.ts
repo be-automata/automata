@@ -300,7 +300,9 @@ export type AgentRunOutput = {
     | "cancelled"
     | "stale-skipped"
     /** www put the thread in `stopping` (user Stop): daemon torn down, `user-cancelled` posted. */
-    | "stopped";
+    | "stopped"
+    /** #386: a redelivery of a run that already returned on this box; nothing re-executed. */
+    | "already-terminal";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };

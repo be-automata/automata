@@ -147,17 +147,33 @@ export function recordRunTerminal(
  * Run `run` at most once to a terminal per workflow run id on this box: refuse
  * (RunAlreadyTerminalError) an id already recorded, otherwise run it and record
  * how it ended. Without a run id there is nothing to key on — run unguarded.
+ *
+ * `onAlreadyReturned` turns the refusal of a run whose first attempt RETURNED
+ * into a no-op output instead of a throw. Measured on hatchet-lite
+ * (run-terminal-redelivery.integration.test.ts): the drained attempt's own
+ * FINISHED event is ignored once the engine REASSIGNED the run, so the
+ * redelivered attempt's result IS the run's engine status — a throw would
+ * mark a run whose work completed FAILED and fire onFailure. A run whose first
+ * attempt failed is still refused with a throw: FAILED is its true status.
  */
 export async function guardRunTerminal<T>(
-  opts: { root: string; runId: string; log: (msg: string) => void },
+  opts: {
+    root: string;
+    runId: string;
+    log: (msg: string) => void;
+    onAlreadyReturned?: (prior: RecordedRunTerminal) => T;
+  },
   run: () => Promise<T>,
 ): Promise<T> {
-  const { root, runId, log } = opts;
+  const { root, runId, log, onAlreadyReturned } = opts;
   if (!runId) return run();
   const prior = readRunTerminal(root, runId);
   if (prior) {
     const err = new RunAlreadyTerminalError(runId, prior);
     log(err.message);
+    if (prior.outcome === "returned" && onAlreadyReturned) {
+      return onAlreadyReturned(prior);
+    }
     throw err;
   }
   try {

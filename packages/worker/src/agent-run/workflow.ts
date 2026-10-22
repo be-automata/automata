@@ -473,11 +473,18 @@ async function runAgent(
   // ended (returned or threw) and is redelivered after a graceful drain is
   // refused here, before admission — never re-executed. A run that never ended
   // (a worker crash mid-run, #152) has no entry and re-executes as before.
-  return guardRunTerminal(
+  // A refused run whose first attempt RETURNED completes as a no-op, so the
+  // engine records COMPLETED and onFailure never re-posts a terminal to www.
+  return guardRunTerminal<AgentRunOutput>(
     {
-      root: loadWorkerConfig().runNamespaceRoot,
+      root: loadWorkerConfig().runTerminalRoot,
       runId: ctx.workflowRunId?.() || "",
       log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
+      onAlreadyReturned: () => ({
+        threadId: wire.threadId,
+        threadChatId: wire.threadChatId,
+        outcome: "already-terminal",
+      }),
     },
     () => runAgentAttempt(wire, ctx),
   );

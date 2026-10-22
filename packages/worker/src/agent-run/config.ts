@@ -189,6 +189,12 @@ export interface WorkerConfig {
    */
   runNamespaceRoot: string;
   /**
+   * #386: where the run-terminal ledger lives (`<root>/run-terminals/`).
+   * Defaults to runNamespaceRoot. A box whose /tmp is wiped at boot points it
+   * at a durable, worker-only dir so a reboot mid-drain keeps the ledger.
+   */
+  runTerminalRoot: string;
+  /**
    * Per-run GitHub credential brokering (#81). "on" (default): the workflow
    * starts the git + gh brokers and the agent child never sees the
    * installation token — only a per-run bearer, in EVERY lane. "legacy-direct"
@@ -354,6 +360,25 @@ export function parseMemoryMax(raw: string | undefined): number {
     );
   }
   return bytes;
+}
+
+/**
+ * #386: the ledger root. Unset ⇒ the namespace root. A relative path is
+ * refused at boot: it would resolve against the worker's cwd (the repo
+ * checkout) and silently change with it.
+ */
+export function parseRunTerminalRoot(
+  raw: string | undefined,
+  runNamespaceRoot: string,
+): string {
+  const v = raw?.trim() ?? "";
+  if (!v) return runNamespaceRoot;
+  if (!path.isAbsolute(v)) {
+    throw new Error(
+      `WORKER_RUN_TERMINAL_ROOT must be an absolute path (got ${JSON.stringify(v)})`,
+    );
+  }
+  return v;
 }
 
 /** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
@@ -538,6 +563,12 @@ export function loadWorkerConfig(
   // capacity model needs (global cap, worker slots, per-run ceiling, swap) starts
   // with this one not being a typo.
   const memoryMaxBytes = parseMemoryMax(env.WORKER_RUN_MEMORY_MAX);
+  const runNamespaceRoot =
+    env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT;
+  const runTerminalRoot = parseRunTerminalRoot(
+    env.WORKER_RUN_TERMINAL_ROOT,
+    runNamespaceRoot,
+  );
   // ONLY VALIDATED WHEN THE CEILING IS ON. `parseTasksMax` throws on a set-but-
   // invalid value, and running it unconditionally meant a box that never enabled
   // the ceiling could be stopped from booting by a stray `WORKER_RUN_TASKS_MAX` —
@@ -746,8 +777,8 @@ export function loadWorkerConfig(
         ? pollIntervalMs
         : 7000,
     botLogin: env.WORKER_BOT_LOGIN?.trim() || "automata-ai-bot[bot]",
-    runNamespaceRoot:
-      env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT,
+    runNamespaceRoot,
+    runTerminalRoot,
     // Only the exact rollback string opts OUT — anything else (unset, typo)
     // stays brokered, so a misconfigured box degrades to the mode that keeps
     // the installation token out of agent env.
