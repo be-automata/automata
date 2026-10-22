@@ -117,6 +117,44 @@ describe("postRunFailed (#2 terminal-failure callback)", () => {
 });
 
 describe("postEgressEvents (#66 audit sink, worker half)", () => {
+  const event = {
+    destinationHost: "api.github.com",
+    action: "allow",
+    policyLevel: "domain",
+    source: "worker",
+  } as const;
+
+  it("re-sends a batch refused at token verification (401, then 200)", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { inserted: 1 }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    await postEgressEvents(opts, [event], async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS]);
+  });
+
+  it("never re-sends after a 500: the handler may have written rows", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await postEgressEvents(opts, [event], async () => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up quietly once the refusal repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(503, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      postEgressEvents(opts, [event], async () => {}),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
+  });
+
   it("POSTs the batch to /api/daemon/egress-event with the daemon-token header", async () => {
     const fetchMock = vi
       .fn()
@@ -383,6 +421,26 @@ describe("pullNextMessage", () => {
     expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS]);
   });
 
+  it("asks again after a 503 (verification could not reach the database)", async () => {
+    const responses = [
+      jsonResponse(503, { error: "x" }),
+      jsonResponse(204, null),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pullNextMessage(opts, undefined, async () => {})).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-ask after a 500: the handler may already have claimed the message", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      pullNextMessage(opts, undefined, async () => {}),
+    ).rejects.toThrow(/HTTP 500/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("throws the 401 once it repeats on every attempt", async () => {
     const fetchMock = vi.fn(async () => jsonResponse(401, { error: "x" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -511,6 +569,34 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
     expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(sleeps.filter((ms) => ms === AUTH_ERROR_RETRY_MS)).toHaveLength(3);
+  });
+
+  it("rides out a 5xx and a dropped connection between good polls", async () => {
+    const responses: Array<Response | Error> = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(503, { error: "x" }),
+      new TypeError("fetch failed"),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const next = responses.shift()!;
+        if (next instanceof Error) throw next;
+        return next;
+      }),
+    );
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+  });
+
+  it("fails the run once a 5xx repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
+      /HTTP 500/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
   });
 
   it("rides out a 401 on the FIRST poll when the next one succeeds", async () => {

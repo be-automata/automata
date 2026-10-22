@@ -46,6 +46,15 @@ export interface WwwClientOpts {
 export const AUTH_ERROR_CONFIRM_ATTEMPTS = 3;
 export const AUTH_ERROR_RETRY_MS = 2000;
 
+/**
+ * Statuses www returns before a daemon handler runs: 401/403 from token
+ * verification, and 503 when verification itself could not reach the
+ * database. Re-sending a request refused this way cannot double-apply it.
+ */
+function isRefusedBeforeHandler(status: number): boolean {
+  return status === 401 || status === 403 || status === 503;
+}
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -107,10 +116,10 @@ export async function pullNextMessage(
       }),
       signal,
     });
-    // A 401/403 is refused at token verification, before the handler claims
-    // anything, so asking again is safe. See AUTH_ERROR_CONFIRM_ATTEMPTS.
+    // Refused before the handler claims anything, so asking again is safe.
+    // See AUTH_ERROR_CONFIRM_ATTEMPTS.
     if (
-      (res.status !== 401 && res.status !== 403) ||
+      !isRefusedBeforeHandler(res.status) ||
       attempt >= AUTH_ERROR_CONFIRM_ATTEMPTS ||
       signal?.aborted
     ) {
@@ -427,17 +436,29 @@ export interface EgressEventWire {
 export async function postEgressEvents(
   opts: WwwClientOpts,
   events: EgressEventWire[],
+  sleep: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<void> {
   if (events.length === 0) {
     return;
   }
   let res: Response;
   try {
-    res = await fetch(endpoint(opts.baseUrl, "/api/daemon/egress-event"), {
-      method: "POST",
-      headers: headers(opts),
-      body: JSON.stringify({ events }),
-    });
+    for (let attempt = 1; ; attempt++) {
+      res = await fetch(endpoint(opts.baseUrl, "/api/daemon/egress-event"), {
+        method: "POST",
+        headers: headers(opts),
+        body: JSON.stringify({ events }),
+      });
+      // A refusal at token verification wrote nothing, so the batch can be
+      // re-sent without duplicating audit rows (AUTH_ERROR_CONFIRM_ATTEMPTS).
+      if (
+        !isRefusedBeforeHandler(res.status) ||
+        attempt >= AUTH_ERROR_CONFIRM_ATTEMPTS
+      ) {
+        break;
+      }
+      await sleep(AUTH_ERROR_RETRY_MS);
+    }
   } catch (error) {
     console.error("[agent-run] postEgressEvents request failed (swallowed)", {
       threadId: opts.threadId,
@@ -616,7 +637,7 @@ export async function pollUntilTerminal(
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
   let agentSeenDead = false;
-  let authErrorStreak = 0;
+  let failedPollStreak = 0;
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -645,15 +666,25 @@ export async function pollUntilTerminal(
       if (ctx.cancelled || ctx.signal?.aborted) {
         return { outcome: "cancelled", finalStatus: lastStatus };
       }
+      // A 5xx or a dropped connection is the same blip a 401 can be: the
+      // status read is idempotent, so confirm it before failing the run.
+      failedPollStreak++;
+      if (failedPollStreak < AUTH_ERROR_CONFIRM_ATTEMPTS) {
+        ctx.log(
+          `thread-status: ${error instanceof Error ? error.message : String(error)} (${failedPollStreak}/${AUTH_ERROR_CONFIRM_ATTEMPTS}) — confirming before failing the run`,
+        );
+        await sleep(AUTH_ERROR_RETRY_MS);
+        continue;
+      }
       throw error;
     }
     if (poll.kind === "auth-error") {
       // Confirm before believing it: one 401 can be a verify-time database
       // error on www's side, not a revocation (AUTH_ERROR_CONFIRM_ATTEMPTS).
-      authErrorStreak++;
-      if (authErrorStreak < AUTH_ERROR_CONFIRM_ATTEMPTS) {
+      failedPollStreak++;
+      if (failedPollStreak < AUTH_ERROR_CONFIRM_ATTEMPTS) {
         ctx.log(
-          `thread-status: HTTP ${poll.httpStatus} (${authErrorStreak}/${AUTH_ERROR_CONFIRM_ATTEMPTS}) — confirming before failing the run`,
+          `thread-status: HTTP ${poll.httpStatus} (${failedPollStreak}/${AUTH_ERROR_CONFIRM_ATTEMPTS}) — confirming before failing the run`,
         );
         await sleep(AUTH_ERROR_RETRY_MS);
         continue;
@@ -677,7 +708,7 @@ export async function pollUntilTerminal(
       );
     }
 
-    authErrorStreak = 0;
+    failedPollStreak = 0;
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
