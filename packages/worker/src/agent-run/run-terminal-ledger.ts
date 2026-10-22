@@ -25,8 +25,10 @@ import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
  * clone, no daemon. A worker-loss redelivery of a run that never ENDED (a
  * crash mid-run, #152) finds no entry and re-executes as before.
  *
- * `root` is the run namespace root, shared by every worker process on the box
- * and kept across a restart (`PrivateTmp=no` in automata-worker.service).
+ * `root` is `WORKER_RUN_TERMINAL_ROOT` (config.ts `runTerminalRoot`), shared by
+ * every worker process on the box. On the execution box run-worker.sh names
+ * `/usr/local/automata/state`, which survives a reboot; the code default, the
+ * run namespace root under /tmp, survives only a restart (`PrivateTmp=no`).
  * Every op is best-effort: an unwritable or unreadable ledger fails OPEN (the
  * run executes) — it narrows the redelivery window, it never blocks a run.
  */
@@ -68,6 +70,25 @@ export class RunAlreadyTerminalError extends NonRetryableError {
     );
     this.name = "RunAlreadyTerminalError";
   }
+}
+
+/**
+ * The boot log line naming the ledger root, plus a warning when that root is
+ * under /tmp on Linux: Ubuntu's tmpfiles (`D /tmp`) wipes it at boot, so a
+ * reboot mid-drain would let the engine re-execute a run that already ended.
+ */
+export function runTerminalRootBootLines(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): { line: string; warning: string | null } {
+  const underTmp = root === "/tmp" || root.startsWith("/tmp/");
+  return {
+    line: `run-terminal ledger root=${root}`,
+    warning:
+      platform === "linux" && underTmp
+        ? `run-terminal ledger root ${root} is under /tmp, which is wiped at boot — set WORKER_RUN_TERMINAL_ROOT to a durable dir (#386)`
+        : null,
+  };
 }
 
 function entryPath(root: string, runId: string): string | null {
@@ -129,10 +150,14 @@ export function recordRunTerminal(
   }
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith(".json")) continue;
-      // An unreadable entry is aged by its mtime instead of its `at`.
+      // A `.tmp` left by a crash mid-write is aged by its mtime like an
+      // unreadable entry; anything else is not ours.
+      const isTmp = name.endsWith(".tmp");
+      if (!isTmp && !name.endsWith(".json")) continue;
       const at =
-        readRunTerminal(root, name.slice(0, -".json".length))?.at ??
+        (isTmp
+          ? undefined
+          : readRunTerminal(root, name.slice(0, -".json".length))?.at) ??
         fs.statSync(path.join(dir, name)).mtimeMs;
       if (now - at > RUN_TERMINAL_TTL_MS) fs.rmSync(path.join(dir, name));
     }
@@ -169,11 +194,26 @@ export async function guardRunTerminal<T>(
   if (!runId) return run();
   const prior = readRunTerminal(root, runId);
   if (prior) {
+    const noop = prior.outcome === "returned" && onAlreadyReturned;
     const err = new RunAlreadyTerminalError(runId, prior);
-    log(err.message);
-    if (prior.outcome === "returned" && onAlreadyReturned) {
-      return onAlreadyReturned(prior);
-    }
+    log(
+      noop
+        ? `workflow run ${runId} already finished on this box at ` +
+            `${new Date(prior.at).toISOString()}; redelivered attempt completed as a no-op, not re-executed (#386)`
+        : err.message,
+    );
+    // One greppable, structured line per redelivery the ledger caught — the
+    // box has no metrics pipeline, so this is what a post-restart check reads.
+    log(
+      `run.redelivery_refused ${JSON.stringify({
+        runId,
+        prior: prior.outcome,
+        priorAt: new Date(prior.at).toISOString(),
+        gapMs: Date.now() - prior.at,
+        action: noop ? "noop" : "refused",
+      })}`,
+    );
+    if (noop) return onAlreadyReturned(prior);
     throw err;
   }
   try {

@@ -2582,6 +2582,42 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     );
   });
 
+  it("the launcher defaults the run-terminal ledger to a durable dir under ReadWritePaths (#386)", () => {
+    // /tmp — the code default — is wiped at boot by Ubuntu's tmpfiles, so a
+    // reboot mid-drain lost the ledger and let a redelivery re-execute a run
+    // that already ended. The launcher names the durable default (worker-box.env
+    // may still override it), creates it worker-only, and does so before exec.
+    const script = deployFile("linux", "run-worker.sh.template");
+    const exported = script.match(
+      /^export WORKER_RUN_TERMINAL_ROOT="\$\{WORKER_RUN_TERMINAL_ROOT:-(\S+)\}"$/m,
+    );
+    expect(
+      exported,
+      "launcher does not default WORKER_RUN_TERMINAL_ROOT",
+    ).toBeTruthy();
+    const root = exported![1]!;
+    expect(root).toBe("/usr/local/automata/state");
+    expect(script).toMatch(/install -d -m 0700 "\$WORKER_RUN_TERMINAL_ROOT"/);
+    const exec = script.lastIndexOf(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(script.indexOf(exported![0])).toBeGreaterThan(
+      script.indexOf("source __HOME__/.automata/worker-box.env"),
+    );
+    expect(script.indexOf(exported![0])).toBeLessThan(exec);
+
+    // The unit can write it, and a fresh box has it before the first boot.
+    const unit = deployFile("linux", "automata-worker.service");
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+    expect(rw.some((p) => root === p || root.startsWith(`${p}/`))).toBe(true);
+    const ci = deployFile("linux", "cloud-init.yaml");
+    expect(ci).toMatch(
+      /install -d -m 0700 -o automata -g automata \/usr\/local\/automata\/state$/m,
+    );
+  });
+
   it("the unit signals only MainPID, so the SDK owns the drain", () => {
     // KillMode=control-group SIGTERMs the agent and its daemon directly and
     // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
