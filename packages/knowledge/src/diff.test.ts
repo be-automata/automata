@@ -337,6 +337,32 @@ describe("parseUnifiedDiff", () => {
     expect(() => parseUnifiedDiff(diff)).toThrow(/-M, not -C/);
   });
 
+  it("malformed: an unparseable hunk header is refused, not dropped as mode-only", () => {
+    const diff = lines(
+      "diff --git a/a.ts b/a.ts",
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -3 +3 @",
+      "-x",
+      "+y",
+    );
+    expect(() => parseUnifiedDiff(diff)).toThrow(/unparseable hunk header/);
+  });
+
+  it("malformed: context lines (-U3) are refused", () => {
+    const diff = lines(
+      "diff --git a/a.ts b/a.ts",
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -1,3 +1,3 @@",
+      " keep",
+      "-x",
+      "+y",
+      " keep",
+    );
+    expect(() => parseUnifiedDiff(diff)).toThrow(/-U0/);
+  });
+
   it("MalformedDiffError carries its name and reason", () => {
     try {
       parseUnifiedDiff("\u001b[m");

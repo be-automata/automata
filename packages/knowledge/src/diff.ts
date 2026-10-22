@@ -196,8 +196,19 @@ function parseSection([first, ...rest]: [
   }
 
   if (binary) return null;
-  const hunks = parseHunks(rest.slice(bodyStart).join("\n"));
+  const body = rest.slice(bodyStart);
+  const hunks = parseHunks(body.join("\n"));
   const where = JSON.stringify(header);
+  // Every @@ line must be a hunk header parseHunks read, or the file would silently lose hunks.
+  if (body.filter((l) => l.startsWith("@@")).length !== hunks.length) {
+    throw new MalformedDiffError(`unparseable hunk header in ${where}`);
+  }
+  // A context line means the diff was not produced with -U0: its hunks would cover the context too.
+  if (body.some((l) => l.startsWith(" "))) {
+    throw new MalformedDiffError(
+      `context lines in ${where}: produce the diff with -U0`,
+    );
+  }
   const renamed = renameFrom !== undefined || renameTo !== undefined;
   if (hunks.length === 0 && !renamed && !newFile && !deletedFile) return null; // mode-only
 
