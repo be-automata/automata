@@ -11,6 +11,8 @@ import {
   checkRunStaleness,
   pullAgentCredentials,
   CREDENTIAL_PULL_ATTEMPTS,
+  AUTH_ERROR_CONFIRM_ATTEMPTS,
+  AUTH_ERROR_RETRY_MS,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -365,6 +367,30 @@ describe("pullNextMessage", () => {
     );
     await expect(pullNextMessage(opts)).rejects.toThrow(/HTTP 500/);
   });
+
+  it("asks again after a 401 and returns the message when the token verifies", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { agent: "claudeCode", model: "opus" }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    const result = await pullNextMessage(opts, undefined, async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(result).toMatchObject({ agent: "claudeCode" });
+    expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS]);
+  });
+
+  it("throws the 401 once it repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(401, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      pullNextMessage(opts, undefined, async () => {}),
+    ).rejects.toThrow(/HTTP 401/);
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
+  });
 });
 
 describe("pollThreadStatus", () => {
@@ -451,6 +477,8 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     const responses = [
       jsonResponse(200, { status: "working", terminal: false }),
       jsonResponse(401, { error: "revoked" }),
+      jsonResponse(401, { error: "revoked" }),
+      jsonResponse(401, { error: "revoked" }),
     ];
     vi.stubGlobal(
       "fetch",
@@ -460,6 +488,42 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /premature revocation/,
     );
+  });
+
+  it("rides out a single 401 between good polls (verify-time blip, not a revocation)", async () => {
+    // Prod 2026-10-22: www's verifyApiKey turned a database error into
+    // valid:false, the worker believed the one 401, and the run died while
+    // the token was still good.
+    const responses = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    const result = await pollUntilTerminal(ctx(), opts, 1, async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(sleeps.filter((ms) => ms === AUTH_ERROR_RETRY_MS)).toHaveLength(3);
+  });
+
+  it("rides out a 401 on the FIRST poll when the next one succeeds", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift()!),
+    );
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
   it("returns completed on terminal=true even if the token is revoked immediately after (revoke-on-read happy path)", async () => {
@@ -479,14 +543,13 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
-  it("throws when the FIRST poll is a 401 (a real auth error)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse(401, { error: "x" })),
-    );
+  it("throws when the FIRST polls keep answering 401 (a real auth error)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(401, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /first poll/,
     );
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
   });
 
   it("stops with outcome cancelled when the context is cancelled", async () => {
