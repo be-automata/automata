@@ -252,6 +252,13 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
         reason: "Too many tasks were queued at once, so this one was dropped.",
         action: "open-task",
       };
+    case "queue-retired":
+      return {
+        title: "Retired from the queue",
+        reason:
+          "This run waited in the queue until it was stale, so it was retired without running.",
+        action: "open-task",
+      };
     case "agent-not-responding":
     case "request-timeout":
       return {
@@ -293,6 +300,7 @@ const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
   "prompt-too-long": true,
   "queue-limit-exceeded": true,
   "provider-unavailable": true,
+  "queue-retired": true,
 };
 
 function isThreadErrorType(value: string): value is ThreadErrorType {

@@ -50,4 +50,5 @@ export const allThreadErrors: Record<ThreadErrorType, boolean> = {
   "prompt-too-long": true,
   "queue-limit-exceeded": true,
   "provider-unavailable": true,
+  "queue-retired": true,
 };

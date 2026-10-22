@@ -344,6 +344,16 @@ const threadChatShared = {
   errorMessageInfo: text("error_message_info"),
   scheduleAt: timestamp("schedule_at"),
   reattemptQueueAt: timestamp("reattempt_queue_at"),
+  /**
+   * #446: when this chat entered `queued-tasks-concurrency` in its current
+   * queue period. Set once (COALESCE) by updateThreadChatStatusAtomic, cleared
+   * when the chat boots or a new queue period starts. The dequeue's
+   * stale-retirement rules age a queued run from here, not from the thread's
+   * creation. NULL on rows queued before it existed. On BOTH tables: a legacy
+   * thread (no thread_chat row, production's shape) carries its chat status
+   * on the thread row, so its queue entry lives there too.
+   */
+  queuedAt: timestamp("queued_at", { withTimezone: true }),
   contextLength: integer("context_length"),
   permissionMode: text("permission_mode")
     .$type<"allowAll" | "plan">()

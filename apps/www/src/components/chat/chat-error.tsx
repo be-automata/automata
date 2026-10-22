@@ -345,6 +345,14 @@ function ChatContent({
         />
       );
     }
+    case "queue-retired": {
+      return (
+        <ChatErrorContentsWithPre
+          header="This run waited in the queue until it was stale and was retired without running."
+          errorStr={errorInfo}
+        />
+      );
+    }
     default: {
       const _exhaustiveCheck: never = errorTypeStrict;
       console.log("Unhandled error", _exhaustiveCheck);

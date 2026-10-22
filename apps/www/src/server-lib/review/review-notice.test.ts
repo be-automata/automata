@@ -52,6 +52,37 @@ describe("renderReviewNotice", () => {
     expect(body.split("\n")).toHaveLength(6);
   });
 
+  // Card: protects=a review retired because its PR closed while queued says
+  // so (#446); fails_when=the notice reads like an agent failure or omits the
+  // closed-while-queued reason; no_claim=when the notice is posted.
+  it("queue_retired (closed): says the review was retired from the queue because the PR closed", () => {
+    const body = renderReviewNotice({
+      sha: SHA,
+      cause: "queue_retired",
+      reason: "the PR was closed while this review waited in the queue.",
+    });
+    expect(body).toContain(
+      "**Why:** this review was retired from the queue without running: the PR was closed while this review waited in the queue.",
+    );
+    expect(body).toContain("This is not a pass");
+  });
+
+  // Card: protects=a review retired for waiting too long tells the author how
+  // to re-run (#446); fails_when=the age reason or the re-run instruction is
+  // lost; no_claim=the 1h threshold.
+  it("queue_retired (age): says the review waited over an hour and how to re-run", () => {
+    const body = renderReviewNotice({
+      sha: SHA,
+      cause: "queue_retired",
+      reason:
+        "this review waited longer than an hour in the queue; push a new commit to re-run.",
+    });
+    expect(body).toContain(
+      "retired from the queue without running: this review waited longer than an hour in the queue; push a new commit to re-run.",
+    );
+    expect(body.split("\n")).toHaveLength(6);
+  });
+
   it("clips a very long reason", () => {
     const body = renderReviewNotice({
       sha: SHA,
