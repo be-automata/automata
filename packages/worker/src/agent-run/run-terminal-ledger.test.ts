@@ -95,6 +95,38 @@ describe("guardRunTerminal", () => {
     expect(rerun).not.toHaveBeenCalled();
   });
 
+  it("a redelivered attempt of a run id that already RETURNED gets the caller's no-op output (engine records COMPLETED), without re-executing", async () => {
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
+    const rerun = vi.fn(async () => "ran again");
+    const noop = vi.fn((prior: { outcome: string }) => `noop:${prior.outcome}`);
+    await expect(
+      guardRunTerminal(
+        { root, runId: RUN_ID, log, onAlreadyReturned: noop },
+        rerun,
+      ),
+    ).resolves.toBe("noop:returned");
+    expect(rerun).not.toHaveBeenCalled();
+    expect(log).toHaveBeenLastCalledWith(
+      expect.stringMatching(
+        /already finished on this box .*redelivered attempt refused, not re-executed/,
+      ),
+    );
+  });
+
+  it("a redelivered attempt of a run id that already FAILED still throws, even with a no-op output on offer", async () => {
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => {
+      throw new Error("boom");
+    }).catch(() => undefined);
+    const noop = vi.fn(() => "noop");
+    await expect(
+      guardRunTerminal(
+        { root, runId: RUN_ID, log, onAlreadyReturned: noop },
+        async () => "ran again",
+      ),
+    ).rejects.toBeInstanceOf(RunAlreadyTerminalError);
+    expect(noop).not.toHaveBeenCalled();
+  });
+
   it("refuses a redelivered attempt of a run id that already RETURNED, also without re-executing", async () => {
     await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
     const rerun = vi.fn(async () => "ran again");

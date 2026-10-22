@@ -30,6 +30,7 @@ process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import { runPaths } from "./run-owned-paths";
+import { recordRunTerminal } from "./run-terminal-ledger";
 import { resetPlaneKeyRingForTests } from "./payload-seal-keys";
 
 /**
@@ -503,6 +504,23 @@ describe("#386: a redelivered run that already reached a terminal is refused, no
     expect(String(err)).toMatch(/run-ext-386 already failed on this box/);
     // Never re-executed: no second clone, so no admission, daemon or agent.
     expect(provisionWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("a redelivery of a run id that already RETURNED completes as a no-op (`already-terminal`) and never provisions", async () => {
+    provisionWorkdir.mockClear();
+    recordRunTerminal(TEST_NAMESPACE_ROOT, "run-ext-386r", {
+      outcome: "returned",
+    });
+    const out = await runFn(INPUT, {
+      ...ctx(),
+      workflowRunId: () => "run-ext-386r",
+    });
+    expect(out).toEqual({
+      threadId: INPUT.threadId,
+      threadChatId: INPUT.threadChatId,
+      outcome: "already-terminal",
+    });
+    expect(provisionWorkdir).not.toHaveBeenCalled();
   });
 
   it("a different workflow run of the same thread (a re-review) still runs", async () => {

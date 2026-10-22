@@ -269,15 +269,20 @@ not a rolling restart:
 > **A drained run's terminal can be redelivered (#386).** On SIGTERM the SDK
 > (v1.26.0 `exitGracefully`) pauses the worker, stops its heartbeat and
 > unsubscribes BEFORE it waits for in-flight runs; each run still sends its own
-> COMPLETED/FAILED event before the drain ends. The engine can nevertheless hand the
-> same workflow run (attempt 0) to the relaunched process — seen in prod when a
-> run deferring on memory headroom failed five minutes into a drain. The worker
+> COMPLETED/FAILED event before the drain ends. But once the drain outlasts the
+> engine's heartbeat window the engine marks the run `REASSIGNED`, ignores the
+> drained attempt's own event, and hands the same workflow run to the relaunched
+> process (measured on hatchet-lite: a 5 s drain is not redelivered, 45 s is —
+> `run-terminal-redelivery.integration.test.ts`). Seen in prod when a run
+> deferring on memory headroom failed five minutes into a drain. The worker
 > therefore records every run id that reached a terminal in
 > `<WORKER_RUN_NAMESPACE_ROOT>/run-terminals/` (kept 24h; `PrivateTmp=no` keeps
-> it across a restart) and refuses a redelivered attempt of a recorded id with
-> `RunAlreadyTerminalError` — no clone, no daemon. The journal line reads
-> `redelivered attempt refused, not re-executed`. A run that never ended (worker
-> crash mid-run, #152) has no entry and is re-executed as before. A deferring run
+> it across a restart) and never re-executes a recorded id: a run whose first
+> attempt returned completes as a no-op (output `outcome: already-terminal`,
+> engine COMPLETED); one whose first attempt failed is refused with
+> `RunAlreadyTerminalError` (engine FAILED). Either way no clone, no daemon, and
+> the journal line reads `redelivered attempt refused, not re-executed`. A run
+> that never ended (worker crash mid-run, #152) has no entry and is re-executed as before. A deferring run
 > (`box.headroom_deferred_wait`) holds the drain for up to its 12-minute budget,
 > and has no cgroup yet, so a cgroup idle check does not see it.
 
