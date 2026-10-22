@@ -56,7 +56,7 @@ async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
 }
 
 describe("deploy/migrations on a fresh database", () => {
-  it("applies all seven, records seven rows, and a re-run is a no-op", async () => {
+  it("applies all eight, records eight rows, and a re-run is a no-op", async () => {
     const db = await freshDb();
     const c = await db.connect();
 
@@ -69,9 +69,10 @@ describe("deploy/migrations on a fresh database", () => {
       "2026-10-14-environment-org-unique",
       "2026-10-19-knowledge-plane",
       "2026-10-22-queued-at",
+      "2026-10-22-review-rerun",
     ]);
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(7);
+    expect(ledger).toHaveLength(8);
     expect(ledger.every((row) => row.mode === "applied")).toBe(true);
     expect(ledger.every((row) => row.appliedBy === "test@0")).toBe(true);
 
@@ -93,7 +94,7 @@ describe("deploy/migrations on a fresh database", () => {
 
     const second = await applyDir(c, REPO_MIGRATIONS);
     expect(second.applied).toEqual([]);
-    expect(await readLedger(c)).toHaveLength(7);
+    expect(await readLedger(c)).toHaveLength(8);
   });
 
   it("refuses the baseline on a database that already has tables", async () => {

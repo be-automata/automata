@@ -57,7 +57,14 @@ export type NoVerdictCause =
    * #446: the queued review was retired at dequeue without running (its PR
    * closed while it waited, or it waited longer than the queue allows).
    */
-  | "queue_retired";
+  | "queue_retired"
+  /**
+   * #107: the run FAILED before the agent produced a verdict (an infra
+   * failure: the worker reported an error, or the run died before the agent
+   * spoke). Posted only once the automatic re-runs are spent; `reason` is the
+   * run's own error text when it recorded one.
+   */
+  | "run_failed";
 
 /** A comment in the PR conversation (the GitHub issue-comment surface). */
 export interface PrConversationComment {
@@ -165,7 +172,16 @@ function describeCause(cause: NoVerdictCause, reason: string): string {
       return "the Claude provider refused the run.";
     case "queue_retired":
       return `this review was retired from the queue without running: ${detail}`;
+    case "run_failed":
+      return detail.length > 0
+        ? `the review run failed before the agent produced a verdict: ${detail}`
+        : "the review run failed before the agent produced a verdict.";
   }
+}
+
+function describeReruns(reruns: number | undefined): string | null {
+  if (!reruns || reruns <= 0) return null;
+  return `Automata re-ran the review automatically ${reruns === 1 ? "once" : `${reruns} times`}; no run produced a verdict.`;
 }
 
 export function renderReviewNotice(args: {
@@ -174,6 +190,8 @@ export function renderReviewNotice(args: {
   reason: string;
   /** The classification, read only for `provider_unavailable`. */
   provider?: ProviderUnavailable;
+  /** #107: how many automatic re-runs this commit already had. */
+  reruns?: number;
 }): string {
   if (args.cause === "provider_unavailable") {
     // Never names the account (epic #440 decision 5): the text is built from
@@ -191,7 +209,7 @@ export function renderReviewNotice(args: {
     reviewNoticeMarker(args.sha),
     `⚠️ **Automata has no verdict for commit \`${args.sha.slice(0, 7)}\`.** Nothing was approved or blocked. This is not a pass.`,
     "",
-    `**Why:** ${describeCause(args.cause, args.reason)}`,
+    `**Why:** ${[describeCause(args.cause, args.reason), describeReruns(args.reruns)].filter((part) => part !== null).join(" ")}`,
     "",
     "**Next:** push a new commit to trigger a fresh review, or have a teammate review this commit.",
   ].join("\n");
@@ -282,6 +300,7 @@ export async function publishReviewNotice(
     cause: NoVerdictCause;
     reason: string;
     provider?: ProviderUnavailable;
+    reruns?: number;
   },
 ): Promise<PublishReviewNoticeResult> {
   const existing = await listOwnNotices(args, "per-commit dedup");

@@ -689,6 +689,7 @@ export async function runPullRequestAutomation({
   prNumber,
   source,
   deliveryId,
+  expectedHeadSha,
 }: {
   userId: string;
   automationId: string;
@@ -698,6 +699,12 @@ export async function runPullRequestAutomation({
   source: "automated" | "manual";
   /** #127: originating webhook delivery id (absent for manual runs). */
   deliveryId?: string;
+  /**
+   * #107: a re-run of a failed review is for ONE head. When set, the run is
+   * not started (returns false) unless the PR is open and its head is still
+   * this sha, read from the same pulls.get the run derives everything from.
+   */
+  expectedHeadSha?: string;
 }): Promise<boolean> {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
@@ -716,6 +723,25 @@ export async function runPullRequestAutomation({
   // is suppressed downstream in runAutomation → createNewThread).
   const shadow = await isAutomationShadow(automation.organizationId);
   const [owner, repo] = parseRepoFullName(repoFullName);
+  // #107: a re-run for one head reads the PR FIRST and refuses before any PR
+  // side effect — no eyes reaction, no check run — when the PR closed or its
+  // head moved. A refused re-run must leave nothing on the PR. A failed read
+  // is not a refusal: it falls through to the normal error handling below.
+  const earlyPrRead =
+    expectedHeadSha !== undefined
+      ? await readPullRequest({ userId, repoFullName, prNumber })
+      : undefined;
+  if (
+    earlyPrRead?.ok &&
+    (earlyPrRead.data.state !== "open" ||
+      earlyPrRead.data.head.sha !== expectedHeadSha)
+  ) {
+    console.warn(
+      `[automations] re-run refused: ${repoFullName}#${prNumber} is no longer open at ${expectedHeadSha}`,
+      { state: earlyPrRead.data.state, headSha: earlyPrRead.data.head.sha },
+    );
+    return false;
+  }
   // Independent, so concurrent: the eyes reaction (never throws), the checks
   // flag, and the PR read everything below is derived from.
   const [shouldCreateGitHubChecks, prRead] = await Promise.all([
@@ -724,7 +750,7 @@ export async function runPullRequestAutomation({
       userId,
       flagName: "createGitHubChecksForAutomations",
     }),
-    readPullRequest({ userId, repoFullName, prNumber }),
+    earlyPrRead ?? readPullRequest({ userId, repoFullName, prNumber }),
     shadow
       ? undefined
       : addEyesReactionToPullRequest({ owner, repo, issueNumber: prNumber }),

@@ -1976,6 +1976,57 @@ export const supersedeRecheck = pgTable(
 );
 
 /**
+ * #107 no-verdict re-run ledger: one row per automatic re-run of a review
+ * whose run failed before it produced a verdict (an infra failure, never an
+ * agent that answered badly). Two UNIQUE indexes are the bounds:
+ *  - (prKey, headSha, attempt): at most REVIEW_RERUN_MAX_ATTEMPTS re-runs per
+ *    head, however many failed runs race to schedule one;
+ *  - (failedThreadId): a failed run hands off to at most one re-run, so the
+ *    finish hook and the hourly sweep reading the same thread converge.
+ * `state` walks pending → claimed → dispatched | skipped | failed, each step
+ * a compare-and-set on the previous state; a claim whose lease lapses
+ * becomes failed (claim_expired).
+ */
+export const reviewRerun = pgTable(
+  "review_rerun",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    prKey: text("pr_key").notNull(),
+    headSha: text("head_sha").notNull(),
+    /** 1-based: the Nth automatic re-run of this head. */
+    attempt: integer("attempt").notNull(),
+    /** The run that ended without a verdict and asked for this re-run. */
+    failedThreadId: text("failed_thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    state: text("state")
+      .$type<"pending" | "claimed" | "dispatched" | "skipped" | "failed">()
+      .notNull()
+      .default("pending"),
+    /** Earliest dispatch time (the backoff). */
+    dueAt: timestamp("due_at", { mode: "date" }).notNull(),
+    /** Why a row ended skipped or failed (operator-facing, never on a PR). */
+    outcomeReason: text("outcome_reason"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("review_rerun_pr_key_sha_attempt_index").on(
+      table.prKey,
+      table.headSha,
+      table.attempt,
+    ),
+    uniqueIndex("review_rerun_failed_thread_index").on(table.failedThreadId),
+    index("review_rerun_state_due_index").on(table.state, table.dueAt),
+  ],
+);
+
+/**
  * Egress audit sink (#66): one row per egress decision (allow AND deny) made
  * by an enforcement plane (worker proxy, Docker sidecar) or a single
  * "policy applied" marker from native-firewall planes (E2B/Daytona). Rows
