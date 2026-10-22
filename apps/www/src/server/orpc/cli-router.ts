@@ -1,4 +1,4 @@
-import { implement } from "@orpc/server";
+import { implement, ORPCError } from "@orpc/server";
 import { cliAPIContract } from "@terragon/cli-api-contract";
 import { db } from "@/lib/db";
 import {
@@ -16,6 +16,7 @@ import { getClaudeSessionJSONLOrNull } from "@/server-lib/claude-session";
 import { checkCliTaskCreationRateLimit } from "@/lib/rate-limit";
 import { ensureAgent } from "@terragon/agent/utils";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { combineThreadStatuses } from "@/agent/thread-status";
 
 const os = implement(cliAPIContract)
@@ -28,7 +29,19 @@ const os = implement(cliAPIContract)
   }>()
   .use(async ({ context, next, errors }) => {
     const headers = (context?.headers || new Headers()) as Headers;
-    const tenant = await getDaemonTokenContext({ headers });
+    let tenant: Awaited<ReturnType<typeof getDaemonTokenContext>>;
+    try {
+      tenant = await getDaemonTokenContext({ headers });
+    } catch (error) {
+      // The auth store failed: retryable, never UNAUTHORIZED.
+      if (error instanceof DaemonAuthUnavailableError) {
+        throw new ORPCError("SERVICE_UNAVAILABLE", {
+          status: 503,
+          message: "Authentication temporarily unavailable",
+        });
+      }
+      throw error;
+    }
     if (!tenant) {
       throw errors.UNAUTHORIZED();
     }

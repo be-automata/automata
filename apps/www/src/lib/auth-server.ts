@@ -1,6 +1,9 @@
 import { auth } from "./auth";
 import { headers } from "next/headers";
+import { defaultKeyHasher } from "@better-auth/api-key";
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { apikey } from "@terragon/shared/db/schema";
 import {
   User,
   Session,
@@ -29,6 +32,7 @@ import {
   DaemonTokenContext,
   daemonTokenContextFromApiKey,
 } from "./daemon-token-context";
+import { DaemonAuthUnavailableError } from "./daemon-auth-unavailable";
 
 export const getSessionOrNull = cache(
   async (): Promise<{
@@ -207,10 +211,36 @@ export async function getUserIdOrRedirect(): Promise<User["id"]> {
 }
 
 /**
+ * Whether an apikey row exists for the raw token. Hashes exactly as the
+ * api-key plugin stores keys (`defaultKeyHasher`; auth.ts leaves
+ * `disableKeyHashing` at its default `false`). Throws
+ * DaemonAuthUnavailableError when the lookup itself fails.
+ */
+async function apiKeyRowExists(token: string): Promise<boolean> {
+  const hashedKey = await defaultKeyHasher(token);
+  try {
+    const rows = await db
+      .select({ id: apikey.id })
+      .from(apikey)
+      .where(eq(apikey.key, hashedKey))
+      .limit(1);
+    return rows.length > 0;
+  } catch (error) {
+    throw new DaemonAuthUnavailableError("api key lookup failed", {
+      cause: error,
+    });
+  }
+}
+
+/**
  * Resolve the full tenant context ({ userId, organizationId }) from an
  * X-Daemon-Token API key. `organizationId` comes from the key's metadata (see
  * daemon-token-context.ts); it is null for personal keys. Downstream code can
  * read the org directly instead of inferring it from the user's active org.
+ *
+ * Null (→ 401) only for a missing, unknown, disabled or expired key. Throws
+ * DaemonAuthUnavailableError when the auth store fails; callers answer 503
+ * (withDaemonAuthUnavailable / daemonAuthUnavailableResponse).
  */
 export async function getDaemonTokenContext(
   request: Pick<Request, "headers">,
@@ -219,10 +249,27 @@ export async function getDaemonTokenContext(
   if (!token) {
     return null;
   }
+  // better-auth's verifyApiKey turns ANY non-APIError (a DB timeout included)
+  // into `{ valid: false, code: "INVALID_API_KEY" }` — the same answer as an
+  // unknown key. Look the row up ourselves first so an outage is observable:
+  // the lookup throwing means the store is unavailable (503), no row means
+  // the key is unknown (401).
+  if (!(await apiKeyRowExists(token))) {
+    console.log("Unauthorized", "reason", "unknown api key");
+    return null;
+  }
   const { valid, error, key } = await auth.api.verifyApiKey({
     body: { key: token },
   });
   if (error || !valid) {
+    // The row was just found, so "invalid" here means verification failed
+    // internally (or the key was revoked in between — the retry then 401s).
+    // KEY_DISABLED / KEY_EXPIRED and the other codes stay a 401.
+    if (!error || error.code === "INVALID_API_KEY") {
+      throw new DaemonAuthUnavailableError(
+        "api key verification failed after the key row was found",
+      );
+    }
     console.log("Unauthorized", "error", error, "valid", valid);
     return null;
   }
