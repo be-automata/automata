@@ -9,11 +9,29 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 
+import {
+  classifyEvidence,
+  type EvidenceClass,
+  type EvidenceScheme,
+} from "./evidence-class";
 import { assertOpKeyPart, opKey, parseOpKey } from "./op-key";
 import { reanchorSpan, type Hunk, type LineSpan } from "./reanchor";
+import {
+  findRejection,
+  type RejectedOp,
+  type SuppressedOp,
+} from "./rejections";
+import { compareValueSets, extractValues, type ValueExtractor } from "./values";
 
 export interface EvidencePin {
   uri: string;
+  /**
+   * Identity of the pinned span's content, in one of two self-describing forms:
+   * - bare 16 hex: whitespace-collapsed (prose pins, and legacy pins written before ENG-03; a legacy
+   *   bare hash on a code file keeps verifying whitespace-tolerantly until its next repin or update);
+   * - `x:` + 16 hex: the exact text, whitespace and line endings included (code and config pins).
+   * The stored form, never the URI, decides how the hash is compared.
+   */
   hash: string;
 }
 export interface Claim {
@@ -73,9 +91,27 @@ export class InvalidEvidenceUriError extends Error {
 
 const sha = (s: string) =>
   createHash("sha256").update(s).digest("hex").slice(0, 16);
-/** The identity of a span's content. Whitespace-only edits must not flip a claim. */
+/** The identity of a prose span's content. Whitespace-only edits must not flip a prose claim. */
 const fingerprint = (text: string) => sha(text.replace(/\s+/g, " ").trim());
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+/** Marks a hash of the exact text (code and config), so a stored hash says how to compare it. */
+const EXACT_HASH_PREFIX = "x:";
+function hashAs(mode: EvidenceClass, text: string): string {
+  // Exact: the text as resolved, no trim and no CRLF normalization (a line-ending change is a change).
+  return mode === "exact" ? EXACT_HASH_PREFIX + sha(text) : fingerprint(text);
+}
+const modeOfHash = (hash: string): EvidenceClass =>
+  hash.startsWith(EXACT_HASH_PREFIX) ? "exact" : "prose";
+/** The class a new pin on this URI gets. Comparing an existing pin uses modeOfHash instead. */
+function classOfUri(uri: string): EvidenceClass {
+  const { scheme, target } = parseUri(uri);
+  return classifyEvidence(scheme, target);
+}
+const matchesHash = (stored: string, text: string) =>
+  hashAs(modeOfHash(stored), text) === stored;
+/** A stale span as the updater sees it: exact text keeps its indentation, prose is collapsed. */
+const nowText = (mode: EvidenceClass, text: string) =>
+  mode === "exact" ? text.replace(/\n$/, "") : norm(text);
 const slug = (s: string) =>
   s
     .toLowerCase()
@@ -102,7 +138,7 @@ export function parseUri(uri: string) {
       uri,
       "target must stay inside its source",
     );
-  return { scheme: scheme as "repo" | "ticket" | "doc", target, anchor };
+  return { scheme: scheme as EvidenceScheme, target, anchor };
 }
 
 /**
@@ -217,15 +253,19 @@ export function pin(root: string, uri: string): EvidencePin {
       uri,
       `cannot pin: ${"missing" in r ? r.missing : "the anchor names several places"}`,
     );
-  return { uri, hash: fingerprint(r.text) };
+  return { uri, hash: hashAs(classOfUri(uri), r.text) };
 }
 
-// Window indexes keyed by (content, width), least recently used evicted past the cap. Keyed by content,
+// Window indexes keyed by (content, width, hash mode), least recently used evicted past the cap. Keyed by content,
 // not path, so a worker that checks out every run into a fresh directory reuses them and stays bounded.
 const WINDOW_INDEX_CAP = 64;
 const WINDOW_INDEX = new Map<string, Map<string, number[]>>();
-function windowIndex(text: string, width: number): Map<string, number[]> {
-  const key = `${sha(text)}\0${width}`;
+function windowIndex(
+  text: string,
+  width: number,
+  mode: EvidenceClass,
+): Map<string, number[]> {
+  const key = `${sha(text)}\0${width}\0${mode}`;
   const cached = WINDOW_INDEX.get(key);
   if (cached) {
     WINDOW_INDEX.delete(key);
@@ -235,7 +275,7 @@ function windowIndex(text: string, width: number): Map<string, number[]> {
   const lines = text.split("\n");
   const idx = new Map<string, number[]>();
   for (let i = 0; i + width <= lines.length; i++) {
-    const h = fingerprint(lines.slice(i, i + width).join("\n"));
+    const h = hashAs(mode, lines.slice(i, i + width).join("\n"));
     const list = idx.get(h);
     if (list) list.push(i + 1);
     else idx.set(h, [i + 1]);
@@ -254,11 +294,12 @@ function spansWithHash(
   hash: string,
 ): string[] | null {
   const { scheme, target, anchor } = parseUri(uri);
+  const mode = modeOfHash(hash);
   if (scheme === "doc") {
     const sections = readSections(root, target, uri);
     return sections
       ? sections
-          .filter((s) => fingerprint(s.body) === hash)
+          .filter((s) => hashAs(mode, s.body) === hash)
           .map((s) => `doc://${target}#${s.slug}`)
       : null;
   }
@@ -268,7 +309,7 @@ function spansWithHash(
   const file = sourceFile(root, "repo", target, uri);
   if (!file) return null;
   const text = readFileSync(file, "utf8");
-  return (windowIndex(text, width).get(hash) ?? []).map((s) =>
+  return (windowIndex(text, width, mode).get(hash) ?? []).map((s) =>
     repoUri(target, [s, s + width - 1]),
   );
 }
@@ -302,8 +343,14 @@ export function checkEvidence(root: string, e: EvidencePin): EvidenceStatus {
         code: r.code,
       }
     );
-  if (fingerprint(r.text) === e.hash) return { kind: "fresh", uri: e.uri };
-  return relocated() ?? { kind: "stale", uri: e.uri, now: norm(r.text) };
+  if (matchesHash(e.hash, r.text)) return { kind: "fresh", uri: e.uri };
+  return (
+    relocated() ?? {
+      kind: "stale",
+      uri: e.uri,
+      now: nowText(modeOfHash(e.hash), r.text),
+    }
+  );
 }
 
 const holds = (k: EvidenceStatus["kind"]) => k === "fresh" || k === "relocated";
@@ -418,17 +465,50 @@ export interface DraftOp {
   newEvidenceHash?: string[];
   /** Re-anchor similarity behind an update (1 = located by the diff alone). */
   score?: number;
+  /** For a value conflict: what each source says now, for the owner's choose-source decision. */
+  sourceValues?: SourceValues[];
+  /**
+   * Identity of what the owner saw: the claim, its statement and the current state of every pin. Stable
+   * across merges that do not touch the evidence (line shifts included). Set on every non-auto op reconcile
+   * emits; a rejection is matched on it (ENG-02).
+   */
+  evidenceFingerprint?: string;
+  /**
+   * Where each pin was located when the op was raised (the pin itself when it did not move), in pin order.
+   * Set with evidenceFingerprint: a rejection carries it so a later merge that says nothing about a pin's
+   * file can still recognise the evidence the owner saw (a rejected op is never applied, so its pins stay put).
+   */
+  locatedEvidence?: string[];
+  /** Identity of the proposed change (statement and new evidence fingerprints). update/reverify only. */
+  proposalFingerprint?: string;
+}
+/**
+ * Tokens extracted from one source at its re-anchored location. Numbers and versions only, never prose,
+ * so a persisted conflict op stays minimal (OPS-04).
+ */
+export interface SourceValues {
+  uri: string;
+  values: string[];
 }
 export interface Draft {
   page: string;
   /** propose = a human edited the page since the agent last verified it. Informational: applyDraft re-derives it. */
   mode: "apply" | "propose";
   ops: DraftOp[];
+  /**
+   * Ops a prior rejection still covers (ENG-02): kept here, never silently dropped. reconcile always sets
+   * it (empty when nothing matched); optional only so hand-built drafts need not carry it.
+   */
+  suppressed?: SuppressedOp[];
   llmCalls: number;
 }
+/** A draft as reconcile returns it: suppressed is always present. */
+export type ReconciledDraft = Draft & { suppressed: SuppressedOp[] };
 export interface ReconcileDiff {
-  /** The single repo:// target this diff covers (e.g. "deploy/PILOT-RUNBOOK.md"). */
+  /** The repo:// target this diff covers, as a path in the NEW tree (e.g. "deploy/PILOT-RUNBOOK.md"). */
   path: string;
+  /** Set for a rename: pins on oldPath are re-targeted to path. */
+  oldPath?: string;
   hunks: Hunk[];
   oldText: string;
   newText: string;
@@ -438,12 +518,22 @@ export interface ReconcileOptions {
   /** Source commit the evidence was checked at; part of every op key. Defaults to "working". */
   sourceRev?: string;
   /**
-   * The diff that produced this state. With it, every stale line pin is re-anchored through reanchorSpan
-   * before anything reaches the model: below-floor, tied or narrowed spans become reviews, deleted spans
-   * become retracts or reviews, and line pins on other files (no diff to locate them) become reviews.
-   * Without a diff, a stale line pin is assumed to have changed in place (positional re-pin).
+   * The diffs that produced this state, one per changed file. With them, every stale line pin is re-anchored
+   * through the diff of ITS file (reanchorSpan) before anything reaches the model: below-floor, tied or
+   * narrowed spans become reviews, deleted spans become retracts or reviews, and line pins on files absent
+   * from the diffs (nothing to locate them with) become reviews. A pin on a renamed file's old path is
+   * re-targeted to its new path. Without diffs (or with an empty list), a stale line pin is assumed to have
+   * changed in place (positional re-pin).
    */
-  diff?: ReconcileDiff;
+  diffs?: ReconcileDiff[];
+  /** Replaces the deterministic token extractor (e.g. a model-extracted or typed-value variant). */
+  extractValues?: ValueExtractor;
+  /**
+   * Prior owner rejections supplied by the caller (ENG-02). A non-auto op they still cover goes to
+   * draft.suppressed instead of draft.ops; a covered update never reaches the model. See RejectedOp for
+   * the latest-only, ledger-sourced contract.
+   */
+  rejected?: readonly RejectedOp[];
 }
 
 interface DiffLines {
@@ -451,21 +541,71 @@ interface DiffLines {
   oldLines: string[];
   newLines: string[];
 }
+/**
+ * Each changed file's diff, keyed by its new path and (for a rename) its old path. AMBIGUOUS marks a path two
+ * entries claim (e.g. `a -> b` renamed plus a new file at `a`): which diff locates a pin there is unknowable, so
+ * only pins on that path become reviews and the rest of the reconcile proceeds.
+ */
+const AMBIGUOUS = "ambiguous";
+type DiffIndex = Map<string, DiffLines | typeof AMBIGUOUS>;
+
+/**
+ * Index the diffs once per reconcile, splitting each file's text once. Diff paths are untrusted and are only
+ * ever map keys here: they become repo:// targets through repoUri and are read only through resolve().
+ */
+function buildDiffIndex(
+  diffs: readonly ReconcileDiff[] = [],
+): DiffIndex | undefined {
+  if (diffs.length === 0) return undefined;
+  const idx: DiffIndex = new Map();
+  for (const diff of diffs) {
+    const lines: DiffLines = {
+      diff,
+      oldLines: diff.oldText.split("\n"),
+      newLines: diff.newText.split("\n"),
+    };
+    const keys =
+      diff.oldPath !== undefined && diff.oldPath !== diff.path
+        ? [diff.path, diff.oldPath]
+        : [diff.path];
+    for (const key of keys) idx.set(key, idx.has(key) ? AMBIGUOUS : lines);
+  }
+  return idx;
+}
+
+/** The repo:// URI of a span in a diff's new path, or null when that path could name a file outside the repo. */
+function newPathUri(d: DiffLines, span: LineSpan): string | null {
+  const uri = repoUri(d.diff.path, span);
+  try {
+    parseUri(uri);
+    return uri;
+  } catch (e) {
+    if (e instanceof InvalidEvidenceUriError) return null;
+    throw e;
+  }
+}
+
 type Located =
   | { kind: "located"; uri: string; score: number }
   | { kind: "review"; why: string }
   | { kind: "deleted" };
 
 /** Where a pin lives after the diff. Ticket and doc anchors are semantic, so they never move. */
-function locate(e: EvidenceStatus, d: DiffLines | undefined): Located {
-  if (e.kind !== "stale" || !d)
+function locate(e: EvidenceStatus, idx: DiffIndex | undefined): Located {
+  if (e.kind !== "stale" || !idx)
     return { kind: "located", uri: e.uri, score: 1 };
   const { scheme, target, anchor } = parseUri(e.uri);
   if (scheme !== "repo") return { kind: "located", uri: e.uri, score: 1 };
-  if (target !== d.diff.path)
+  const d = idx.get(target);
+  if (!d)
     return {
       kind: "review",
       why: `no diff for ${target}: a line pin cannot be re-anchored, a human must locate this fact`,
+    };
+  if (d === AMBIGUOUS)
+    return {
+      kind: "review",
+      why: `two diff entries name ${target} (a rename source and a file at the same path): a human must locate this fact`,
     };
   const r = reanchorSpan({
     hunks: d.diff.hunks,
@@ -483,27 +623,197 @@ function locate(e: EvidenceStatus, d: DiffLines | undefined): Located {
         why: `re-anchor ${r.reason} (similarity ${r.score}): a human must locate this fact`,
       };
     case "shifted":
-    case "in-hunk":
-      return { kind: "located", uri: repoUri(target, r.span), score: r.score };
+    case "in-hunk": {
+      const uri = newPathUri(d, r.span);
+      return uri
+        ? { kind: "located", uri, score: r.score }
+        : {
+            kind: "review",
+            why: `the diff moves ${target} to a path outside the repository: a human must locate this fact`,
+          };
+    }
   }
 }
 
 /**
- * A line pin pushed past end-of-file by the diff is not gone, it moved up: with a diff for its file it is
- * a re-anchor candidate (stale), not a retraction.
+ * Evidence as the diff explains it. A line pin pushed past end-of-file is not gone, it moved up: with a diff
+ * for its file it is a re-anchor candidate (stale), not a retraction. A pin on a renamed file's old path is
+ * re-targeted to the new path: when the text there is identical to what was pinned it relocated (a
+ * mechanical repin); otherwise it is stale and locate() re-anchors it at the new path.
  */
 function inDiffContext(
   evidence: EvidenceStatus[],
-  d: DiffLines | undefined,
+  pins: EvidencePin[],
+  idx: DiffIndex | undefined,
+  root: string,
 ): EvidenceStatus[] {
-  if (!d) return evidence;
-  return evidence.map((e) =>
-    e.kind === "missing" &&
-    e.code === "past-eof" &&
-    parseUri(e.uri).target === d.diff.path
-      ? { kind: "stale", uri: e.uri, now: "" }
-      : e,
+  if (!idx) return evidence;
+  return evidence.map((e, j): EvidenceStatus => {
+    if (e.kind !== "missing") return e;
+    const { scheme, target } = parseUri(e.uri);
+    const d = scheme === "repo" ? idx.get(target) : undefined;
+    if (!d) return e;
+    const stale = { kind: "stale" as const, uri: e.uri, now: "" };
+    // An ambiguous path: let locate() turn the pin into a review rather than a retraction.
+    if (d === AMBIGUOUS || e.code === "past-eof") return stale;
+    // d was found by target, so target is either its new path or its rename source.
+    if (d.diff.path === target) return e;
+    return renamed(root, stale, pins[j], idx) ?? stale;
+  });
+}
+
+/** A gone pin on a rename source that lands on identical text at the new path, or null. */
+function renamed(
+  root: string,
+  stale: Extract<EvidenceStatus, { kind: "stale" }>,
+  pinned: EvidencePin | undefined,
+  idx: DiffIndex,
+): EvidenceStatus | null {
+  const l = locate(stale, idx);
+  if (l.kind !== "located" || !pinned) return null;
+  const now = resolve(root, l.uri);
+  return "text" in now && matchesHash(pinned.hash, now.text)
+    ? { kind: "relocated", uri: stale.uri, newUri: l.uri }
+    : null;
+}
+
+/**
+ * A repin that moves a pin to another file (a rename) carries the new evidence and its fingerprint, so
+ * applyDraft can re-check it: a gone pin cannot be relocated from the sources alone. Same-file relocations
+ * carry nothing (applyDraft finds them again by hash).
+ */
+function renameProposal(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+): Pick<DraftOp, "newEvidence" | "newEvidenceHash"> {
+  const crossFile = ev.some(
+    (e) =>
+      e.kind === "relocated" &&
+      parseUri(e.newUri).target !== parseUri(e.uri).target,
   );
+  if (!crossFile) return {};
+  const newEvidence = ev.map((e, j) =>
+    e.kind === "relocated" ? e.newUri : (claim.evidence[j]?.uri ?? e.uri),
+  );
+  return {
+    newEvidence,
+    newEvidenceHash: newEvidence.map((uri) => pin(root, uri).hash),
+  };
+}
+
+/**
+ * What the owner saw when an op was raised: the claim, its statement and every pin's pinned hash with its
+ * current state. A pin that holds (fresh or relocated) contributes only "holds", so a line shift never
+ * changes it; a stale pin contributes the hash of the text at its located span (content, not line
+ * numbers). Deterministic: keys are written in a fixed order and pins are sorted by URI.
+ */
+function evidenceFingerprintOf(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+  located: Located[],
+): string {
+  const pins = claim.evidence
+    .map((p, j) => ({
+      uri: p.uri,
+      pinned: p.hash,
+      state: pinState(root, p, ev[j], located[j]),
+    }))
+    .sort((a, b) => (a.uri < b.uri ? -1 : a.uri > b.uri ? 1 : 0));
+  return sha(
+    JSON.stringify({
+      v: 1,
+      claimId: claim.id,
+      statement: sha(claim.statement),
+      pins,
+    }),
+  );
+}
+
+interface Sight {
+  fingerprint: () => string;
+  locatedEvidence: string[];
+  /** The rejection that still covers this evidence, or undefined. */
+  coveredBy: () => RejectedOp | undefined;
+}
+
+/**
+ * A stale line pin this merge says nothing about: no diffs at all, or none for its file. Its text has not
+ * moved since the last merge that did locate it, so a rejection's locatedEvidence still says where it is.
+ */
+function uninformed(e: EvidenceStatus | undefined, idx: DiffIndex | undefined) {
+  if (e?.kind !== "stale") return false;
+  const { scheme, target } = parseUri(e.uri);
+  return scheme === "repo" && !idx?.has(target);
+}
+
+/**
+ * True when the evidence, read at the rejection's located spans for the pins this merge says nothing about,
+ * is exactly what the owner saw. Only ever adds a suppression on an exact fingerprint match: a stale or
+ * unreadable location re-raises the op instead.
+ */
+function seenAtRejection(
+  root: string,
+  claim: Claim,
+  ev: EvidenceStatus[],
+  located: Located[],
+  idx: DiffIndex | undefined,
+  r: RejectedOp,
+): boolean {
+  const at = r.locatedEvidence;
+  if (
+    !at ||
+    at.length !== located.length ||
+    !ev.some((e) => uninformed(e, idx))
+  )
+    return false;
+  try {
+    const relocated = located.map((l, j): Located => {
+      const uri = at[j];
+      if (!uninformed(ev[j], idx) || uri === undefined) return l;
+      parseUri(uri);
+      return { kind: "located", uri, score: 1 };
+    });
+    return (
+      evidenceFingerprintOf(root, claim, ev, relocated) ===
+      r.evidenceFingerprint
+    );
+  } catch (e) {
+    if (e instanceof InvalidEvidenceUriError) return false;
+    throw e;
+  }
+}
+
+function pinState(
+  root: string,
+  p: EvidencePin,
+  e: EvidenceStatus | undefined,
+  l: Located | undefined,
+): string {
+  if (!e) return "unchecked";
+  switch (e.kind) {
+    case "fresh":
+    case "relocated":
+      return "holds";
+    case "missing":
+      return `missing:${e.code}`;
+    case "ambiguous":
+      return `ambiguous:${e.candidates.length}`;
+    case "stale": {
+      const r = l?.kind === "located" ? resolve(root, l.uri) : null;
+      const text = r && "text" in r ? r.text : e.now;
+      return `stale:${hashAs(modeOfHash(p.hash), text)}`;
+    }
+  }
+}
+
+/** The identity of a proposed change: the new statement and the fingerprint of each new evidence span. */
+function proposalFingerprintOf(
+  after: string,
+  newEvidenceHash: string[],
+): string {
+  return sha(JSON.stringify({ v: 1, after, newEvidenceHash }));
 }
 
 /** Widest line span an updater may choose: wider overrides would make the window scan quadratic. */
@@ -525,7 +835,7 @@ function acceptableEvidence(
       }
       const r = resolve(root, uri);
       if (!("text" in r)) return false;
-      const spans = spansWithHash(root, uri, fingerprint(r.text));
+      const spans = spansWithHash(root, uri, hashAs(classOfUri(uri), r.text));
       return spans === null || spans.length === 1;
     } catch (e) {
       // Malformed or out-of-corpus model output is a review, not a crash.
@@ -546,7 +856,9 @@ function atLocation(
 ): EvidenceStatus | null {
   if (e.kind !== "stale") return e;
   const r = resolve(root, uri);
-  return "text" in r ? { kind: "stale", uri: e.uri, now: norm(r.text) } : null;
+  return "text" in r
+    ? { kind: "stale", uri: e.uri, now: nowText(classOfUri(uri), r.text) }
+    : null;
 }
 
 const describe = (e: EvidenceStatus) => {
@@ -633,38 +945,99 @@ export async function reconcile(
   sc: Sidecar,
   llm: Updater,
   options: ReconcileOptions = {},
-): Promise<Draft> {
+): Promise<ReconciledDraft> {
   const report = checkPage(root, pageMd, sc);
   const before = llm.calls;
+  const idx = buildDiffIndex(options.diffs);
   const ops: DraftOp[] = [];
-  const add = (o: Omit<DraftOp, "id" | "auto">) =>
+  const rejected = options.rejected ?? [];
+  const suppressed: SuppressedOp[] = [];
+  /** A claim's evidence as an op on it would show it; the fingerprint is computed at most once, on demand. */
+  const sightOf = (
+    claim: Claim,
+    ev: EvidenceStatus[],
+    located: Located[],
+  ): Sight => {
+    let fp: string | undefined;
+    const fingerprint = () =>
+      (fp ??= evidenceFingerprintOf(root, claim, ev, located));
+    return {
+      fingerprint,
+      locatedEvidence: located.map((l, j) =>
+        l.kind === "located" ? l.uri : (claim.evidence[j]?.uri ?? ""),
+      ),
+      coveredBy: () =>
+        findRejection(
+          { claimId: claim.id, evidenceFingerprint: fingerprint() },
+          rejected,
+        ) ??
+        rejected.find(
+          (r) =>
+            r.claimId === claim.id &&
+            seenAtRejection(root, claim, ev, located, idx, r),
+        ),
+    };
+  };
+  /** A covered op is recorded in suppressed; returns whether it was. */
+  const suppress = (claimId: string, op: DraftOpKind, sight: Sight) => {
+    const match = sight.coveredBy();
+    if (!match) return false;
+    suppressed.push({
+      claimId,
+      op,
+      rejectedOpId: match.opId,
+      evidenceFingerprint: match.evidenceFingerprint,
+    });
+    return true;
+  };
+  // ENG-02: every non-auto op carries what the owner saw; auto repins carry nothing and are never suppressed.
+  const add = (
+    o: Omit<DraftOp, "id" | "auto" | "evidenceFingerprint" | "locatedEvidence">,
+    sight: Sight,
+  ) => {
+    const auto = OP_KINDS[o.op].auto;
+    if (!auto && suppress(o.claimId, o.op, sight)) return;
     ops.push({
       ...o,
       id: opKey(o.op, sc.page, o.claimId, options.sourceRev),
-      auto: OP_KINDS[o.op].auto,
+      auto,
+      ...(auto
+        ? {}
+        : {
+            evidenceFingerprint: sight.fingerprint(),
+            locatedEvidence: sight.locatedEvidence,
+          }),
     });
+  };
   const baseOf = (claim: Claim, ev: EvidenceStatus[]) => ({
     claimId: claim.id,
     before: claim.statement,
     evidence: ev.map(describe),
   });
-  const d = options.diff && {
-    diff: options.diff,
-    oldLines: options.diff.oldText.split("\n"),
-    newLines: options.diff.newText.split("\n"),
-  };
-  const needWork: UpdateRequest[] = [];
+  const extract = options.extractValues ?? extractValues;
+  // Each claim sent to the model, with the evidence fingerprint its answer's op will carry.
+  const work: { w: UpdateRequest; fp: Sight }[] = [];
   // checkPage reports claims in sc.claims order.
   sc.claims.forEach((claim, i) => {
     const cr = report.claims[i];
     if (!cr) return;
-    const ev = inDiffContext(cr.evidence, d);
+    const ev = inDiffContext(cr.evidence, claim.evidence, idx, root);
+    // Located once: the op and its evidence fingerprint must agree on where every pin landed.
+    const located = ev.map((e) => locate(e, idx));
+    const fp = sightOf(claim, ev, located);
     const status =
       cr.status === "orphaned" ? cr.status : claimStatus(ev.map((e) => e.kind));
     const fixed = FIXED_OPS[status];
-    if (fixed) return add({ ...baseOf(claim, ev), ...fixed });
+    if (fixed)
+      return add(
+        {
+          ...baseOf(claim, ev),
+          ...fixed,
+          ...(fixed.op === "repin" ? renameProposal(root, claim, ev) : {}),
+        },
+        fp,
+      );
     if (status !== "stale") return; // fresh
-    const located = ev.map((e) => locate(e, d));
     const pins = located.filter(
       (l): l is Extract<Located, { kind: "located" }> => l.kind === "located",
     );
@@ -672,80 +1045,139 @@ export async function reconcile(
       (l): l is Extract<Located, { kind: "review" }> => l.kind === "review",
     );
     if (located.every((l) => l.kind === "deleted"))
-      return add({
-        ...baseOf(claim, ev),
-        op: "retract",
-        why: "the merge deleted every span this fact was grounded on",
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "retract",
+          why: "the merge deleted every span this fact was grounded on",
+        },
+        fp,
+      );
     if (review || pins.length !== located.length)
-      return add({
-        ...baseOf(claim, ev),
-        op: "review",
-        why:
-          review?.why ??
-          "the merge deleted part of this fact's evidence: re-ground or retract",
-      });
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "review",
+          why:
+            review?.why ??
+            "the merge deleted part of this fact's evidence: re-ground or retract",
+        },
+        fp,
+      );
     const evidence = ev.map((e, j) => atLocation(root, e, pins[j]?.uri ?? ""));
     if (!evidence.every((e): e is EvidenceStatus => e !== null))
-      return add({
-        ...baseOf(claim, ev),
-        op: "review",
-        why: "a re-anchored span does not resolve: a human must locate this fact",
-      });
-    needWork.push({
-      claim,
-      evidence,
-      newEvidence: pins.map((l) => l.uri),
-      reanchorScore: Math.min(...pins.map((l) => l.score)),
+      return add(
+        {
+          ...baseOf(claim, ev),
+          op: "review",
+          why: "a re-anchored span does not resolve: a human must locate this fact",
+        },
+        fp,
+      );
+    // ENG-04: every source of a multi-source fact changed. Compare the values at the re-anchored spans
+    // (never the text at the old pin) before the model can paper over a disagreement.
+    if (claim.evidence.length >= 2) {
+      const sets = evidence.map((e) =>
+        e.kind === "stale" ? extract(e.now) : [],
+      );
+      if (compareValueSets(sets) === "conflict") {
+        const sourceValues = pins.map((l, j) => ({
+          uri: l.uri,
+          values: sets[j] ?? [],
+        }));
+        const says = sourceValues
+          .map((s) => `${s.uri} says ${s.values.join(", ")}`)
+          .join("; ");
+        return add(
+          {
+            ...baseOf(claim, evidence),
+            op: "conflict",
+            why: `sources changed in the same merge and now disagree: ${says}; the owner must decide which source is right`,
+            sourceValues,
+          },
+          fp,
+        );
+      }
+    }
+    // A rejected update is suppressed before the model is asked: no call is spent on it.
+    if (suppress(claim.id, "update", fp)) return;
+    work.push({
+      w: {
+        claim,
+        evidence,
+        newEvidence: pins.map((l) => l.uri),
+        reanchorScore: Math.min(...pins.map((l) => l.score)),
+      },
+      fp,
     });
   });
-  if (needWork.length > 0) {
-    const asked = new Map(needWork.map((w) => [w.claim.id, w]));
-    for (const u of await llm.rework(needWork)) {
-      const w = asked.get(u.id);
-      if (!w) continue; // unknown or already-answered id: an updater answers each claim at most once
+  if (work.length > 0) {
+    const asked = new Map(work.map((x) => [x.w.claim.id, x]));
+    for (const u of await llm.rework(work.map((x) => x.w))) {
+      const x = asked.get(u.id);
+      if (!x) continue; // unknown or already-answered id: an updater answers each claim at most once
       asked.delete(u.id);
+      const { w, fp } = x;
       if (!isUsableAnswer(u)) {
-        add({
-          ...baseOf(w.claim, w.evidence),
-          op: "review",
-          why: "the updater returned an empty or malformed rewrite: a human must review this fact",
-        });
+        add(
+          {
+            ...baseOf(w.claim, w.evidence),
+            op: "review",
+            why: "the updater returned an empty or malformed rewrite: a human must review this fact",
+          },
+          fp,
+        );
         continue;
       }
       if (
         u.evidence !== undefined &&
         !acceptableEvidence(root, u.evidence, w.newEvidence.length)
       ) {
-        add({
-          ...baseOf(w.claim, w.evidence),
-          op: "review",
-          why: "the updater chose evidence that is missing, ambiguous or malformed: a human must locate this fact",
-        });
+        add(
+          {
+            ...baseOf(w.claim, w.evidence),
+            op: "review",
+            why: "the updater chose evidence that is missing, ambiguous or malformed: a human must locate this fact",
+          },
+          fp,
+        );
         continue;
       }
       const newEvidence = u.evidence ?? w.newEvidence;
-      add({
-        ...baseOf(w.claim, w.evidence),
-        op: "update",
-        after: u.statement,
-        why: "all sources changed consistently",
-        newEvidence,
-        newEvidenceHash: newEvidence.map((uri) => pin(root, uri).hash),
-        score: w.reanchorScore,
-      });
+      const newEvidenceHash = newEvidence.map((uri) => pin(root, uri).hash);
+      // proposalFingerprint is audit data: a rejected update was already suppressed before the model.
+      add(
+        {
+          ...baseOf(w.claim, w.evidence),
+          op: "update",
+          after: u.statement,
+          why: "all sources changed consistently",
+          newEvidence,
+          newEvidenceHash,
+          proposalFingerprint: proposalFingerprintOf(
+            u.statement,
+            newEvidenceHash,
+          ),
+          score: w.reanchorScore,
+        },
+        fp,
+      );
     }
-    for (const w of asked.values())
-      add({
-        ...baseOf(w.claim, w.evidence),
-        op: "review",
-        why: "the updater returned no rewrite for this fact: a human must review it",
-      });
+    for (const { w, fp } of asked.values())
+      add(
+        {
+          ...baseOf(w.claim, w.evidence),
+          op: "review",
+          why: "the updater returned no rewrite for this fact: a human must review it",
+        },
+        fp,
+      );
   }
   return {
     page: sc.page,
     mode: report.humanEdited ? "propose" : "apply",
     ops,
+    suppressed,
     llmCalls: llm.calls - before,
   };
 }
@@ -891,6 +1323,35 @@ function keepOrRelocate(
 }
 
 /**
+ * The evidence a rename repin moves to. Every span must resolve (parseUri and the source containment check
+ * run inside resolve) to text identical to what was pinned, and still match the fingerprint proposed: a
+ * forged or outdated repin can never re-ground a claim onto different text.
+ */
+function renamedEvidence(root: string, c: Claim, op: DraftOp): EvidencePin[] {
+  const { newEvidence = [], newEvidenceHash } = op;
+  const refuse = () =>
+    new UnappliableOpError(
+      op.id,
+      "a rename repin must land on content identical to the pinned span: reconcile again",
+    );
+  if (
+    newEvidence.length !== c.evidence.length ||
+    newEvidenceHash?.length !== newEvidence.length
+  )
+    throw refuse();
+  return newEvidence.map((uri, j) => {
+    const was = c.evidence[j];
+    const r = resolve(root, uri);
+    if (!was || !("text" in r) || !matchesHash(was.hash, r.text))
+      throw refuse();
+    // The same derivation as pin(), from the text already read.
+    const now = { uri, hash: hashAs(classOfUri(uri), r.text) };
+    if (now.hash !== newEvidenceHash[j]) throw refuse();
+    return now;
+  });
+}
+
+/**
  * Apply auto ops plus the ops a human approved. Content changes on a human-edited page are refused;
  * repins are still allowed there because they never touch the page text. Nothing on the draft is
  * trusted: the op kind caps `auto`, the page is re-hashed rather than reading `mode`, every op id must
@@ -943,9 +1404,14 @@ export function applyDraft(
       continue;
     }
     if (op.op === "repin") {
+      // A retargeted repin is never auto and has lost newEvidence (keepsProposal is false), so it falls back
+      // to keepOrRelocate, which refuses a pin whose file is gone.
       claims.push({
         ...c,
-        evidence: c.evidence.map((e) => keepOrRelocate(root, e, op.id)),
+        evidence:
+          op.newEvidence === undefined
+            ? c.evidence.map((e) => keepOrRelocate(root, e, op.id))
+            : renamedEvidence(root, c, op),
       });
       continue;
     }

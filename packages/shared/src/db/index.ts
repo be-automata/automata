@@ -8,8 +8,11 @@ import * as schema from "./schema";
  * Pick the DB driver by environment:
  *   - `node-postgres` (TCP) — the default; used by the VPS/self-host runtime and
  *     the testcontainer harness against a local/containerized Postgres.
- *   - `neon-serverless` (WebSocket) — used on Cloudflare Workers (node-postgres
- *     does not run on workerd) and for the Neon Postgres target.
+ *   - `neon-serverless` (WebSocket) — the Cloudflare Workers fallback when no
+ *     Hyperdrive binding is configured, and the Neon Postgres target off Workers.
+ *
+ * On Workers with a Hyperdrive binding, apps/www calls `createDbFromHyperdrive`
+ * instead (node-postgres over workerd TCP sockets through Hyperdrive).
  *
  * Selection: explicit `DB_DRIVER=neon-serverless|node-postgres` wins; otherwise a
  * Neon-shaped connection string routes to neon-serverless. neon-serverless is used
@@ -95,6 +98,41 @@ export function createDb(databaseUrl: string): DB {
     return drizzleNeon(pool, { schema }) as unknown as DB;
   }
   const db = createNodePgDb(databaseUrl);
+  db.$client.on("error", onIdleConnectionError);
+  return db;
+}
+
+/**
+ * Max sockets one request's pool may open to Hyperdrive. Workers cap a request
+ * at 6 simultaneous outbound connections (fetch + TCP combined), so the pool
+ * stays below that and leaves room for the request's own fetches.
+ */
+const HYPERDRIVE_POOL_MAX = 5;
+
+/**
+ * A node-postgres drizzle handle over a Cloudflare Hyperdrive binding's
+ * `connectionString` (Workers only).
+ *
+ * Hyperdrive keeps warm, pooled connections next to the database and terminates
+ * the client handshake at the edge, so a per-request client is cheap — the
+ * Cloudflare-recommended pattern is to build a fresh client for EVERY request and
+ * let Hyperdrive do the pooling. The caller must therefore never share the
+ * returned handle across requests (workerd forbids cross-request I/O).
+ *
+ * A pg.Pool (not a single Client) backs it so `db.transaction()` checks out one
+ * dedicated connection for the interactive transaction while other queries of
+ * the same request keep running; Hyperdrive pools in transaction mode, so the
+ * whole BEGIN…COMMIT stays on one origin connection.
+ */
+export function createDbFromHyperdrive(connectionString: string): DB {
+  const db = drizzle({
+    connection: {
+      connectionString,
+      connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
+      max: HYPERDRIVE_POOL_MAX,
+    },
+    schema,
+  });
   db.$client.on("error", onIdleConnectionError);
   return db;
 }

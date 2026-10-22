@@ -13,9 +13,12 @@ import {
   renderNoticeComment,
   renderPrComment,
   renderPromotionComment,
+  renderProviderAuditNotice,
   renderTrackerComment,
+  renderUnusableAuditNotice,
   type TicketAuditResult,
 } from "./merge-audit";
+import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
 import {
   type MergeAuditIntent,
   parseMergeAuditIntent,
@@ -71,10 +74,13 @@ export interface MergedPullRequest {
 }
 
 /**
- * `replace`     — create the bot's marker comment or update it in place;
- * `create-only` — create it, but leave an existing one untouched.
+ * `replace`        — create the bot's marker comment or update it in place;
+ * `create-only`    — create it, but leave an existing one untouched;
+ * `replace-notice` — create it, or update an existing one only when it is the
+ *                    generic "no usable result" notice (`isReplaceableAuditNotice`),
+ *                    never an audit an earlier turn posted (#441).
  */
-export type MarkerCommentMode = "replace" | "create-only";
+export type MarkerCommentMode = "replace" | "create-only" | "replace-notice";
 
 export type MarkerCommentResult = "created" | "updated" | "kept_existing";
 
@@ -432,6 +438,7 @@ export async function executeMergeAudit({
   prNumber,
   pr,
   terminalText,
+  providerUnavailable,
   config,
   tracker,
   comments,
@@ -441,6 +448,12 @@ export async function executeMergeAudit({
   pr: MergedPullRequest;
   /** The agent's final message — where the emitted intent lives. */
   terminalText: string;
+  /**
+   * #441: the provider refused the run. Consulted only when no usable intent
+   * parsed: the notice then names the provider cause and corrects a generic
+   * notice an earlier run left.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
   config: TrackerConfig | null;
   tracker: TrackerClient | null;
   comments: AuditCommentClient;
@@ -453,11 +466,12 @@ export async function executeMergeAudit({
   const postNotice = async <T extends MergeAuditOutcome>(
     notice: string,
     outcome: T,
+    mode: MarkerCommentMode = "create-only",
   ): Promise<T | { outcome: "skipped_existing_comment" }> => {
     const posted = await comments.upsertMarkerComment(
       marker,
       renderNoticeComment(prNumber, notice),
-      "create-only",
+      mode,
     );
     return posted === "kept_existing"
       ? { outcome: "skipped_existing_comment" }
@@ -491,10 +505,20 @@ export async function executeMergeAudit({
   const parsed = parseUsableIntent(terminalText, prNumber);
   if (!parsed.ok) {
     logger.warn("audit intent not usable", { reason: parsed.reason });
-    return await postNotice(
-      `The audit run for ${extraction.auditKeys.join(", ")} did not produce a usable result, so no ticket was changed. Check the acceptance criteria by hand.`,
-      { outcome: "degraded_comment", reason: parsed.reason },
-    );
+    if (providerUnavailable) {
+      return await postNotice(
+        renderProviderAuditNotice(extraction.auditKeys, providerUnavailable),
+        {
+          outcome: "degraded_comment",
+          reason: `provider_unavailable: ${providerUnavailable.kind}`,
+        },
+        "replace-notice",
+      );
+    }
+    return await postNotice(renderUnusableAuditNotice(extraction.auditKeys), {
+      outcome: "degraded_comment",
+      reason: parsed.reason,
+    });
   }
 
   const live = config.writes === "live";

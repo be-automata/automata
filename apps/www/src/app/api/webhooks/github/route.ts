@@ -58,6 +58,7 @@ import { env } from "@terragon/env/apps-www";
 import { findWebhookSkip } from "./webhook-skip";
 import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
 import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
+import { deferWebhookWork } from "./defer-webhook-work";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -94,17 +95,29 @@ export async function POST(request: NextRequest) {
   // Mirror-intake (pilot): event classes prod routes to a skill but the
   // chassis has no task-creation path for. Each creates an org-attributed shadow
   // task (see mirror-intake.ts).
+  //
+  // #447: the merged-PR mirror task stays awaited on pull_request.closed. An
+  // unexpected failure there must still 500, because the red mark in GitHub's
+  // delivery log is the operator's only signal to redeliver a lost merged-PR
+  // audit until durable ingress (#448) exists. Its p50 (4.6s) is well inside
+  // the 10s limit; a WebhookSkip still fast-acks with `skipped: true` (WI-8).
   webhooks.on(
     ["pull_request.review_requested", "pull_request.closed"],
     async ({ payload }) => {
       await handlePullRequestMirror(payload);
     },
   );
-  // R5: a self-heal fix PR a person merged or closed. A sibling of the two
-  // closed handlers above: one DB lookup by (repo, pr_number), the GitHub
-  // reads of a merge in waitUntil. Observation only; never merges, never throws.
-  webhooks.on("pull_request.closed", async ({ payload }) => {
-    await handleSelfHealPrClosed(payload);
+  // R5: a self-heal fix PR a person merged or closed. A sibling of the closed
+  // handlers above: one DB lookup by (repo, pr_number), then the GitHub reads
+  // of a merge. Observation only; never merges, never throws (its failures were
+  // only ever logged), so #447 runs it after the 2xx at no loss of signal.
+  webhooks.on("pull_request.closed", ({ id, payload }) => {
+    deferWebhookWork({
+      deliveryId: id,
+      eventName: "pull_request.closed",
+      label: "self-heal fix PR lifecycle",
+      work: () => handleSelfHealPrClosed(payload),
+    });
   });
   webhooks.on("pull_request_review.submitted", async ({ payload }) => {
     await handlePullRequestReviewMirror(payload);
@@ -145,8 +158,9 @@ export async function POST(request: NextRequest) {
       await handleSelfHealCiEvent(payload);
     },
   );
-  webhooks.on(["issues.opened", "issues.labeled"], async ({ payload }) => {
-    await handleIssueEvent(payload);
+  webhooks.on(["issues.opened", "issues.labeled"], async ({ id, payload }) => {
+    // #447: the automations run after the ack; the id tags their failure logs.
+    await handleIssueEvent(payload, id);
   });
   // R7: a closed issue or a removed trigger label withdraws a self-heal
   // finding's readiness. DB-only, never throws.
@@ -209,10 +223,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true });
   } catch (error) {
     // WI-8: a business rejection (app not installed, no mapped user, unmapped
-    // installation, unconfigured repo) fast-acks 2xx with a structured skip log
-    // — GitHub must NOT retry it (retries never help and eventually disable the
-    // webhook). Only genuine unexpected errors 5xx so GitHub retries transient
-    // infra failures until the ingress outbox lands.
+    // installation, unconfigured repo) fast-acks 2xx with a structured skip log:
+    // a redelivery would never help. Only genuine unexpected errors 5xx. GitHub
+    // never retries a failed delivery on its own, so a 5xx is only a marker in
+    // the delivery log that an operator can redeliver from (#447); durable
+    // ingress is #448.
     const skip = findWebhookSkip(error);
     if (skip) {
       console.log("[github webhook] skipped", {

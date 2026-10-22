@@ -49,5 +49,7 @@ export const allThreadErrors: Record<ThreadErrorType, boolean> = {
   "setup-script-failed": true,
   "prompt-too-long": true,
   "queue-limit-exceeded": true,
+  "provider-unavailable": true,
+  "queue-retired": true,
   "out-of-memory": true,
 };

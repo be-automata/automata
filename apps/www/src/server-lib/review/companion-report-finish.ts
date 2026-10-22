@@ -22,6 +22,11 @@ import {
   type ParseTaggedJsonResult,
 } from "./tagged-fence";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
+import {
+  describeProviderUnavailable,
+  providerUnavailableOfChat,
+  type ProviderUnavailable,
+} from "@/agent/msg/classify-provider-result";
 
 /**
  * The PR companion lane's terminal writer (emit-only, like the review and
@@ -228,15 +233,22 @@ export function renderCompanionReport(
   return truncate(parts.join("\n\n"), COMMENT_BODY_LIMIT);
 }
 
-/** The comment when the run produced no usable report. */
+/**
+ * The comment when the run produced no usable report. A run the provider
+ * refused (#441) names that cause; the text never names the account.
+ */
 export function renderCompanionNotice(
   run: CompanionReportRun,
   currentHeadSha: string | null,
+  providerUnavailable?: ProviderUnavailable | null,
 ): string {
   return [
     ...renderHeader(run, currentHeadSha),
-    "The companion run finished without a usable report for this commit, " +
-      "so there are no notes this time. The review of this PR is not affected.",
+    providerUnavailable
+      ? `The companion run for this commit could not run. ${describeProviderUnavailable(providerUnavailable)} ` +
+        "There are no notes this time. The review of this PR is not affected."
+      : "The companion run finished without a usable report for this commit, " +
+        "so there are no notes this time. The review of this PR is not affected.",
   ].join("\n\n");
 }
 
@@ -305,12 +317,19 @@ export async function executeCompanionReport({
   run,
   terminalText,
   currentHeadSha,
+  providerUnavailable,
   logger,
 }: {
   github: CompanionReportGitHub;
   run: CompanionReportRun;
   terminalText: string;
   currentHeadSha: string | null;
+  /**
+   * #441: the provider refused the run. Read only when no report parsed; the
+   * notice then names the cause. The existing comment for this (PR, skill) is
+   * edited in place as for any changed body.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
   logger?: ReviewLogger;
 }): Promise<CompanionReportOutcome> {
   const { stamp, requestedAt } = run;
@@ -353,7 +372,7 @@ export async function executeCompanionReport({
   const parsed = parseCompanionReport(terminalText);
   const body = parsed.ok
     ? renderCompanionReport(parsed.value, run, currentHeadSha)
-    : renderCompanionNotice(run, currentHeadSha);
+    : renderCompanionNotice(run, currentHeadSha, providerUnavailable);
   if (existing !== null && existing.body === body) {
     logger?.info("companion: report unchanged; skipping", meta);
     return { outcome: "skipped_unchanged" };
@@ -565,6 +584,7 @@ export async function handleCompanionReportAtFinish({
       run: { stamp, requestedAt: new Date(thread.createdAt).getTime() },
       terminalText,
       currentHeadSha,
+      providerUnavailable: providerUnavailableOfChat(threadChat),
       logger,
     });
     getPostHogServer().capture({

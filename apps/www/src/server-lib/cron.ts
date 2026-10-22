@@ -188,6 +188,23 @@ export async function runScheduledTasksCron(): Promise<void> {
     console.error("[cron:scheduled] supersede sweep failed (non-fatal)", error);
   }
 
+  // #107: dispatch the due automatic re-runs of failed reviews. Same
+  // bulkhead: a dispatcher error never skips scheduled-thread processing.
+  try {
+    const { runReviewRerunDispatcher } = await import(
+      "@/server-lib/review/review-rerun"
+    );
+    const r = await runReviewRerunDispatcher({ db });
+    if (r.dispatched + r.skipped + r.failed + r.expired > 0) {
+      console.log("[cron:scheduled] review re-runs", r);
+    }
+  } catch (error) {
+    console.error(
+      "[cron:scheduled] review re-run dispatch failed (non-fatal)",
+      error,
+    );
+  }
+
   const { runScheduledThread } = await import("@/server-lib/scheduled-thread");
   const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
   console.log(`[cron:scheduled] ${dueThreadChats.length} thread chats due`);

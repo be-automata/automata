@@ -9,6 +9,7 @@ import {
 } from "@/server-lib/audit/mark-fix-ready";
 import { createSelfHealOctokit } from "@/server-lib/audit/self-heal-octokit";
 import type { Automation } from "@terragon/shared/db/types";
+import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
 
 import {
   handleIssueEvent,
@@ -133,6 +134,13 @@ function issueEvent({
   } as unknown as IssueEvent;
 }
 
+// #447: handleIssueEvent defers the automation fan-out to waitUntil; drain it
+// so these cases still observe what the runs did.
+async function runIssueEvent(event: IssueEvent): Promise<void> {
+  await handleIssueEvent(event);
+  await waitUntilResolved();
+}
+
 function expectNoOctokit(): void {
   for (const factory of OCTOKIT_FACTORIES) {
     expect(factory).not.toHaveBeenCalled();
@@ -142,8 +150,9 @@ function expectNoOctokit(): void {
 describe("handleIssueAutomation — label filters and the self-heal trigger", () => {
   let logs: string[];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await mockWaitUntil();
     logs = [];
     vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
       logs.push(args.map(String).join(" "));
@@ -153,7 +162,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
 
   it("legacy all-authors + opened runs the pinned call object", async () => {
     vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([automation()]);
-    await handleIssueEvent(issueEvent({ action: "opened" }));
+    await runIssueEvent(issueEvent({ action: "opened" }));
     expect(runIssueAutomation).toHaveBeenCalledTimes(1);
     expect(vi.mocked(runIssueAutomation).mock.calls[0]![0]).toEqual({
       automationId: "auto-1",
@@ -177,7 +186,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
         },
       } as unknown as Partial<Automation>),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({
         action: "labeled",
         labels: ["automata:deliver"],
@@ -204,7 +213,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
 
   it("legacy config ignores a labeled event", async () => {
     vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([automation()]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({ action: "labeled", labels: ["bug"], added: "bug" }),
     );
     expect(runIssueAutomation).not.toHaveBeenCalled();
@@ -222,14 +231,14 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
         },
       }),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({ action: "opened", labels: ["bug", "P1", "extra"] }),
     );
     expect(runIssueAutomation).toHaveBeenCalledTimes(1);
 
     vi.mocked(runIssueAutomation).mockClear();
     logs.length = 0;
-    await handleIssueEvent(issueEvent({ action: "opened", labels: ["bug"] }));
+    await runIssueEvent(issueEvent({ action: "opened", labels: ["bug"] }));
     expect(runIssueAutomation).not.toHaveBeenCalled();
     expect(logs.some((l) => l.includes("labels filter not satisfied"))).toBe(
       true,
@@ -248,7 +257,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
         },
       }),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({ action: "opened", labels: ["Automata:Finding"] }),
     );
     expect(runIssueAutomation).not.toHaveBeenCalled();
@@ -270,7 +279,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
         },
       }),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({
         action: "labeled",
         labels: ["bug", "wontfix"],
@@ -289,12 +298,12 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
         },
       }),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({ action: "labeled", labels: ["bug", "docs"], added: "docs" }),
     );
     expect(runIssueAutomation).not.toHaveBeenCalled();
 
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({ action: "labeled", labels: ["BUG"], added: "BUG" }),
     );
     expect(runIssueAutomation).toHaveBeenCalledTimes(1);
@@ -313,7 +322,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
       auditFixAutomation(),
     ]);
     const started = Date.now();
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({
         action: "labeled",
         labels: ["automata:finding", "automata:auto-fix"],
@@ -345,7 +354,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
     vi.mocked(getIssueAutomationsForRepo).mockResolvedValue([
       auditFixAutomation(),
     ]);
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({
         action: "labeled",
         labels: ["automata:auto-fix", "documentation"],
@@ -366,7 +375,7 @@ describe("handleIssueAutomation — label filters and the self-heal trigger", ()
       outcome: "author_not_bot",
       fingerprint: "abcdef0123456789",
     });
-    await handleIssueEvent(
+    await runIssueEvent(
       issueEvent({
         action: "labeled",
         labels: ["automata:auto-fix"],

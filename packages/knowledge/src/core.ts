@@ -24,11 +24,17 @@ export type {
   PageReport,
   ReconcileDiff,
   ReconcileOptions,
+  ReconciledDraft,
   Resolved,
   Sidecar,
+  SourceValues,
   UpdateRequest,
   UpdateResult,
   Updater,
 } from "./claims";
+export * from "./diff";
 export * from "./op-key";
 export * from "./reanchor";
+export * from "./rejections";
+export * from "./evidence-class";
+export * from "./values";

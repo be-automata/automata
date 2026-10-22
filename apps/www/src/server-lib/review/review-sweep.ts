@@ -25,6 +25,8 @@ import {
   selectReviewTerminalText,
 } from "./review-single-writer-finish";
 import { isPrAuthoredByBot } from "./bot-login";
+import { classifyRunFailure, createRerunPlanner } from "./review-rerun";
+import { providerUnavailableOfChat } from "@/agent/msg/classify-provider-result";
 
 /**
  * GAP-1 backstop (ADR-036): the finish-hook single-writer only fires if the thread
@@ -225,6 +227,22 @@ export async function runReviewSweep(): Promise<void> {
         // out of the run's silence.
         reviewedSha: c.reviewedSha,
         runAbandoned: isAbandonedTerminalCause(c.terminalCause),
+        // #441: the same provider cause the finish hook passes, read from the
+        // same chat row, so the backstop never re-labels it "unparseable".
+        providerUnavailable: providerUnavailableOfChat(threadChat),
+        // #107: the same re-run inputs the finish hook passes. A thread the
+        // hook already handed off defers again here (one ledger row per
+        // failed thread), and a run reaped without a finish hook (box sleep,
+        // a lost failure report) gets its re-run from this pass.
+        runFailure: classifyRunFailure(threadChat?.messages ?? null),
+        planRerun: createRerunPlanner({
+          db,
+          threadId: c.id,
+          organizationId: c.organizationId ?? null,
+          automationId: c.automationId ?? null,
+          repoFullName: c.repoFullName,
+          prNumber: c.prNumber,
+        }),
       });
       console.log("[review-sweep] backstopped a terminal review thread", {
         threadId: c.id,

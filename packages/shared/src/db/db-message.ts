@@ -164,7 +164,36 @@ type DBErrorMessage = {
   timestamp?: string;
 };
 
-type DBMetaMessage = DBSystemMetaMessage | DBResultMetaMessage;
+type DBMetaMessage =
+  | DBSystemMetaMessage
+  | DBResultMetaMessage
+  | DBRateLimitMetaMessage;
+
+/**
+ * The Claude CLI's `rate_limit_event` (#441), kept so a run that died on a
+ * provider limit is classified from the structured signal rather than from
+ * text. An operator artifact: it renders as nothing in the chat and is never
+ * agent output.
+ */
+export type DBRateLimitMetaMessage = {
+  type: "meta";
+  subtype: "rate-limit";
+  /** `allowed` | `allowed_warning` | `rejected`, kept verbatim. */
+  status: string;
+  /** `five_hour` | `seven_day` | …, kept verbatim; null when absent. */
+  rateLimitType: string | null;
+  /** Epoch SECONDS, as the CLI sends it; null when absent. */
+  resetsAt: number | null;
+  utilization: number | null;
+  /**
+   * True when paid overage covers the overflow, so a `rejected` status did
+   * not refuse the run (the CLI's own `isUsingOverage || overageInUse ||
+   * overageStatus allowed*` reading). Optional: rows stored before it are
+   * read as not covered.
+   */
+  overageCovered?: boolean;
+  session_id: string | null;
+};
 
 type DBSystemMetaMessage =
   | {

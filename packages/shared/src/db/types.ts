@@ -280,6 +280,8 @@ export type ThreadErrorType =
   | "setup-script-failed"
   | "prompt-too-long"
   | "queue-limit-exceeded"
+  | "provider-unavailable"
+  | "queue-retired"
   | "out-of-memory";
 export type ThreadErrorMessage = ThreadErrorType | string;
 export type GithubPRStatus = "draft" | "open" | "closed" | "merged";
@@ -329,6 +331,7 @@ export type ThreadInfo = Omit<
   | "errorMessageInfo"
   | "permissionMode"
   | "reattemptQueueAt"
+  | "queuedAt"
   | "scheduleAt"
   | "contextLength"
   | "messages"
@@ -412,6 +415,7 @@ export type ThreadInsert = Omit<
   | "queuedMessages"
   | "sessionId"
   | "reattemptQueueAt"
+  | "queuedAt"
   | "scheduleAt"
   | "contextLength"
   | "permissionMode"

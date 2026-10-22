@@ -1,6 +1,7 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import { POST } from "./route";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { handleDaemonEvent } from "@/server-lib/handle-daemon-event";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
 
@@ -43,6 +44,18 @@ describe("POST /api/daemon-event — F1/F2 token binding", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
+  });
+
+  it("503 + Retry-After (never 401) when daemon auth is unavailable", async () => {
+    vi.mocked(getDaemonTokenContext).mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const res = await POST(req(THREAD_CHAT_ID));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("2");
+    expect(await res.json()).toEqual({
+      error: "Authentication temporarily unavailable",
+    });
   });
 
   it("401 without a valid daemon token", async () => {

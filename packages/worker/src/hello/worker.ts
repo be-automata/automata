@@ -48,6 +48,7 @@ import {
   assessCgroupSupport,
   prepareDelegatedRoot,
 } from "../agent-run/run-cgroup";
+import { containerRunsBoot } from "../agent-run/container-boot";
 import { buildWorkflows } from "../registry";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
@@ -106,7 +107,9 @@ async function claimNamespaceAndReclaim(): Promise<void> {
  */
 function prepareCeilingSubtreeAtBoot(): void {
   const cfg = loadWorkerConfig();
-  if (cfg.memoryMaxBytes <= 0) {
+  // ADR-013 P1: a container run takes its ceiling as Docker's --memory on the
+  // rootless daemon's own delegated subtree; the worker's subtree is unused.
+  if (cfg.memoryMaxBytes <= 0 || cfg.containerRuns) {
     return;
   }
   let procSelfCgroup: string;
@@ -284,6 +287,24 @@ async function main() {
   }
 
   await claimNamespaceAndReclaim();
+
+  // ADR-013 P1: the dev-only container run path. Null (and silent) unless
+  // WORKER_DEV_CONTAINER_RUNS=1; when on, the rootless daemon, the pinned
+  // image and the orphan sweep are checked before registration, fail-closed.
+  try {
+    await containerRunsBoot({
+      config: bootCfg,
+      workerId: getProcessWorkerId(),
+      log: (m) => console.log(`[worker-boot] ${m}`),
+      warn: (m) => console.warn(`[worker-boot] WARNING: ${m}`),
+    });
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: container runs are switched on but unusable — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
 
   // Harness battery packs (gstack, GSD, ruflo): one doctor line, never fatal.
   // A box without the harness install (or on the wrong Node) boots and runs

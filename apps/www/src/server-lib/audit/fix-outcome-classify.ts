@@ -188,11 +188,18 @@ export const THREAD_ERROR_RULES = {
     reason: "queue_limit",
     execPlaneSignal: false,
   },
+  "queue-retired": {
+    class: "infra",
+    reason: "queue_retired",
+    execPlaneSignal: false,
+  },
   "missing-gemini-credentials": CREDENTIAL,
   "missing-amp-credentials": CREDENTIAL,
   "chatgpt-sub-required": CREDENTIAL,
   "invalid-codex-credentials": CREDENTIAL,
   "invalid-claude-credentials": CREDENTIAL,
+  // #441: the provider refused the run (usage limit, disabled access, credit).
+  "provider-unavailable": CREDENTIAL,
   "no-user-message": {
     class: "counted",
     reason: "agent_error",

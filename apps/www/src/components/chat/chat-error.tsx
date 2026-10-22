@@ -5,6 +5,10 @@ import Link from "next/link";
 import { isAgentWorking } from "@/agent/thread-status";
 import { useTheme } from "next-themes";
 import { ansiToHtml } from "./tools/utils";
+import {
+  describeProviderUnavailable,
+  parseProviderUnavailableInfo,
+} from "@/agent/msg/classify-provider-result";
 
 const ERROR_TYPES_THAT_HIDE_RETRY_BUTTON = new Set<ThreadErrorType>([
   "no-user-message",
@@ -335,6 +339,27 @@ function ChatContent({
       return (
         <ChatErrorContentsWithPre
           header="Task queue limit reached. Please try again later."
+          errorStr={errorInfo}
+        />
+      );
+    }
+    case "provider-unavailable": {
+      const provider = parseProviderUnavailableInfo(errorInfo);
+      return (
+        <ChatErrorContents
+          header="Claude subscription unavailable"
+          body={
+            provider
+              ? describeProviderUnavailable(provider)
+              : "The connected Claude subscription refused this run."
+          }
+        />
+      );
+    }
+    case "queue-retired": {
+      return (
+        <ChatErrorContentsWithPre
+          header="This run waited in the queue until it was stale and was retired without running."
           errorStr={errorInfo}
         />
       );

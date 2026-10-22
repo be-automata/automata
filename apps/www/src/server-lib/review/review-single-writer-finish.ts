@@ -14,6 +14,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
+import { providerUnavailableOfChat } from "@/agent/msg/classify-provider-result";
 import {
   createFileAtCommitReader,
   createOctokitReviewClient,
@@ -29,6 +30,7 @@ import { isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
+import { classifyRunFailure, createRerunPlanner } from "./review-rerun";
 import { PR_MERGED_SKILL_NAME } from "./review-skill";
 
 /**
@@ -141,6 +143,8 @@ const WORK_FAILED_BY_OUTCOME: WorkFailedByOutcome = {
   degraded_comment: true,
   post_failed: true,
   skipped_duplicate_degrade_at_commit: true,
+  // #107: the notice waits for an automatic re-run, but THIS run still failed.
+  deferred_to_rerun: true,
 };
 
 export function isWorkFailedOutcome(
@@ -312,6 +316,7 @@ async function handleMergeAuditAtFinish({
     prNumber,
     terminalText: extractTerminalAgentText(threadChat?.messages ?? null),
     botLogin: resolveBotLogin(),
+    providerUnavailable: providerUnavailableOfChat(threadChat),
   });
   getPostHogServer().capture({
     distinctId: userId,
@@ -472,6 +477,19 @@ export async function handleReviewEffectAtFinish({
         // could. Neither gate can withhold a parsed verdict.
         reviewedSha: thread?.reviewedSha ?? null,
         runAbandoned: isAbandonedTerminalCause(thread?.terminalCause ?? null),
+        // #441: a run the provider refused names that cause on the PR.
+        providerUnavailable: providerUnavailableOfChat(threadChat),
+        // #107: a run that failed (infra) before a verdict is re-run for this
+        // commit before the notice posts — the same two inputs the sweep passes.
+        runFailure: classifyRunFailure(threadChat?.messages ?? null),
+        planRerun: createRerunPlanner({
+          db,
+          threadId,
+          organizationId: thread?.organizationId ?? null,
+          automationId: thread?.automationId ?? null,
+          repoFullName,
+          prNumber,
+        }),
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),

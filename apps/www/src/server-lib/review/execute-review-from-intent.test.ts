@@ -820,3 +820,71 @@ describe("executeReviewFromIntent — a PR the bot opened itself (self-heal fix 
     expect(github.submitReviewWithComments).not.toHaveBeenCalled();
   });
 });
+
+// #441: the executor is shared by the finish hook and the hourly sweep; both
+// pass `providerUnavailable` from the same chat row, so this covers both.
+describe("executeReviewFromIntent — provider_unavailable (#441)", () => {
+  const provider = {
+    kind: "usage_limit" as const,
+    window: "five_hour" as const,
+    resetsAt: Date.UTC(2026, 9, 21, 18, 0),
+  };
+
+  // Card: protects=a provider-refused run names the provider cause instead of
+  // "unparseable" and still never posts a review; fails_when=the notice says
+  // "could not be read", a review is submitted, or workFailed is lost;
+  // no_claim=how the chat row got its classification (handleDaemonEvent).
+  it("names the provider cause on the notice, never a review", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "",
+      providerUnavailable: provider,
+    });
+    expect(res).toMatchObject({
+      outcome: "degraded_comment",
+      cause: "provider_unavailable",
+      workFailed: true,
+    });
+    expect(github.submitReview).not.toHaveBeenCalled();
+    expect(github.submitReviewWithComments).not.toHaveBeenCalled();
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.body).toContain(
+      "hit its five-hour usage limit; it resets at 18:00 UTC on 21 Oct.",
+    );
+  });
+
+  // Card: protects=AC2, the generic notice an earlier pass left at HEAD is
+  // corrected in place; fails_when=a second notice is created at the same
+  // sha or the outcome reads as a duplicate; no_claim=a parsed verdict (the
+  // classification is consulted only when nothing parsed).
+  it("corrects an existing generic notice at HEAD in place", async () => {
+    const github = makeGithub([]);
+    await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "",
+    });
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      terminalText: "",
+      providerUnavailable: provider,
+    });
+    expect(res.outcome).toBe("degraded_comment");
+    expect(github.createConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.updateConversationComment).toHaveBeenCalledTimes(1);
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.body).toContain("five-hour usage limit");
+  });
+});

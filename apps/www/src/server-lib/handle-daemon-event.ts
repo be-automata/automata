@@ -34,6 +34,10 @@ import {
   parseCodexRateLimitMessage,
   parseClaudeOAuthTokenRevokedMessage,
 } from "@/agent/msg/helpers";
+import {
+  classifyProviderResult,
+  PROVIDER_UNAVAILABLE_ERROR,
+} from "@/agent/msg/classify-provider-result";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import {
@@ -87,6 +91,9 @@ export async function handleDaemonEvent({
     "messages",
     JSON.stringify(messages, null, 2),
   );
+  // The reference time for a provider-limit reset (#441): stored messages
+  // carry no timestamp, so "resets 5pm" means the next 5pm after now.
+  const receivedAt = Date.now();
   const [threadChat, thread] = await Promise.all([
     getThreadChat({
       db,
@@ -347,6 +354,22 @@ export async function handleDaemonEvent({
         })
       : [];
 
+  // #441 / epic #440 AC7: only the legacy sandbox plane parks a thread in
+  // `queued-agent-rate-limit`, exactly as before. A worker-plane thread
+  // (ADR-003: no control-plane sandbox) never enters it, classified or not:
+  // `isAgentWorking` reads that state as live, so the run would hang until
+  // its timeout. `isRateLimited` itself is left as the parsers set it, so the
+  // finish path (follow-up queue, checkpoint) behaves as before.
+  const takesRateLimitRoute =
+    isRateLimited && !!rateLimitResetTime && !!thread.codesandboxId;
+  // A run the provider refused (usage limit, subscription disabled, credit
+  // exhausted), classified from THIS batch only against the server clock.
+  // The legacy route above wins where it applies, so that plane is unchanged.
+  const providerUnavailable =
+    threadChat.agent === "claudeCode" && !takesRateLimitRoute
+      ? classifyProviderResult(dbMessages, { now: receivedAt })
+      : null;
+
   const threadChatUpdates: ThreadChatInsert = {
     appendMessages: [...dbMessages, ...messagesToAppend],
     sessionId: sessionId ?? threadChat.sessionId ?? null,
@@ -358,6 +381,9 @@ export async function handleDaemonEvent({
     if (isPromptTooLong) {
       threadChatUpdates.errorMessage = "prompt-too-long";
       threadChatUpdates.errorMessageInfo = null;
+    } else if (providerUnavailable) {
+      threadChatUpdates.errorMessage = PROVIDER_UNAVAILABLE_ERROR;
+      threadChatUpdates.errorMessageInfo = JSON.stringify(providerUnavailable);
     } else if (customErrorMessage) {
       threadChatUpdates.errorMessage = "agent-generic-error";
       threadChatUpdates.errorMessageInfo = customErrorMessage;
@@ -565,7 +591,7 @@ export async function handleDaemonEvent({
     chatUpdates: threadChatUpdates,
     eventType: isStop
       ? "assistant.message_stop"
-      : isRateLimited && rateLimitResetTime
+      : takesRateLimitRoute
         ? "system.agent-rate-limit"
         : isError
           ? "assistant.message_error"

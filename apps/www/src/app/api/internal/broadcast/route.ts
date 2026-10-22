@@ -2,6 +2,7 @@ import {
   getUserIdOrNull,
   getUserIdOrNullFromDaemonToken,
 } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { db } from "@/lib/db";
 import { NextResponse } from "next/server";
 import { parseBroadcastChannel } from "@terragon/types/broadcast";
@@ -9,7 +10,9 @@ import { assertNever } from "@terragon/shared/utils";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 
 // Validate that the current user is allowed to listen to the given broadcast channel.
-export async function GET(request: Request) {
+export const GET = withDaemonAuthUnavailable(async function GET(
+  request: Request,
+) {
   const { searchParams } = new URL(request.url);
   const channel = searchParams.get("channel") ?? "";
   const parsedChannel = parseBroadcastChannel(channel);
@@ -53,4 +56,4 @@ export async function GET(request: Request) {
       assertNever(parsedChannel);
     }
   }
-}
+});

@@ -4,6 +4,7 @@ import { POST } from "./route";
 import { db } from "@/lib/db";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import {
   createTestUser,
   createTestThread,
@@ -94,6 +95,18 @@ describe("POST /api/daemon/run-terminal (#125 C1 generation fence)", () => {
     runExternalId,
     cause: "superseded",
     detail: { policy: "newest-wins" },
+  });
+
+  it("503 + Retry-After (never 401) when daemon auth is unavailable", async () => {
+    vi.mocked(getDaemonTokenContext).mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const res = await POST(req(body("r1")));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("2");
+    expect(await res.json()).toEqual({
+      error: "Authentication temporarily unavailable",
+    });
   });
 
   it("401 without a token context; 403 for a non-daemon token", async () => {

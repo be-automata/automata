@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { POST } from "./route";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import {
   createTestUser,
   createTestThread,
@@ -66,10 +67,24 @@ describe("POST /api/daemon/thread-status", () => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
   });
 
+  it("503 + Retry-After (never 401) when daemon auth is unavailable", async () => {
+    vi.mocked(getDaemonTokenContext).mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const res = await POST(req({ threadId, threadChatId }));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("2");
+    expect(await res.json()).toEqual({
+      error: "Authentication temporarily unavailable",
+    });
+  });
+
   it("401 without a token; 403 for a non-daemon token", async () => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue(null);
     expect((await POST(req({ threadId, threadChatId }))).status).toBe(401);
-    vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx({ tokenType: null }));
+    vi.mocked(getDaemonTokenContext).mockResolvedValue(
+      ctx({ tokenType: null }),
+    );
     expect((await POST(req({ threadId, threadChatId }))).status).toBe(403);
   });
 

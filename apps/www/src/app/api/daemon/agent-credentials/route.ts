@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import {
   getThreadMinimal,
   getThreadChat,
@@ -33,7 +34,9 @@ import { ThreadError } from "@/agent/error";
  * The worker writes it to a per-run HOME at 0600 and wipes it on exit; it is
  * never persisted to the box's own ~/.claude.
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: NextRequest,
+): Promise<NextResponse> {
   const ctx = await getDaemonTokenContext(request);
   if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -145,4 +148,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
     throw error;
   }
-}
+});

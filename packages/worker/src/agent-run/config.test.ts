@@ -71,6 +71,32 @@ describe("loadWorkerConfig", () => {
     ).toBe("/data/agent-runs");
   });
 
+  describe("runTerminalRoot (#386) — where the run-terminal ledger lives", () => {
+    it("defaults to the run namespace root (today's behaviour)", () => {
+      expect(loadWorkerConfig({}).runTerminalRoot).toBe(
+        "/tmp/automata-agent-run",
+      );
+      expect(
+        loadWorkerConfig({ WORKER_RUN_NAMESPACE_ROOT: "/data/agent-runs" })
+          .runTerminalRoot,
+      ).toBe("/data/agent-runs");
+    });
+
+    it("honours WORKER_RUN_TERMINAL_ROOT — a durable dir survives the boot-time /tmp wipe", () => {
+      expect(
+        loadWorkerConfig({
+          WORKER_RUN_TERMINAL_ROOT: " /usr/local/automata/state ",
+        }).runTerminalRoot,
+      ).toBe("/usr/local/automata/state");
+    });
+
+    it("refuses a relative WORKER_RUN_TERMINAL_ROOT at boot", () => {
+      expect(() =>
+        loadWorkerConfig({ WORKER_RUN_TERMINAL_ROOT: "state" }),
+      ).toThrow(/WORKER_RUN_TERMINAL_ROOT must be an absolute path/);
+    });
+  });
+
   describe("boxTrust (D1) — who the box belongs to decides how runs authenticate", () => {
     it("defaults to shared: an unconfigured box never gets a provider credential on disk", () => {
       expect(loadWorkerConfig({}).boxTrust).toBe("shared");

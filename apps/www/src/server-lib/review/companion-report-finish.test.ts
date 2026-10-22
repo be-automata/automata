@@ -731,3 +731,54 @@ describe("companion skill validators", () => {
     expect(isCompanionLaneStamp(null)).toBe(false);
   });
 });
+
+describe("executeCompanionReport — provider_unavailable (#441)", () => {
+  // Card: protects=a provider-refused companion run names the cause in its
+  // one comment and edits the generic notice an earlier pass wrote;
+  // fails_when=it says "without a usable report", posts a second comment, or
+  // names the account; no_claim=the review lane (separate marker).
+  it("names the provider cause and edits the earlier generic notice in place", async () => {
+    const github = fakeGitHub();
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+    });
+    expect(github.comments[0]!.body).toContain("without a usable report");
+
+    const outcome = await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+      providerUnavailable: { kind: "subscription_disabled" },
+    });
+    expect(outcome).toEqual({ outcome: "updated", report: "notice" });
+    expect(github.createIssueComment).toHaveBeenCalledTimes(1);
+    expect(github.comments).toHaveLength(1);
+    const body = github.comments[0]!.body;
+    expect(body).toContain(
+      "The companion run for this commit could not run. The connected Claude subscription is unavailable: an admin of the connected Claude organization disabled Claude Code access; it will not reset on its own.",
+    );
+    expect(body).toContain("The review of this PR is not affected.");
+    expect(body).not.toContain("without a usable report");
+    expect(body).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.]+/);
+  });
+
+  // Card: protects=a parsed report always wins over the classification;
+  // fails_when=a run that DID report is shown as provider-refused;
+  // no_claim=none.
+  it("a parsed report ignores the classification", async () => {
+    const github = fakeGitHub();
+    const outcome = await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_A,
+      providerUnavailable: { kind: "credit_exhausted" },
+    });
+    expect(outcome).toEqual({ outcome: "created", report: "parsed" });
+    expect(github.comments[0]!.body).not.toContain("credit");
+  });
+});

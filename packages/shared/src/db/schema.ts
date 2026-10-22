@@ -344,6 +344,16 @@ const threadChatShared = {
   errorMessageInfo: text("error_message_info"),
   scheduleAt: timestamp("schedule_at"),
   reattemptQueueAt: timestamp("reattempt_queue_at"),
+  /**
+   * #446: when this chat entered `queued-tasks-concurrency` in its current
+   * queue period. Set once (COALESCE) by updateThreadChatStatusAtomic, cleared
+   * when the chat boots or a new queue period starts. The dequeue's
+   * stale-retirement rules age a queued run from here, not from the thread's
+   * creation. NULL on rows queued before it existed. On BOTH tables: a legacy
+   * thread (no thread_chat row, production's shape) carries its chat status
+   * on the thread row, so its queue entry lives there too.
+   */
+  queuedAt: timestamp("queued_at", { withTimezone: true }),
   contextLength: integer("context_length"),
   permissionMode: text("permission_mode")
     .$type<"allowAll" | "plan">()
@@ -1962,6 +1972,57 @@ export const supersedeRecheck = pgTable(
       table.prKey,
       table.desiredHeadSha,
     ),
+  ],
+);
+
+/**
+ * #107 no-verdict re-run ledger: one row per automatic re-run of a review
+ * whose run failed before it produced a verdict (an infra failure, never an
+ * agent that answered badly). Two UNIQUE indexes are the bounds:
+ *  - (prKey, headSha, attempt): at most REVIEW_RERUN_MAX_ATTEMPTS re-runs per
+ *    head, however many failed runs race to schedule one;
+ *  - (failedThreadId): a failed run hands off to at most one re-run, so the
+ *    finish hook and the hourly sweep reading the same thread converge.
+ * `state` walks pending → claimed → dispatched | skipped | failed, each step
+ * a compare-and-set on the previous state; a claim whose lease lapses
+ * becomes failed (claim_expired).
+ */
+export const reviewRerun = pgTable(
+  "review_rerun",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    prKey: text("pr_key").notNull(),
+    headSha: text("head_sha").notNull(),
+    /** 1-based: the Nth automatic re-run of this head. */
+    attempt: integer("attempt").notNull(),
+    /** The run that ended without a verdict and asked for this re-run. */
+    failedThreadId: text("failed_thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    state: text("state")
+      .$type<"pending" | "claimed" | "dispatched" | "skipped" | "failed">()
+      .notNull()
+      .default("pending"),
+    /** Earliest dispatch time (the backoff). */
+    dueAt: timestamp("due_at", { mode: "date" }).notNull(),
+    /** Why a row ended skipped or failed (operator-facing, never on a PR). */
+    outcomeReason: text("outcome_reason"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("review_rerun_pr_key_sha_attempt_index").on(
+      table.prKey,
+      table.headSha,
+      table.attempt,
+    ),
+    uniqueIndex("review_rerun_failed_thread_index").on(table.failedThreadId),
+    index("review_rerun_state_due_index").on(table.state, table.dueAt),
   ],
 );
 
