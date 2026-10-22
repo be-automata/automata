@@ -139,4 +139,13 @@ describe("getDaemonTokenContext: unavailable vs unauthorized", () => {
       getDaemonTokenContext(daemonRequest(token)),
     ).rejects.toBeInstanceOf(DaemonAuthUnavailableError);
   });
+
+  it("throws DaemonAuthUnavailableError (503) when verifyApiKey itself throws", async () => {
+    vi.spyOn(auth.api, "verifyApiKey").mockRejectedValue(
+      new Error("connection terminated"),
+    );
+    await expect(
+      getDaemonTokenContext(daemonRequest(token)),
+    ).rejects.toBeInstanceOf(DaemonAuthUnavailableError);
+  });
 });

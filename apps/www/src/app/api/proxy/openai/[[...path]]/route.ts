@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { env } from "@terragon/env/apps-www";
-import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
@@ -9,6 +8,11 @@ import { logOpenAIUsage } from "../log-openai-usage";
 import { waitUntil } from "@/lib/wait-until";
 import { validateProxyRequestModel } from "@/server-lib/proxy-model-validation";
 import { daemonTokenContextFromApiKey } from "@/lib/daemon-token-context";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import {
+  DaemonAuthUnavailableError,
+  daemonAuthUnavailableResponse,
+} from "@/lib/daemon-auth-unavailable";
 
 const OPENAI_API_BASE = "https://api.openai.com/";
 const DEFAULT_OPENAI_PATH = "v1/chat/completions";
@@ -311,9 +315,9 @@ async function authorize(
   }
 
   try {
-    const { valid, error, key } = await auth.api.verifyApiKey({
-      body: { key: token },
-    });
+    // Null for an unknown, disabled or expired key (401); throws
+    // DaemonAuthUnavailableError when the auth store fails (503).
+    const key = await verifyDaemonApiKey(token);
 
     // Resolve the tenant context ONCE through the shared helper: it owns the
     // better-auth 1.5 `referenceId` rename (with a legacy `userId` fallback so a
@@ -321,8 +325,8 @@ async function authorize(
     const daemonContext = daemonTokenContextFromApiKey(key);
     const userId = daemonContext?.userId;
 
-    if (error || !valid || !userId) {
-      console.log("Unauthorized OpenAI proxy request", { error, valid });
+    if (!userId) {
+      console.log("Unauthorized OpenAI proxy request");
       return { response: new Response("Unauthorized", { status: 401 }) };
     }
 
@@ -352,8 +356,16 @@ async function authorize(
       organizationId: daemonContext?.organizationId ?? null,
     };
   } catch (err) {
+    if (err instanceof DaemonAuthUnavailableError) {
+      // The cause can quote the failed SQL with the key hash as a parameter,
+      // so only the reason is logged.
+      console.error("OpenAI proxy auth unavailable", { reason: err.message });
+      return { response: daemonAuthUnavailableResponse() };
+    }
+    // Every bad-credential outcome returned above; a throw is a server-side
+    // failure (e.g. the credit lookup), so answer a retryable 503, never 401.
     console.error("Failed to verify OpenAI proxy request", err);
-    return { response: new Response("Unauthorized", { status: 401 }) };
+    return { response: daemonAuthUnavailableResponse() };
   }
 }
 

@@ -2,16 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { NextRequest } from "next/server";
 import * as aiSdkRoute from "./[[...path]]/route";
 import { logOpenAIUsage } from "./log-openai-usage";
-import { auth } from "@/lib/auth";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { getUserCreditBalance } from "@terragon/shared/model/credits";
 import { isStripeConfigured } from "@/server-lib/stripe";
 
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      verifyApiKey: vi.fn(),
-    },
-  },
+vi.mock("@/lib/daemon-api-key", () => ({
+  verifyDaemonApiKey: vi.fn(),
 }));
 
 vi.mock("@terragon/env/apps-www", () => ({
@@ -80,7 +77,7 @@ function createRequest({
 }
 
 describe("OpenAI proxy route", () => {
-  const verifyApiKeyMock = vi.mocked(auth.api.verifyApiKey);
+  const verifyDaemonApiKeyMock = vi.mocked(verifyDaemonApiKey);
   const getUserCreditBalanceMock = vi.mocked(getUserCreditBalance);
   const logUsageMock = vi.mocked(logOpenAIUsage);
   const { POST } = aiSdkRoute;
@@ -88,11 +85,9 @@ describe("OpenAI proxy route", () => {
   beforeEach(async () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    verifyApiKeyMock.mockResolvedValue({
-      valid: true,
-      error: null,
-      key: { referenceId: "user-123" } as any,
-    });
+    verifyDaemonApiKeyMock.mockResolvedValue({
+      referenceId: "user-123",
+    } as any);
     getUserCreditBalanceMock.mockResolvedValue({
       totalCreditsCents: 1_000,
       totalUsageCents: 0,
@@ -162,7 +157,8 @@ describe("OpenAI proxy route", () => {
       path: "/v1/chat/completions",
       usage: responsePayload.usage,
       userId: "user-123",
-      organizationId: null,      model: responsePayload.model,
+      organizationId: null,
+      model: responsePayload.model,
     });
   });
 
@@ -252,7 +248,8 @@ describe("OpenAI proxy route", () => {
       path: "/v1/responses",
       usage: responsePayload.usage,
       userId: "user-123",
-      organizationId: null,      model: responsePayload.model,
+      organizationId: null,
+      model: responsePayload.model,
     });
   });
 
@@ -276,9 +273,7 @@ describe("OpenAI proxy route", () => {
 
     await POST(request, { params: Promise.resolve({}) });
 
-    expect(verifyApiKeyMock).toHaveBeenCalledWith({
-      body: { key: "alt-daemon-token" },
-    });
+    expect(verifyDaemonApiKeyMock).toHaveBeenCalledWith("alt-daemon-token");
 
     const fetchHeaders =
       (fetchMock.mock.calls[0]![1]!.headers as Headers) ?? new Headers();
@@ -401,7 +396,8 @@ describe("OpenAI proxy route", () => {
         total_tokens: 15,
       },
       userId: "user-123",
-      organizationId: null,      model: "gpt-5.1-2025-04-14",
+      organizationId: null,
+      model: "gpt-5.1-2025-04-14",
     });
 
     const bodyText = await response.text();
@@ -658,10 +654,53 @@ describe("OpenAI proxy route", () => {
         total_tokens: 48,
       },
       userId: "user-123",
-      organizationId: null,      model: "gpt-5",
+      organizationId: null,
+      model: "gpt-5",
     });
 
     const bodyText = await response.text();
     expect(bodyText).toContain("response.completed");
+  });
+
+  it("answers 401 for an unknown, disabled or expired key", async () => {
+    verifyDaemonApiKeyMock.mockResolvedValueOnce(null);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 + Retry-After, not 401, when key verification is unavailable", async () => {
+    verifyDaemonApiKeyMock.mockRejectedValueOnce(
+      new DaemonAuthUnavailableError("api key lookup failed"),
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503, not 401, when the credit lookup fails", async () => {
+    getUserCreditBalanceMock.mockRejectedValueOnce(new Error("Failed query"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(createRequest(), {
+      params: Promise.resolve({}),
+    });
+
+    expect(response.status).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

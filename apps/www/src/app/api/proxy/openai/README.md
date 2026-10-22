@@ -7,7 +7,7 @@ This directory hosts the catch-all Next.js route that forwards requests to the O
 - `GET/POST/... /api/proxy/openai` → `https://api.openai.com/v1/chat/completions` (default)
 - `GET/POST/... /api/proxy/openai/<path>` → `https://api.openai.com/<path>`
 - The server injects `Authorization: Bearer <OPENAI_API_KEY>` from `@terragon/env/apps-www`.
-- Clients must include `X-Daemon-Token: <Terragon API key>` in each request; the proxy verifies the key using `auth.api.verifyApiKey` (same mechanism as the daemon event handler).
+- Clients must include `X-Daemon-Token: <Terragon API key>` in each request; the proxy verifies the key with `verifyDaemonApiKey` (`src/lib/daemon-api-key.ts`, same mechanism as the daemon routes): an unknown, disabled or expired key gets 401; an auth-store failure gets 503 + `Retry-After` so clients retry instead of treating the credential as revoked.
 - Access additionally requires that the requesting user have a positive Terragon credit balance; requests from users without remaining credits receive a `402 Payment Required` response.
 - Query strings and request bodies are forwarded unchanged; streaming responses are passed through.
 
