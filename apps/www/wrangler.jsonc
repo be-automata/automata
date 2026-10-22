@@ -54,5 +54,21 @@
   // (the request 404s at the edge); the binding routes worker-to-worker directly.
   // packages/shared/broadcast-server.ts resolves env.BROADCAST via getCloudflareContext.
   "services": [{ "binding": "BROADCAST", "service": "automata-broadcast" }],
+  // Hyperdrive in front of Neon (config `automata-www-neon`, query caching
+  // DISABLED: the app reads its own writes — generation fence, status reads).
+  // apps/www/src/lib/db.ts builds a per-request node-postgres handle from
+  // env.HYPERDRIVE.connectionString; Hyperdrive keeps the warm pool near the
+  // database. Origin is Neon's direct host (not `-pooler`), per Cloudflare's
+  // Neon guide: Hyperdrive is itself the pooler. Rollback = delete this block;
+  // db.ts then falls back to a per-request neon-serverless Pool on DATABASE_URL.
+  // localConnectionString is the dev-env docker Postgres, used only by
+  // `wrangler dev`.
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "69f42f5b724b48a0959baf4decc4c979",
+      "localConnectionString": "postgresql://postgres:postgres@localhost:5432/terragon",
+    },
+  ],
   // Other bindings/secrets set via `wrangler secret put` (see deploy/WORKERS-ENV-MAP.md)
 }

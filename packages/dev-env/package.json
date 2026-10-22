@@ -24,7 +24,7 @@
   "dependencies": {
     "@ngrok/ngrok": "^1.5.1",
     "@terragon/env": "workspace:*",
-    "pg": "^8.16.0"
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
