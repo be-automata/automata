@@ -31,6 +31,15 @@
   "triggers": {
     "crons": ["0 * * * *", "*/1 * * * *", "*/10 * * * *", "*/30 * * * *"],
   },
+  // Run next to the database (Neon, aws us-east-1). Without it the Worker runs at
+  // the caller's colo: daemon traffic from the execution box lands in Frankfurt, and
+  // every request opens a fresh Neon WebSocket across the Atlantic (db.ts creates a
+  // Pool per request). Prod 2026-10-22: those connects clustered past the 5 s
+  // DB_CONNECT_TIMEOUT_MS, and a failed apikey read surfaced as a false 401.
+  "placement": {
+    "mode": "targeted",
+    "region": "aws:us-east-1",
+  },
   "observability": {
     "enabled": true,
   },
@@ -45,5 +54,21 @@
   // (the request 404s at the edge); the binding routes worker-to-worker directly.
   // packages/shared/broadcast-server.ts resolves env.BROADCAST via getCloudflareContext.
   "services": [{ "binding": "BROADCAST", "service": "automata-broadcast" }],
+  // Hyperdrive in front of Neon (config `automata-www-neon`, query caching
+  // DISABLED: the app reads its own writes — generation fence, status reads).
+  // apps/www/src/lib/db.ts builds a per-request node-postgres handle from
+  // env.HYPERDRIVE.connectionString; Hyperdrive keeps the warm pool near the
+  // database. Origin is Neon's direct host (not `-pooler`), per Cloudflare's
+  // Neon guide: Hyperdrive is itself the pooler. Rollback = delete this block;
+  // db.ts then falls back to a per-request neon-serverless Pool on DATABASE_URL.
+  // localConnectionString is the dev-env docker Postgres, used only by
+  // `wrangler dev`.
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "69f42f5b724b48a0959baf4decc4c979",
+      "localConnectionString": "postgresql://postgres:postgres@localhost:5432/terragon",
+    },
+  ],
   // Other bindings/secrets set via `wrangler secret put` (see deploy/WORKERS-ENV-MAP.md)
 }
