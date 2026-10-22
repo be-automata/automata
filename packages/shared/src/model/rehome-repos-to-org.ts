@@ -56,6 +56,7 @@ export const REHOME_MOVE_BY_REPO: readonly RehomeByRepoTable[] = [
   { table: "knowledge_op", repoColumn: "repo_full_name" },
   { table: "knowledge_decision", repoColumn: "repo_full_name" },
   { table: "knowledge_cursor", repoColumn: "repo_full_name" },
+  { table: "knowledge_intent", repoColumn: "repo_full_name" },
 ];
 
 /** Moved because the thread they belong to is one of the owner's threads. */
@@ -113,6 +114,7 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "self_heal_breaker_event",
   "self_heal_admin_log",
   "knowledge_usage_window",
+  "knowledge_admin_log",
 ];
 
 /**
@@ -167,6 +169,12 @@ const COLLISION_SPECS: readonly CollisionSpec[] = [
     index: "knowledge_cursor_org_repo_unique",
     repoColumn: "repo_full_name",
     keys: ["repo_full_name"],
+  },
+  {
+    table: "knowledge_intent",
+    index: "knowledge_intent_org_repo_sha_unique",
+    repoColumn: "repo_full_name",
+    keys: ["repo_full_name", "target_sha"],
   },
 ];
 
