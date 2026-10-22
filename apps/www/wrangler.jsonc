@@ -31,6 +31,15 @@
   "triggers": {
     "crons": ["0 * * * *", "*/1 * * * *", "*/10 * * * *", "*/30 * * * *"],
   },
+  // Run next to the database (Neon, aws us-east-1). Without it the Worker runs at
+  // the caller's colo: daemon traffic from the execution box lands in Frankfurt, and
+  // every request opens a fresh Neon WebSocket across the Atlantic (db.ts creates a
+  // Pool per request). Prod 2026-10-22: those connects clustered past the 5 s
+  // DB_CONNECT_TIMEOUT_MS, and a failed apikey read surfaced as a false 401.
+  "placement": {
+    "mode": "targeted",
+    "region": "aws:us-east-1",
+  },
   "observability": {
     "enabled": true,
   },
