@@ -39,15 +39,23 @@ import {
  * SAFETY: the harness runs the isolated compose project `automata-hatchet-it`.
  */
 const itEnabled = process.env.HATCHET_IT === "1";
-vi.setConfig({ testTimeout: 300_000 });
+vi.setConfig({ testTimeout: 420_000 });
 
 const FIXTURE = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "__fixtures__",
   "terminal-guard-worker.ts",
 );
-/** How long A's drain is held after SIGTERM before its run ends. */
+/** The least time A's drain is held after SIGTERM before its run ends. */
 const DRAIN_HOLD_MS = Number(process.env.IT_DRAIN_HOLD_MS ?? 45_000);
+/**
+ * How much longer the drain may be held while waiting for the engine to
+ * record REASSIGNED. The engine's heartbeat sweep does not fire at a fixed
+ * offset from the SIGTERM: on CI runners 45 s alone left both guarded cases
+ * without a REASSIGNED in about half of the runs on 2026-10-22, so the drill
+ * ends the run once the redelivery it exists to reproduce has really begun.
+ */
+const REASSIGN_WAIT_MS = Number(process.env.IT_REASSIGN_WAIT_MS ?? 120_000);
 /** How long B is watched for a redelivery. */
 const REDELIVERY_WATCH_MS = Number(
   process.env.IT_REDELIVERY_WATCH_MS ?? 90_000,
@@ -129,6 +137,19 @@ describe.skipIf(!itEnabled)(
       return body.run?.metadata?.id ?? "";
     }
 
+    async function engineEvents(runId: string): Promise<string[]> {
+      const events = await pg.query<{
+        event_type: string;
+        retry_count: number;
+      }>(
+        `SELECT e.event_type, e.retry_count FROM v1_task_events_olap e
+           JOIN v1_tasks_olap t ON t.id = e.task_id AND t.inserted_at = e.task_inserted_at
+          WHERE t.workflow_run_id = $1 ORDER BY e.event_timestamp, e.id`,
+        [runId],
+      );
+      return events.rows.map((e) => `${e.event_type}#${e.retry_count}`);
+    }
+
     /** One drill: returns how often the run fn body executed and whether B refused. */
     async function drill(guard: boolean, fail = false) {
       const label = `${guard ? "guarded" : "control"}${fail ? "-fail" : ""}-${Date.now().toString(36)}`;
@@ -153,9 +174,19 @@ describe.skipIf(!itEnabled)(
       );
 
       // systemctl restart: SIGTERM, then the drain. Hold it past the engine's
-      // heartbeat window, then let the run end INSIDE the drain.
+      // heartbeat window (until the engine has REASSIGNED the run), then let
+      // the run end INSIDE the drain.
+      const sigtermAt = Date.now();
       a.child.kill("SIGTERM");
       await new Promise((r) => setTimeout(r, DRAIN_HOLD_MS));
+      const reassignDeadline = Date.now() + REASSIGN_WAIT_MS;
+      while (
+        Date.now() < reassignDeadline &&
+        !(await engineEvents(runId)).includes("REASSIGNED#0")
+      ) {
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+      const drainHeldMs = Date.now() - sigtermAt;
       fs.writeFileSync(path.join(root, `release-${label}`), "");
       const aExit = await Promise.race([
         a.exited,
@@ -192,18 +223,9 @@ describe.skipIf(!itEnabled)(
             "SELECT readable_status FROM v1_runs_olap WHERE external_id = $1",
             [runId],
           );
-          const events = await pg.query<{
-            event_type: string;
-            retry_count: number;
-          }>(
-            `SELECT e.event_type, e.retry_count FROM v1_task_events_olap e
-               JOIN v1_tasks_olap t ON t.id = e.task_id AND t.inserted_at = e.task_inserted_at
-              WHERE t.workflow_run_id = $1 ORDER BY e.event_timestamp, e.id`,
-            [runId],
-          );
           return {
             status: run.rows[0]?.readable_status ?? "",
-            events: events.rows.map((e) => `${e.event_type}#${e.retry_count}`),
+            events: await engineEvents(runId),
           };
         },
         (r) => ["COMPLETED", "FAILED", "CANCELLED"].includes(r.status),
@@ -222,7 +244,7 @@ describe.skipIf(!itEnabled)(
           noop,
           ledger,
           engine,
-          drainHoldMs: DRAIN_HOLD_MS,
+          drainHeldMs,
         }),
       );
       console.log(
