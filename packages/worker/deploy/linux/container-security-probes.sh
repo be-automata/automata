@@ -380,10 +380,14 @@ probe_review() {
   envhits="$(grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=.' <<<"$envs" | cut -d= -f1 | sort -u | tr '\n' ' ')" || true
   [ -z "$envhits" ] || why="$why; token variable(s) set: $envhits"
   if grep -qE "$TOKEN_RE" <<<"$envs"; then why="$why; a GitHub credential value is in a process env"; fi
-  # (c) files the worker could have copied in, and git's own config.
+  # (c) files the worker could have copied in, and git's own config. The
+  # image's skill packs ship test fixtures with fake token-shaped strings
+  # (gstack's redaction tests); those directories come from the image, never
+  # from the worker, so they are pruned.
   [ ! -e "${HOME:-/home/agent}/.git-credentials" ] || why="$why; ~/.git-credentials exists"
   files="$(find "${HOME:-/home/agent}" "$WORKSPACE/.git" "$TMP_DIR" "$SOCK_DIR" -xdev \
-    \( -name node_modules -o -name objects \) -prune -o -type f -size -1024k -print0 2>/dev/null |
+    \( -name node_modules -o -name objects -o -path '*/.claude/skills/*/test' \
+    -o -path '*/.claude/skills/*/tests' \) -prune -o -type f -size -1024k -print0 2>/dev/null |
     xargs -0r grep -lIE "$TOKEN_RE" 2>/dev/null | head -n 5 | tr '\n' ' ')" || true
   [ -z "$files" ] || why="$why; credential-shaped content in: $files"
   # (d) the push itself.
@@ -429,10 +433,11 @@ probe_isolation() {
     case "$cmd" in *src/hello/worker.ts*) hostish="$hostish ${f##*/}:worker" ;; esac
   done
   [ -z "$hostish" ] || why="$why; host or worker processes visible:$hostish"
-  # Mounts: only the run's own (ADR-013 I2) plus Docker's own plumbing.
+  # Mounts: only the run's own (ADR-013 I2) plus Docker's own plumbing
+  # (/usr/sbin/docker-init is the --init binary Docker bind-mounts read-only).
   while read -r mp; do
     case "$mp" in
-      / | "$WORKSPACE" | "$WORKSPACE"/* | /run/automata | /opt/automata-daemon/index.js | \
+      / | "$WORKSPACE" | "$WORKSPACE"/* | /run/automata | /opt/automata-daemon/index.js | /usr/sbin/docker-init | \
         /home/agent | /opt/flutter | /opt/somnio-ai-tools/agent-rules/adapters | /tmp | /dev/shm | \
         /etc/hosts | /etc/hostname | /etc/resolv.conf | /proc | /proc/* | /sys | /sys/* | /dev | /dev/*) ;;
       *) extra_mounts="$extra_mounts $mp" ;;
@@ -466,7 +471,7 @@ ${f##*/}: $cmd $(tr '\0' ' ' <"$f/environ" 2>/dev/null || true)"
     names="$(find "$WORKSPACE" "${HOME:-/home/agent}" "$TMP_DIR" "$SOCK_DIR" -xdev \
       \( -name node_modules -o -name objects \) -prune -o -print 2>/dev/null || true)"
     contents="$(find "$WORKSPACE" "$TMP_DIR" "$SOCK_DIR" -xdev \( -name node_modules -o -name objects \) -prune \
-      -o -type f -size -1024k -print0 2>/dev/null | xargs -0r cat 2>/dev/null || true)"
+      -o -type f -size -1024k -print0 2>/dev/null | xargs -0r cat 2>/dev/null | tr -d '\000' || true)"
   fi
   for tok in ${peers[@]+"${peers[@]}"}; do
     hit=""
