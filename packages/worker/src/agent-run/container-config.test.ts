@@ -52,11 +52,23 @@ describe("WORKER_DEV_CONTAINER_RUNS (ADR-013 Decision 6: dev-only, default OFF)"
       dockerSocket: DEFAULT_CONTAINER_DOCKER_SOCKET,
       dockerBin: "docker",
       cpus: 2,
-      tmpBytes: 1024 ** 3,
-      shmBytes: 512 * 1024 ** 2,
+      tmpBytes: 512 * 1024 ** 2,
+      shmBytes: 256 * 1024 ** 2,
       runGid: null,
     });
     expect(cfg.memoryMaxBytes).toBe(3 * 1024 ** 3);
+  });
+
+  // card: protects=the tmpfs defaults fit the shipped 1500M per-run ceiling; fails_when=a default pair reaches it and a box with only the switch, the image and the tuple refuses to boot; no_claim=that 768M of tmpfs suits every workload
+  it("on: the tmpfs defaults boot under the shipped 1500M ceiling", () => {
+    const cfg = loadWorkerConfig({
+      ...SEAL,
+      WORKER_DEV_CONTAINER_RUNS: "1",
+      WORKER_BATTERIES_IMAGE: IMAGE,
+      WORKER_RUN_MEMORY_MAX: "1500M",
+    });
+    expect(cfg.containerRuns?.tmpBytes).toBe(512 * 1024 ** 2);
+    expect(cfg.containerRuns?.shmBytes).toBe(256 * 1024 ** 2);
   });
 
   // card: protects=on: a tag image, a missing ceiling, a relative socket, bad CPUs or a tmpfs that eats the memory limit refuse to load; fails_when=any of them loads; no_claim=values within range being sensible for a given box

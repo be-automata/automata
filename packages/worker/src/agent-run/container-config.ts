@@ -29,10 +29,14 @@ export const DEFAULT_CONTAINER_DOCKER_SOCKET =
 
 /** Default CPU quota per run container (`--cpus`). */
 export const DEFAULT_CONTAINER_CPUS = 2;
-/** Default size cap of the `/tmp` tmpfs (counts against `--memory`). */
-export const DEFAULT_CONTAINER_TMP_BYTES = 1024 ** 3;
+/**
+ * Default size cap of the `/tmp` tmpfs (counts against `--memory`). The two
+ * tmpfs defaults together (768M) stay under the shipped 1500M per-run
+ * ceiling, which refuses any pair whose sum reaches it.
+ */
+export const DEFAULT_CONTAINER_TMP_BYTES = 512 * 1024 ** 2;
 /** Default `/dev/shm` size, for gstack's Chromium (counts against `--memory`). */
-export const DEFAULT_CONTAINER_SHM_BYTES = 512 * 1024 ** 2;
+export const DEFAULT_CONTAINER_SHM_BYTES = 256 * 1024 ** 2;
 
 export interface ContainerRunsConfig {
   /** The batteries image, digest-pinned (ADR-013 I5). */
