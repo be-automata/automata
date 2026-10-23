@@ -16,6 +16,7 @@ import { DEFAULT_CONTAINER_DOCKER_SOCKET } from "./container-config";
 import { CONTAINER_BRIDGES } from "./container-entry";
 import { parsePinnedImage } from "./container-image";
 import { CONTAINER_GH_BROKER_SOCKET } from "./container-policy";
+import { NODE_ENV_PROXY_FLOOR } from "./node-floor";
 
 /**
  * The ADR-013 box assets: the rootless daemon installer, its user unit, the
@@ -454,6 +455,63 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     expect(bodies.get("fail")).toMatch(
       /printf 'FAIL %s %s\\n' "\$1" "\$2"\n\s+exit 1/,
     );
+  });
+
+  // card: protects=the host node floor in step_worker_runtime (22.x >= 22.21, or >= 24) matches the worker's own NODE_ENV_PROXY_FLOOR and fails closed; fails_when=the shell floor drifts from node-floor.ts, or a below-floor, 23.x or unparseable node passes; no_claim=the pnpm check or the report wording
+  describe("step_worker_runtime node floor", () => {
+    it("names the same floor as node-floor.ts", () => {
+      expect(NODE_ENV_PROXY_FLOOR).toBe(">=22.21.0 (22.x) or >=24.0.0");
+      expect(script).toContain("# >=22.21.0 on 22.x, or >=24.0.0.");
+      expect(bodies.get("step_worker_runtime")).toContain(
+        "node >=22.21.0 (22.x) or >=24 is required",
+      );
+    });
+
+    /** Run the step alone against a stubbed `node` (the script itself needs root). */
+    function runStep(nodeOutput: string) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "node-floor-"));
+      try {
+        const stub = (name: string, body: string) => {
+          const f = path.join(dir, name);
+          fs.writeFileSync(f, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+        };
+        stub("node", `printf '%s\\n' '${nodeOutput}'`);
+        stub("pnpm", "exit 0");
+        const harness = [
+          `report() { printf '%s %s %s\\n' "$1" "$2" "$3"; }`,
+          `fail() { printf 'FAIL %s %s\\n' "$1" "$2"; exit 1; }`,
+          `step_worker_runtime() {`,
+          bodies.get("step_worker_runtime") ?? "",
+          `}`,
+          `step_worker_runtime`,
+        ].join("\n");
+        return spawnSync("bash", ["-c", harness], {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: { PATH: `${dir}:/usr/bin:/bin` },
+        });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it.each([
+      ["22.20.0", false],
+      ["22.21.0", true],
+      ["22.22.1", true],
+      ["23.11.0", false],
+      ["24.0.0", true],
+      ["25.1.0", true],
+      ["20.19.0", false],
+      ["garbage", false],
+      ["", false],
+    ])("node %j accepted=%s", (version, accepted) => {
+      const r = runStep(version);
+      expect(r.status).toBe(accepted ? 0 : 1);
+      expect(r.stdout).toMatch(
+        accepted ? /^ok worker-runtime / : /^FAIL worker-runtime /,
+      );
+    });
   });
 });
 
