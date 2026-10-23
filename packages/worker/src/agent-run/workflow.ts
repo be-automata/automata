@@ -98,7 +98,7 @@ import {
   type BrokerHandoff,
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
-import { guardRunTerminal, waitForRunTerminal } from "./run-terminal-ledger";
+import { guardRunTerminal } from "./run-terminal-ledger";
 import {
   claimAbnormalEnd,
   newAbnormalEndState,
@@ -319,6 +319,14 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 }
 
 /**
+ * #437: how long onFailure waits for a task run's own teardown (and its typed
+ * terminal) before posting the generic failure: AC1's 90 s plus margin.
+ */
+export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 120_000;
+/** onFailure's engine timeout: the wait above plus the post. */
+export const ON_FAILURE_EXECUTION_TIMEOUT = "3m";
+
+/**
  * Register one agent-run workflow from its pure definition with the real run
  * fn + onFailure handler.
  */
@@ -330,7 +338,12 @@ export function makeAgentRunWorkflow(
   const def = buildAgentRunDefinition(name, perPrStrategy, caps);
   const wf = hatchet.workflow<AgentRunWireInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
-  wf.onFailure({ fn: onAgentRunFailure });
+  // #437: above the default 60 s — a task run's onFailure may wait up to
+  // ON_FAILURE_TYPED_TERMINAL_WAIT_MS for the run's own teardown first.
+  wf.onFailure({
+    fn: onAgentRunFailure,
+    executionTimeout: ON_FAILURE_EXECUTION_TIMEOUT,
+  });
   return wf;
 }
 
@@ -485,19 +498,68 @@ async function runAgent(
   // (a worker crash mid-run, #152) has no entry and re-executes as before.
   // A refused run whose first attempt RETURNED completes as a no-op, so the
   // engine records COMPLETED and onFailure never re-posts a terminal to www.
-  return guardRunTerminal<AgentRunOutput>(
-    {
-      root: loadWorkerConfig().runTerminalRoot,
-      runId: ctx.workflowRunId?.() || "",
-      log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
-      onAlreadyReturned: () => ({
-        threadId: wire.threadId,
-        threadChatId: wire.threadChatId,
-        outcome: "already-terminal",
-      }),
-    },
-    () => runAgentAttempt(wire, ctx),
+  return trackLiveRun(ctx.workflowRunId?.() || "", () =>
+    guardRunTerminal<AgentRunOutput>(
+      {
+        root: loadWorkerConfig().runTerminalRoot,
+        runId: ctx.workflowRunId?.() || "",
+        log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
+        onAlreadyReturned: () => ({
+          threadId: wire.threadId,
+          threadChatId: wire.threadChatId,
+          outcome: "already-terminal",
+        }),
+      },
+      () => runAgentAttempt(wire, ctx),
+    ),
   );
+}
+
+/**
+ * #437: the run fns executing in THIS process, by workflow run id, each with
+ * the promise that settles when it ends. onFailure waits on it so a run's own
+ * teardown (and its typed terminal) finishes first; a run that never started
+ * here (a scheduleTimeout, another worker) is absent and is never waited for.
+ */
+const LIVE_RUNS = new Map<string, Promise<void>>();
+
+async function trackLiveRun<T>(
+  runId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!runId) return run();
+  const pending = run();
+  const ended = pending.then(
+    () => undefined,
+    () => undefined,
+  );
+  LIVE_RUNS.set(runId, ended);
+  try {
+    return await pending;
+  } finally {
+    if (LIVE_RUNS.get(runId) === ended) LIVE_RUNS.delete(runId);
+  }
+}
+
+/** Test seam: drive trackLiveRun with a held run fn. */
+export const _trackLiveRunForTests = trackLiveRun;
+
+/** True iff the run ended (or was never live here) within `timeoutMs`. */
+async function waitForLiveRunEnd(
+  runId: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const ended = LIVE_RUNS.get(runId);
+  if (!ended) return true;
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([ended.then(() => true as const), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function runAgentAttempt(
@@ -569,6 +631,15 @@ async function runAgentResolved(
     runStartedAt,
     runExecutionTimeoutMs: RUN_EXECUTION_TIMEOUT_MS,
   });
+  // The cancel's own time, not the claim's: a slow teardown must not stretch
+  // the timeout tolerance.
+  ctx.abortController?.signal.addEventListener(
+    "abort",
+    () => {
+      abnormal.cancelledAt ??= Date.now();
+    },
+    { once: true },
+  );
   try {
     const output = await runAgentInner(
       input,
@@ -2016,11 +2087,6 @@ function readMemoryStarvation(daemon: RunDaemon): unknown {
  * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
  * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
  */
-/**
- * #437: how long onFailure waits for a task run's own teardown (and its typed
- * terminal) before posting the generic failure: AC1's 90 s plus margin.
- */
-export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 120_000;
 
 async function onAgentRunFailure(
   wire: AgentRunWireInput,
@@ -2042,17 +2108,17 @@ async function onAgentRunFailure(
     return;
   }
   // #437: a task run posts its own typed terminal from its teardown. On an
-  // executionTimeout this handler is scheduled while that teardown still runs,
-  // and www keeps the FIRST terminal — so wait (bounded) for the task fn to
-  // finish before posting the generic one, which is then absorbed as a no-op.
+  // executionTimeout the SDK rejects the task's future at once, so this
+  // handler is scheduled while that teardown still runs, and www keeps the
+  // FIRST terminal — so wait (bounded) for a run still live in this process
+  // to end before the generic post, which is then absorbed as a no-op.
   const runId = ctx.workflowRunId?.() || "";
   if (runId && ownsAbnormalTerminal(input)) {
-    const finished = await waitForRunTerminal({
-      root: loadWorkerConfig().runTerminalRoot,
+    const ended = await waitForLiveRunEnd(
       runId,
-      timeoutMs: ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
-    });
-    if (!finished) {
+      ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    );
+    if (!ended) {
       console.error(
         `[agent-run ${input.threadId}] onFailure: the run's teardown did not finish within ${ON_FAILURE_TYPED_TERMINAL_WAIT_MS / 1000}s — posting the generic failure`,
       );

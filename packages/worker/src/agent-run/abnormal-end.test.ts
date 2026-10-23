@@ -258,6 +258,20 @@ describe("claimAbnormalEnd / postAbnormalEnd (#437)", () => {
     );
   });
 
+  it("a cancel is timed by when the abort fired, not by when the slow teardown claimed it", () => {
+    // protects=the 15 s tolerance staying 15 s; fails_when=a cancel 20 s
+    // before the limit, claimed after a 30 s teardown, reads as timeout;
+    // no_claim=the abort listener wiring (workflow.ts).
+    const s = state();
+    s.cancelledAt = START + LIMIT_MS - 20_000;
+    const end = claimAbnormalEnd(
+      s,
+      { cancelled: true, starvation: null },
+      START + LIMIT_MS + 10_000,
+    );
+    expect(end?.cause).toBe("user-cancelled");
+  });
+
   it("a run this plane does not own never claims", () => {
     // protects=AC10 at the claim; fails_when=a non-owned run gets a cause;
     // no_claim=none beyond protects.

@@ -11,7 +11,6 @@ import {
   guardRunTerminal,
   readRunTerminal,
   recordRunTerminal,
-  waitForRunTerminal,
 } from "./run-terminal-ledger";
 
 /**
@@ -150,59 +149,5 @@ describe("guardRunTerminal", () => {
     await guardRunTerminal({ root, runId: "", log }, run);
     await guardRunTerminal({ root, runId: "", log }, run);
     expect(run).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("waitForRunTerminal (#437)", () => {
-  it("returns true as soon as the run's entry appears, false at the deadline", async () => {
-    // protects=onFailure waiting for the run's own typed terminal; fails_when=
-    // it returns before the entry exists or waits past its deadline;
-    // no_claim=the engine's scheduling of onFailure (the clock is injected).
-    let t = 0;
-    const now = () => t;
-    const sleep = vi.fn(async (ms: number) => {
-      t += ms;
-      if (t === 3_000) {
-        recordRunTerminal(
-          root,
-          RUN_ID,
-          { outcome: "returned" },
-          Date.now(),
-          () => {},
-        );
-      }
-    });
-    expect(
-      await waitForRunTerminal({
-        root,
-        runId: RUN_ID,
-        timeoutMs: 120_000,
-        now,
-        sleep,
-      }),
-    ).toBe(true);
-    expect(t).toBe(3_000);
-
-    t = 0;
-    const other = "1c3f7b63-5a9f-4c9f-8e2d-8b6e4f3a2d1c";
-    expect(
-      await waitForRunTerminal({
-        root,
-        runId: other,
-        timeoutMs: 5_000,
-        now,
-        sleep,
-      }),
-    ).toBe(false);
-    expect(t).toBe(5_000);
-    expect(
-      await waitForRunTerminal({
-        root,
-        runId: "",
-        timeoutMs: 5_000,
-        now,
-        sleep,
-      }),
-    ).toBe(false);
   });
 });

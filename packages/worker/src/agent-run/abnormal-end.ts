@@ -169,6 +169,8 @@ export interface AbnormalEndState {
   runExecutionTimeoutMs: number;
   daemonStarted: boolean;
   claimed: boolean;
+  /** When the run's abort signal fired; the timeout check reads this. */
+  cancelledAt?: number;
 }
 
 export function newAbnormalEndState(o: {
@@ -201,7 +203,7 @@ export function claimAbnormalEnd(
     daemonStarted: state.daemonStarted,
     runStartedAt: state.runStartedAt,
     runExecutionTimeoutMs: state.runExecutionTimeoutMs,
-    now,
+    now: end.cancelled ? (state.cancelledAt ?? now) : now,
   });
   return cause === null ? null : { ...end, cause };
 }

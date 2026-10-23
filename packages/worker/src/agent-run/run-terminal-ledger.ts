@@ -102,37 +102,6 @@ export function readRunTerminal(
 }
 
 /**
- * #437: wait until `runId`'s task fn has recorded its terminal on this box, or
- * the deadline passes. onFailure uses it so the run's own teardown — which
- * posts the typed terminal — finishes first: on an executionTimeout the engine
- * fails the task and schedules onFailure while the task fn is still tearing
- * down (the SDK rejects the task's future on cancel). True iff it appeared.
- */
-export async function waitForRunTerminal({
-  root,
-  runId,
-  timeoutMs,
-  pollMs = 1_000,
-  now = Date.now,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-}: {
-  root: string;
-  runId: string;
-  timeoutMs: number;
-  pollMs?: number;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-}): Promise<boolean> {
-  if (!runId) return false;
-  const deadline = now() + timeoutMs;
-  for (;;) {
-    if (readRunTerminal(root, runId)) return true;
-    if (now() >= deadline) return false;
-    await sleep(pollMs);
-  }
-}
-
-/**
  * Record `runId`'s terminal (atomic write: tmp + rename) and prune entries
  * older than RUN_TERMINAL_TTL_MS. Never throws; failures go to `log`.
  */
