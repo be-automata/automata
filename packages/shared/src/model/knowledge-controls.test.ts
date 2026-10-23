@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { createDb, type DB } from "../db";
 import * as schema from "../db/schema";
@@ -518,5 +518,52 @@ describe("knowledge controls", () => {
       ]);
       expect(log.every((l) => l.organizationId === orgA)).toBe(true);
     });
+  });
+});
+
+// The knowledge fence reads the locked row and compares in JS. A raw-SQL stamp
+// with microseconds parses to a millisecond Date, so the page's stamp matches;
+// a stamp one millisecond off still conflicts.
+describe("knowledge controls fence at millisecond precision", () => {
+  const MS_TRUNCATED = new Date("2026-10-23T18:28:39.410Z");
+
+  it("accepts the ms-truncated stamp of a microsecond raw-SQL write, rejects a different millisecond", async () => {
+    const db = createDb(process.env.DATABASE_URL!);
+    const { user } = await createTestUser({ db });
+    const orgId = await createTestOrg({ db, name: "Precise" });
+    await db.delete(schema.knowledgePlatformSettings);
+    const update = (expectedUpdatedAt: Date) =>
+      updateKnowledgeControls({
+        db,
+        organizationId: orgId,
+        actorUserId: user.id,
+        patch: { budgetMicroUsd: 1_000_000 },
+        expectedUpdatedAt,
+        now: NOW,
+      });
+    await updateKnowledgeControls({
+      db,
+      organizationId: orgId,
+      actorUserId: user.id,
+      patch: { engine: true },
+      now: NOW,
+    });
+    await db
+      .update(schema.organizationReviewSettings)
+      .set({
+        knowledgeUpdatedAt: sql`'2026-10-23 18:28:39.410605'::timestamp`,
+      })
+      .where(eq(schema.organizationReviewSettings.organizationId, orgId));
+
+    expect(
+      (await getKnowledgeControls({ db, organizationId: orgId })).updatedAt,
+    ).toEqual(MS_TRUNCATED);
+    for (const offset of [-1, 1]) {
+      await expect(
+        update(new Date(MS_TRUNCATED.getTime() + offset)),
+      ).rejects.toThrow(KnowledgeControlsConflictError);
+    }
+    const saved = await update(MS_TRUNCATED);
+    expect(saved.budgetMicroUsd).toBe(1_000_000);
   });
 });
