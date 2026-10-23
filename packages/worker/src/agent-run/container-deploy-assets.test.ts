@@ -86,7 +86,50 @@ describe("install-rootless-docker.sh + automata-runner-docker.service (ADR-013 D
     expect(script).toContain("SOCK_DIR=/run/automata-docker");
     expect(script).toContain('SOCK="$SOCK_DIR/docker.sock"');
     expect(unit).toContain(`--host=unix://${DEFAULT_CONTAINER_DOCKER_SOCKET}`);
-    expect(unit).toContain("--group=automata-docker");
+  });
+
+  // card: protects=the socket ends up automata-runner:automata-docker 0660 on the HOST: the group is set by the unit's ExecStartPost (host namespace), never by dockerd's --group, which resolves inside the rootless user namespace and lands on the host as a subordinate gid (987 became 166522, the worker got "permission denied"); fails_when=the unit passes a named --group to dockerd again, drops the host-side chgrp/chmod, or gives the socket a mode with "other" bits; no_claim=that the runner's user manager actually holds automata-docker at chgrp time (box run, and the installer's user-manager restart)
+  it("socket group is set host-side, never by dockerd's in-namespace --group", () => {
+    const execStart = unit.match(/^ExecStart=(.*)$/m)?.[1] ?? "";
+    expect(execStart).toMatch(/ --group= /);
+    expect(execStart).not.toMatch(/--group=\S/);
+    const post = [...unit.matchAll(/^ExecStartPost=(.*)$/gm)].map((m) => m[1]);
+    expect(post).toEqual([
+      `/usr/bin/chgrp automata-docker ${DEFAULT_CONTAINER_DOCKER_SOCKET}`,
+      `/usr/bin/chmod 0660 ${DEFAULT_CONTAINER_DOCKER_SOCKET}`,
+    ]);
+    // Type=notify: ExecStartPost runs once dockerd is READY (socket created).
+    expect(unit).toMatch(/^Type=notify$/m);
+    // The runner itself must be in the group to chgrp to it.
+    expect(script).toMatch(/if ! in_group "\$RUNNER" "\$GROUP"; then/);
+    expect(script).toMatch(/usermod -aG "\$GROUP" "\$RUNNER"/);
+  });
+
+  // card: protects=--check (and every install) fails unless the socket dir is automata-runner:automata-docker 0750 and the socket automata-runner:automata-docker 0660, so a subordinate gid or a world bit cannot pass as healthy; fails_when=either stat check is dropped or loosened (e.g. a 0755 dir or 0666 socket would pass); no_claim=the stat output format on non-GNU coreutils (Ubuntu only)
+  it("verify checks the socket dir and socket owner, group and mode", () => {
+    expect(script).toMatch(/d \$SOCK_DIR 0750 \$RUNNER \$GROUP -/);
+    expect(script).toContain(`stat -c '%U:%G %a' "$SOCK_DIR"`);
+    expect(script).toContain('[ "$got" = "$RUNNER:$GROUP 750" ]');
+    expect(script).toContain(`stat -c '%U:%G %a' "$SOCK"`);
+    expect(script).toContain(
+      '[ -S "$SOCK" ] && [ "$got" = "$RUNNER:$GROUP 660" ]',
+    );
+    expect(script).toMatch(/FAIL socket-dir /);
+    expect(script).toMatch(/FAIL socket-perms /);
+  });
+
+  // card: protects=the worker account joins automata-runner's PRIMARY group (the run-dir hand-over: setgid <runDir> group-owned by it, WORKER_CONTAINER_RUN_GID, --group-add 0) idempotently, and --check fails when it is missing; fails_when=the installer stops adding it, adds it unconditionally (non-idempotent), or verify stops checking it; no_claim=that a RUNNING worker picks the group up before it restarts
+  it("worker joins the runner's primary group; --check verifies it", () => {
+    expect(script).toContain('run_group="$(id -gn "$RUNNER")"');
+    expect(script).toMatch(
+      /for g in "\$GROUP" "\$run_group"; do\n\s+if ! in_group "\$worker_user" "\$g"; then\n(.*\n)?\s+usermod -aG "\$g" "\$worker_user"/,
+    );
+    const verify = script.slice(
+      script.indexOf("verify() {"),
+      script.indexOf("\n}\n", script.indexOf("verify() {")),
+    );
+    expect(verify).toContain('in_group "$worker_user" "$run_group"');
+    expect(verify).toMatch(/FAIL worker-run-group /);
   });
 
   // card: protects=cgroup v2 delegation covers cpu, memory and pids for the runner's user manager, and the unit delegates its own subtree to dockerd; fails_when=a controller is dropped (the limits would be silently unenforced); no_claim=enforcement itself (prove-container-limits.sh on the box)
@@ -105,7 +148,9 @@ describe("install-rootless-docker.sh + automata-runner-docker.service (ADR-013 D
     expect(script).toMatch(
       /useradd --system .*--shell \/usr\/sbin\/nologin "\$RUNNER"/,
     );
-    expect(script).toMatch(/usermod -aG "\$GROUP" "\$u"/);
+    expect(script).toMatch(
+      /if ! in_group "\$worker_user" "\$g"; then\n(.*\n)?\s+usermod -aG "\$g" "\$worker_user"/,
+    );
     expect(script).toMatch(/d \$SOCK_DIR 0750 \$RUNNER \$GROUP -/);
   });
 });

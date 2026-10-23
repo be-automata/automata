@@ -8,8 +8,8 @@
 # id with no host identity.
 #
 # The socket is /run/automata-docker/docker.sock (dir 0750
-# automata-runner:automata-docker, tmpfiles.d), group `automata-docker`: the
-# worker reaches it through that group, without sudo. The worker sets
+# automata-runner:automata-docker, tmpfiles.d), group `automata-docker`, mode
+# 0660: the worker reaches it through that group, without sudo. The worker sets
 # WORKER_CONTAINER_DOCKER_SOCKET to it only on a box running the dev-only
 # container path (WORKER_DEV_CONTAINER_RUNS=1).
 #
@@ -28,7 +28,19 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # slirp4netns, not the default: the daemon itself needs egress only to pull by
 # digest; run containers are --network none and never touch it.
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
-ExecStart=/usr/bin/dockerd-rootless.sh --data-root=%h/docker --host=unix:///run/automata-docker/docker.sock --group=automata-docker --exec-opt=native.cgroupdriver=systemd --log-driver=none --live-restore=false
+# The socket's group is set from the HOST side, never by dockerd: rootless
+# dockerd runs inside rootlesskit's user namespace, where it resolves
+# `--group=<name>` to a gid and chowns the socket to it, and that in-namespace
+# gid lands on the host as a SUBORDINATE gid (automata-docker 987 became
+# 165536+986), so the worker gets "permission denied". `--group=` (empty) makes
+# dockerd keep its own gid, in-namespace 0 = automata-runner's primary group on
+# the host, and the ExecStartPost lines below (host namespace, as
+# automata-runner, a member of automata-docker) hand the socket to
+# automata-docker. Type=notify: they run after dockerd is READY, by which point
+# it has created the socket; a missing socket fails the start (Restart= retries).
+ExecStart=/usr/bin/dockerd-rootless.sh --data-root=%h/docker --host=unix:///run/automata-docker/docker.sock --group= --exec-opt=native.cgroupdriver=systemd --log-driver=none --live-restore=false
+ExecStartPost=/usr/bin/chgrp automata-docker /run/automata-docker/docker.sock
+ExecStartPost=/usr/bin/chmod 0660 /run/automata-docker/docker.sock
 ExecReload=/bin/kill -s HUP $MAINPID
 TimeoutSec=0
 RestartSec=2
