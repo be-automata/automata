@@ -349,6 +349,15 @@ const SUBMODULE_SCRIPT =
   `test ! -e .gitmodules || exit ${EXIT_SUBMODULES}; ` +
   "git ls-files -s -z >/dev/null || exit 1; " +
   `if git ls-files -s -z | tr '\\0' '\\n' | grep -q '^160000 '; then exit ${EXIT_SUBMODULES}; fi`;
+// A run killed at its limit can die inside a git command and leave the index,
+// HEAD or work-branch ref lock behind; add/commit would then exit 128 and the
+// work be lost. Safe to clear: the agent and its escapees are reaped and the
+// box lock is held, so no git of this run is still writing. As the agent uid,
+// so it can only remove what the agent could.
+const STALE_LOCKS_SCRIPT =
+  'for p in index.lock HEAD.lock "refs/heads/$1.lock"; do ' +
+  'f=$(git rev-parse --git-path "$p") || exit 1; rm -f -- "$f" || exit 1; ' +
+  "done";
 const ADD_SCRIPT = "exec git add -A";
 // Every secret-named path the push would ADD: each commit HEAD holds that no
 // origin/* ref does — the salvage commit AND the agent's own unpushed
@@ -585,14 +594,15 @@ export async function salvageWorkBranch(
       );
     }
     const submodules = await git(SUBMODULE_SCRIPT);
-    if (submodules.exitCode === EXIT_SUBMODULES) {
-      return skipped("unsafe local git config");
-    }
+    // Its own reason: a repo that legitimately uses submodules is not one
+    // whose config was tampered with.
+    if (submodules.exitCode === EXIT_SUBMODULES) return skipped("submodules");
     if (submodules.exitCode !== 0) {
       throw new SalvageStepFailed(
         `submodule check failed (exit ${submodules.exitCode ?? "killed"})`,
       );
     }
+    await ok("stale lock cleanup", STALE_LOCKS_SCRIPT, [workBranch]);
     await ok("add", ADD_SCRIPT);
     const staged = await git(STAGED_SCRIPT);
     if (staged.exitCode === 1) {

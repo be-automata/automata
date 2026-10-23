@@ -3353,14 +3353,16 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     salvageCalls.push(a);
     // `exec git <verb> …`; the config guard is `test -d .git … git config`,
     // the HEAD check `head=$(git symbolic-ref …)` and the submodule check
-    // `test ! -e .gitmodules …`.
+    // `test ! -e .gitmodules …`, the stale-lock cleanup `for p in index.lock …`.
     const verb = a.script.startsWith("test -d .git")
       ? "guard"
       : a.script.startsWith("head=")
         ? "head-state"
         : a.script.startsWith("test ! -e .gitmodules")
           ? "submodules"
-          : (a.script.split(" ")[2] ?? "?");
+          : a.script.startsWith("for p in index.lock")
+            ? "stale-locks"
+            : (a.script.split(" ")[2] ?? "?");
     finallyOrder.push(`salvage:${verb}`);
     return {
       exitCode: EXIT[verb] ?? 0,
@@ -3468,6 +3470,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "salvage:check-ref-format",
       "salvage:head-state",
       "salvage:submodules",
+      "salvage:stale-locks",
       "salvage:add",
       "salvage:diff",
       "salvage:commit",

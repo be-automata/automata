@@ -194,6 +194,25 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     ]);
   });
 
+  it.each(["index.lock", "HEAD.lock", `refs/heads/${WORK_BRANCH}.lock`])(
+    "a stale %s left by the killed agent is cleared and the work is still pushed (job 813)",
+    async (lock) => {
+      // protects=job 813 finding 1: a run killed mid-git leaves a lock that
+      // makes add/commit exit 128 and loses the work; fails_when=the salvage
+      // fails or nothing reaches the remote; no_claim=a lock held by a LIVE
+      // git (the workflow reaps the run's processes before the salvage).
+      fs.writeFileSync(path.join(work, ".git", lock), "");
+      fs.writeFileSync(path.join(work, "new.ts"), "export {};\n");
+
+      const result = await salvage();
+
+      const head = git(work, "rev-parse", "HEAD");
+      expect(result).toEqual({ branch: WORK_BRANCH, sha: head });
+      expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(head);
+      expect(fs.existsSync(path.join(work, ".git", lock))).toBe(false);
+    },
+  );
+
   it("a clean tree with commits the agent never pushed is pushed without a new commit (AC3)", async () => {
     // protects=AC3; fails_when=a salvage commit is added on a clean tree or
     // the agent's local commits stay unpushed; no_claim=none beyond protects
@@ -605,7 +624,7 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
 
     expect(fs.existsSync(marker)).toBe(false);
     expect(result).toBeNull();
-    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(logs).toEqual(["salvage: skipped (submodules)"]);
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 
@@ -619,7 +638,7 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
 
     expect(await salvage()).toBeNull();
 
-    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(logs).toEqual(["salvage: skipped (submodules)"]);
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 
