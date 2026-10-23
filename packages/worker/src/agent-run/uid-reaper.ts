@@ -643,7 +643,9 @@ export async function reapAgentUidEscapees(
         escapeesSinceBoot,
       };
       try {
-        writeSnapshotAtomic(runNamespaceRoot, snapshot, BOX_BUDGET_FILENAME);
+        writeSnapshotAtomic(runNamespaceRoot, snapshot, {
+          filename: BOX_BUDGET_FILENAME,
+        });
       } catch (e) {
         log(
           `box.budget_write_failed ${JSON.stringify({ ...base, root: runNamespaceRoot, error: errorMessage(e) })}`,

@@ -441,9 +441,148 @@ pnpm --filter @terragon/daemon run build
 ## Zombie / leaked-worker guard
 
 Each daemon SIGKILLs its own process group on teardown, and boot-time reclaim reaps a
-dead sibling worker's orphaned daemons. Add a worker-liveness alert (gap #7): alert on
-a worker that stops heartbeating so a silently-dead unit is noticed before queued runs
-hit their `scheduleTimeout`.
+dead sibling worker's orphaned daemons. The #215 engine-liveness watchdog restarts a
+wedged worker that stops heartbeating (`WORKER_LIVENESS_STALE_S`). The #373 growth
+triggers below alert on capacity signals, but they run inside the worker process and
+need days of data, so they cannot page on a dead worker. Gap #7 (alerting on a silently
+dead unit before queued runs hit their `scheduleTimeout`) stays open.
+
+### Growth triggers (#373)
+
+An in-process evaluator that checks five signals every interval and POSTs a webhook
+when one crosses its threshold. Each trigger authorizes exactly one move:
+
+- `queue_wait_p90` — daily queue-wait p90 > 600 s on each of the last 7 complete UTC
+  days → raise the cap, then resize CX43 (cap 6) / CX53 (cap 8). It measures the ENGINE
+  queue only: a run that ended before it started (cancelled, timed out) counts its whole life as wait, but a run
+  deferred by the #371 headroom check or parked on a #205 box slot is already running on
+  the engine, so that wait is not seen (and counts as run time). A quiet trigger is not
+  proof the box keeps up; read the `box.headroom_*` journal lines alongside it.
+  POLICY WAITS ARE INCLUDED: the engine rows do not say why a run waited, so a wait
+  behind the per-org cap (`WORKER_PER_ORG_MAX_RUNS`) or a PR's per-PR maxRuns key counts
+  the same as a wait for box capacity. On a single-tenant box, or one busy PR, the p90
+  can therefore rise from policy rather than capacity. Check the per-org caps before
+  acting on "raise the cap": when `WORKER_PER_ORG_MAX_RUNS` is below
+  `WORKER_GLOBAL_MAX_RUNS` and one org holds the queue, raising the global cap moves
+  nothing.
+- `ram_swap` — RAM above the fraction, or continuous swap-in, sustained for the sustain
+  window → add a second shared box on the same tenant. Swap-in counts only at a real
+  rate: `pswpin` must rise on every sample of the window AND average at least
+  `SWAP_IN_MIN_PAGES_PER_S` = 10 pages/s (Δpswpin ÷ Δt over the sustained window, ~40 KiB/s
+  at 4 KiB pages). A trickle of a page or two per sample is cold pages coming back, not a
+  box short of RAM.
+- `client_share` — one client > 40 % of attributed run time (needs ≥ 3 orgs holding run
+  time: on a two-org box one org is always ≥ 50 %, so it never fires) → split that client
+  to its own box. Reads `unknown` while more than 5 % of run time is
+  unattributed (see below). The 24 h hold is per org: each org over the threshold is
+  announced once per 24 h, so a different org is announced as its own split, and two
+  orgs trading the top spot are announced once each, not on every swap. An exact tie
+  goes to the lower orgId. Its `cleared` text names the orgs announced in the last 24 h
+  (`no longer over for org-a, org-b`), not just whichever org is on top at the clear.
+- `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
+  questionnaire → start the per-run sandbox path.
+- `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
+  supersede policy. Only review-lane cancels count (`lane=review`): task, pr and self-heal
+  cancels and laneless pre-#373 rows are excluded from the numerator. A review-lane cancel
+  counts whatever caused it, so a user Stop of a review run counts too. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
+  while deferred by #371 or parked on a #205 box slot counts that wait as waste although
+  no agent compute ran. On a busy box, check `queue_wait_p90` and the `box.headroom_*`
+  lines before reading a high ratio as a policy problem (follow-up #409).
+
+**A saturated box can keep `ram_swap` and `queue_wait_p90` both quiet.** Agent runs have
+`memory.swap.max=0`, so they never page, and the #371 headroom check defers a new run
+before RAM fills, so utilisation plateaus under the fraction. The deferred run is already
+running on the engine, so its wait is not engine queue wait either. The pressure shows
+up only as deferrals: read the `box.headroom_rejected` / `box.headroom_deferred_wait`
+journal lines alongside both triggers before concluding the box has room.
+
+| Knob                                   | Default | Notes                                                 |
+| :------------------------------------- | :------ | :---------------------------------------------------- |
+| `WORKER_ALERT_WEBHOOK_URL`             | unset   | Unset = OFF, silent, nothing else is read. See below. |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`     | 300     | Floor 30, ceiling 43200 (half the sustain ceiling).   |
+| `WORKER_GROWTH_TRIGGER_SUSTAIN_S`      | 900     | Floor 60, ceiling 86400; must be ≥ 2 × interval.      |
+| `WORKER_GROWTH_TRIGGER_RAM_FRACTION`   | 0.70    | 0 < x < 1.                                            |
+| `WORKER_ENTERPRISE_QUESTIONNAIRE`      | unset   | `1` turns on the composite's manual arm.              |
+| `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS` | `on`    | `on` or `off`; anything else refuses boot. See below. |
+
+The sustain ceiling is the 24 h dedupe window: a window longer than a day could not be
+announced inside the window that holds its re-fire. The interval ceiling is derived from
+it: sustain must be ≥ 2 × the interval and is capped at 86400, so 43200 is the largest
+interval that can boot, and a larger one is refused with that reason.
+
+`WORKER_ALERT_WEBHOOK_URL` must be `https:`. Plain `http:` is accepted only when the
+host is a loopback literal (`127.0.0.0/8`, `::1`) or a private IPv4 literal
+(`10/8`, `172.16/12`, `192.168/16`) — the URL is a credential and must not cross a
+network in cleartext. Any hostname, `localhost` included, is refused over `http:`: a name
+goes through the resolver. Use https, or the IP literal. A URL with credentials before the
+host (`https://user:pass@host/…`, or just `user@`) is refused too: fetch rejects such a URL,
+so every alert would fail. Put the sink's token in the path or query instead. The refusal
+names the knob and the rule, never the URL.
+
+A bad knob refuses boot (`FATAL: growth triggers are configured but cannot be armed`).
+Under `Restart=always` that is a crash loop which stops every run lane on the box, not
+just the alerts, so validate the knobs before restarting — from `packages/worker`, with
+the new env exported:
+`pnpm exec tsx -e 'import("./src/agent-run/growth-trigger-config.ts").then((m) => { m.loadGrowthTriggerConfig(process.env); console.log("growth knobs ok"); })'`
+throws on exactly the value boot would refuse (it prints no knob values: the URL is a
+credential).
+The webhook body is `{text, trigger, value, threshold, authorizedMove, boxId, firedAt,
+state}` with `state` `fired` or `cleared`; `text` is a one-line summary, so the same URL
+works for a Slack incoming webhook or ntfy. A trigger that stays over re-fires at most
+once per 24 h (per org for `client_share`; sooner only when a recorded fire time lies in
+the future — a clock that stepped back never extends the hold), and one `cleared` notice
+is sent when it drops back under. The 24 h hold still applies after a `cleared`: an over
+again within the day is not re-announced, and the snapshot carries the live verdict. A
+failed POST is not recorded and is retried next tick; `growth.webhook_failed` is logged
+once per (trigger, state, reason) streak — a tick with no transition for that trigger
+ends the streak — and `growth.webhook_recovered` on the next delivery.
+A POST that TIMES OUT is backed off, since a sink that accepts late may already have
+posted it: after the k-th consecutive timeout of the same transition the next attempt
+waits 2^(k−1) ticks (attempts 1, 2, 4, 8, … ticks apart), capped at 1 h (12 ticks at the
+default 300 s interval; every tick when the interval is ≥ 1 h). The alert is never
+dropped: it stays pending until delivered. The backoff resets on delivery, on a failure
+that is not a timeout, when no transition is pending any more, and when the pending
+state flips (a pending `fired` becomes a pending `cleared`, or back). A tick that runs
+out of its budget before POSTing keeps the backoff as it was. Other failures (non-2xx,
+unreachable, redirect) retry every tick.
+
+The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
+`until` = 00:00 UTC today, so today's partial day is never paged in. Because the window
+only moves at 00:00 UTC, the engine is re-read at most hourly: a tick reads it when the
+window changed (the first tick of a new UTC day) or the last successful read is ≥ 3600 s
+old, and otherwise re-evaluates the cached rows. RAM/swap is still sampled every tick. A
+failed read leaves the cache's age as it was, so the next tick retries (and that tick's
+run triggers read `unknown`). A malformed read is `unknown` too, never `under`: a run row
+(`actionId` ending `:run`) the reader cannot place in time, or a non-empty page none of
+whose rows has the engine's row shape, makes the whole read unreadable (`engine read:
+malformed run row` / `engine read: no recognizable row on a page`) instead of silently
+dropping rows — a window with rows missing would read low and could clear a firing
+trigger. Non-run rows (`:on-failure-task`) are still skipped.
+
+State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, written
+atomically every tick, and again right after each delivered alert so a worker that dies
+mid-tick does not resend it on restart). With the default root (`/tmp/automata-agent-run`)
+the file does not survive a reboot, since `/tmp` is cleared, so a trigger may re-fire once
+after a reboot, and a pending `cleared` is lost. Non-review runs dispatched before the
+#373 www deploy carry no org tag and count as `unattributed` (review runs have carried
+`orgId` and `lane=review` since #127); the client signals are meaningful only once the window holds 7 complete
+UTC days of tagged runs — up to 8 calendar days after the www deploy. The attribution gate enforces that: while more than 5 % of the window's run
+time is unattributed, `client_share` and the scale composite's clients arm read
+`unknown` (the share and the unattributed figures are still in the snapshot). The
+composite then fires only if the other two arms hold, and reads `unknown` when the
+clients arm could decide it.
+
+**One box per tenant sends tenant alerts.** The four run-based triggers
+(`queue_wait_p90`, `client_share`, `scale_composite`, `supersede_waste`) read the whole
+engine TENANT, not this box's runs. With more than one box on a tenant, every box
+evaluates the same rows and would send identical alerts. Set
+`WORKER_GROWTH_TRIGGER_TENANT_SIGNALS=off` on every box but one per tenant, and keep
+`WORKER_ALERT_WEBHOOK_URL` set on all of them, so each box keeps its own `ram_swap` alert
+(which is per box). With `off` the box neither resolves nor reads the engine; the four
+run-based triggers read `unknown` with reason `tenant signals off on this box` (no fire,
+no clear — a trigger restored as firing stays firing) and the snapshot is still written
+every tick. The webhook URL is a secret: it is never logged — keep it in
+`worker-box.env`, never in the unit file or the repo.
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
 

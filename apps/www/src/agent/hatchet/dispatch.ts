@@ -67,6 +67,7 @@ import {
   listAgentRunsForThread,
   workflowNameForPolicy,
   buildReviewRunMetadata,
+  RunMetadataLimitError,
   type TriggerOpts,
 } from "./transport";
 
@@ -110,7 +111,9 @@ export function generateTraceparent(): string {
  * Trigger the agent-run with a small bounded retry. Each failed attempt is logged
  * with the actual error; only the FINAL failure propagates (the caller then
  * revokes the token + fails the thread). A transient (cold first-dispatch, socket
- * blip) is absorbed silently.
+ * blip) is absorbed silently. An over-limit metadata object (RunMetadataLimitError)
+ * is definitive — refused before any request, and refused again on every retry —
+ * so it propagates after its first attempt.
  */
 async function triggerWithRetry(
   input: AgentRunWireInput,
@@ -134,6 +137,7 @@ async function triggerWithRetry(
         maxAttempts: TRIGGER_MAX_ATTEMPTS,
         error: scrub(error instanceof Error ? error.message : String(error)),
       });
+      if (error instanceof RunMetadataLimitError) break;
       if (attempt < TRIGGER_MAX_ATTEMPTS) {
         await sleep(TRIGGER_BACKOFF_MS * attempt);
       }
@@ -159,10 +163,12 @@ const HATCHET_DISPATCH_SCOPE_KEY = "*";
 
 /**
  * True when a failed trigger may still have created the run: a timeout or
- * abort, a network error, a 5xx, 408 or 429. A definitive 4xx or a missing
- * transport config cannot have created anything.
+ * abort, a network error, a 5xx, 408 or 429. A definitive 4xx, a missing
+ * transport config or an over-limit metadata object (refused before any
+ * request) cannot have created anything.
  */
 function isAmbiguousTriggerFailure(error: unknown): boolean {
+  if (error instanceof RunMetadataLimitError) return false;
   if (!(error instanceof Error)) return true;
   if (error.message.includes("are not all configured")) return false;
   const status = /^Hatchet trigger failed: (\d{3})/.exec(error.message)?.[1];
@@ -179,8 +185,10 @@ function isAmbiguousTriggerFailure(error: unknown): boolean {
  * the read-back); nothing found is read once more after a 2 s settle (the
  * listing lags the trigger), and still nothing means exactly one retry. A read-back that
  * fails ends the dispatch (never a blind retry). Every outcome records one
- * hatchet_dispatch breaker event. Review and plain task dispatches never come
- * here: they keep triggerWithRetry, byte-identical.
+ * hatchet_dispatch breaker event, except an over-limit metadata refusal
+ * (RunMetadataLimitError): nothing was sent, so it records none and is only
+ * logged. Review and plain task dispatches never come
+ * here: they keep triggerWithRetry (same metadata derivation, #373 OD-0).
  */
 async function triggerSelfHealBounded({
   input,
@@ -283,6 +291,20 @@ async function triggerSelfHealBounded({
         return { externalId: live.externalId };
       }
     }
+  }
+  if (lastError instanceof RunMetadataLimitError) {
+    // Refused before any request: nothing reached the engine, so this says nothing about
+    // Hatchet's health. Recording it as dispatch_lost would let an over-limit metadata
+    // value trip the hatchet_dispatch breaker; no breaker event is written.
+    console.error(
+      "[hatchet] self-heal trigger refused: run metadata over limit — nothing sent, no breaker event",
+      {
+        threadId,
+        threadChatId,
+        error: scrub(lastError.message),
+      },
+    );
+    throw lastError;
   }
   await record("failure", "dispatch_lost");
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -451,7 +473,8 @@ export function hatchetDispatchEnabled(thread: {
 
 /**
  * The review-dispatch plan (#165: exactly two dispatch modes exist). `null`
- * for a non-review run — legacy `agent-run` payload, no trigger opts, no
+ * for a non-review run — legacy `agent-run` workflow (its metadata derived
+ * by triggerAgentRun, #373 OD-0), no trigger opts, no
  * fence stamp, no run tracking. Non-null for a review run — every field is
  * present together, so "is this a review plan" is ONE predicate everywhere.
  */
@@ -1017,8 +1040,10 @@ export async function dispatchAgentRun({
     const isCompanionRun = prLane === "companion";
 
     // #125/#127/#165: ONE plan for the dispatch mode. Non-review runs keep the
-    // legacy plan (no extension, no opts, byte-identical payload — IRON
-    // golden). A REVIEW run always resolves the (org, repo) policy: it picks
+    // legacy plan (no extension, the `agent-run` workflow — IRON golden); by
+    // decision OD-0 of #373 their metadata now carries orgId + lane (+ repo
+    // and PR when known), derived by triggerAgentRun (transport.ts
+    // buildRunMetadata). A REVIEW run always resolves the (org, repo) policy: it picks
     // the workflow variant, the input gains prKey/deliveryId + the policy
     // SNAPSHOT, and the metadata is enriched. Supersession of prior runs is
     // ENGINE-ONLY (#165, ADR-007): www owns no cancel path — the variant's
@@ -1145,6 +1170,11 @@ export async function dispatchAgentRun({
     // self-heal run uses the bounded policy (TMO-01): 5 s per POST and a
     // read-back before its one retry, so an ambiguous engine answer never
     // starts a second agent.
+    // #373 OD-0: every non-review lane names its org and lane in the run
+    // metadata (the worker's growth triggers attribute run time by it):
+    // triggerAgentRun derives it from the input when no plan metadata is
+    // given, so a self-heal run stamps self-heal-* on either trigger path.
+    // Review runs keep their plan's metadata.
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({

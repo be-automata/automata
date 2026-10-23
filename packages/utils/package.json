@@ -8,7 +8,8 @@
     "./retry": "./src/retry.ts",
     "./encryption": "./src/encryption.ts",
     "./redact": "./src/redact.ts",
-    "./payload-seal": "./src/payload-seal.ts"
+    "./payload-seal": "./src/payload-seal.ts",
+    "./run-lane": "./src/run-lane.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",

@@ -18,6 +18,7 @@ import {
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
 import { harnessDoctorLine } from "../agent-run/batteries-seed";
+import { armGrowthTriggers } from "../agent-run/growth-triggers-io";
 import { loadPlaneKeysAtBoot } from "../agent-run/payload-seal-keys";
 import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
@@ -505,6 +506,29 @@ async function main() {
   } catch (err) {
     console.error(
       "[worker-boot] FATAL: the engine-liveness watchdog is configured but cannot be armed — refusing to start",
+      err,
+    );
+    process.exit(1);
+  }
+
+  // #373: growth-trigger evaluator. OFF unless WORKER_ALERT_WEBHOOK_URL is set — and
+  // then SILENT: unlike #215 there is no OFF line, so an unconfigured box's boot log
+  // stays byte-identical (AC 1). Configured but un-armable (a bad knob, an engine we
+  // cannot resolve) refuses to start, exactly like #215: an operator who set the URL
+  // expects alerts, and a box that boots without them is a silent gap. The webhook URL
+  // is a secret and is never logged here.
+  try {
+    armGrowthTriggers(process.env, {
+      resolveEngine: () => {
+        const c = loadAuthProbeConfig();
+        return { apiUrl: c.apiUrl, tenantId: c.tenantId, token: c.realToken };
+      },
+      snapshotDir: registrationConfig.runNamespaceRoot,
+      boxId: registrationConfig.boxId,
+    });
+  } catch (err) {
+    console.error(
+      "[worker-boot] FATAL: growth triggers are configured but cannot be armed — refusing to start",
       err,
     );
     process.exit(1);
