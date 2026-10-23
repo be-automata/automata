@@ -267,7 +267,7 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     await d.teardown();
     expect(rt.calls).toEqual([
       "inspect",
-      "exec chmod -R g+rwX /workspace",
+      "exec find /workspace -user 10001 -exec chmod g+rwX {} +",
       "inspect",
       `remove ${"c".repeat(64)}`,
       "inspect",

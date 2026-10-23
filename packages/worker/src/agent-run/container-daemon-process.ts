@@ -15,6 +15,7 @@ import {
   CONTAINER_DAEMON_BUNDLE,
   CONTAINER_DAEMON_SOCKET,
   CONTAINER_HOME,
+  CONTAINER_USER,
   CONTAINER_WORKSPACE,
   containerLanePolicy,
   containerNameForSlot,
@@ -678,7 +679,17 @@ export class ContainerDaemonProcess implements RunDaemon {
       }
       const r = await this.runtime.exec(
         id,
-        ["chmod", "-R", "g+rwX", CONTAINER_WORKSPACE],
+        [
+          "find",
+          CONTAINER_WORKSPACE,
+          "-user",
+          CONTAINER_USER.split(":")[0] ?? "",
+          "-exec",
+          "chmod",
+          "g+rwX",
+          "{}",
+          "+",
+        ],
         WORKSPACE_HAND_BACK_TIMEOUT_MS,
       );
       this.log(
