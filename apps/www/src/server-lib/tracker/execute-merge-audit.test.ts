@@ -6,7 +6,12 @@ import {
   type MarkerCommentResult,
   type MergedPullRequest,
 } from "./execute-merge-audit";
-import { mergeAuditMarker } from "./merge-audit";
+import {
+  isReplaceableAuditNotice,
+  mergeAuditMarker,
+  renderNoticeComment,
+  renderUnusableAuditNotice,
+} from "./merge-audit";
 import type { TrackerConfig } from "./tracker-config";
 import {
   type TrackerClient,
@@ -122,6 +127,12 @@ function fakeComments(existingBody: string | null = null) {
             return "created";
           }
           if (mode === "create-only") return "kept_existing";
+          if (
+            mode === "replace-notice" &&
+            !isReplaceableAuditNotice(state.body)
+          ) {
+            return "kept_existing";
+          }
           state.body = body;
           return "updated";
         },
@@ -585,7 +596,7 @@ describe("executeMergeAudit", () => {
       logger,
     });
 
-    it("a redelivered run moves nothing, comments nothing, and leaves the posted audit alone", async () => {
+    it("a redelivered run moves nothing and leaves the posted audit alone", async () => {
       const tracker = fakeTracker([
         issue("ACME-1", {
           links: [dependLink("OUTWARD", [["ACME-20", "Backlog"]])],
@@ -610,10 +621,37 @@ describe("executeMergeAudit", () => {
       expect(tracker.commands).toHaveLength(2); // ACME-1 → PR Merged, ACME-20 → To Do
       expect(tracker.added).toHaveLength(2);
       // The first run's stage move and promotion are still what the PR shows.
-      expect(comments.upserts).toHaveLength(1);
+      expect(comments.upserts.at(-1)!.mode).toBe("replace-notice");
       expect(comments.state.body).toBe(audit);
       expect(comments.state.body).toContain("`In Progress` → `PR Merged`");
       expect(comments.state.body).toContain("Promoted → To Do");
+    });
+
+    // protects=a re-run that finds every ticket already recorded still
+    // replaces an earlier run-failure notice on the PR with its audit;
+    // fails_when=the settled path returns before writing, leaving "did not
+    // produce a usable result" on a PR whose audit succeeded;
+    // no_claim=does not cover shadow mode, which always re-renders.
+    it("a settled re-run replaces an earlier failure notice with the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      // A later failed run left the generic notice in its place.
+      comments.state.body = renderNoticeComment(
+        7,
+        renderUnusableAuditNotice(["ACME-1"]),
+      );
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted" });
+      expect(comments.upserts.at(-1)!.mode).toBe("replace-notice");
+      expect(isReplaceableAuditNotice(comments.state.body!)).toBe(false);
+      expect(comments.state.body).toContain("ACME-1");
+      expect(tracker.commands).toHaveLength(1);
     });
 
     it("a follow-up turn with no intent cannot overwrite the posted audit with a notice", async () => {
