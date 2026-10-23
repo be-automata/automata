@@ -288,6 +288,22 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     expect(code).not.toMatch(/DEV_CONTAINER/);
   });
 
+  // card: protects=/proc's hidepid (the host-uid fence) is touched only in full mode, which backs up /etc/fstab before dropping the line and remounting; prepare-only reports it and skips image-verify instead of failing; fails_when=prepare-only edits fstab or remounts /proc (a production change before the release), or full mode leaves hidepid (no container can start); no_claim=the kernel's remount behaviour (box-proven 2026-10-23)
+  it("removes /proc hidepid only in full mode", () => {
+    const fn = code.slice(
+      code.indexOf("step_proc_hidepid() {"),
+      code.indexOf("step_verify() {"),
+    );
+    const guard = fn.indexOf('if [ "$mode" != full ]; then');
+    expect(guard).toBeGreaterThan(-1);
+    expect(fn.indexOf("cp -p /etc/fstab")).toBeGreaterThan(guard);
+    expect(fn.indexOf("mount -o remount,hidepid=off /proc")).toBeGreaterThan(
+      guard,
+    );
+    expect(fn).toMatch(/hidepid_blocks=1/);
+    expect(code).toMatch(/step_proc_hidepid\nstep_verify/);
+  });
+
   // card: protects=on a box that already runs docker-ce (the engine stack), a Docker package the script or the installer adds is pinned to docker-ce's installed version, so apt never upgrades docker-ce and restarts the root daemon; fails_when=either script passes a bare docker-ce* package to apt-get install; no_claim=apt's resolution itself (simulated on the production box, 2026-10-23: the bare name upgraded docker-ce 29.8.1 -> 29.9.2, the pinned one did not)
   it("pins added Docker packages to the installed docker-ce version", () => {
     const installer = read(

@@ -22,6 +22,10 @@ umask 022
 #   image-attestation   `gh attestation verify oci://<ref> --repo be-automata/automata`;
 #                       with no `gh` on the box: skip, with a loud WARNING on
 #                       stderr (provenance NOT verified), never silently
+#   proc-hidepid        /proc without hidepid (the host-uid fence's mount): a
+#                       container cannot start under it. prepare-only reports
+#                       it (skip) and skips image-verify; full mode drops it
+#                       from /etc/fstab (backed up) and remounts /proc
 #   image-verify        deploy/images/batteries/verify.sh against the digest, as
 #                       the worker account, through the rootless socket
 #   image-record        /etc/automata/batteries-image.state: CURRENT=<ref>, and
@@ -305,10 +309,51 @@ step_attestation() {
   report ok image-attestation "provenance verified against $ATTEST_REPO"
 }
 
+# The host-uid fence mounts /proc with hidepid (fstab). Under it the runner's
+# systemd user manager cannot see a container's processes (they run as
+# subordinate uids), so runc's scope request fails with "Interactive
+# authentication required" and no container starts (seen on the production
+# box, reproduced on the throwaway box, 2026-10-23). A container has its own
+# pid namespace, so the container model does not need hidepid. prepare-only
+# leaves the host fence alone and says so; full mode removes it (fstab backed
+# up next to it; a revert re-adds the line and remounts).
+hidepid_blocks=0
+step_proc_hidepid() {
+  local opts
+  opts="$(findmnt -no OPTIONS /proc 2>/dev/null || true)"
+  case ",$opts," in
+    *,hidepid=invisible,* | *,hidepid=noaccess,* | *,hidepid=ptraceable,* | *,hidepid=1,* | *,hidepid=2,* | *,hidepid=4,*) ;;
+    *)
+      report ok proc-hidepid "/proc has no hidepid"
+      return
+      ;;
+  esac
+  if [ "$mode" != full ]; then
+    hidepid_blocks=1
+    report skip proc-hidepid "/proc is mounted $opts (host-uid fence): containers cannot start until the cutover removes it (full mode)"
+    return
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    report changed proc-hidepid "would drop hidepid from /etc/fstab and remount /proc (now: $opts)"
+    return
+  fi
+  if awk '$2 == "/proc" && $4 ~ /hidepid=/ { found = 1 } END { exit !found }' /etc/fstab; then
+    cp -p /etc/fstab "/etc/fstab.bak-hidepid-$(date -u +%Y%m%dT%H%M%SZ)" || fail proc-hidepid "cannot back up /etc/fstab"
+    { awk '!($2 == "/proc" && $4 ~ /hidepid=/)' /etc/fstab >/etc/fstab.provision.tmp &&
+      mv -f /etc/fstab.provision.tmp /etc/fstab; } || fail proc-hidepid "cannot rewrite /etc/fstab"
+  fi
+  mount -o remount,hidepid=off /proc || fail proc-hidepid "remount of /proc without hidepid failed"
+  report changed proc-hidepid "dropped hidepid from /etc/fstab and remounted /proc (was: $opts)"
+}
+
 step_verify() {
   local out
   if ! image_present "$image"; then
     report skip image-verify "image not pulled yet (dry-run)"
+    return
+  fi
+  if [ "$hidepid_blocks" -eq 1 ]; then
+    report skip image-verify "no container can start under hidepid (see proc-hidepid); run verify at the cutover"
     return
   fi
   if ! out="$(runuser -u "$worker_user" -- env HOME="$(home_of "$worker_user")" DOCKER_HOST="unix://$SOCK" \
@@ -493,6 +538,7 @@ step_packages
 step_rootless
 step_pull image-pull "$image"
 step_attestation
+step_proc_hidepid
 step_verify
 step_record
 step_previous
