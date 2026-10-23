@@ -22,6 +22,7 @@ import {
 } from "./execute-review-from-intent";
 import {
   isReviewThread,
+  reviewBaseOfThread,
   selectReviewTerminalText,
 } from "./review-single-writer-finish";
 import { isPrAuthoredByBot } from "./bot-login";
@@ -129,6 +130,7 @@ export async function runReviewSweep(): Promise<void> {
         headSha: currentHeadSha,
         isDraft,
         authorLogin,
+        baseRef: liveBase,
       } = await getPrHeadState(octokit, c.repoFullName, c.prNumber);
       const botLogin = resolveBotLogin();
 
@@ -226,6 +228,10 @@ export async function runReviewSweep(): Promise<void> {
         // must still read the run's output — it just won't invent a warning
         // out of the run's silence.
         reviewedSha: c.reviewedSha,
+        // Same base stamp as the finish hook: a backstopped verdict carries
+        // the same marker the hook would have written.
+        reviewBase: reviewBaseOfThread(c),
+        liveBase: liveBase ?? null,
         runAbandoned: isAbandonedTerminalCause(c.terminalCause),
         // #441: the same provider cause the finish hook passes, read from the
         // same chat row, so the backstop never re-labels it "unparseable".

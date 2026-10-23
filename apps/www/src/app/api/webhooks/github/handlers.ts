@@ -108,6 +108,22 @@ export async function handlePullRequestStatusChange(
   }
 }
 
+/**
+ * A retarget: a `pull_request.edited` whose payload carries `changes.base` (the
+ * base branch changed, e.g. GitHub moved a stacked PR onto its merged parent's
+ * base). Returns the base ref before the change (null when the payload omits
+ * it), or undefined when the event is not a retarget: every other action, and
+ * an `edited` that only changed the title or body.
+ */
+export function baseRetargetedFrom(
+  event: PullRequestEvent,
+): string | null | undefined {
+  if (event.action !== "edited") return undefined;
+  const base = event.changes?.base;
+  if (!base) return undefined;
+  return base.ref?.from ?? null;
+}
+
 export async function handlePullRequestUpdated(
   event: PullRequestEvent,
   /** #127: the webhook's X-GitHub-Delivery id, threaded to the dispatch. */
@@ -115,6 +131,11 @@ export async function handlePullRequestUpdated(
 ): Promise<void> {
   const repoFullName = event.repository.full_name;
   const prNumber = event.pull_request.number;
+  // `edited` reaches this handler for every edit; only a retarget changes what
+  // a review would see. A title/body edit triggers nothing, before any read.
+  if (event.action === "edited" && baseRetargetedFrom(event) === undefined) {
+    return;
+  }
   console.log(
     `Pull request updated: ${event.action} for PR #${prNumber} in ${repoFullName}`,
   );
@@ -134,8 +155,9 @@ export async function handlePullRequestUpdated(
     // ONCE per distinct org on this delivery, not once per automation.
     // Compare-and-set on GitHub's timestamp so an out-of-order delivery never
     // moves it backwards. Best-effort; a failure never blocks the runs. This
-    // handler only receives head-affecting actions (opened / ready_for_review
-    // / synchronize).
+    // handler only receives diff-affecting actions (opened / ready_for_review
+    // / synchronize / a retarget). A retarget keeps the head sha, so the
+    // compare-and-set leaves the desired head where it was.
     // Review automations only: the desired head feeds the review lane's
     // discard+recheck, which a PR companion never takes part in.
     if (deliveryId) {
@@ -247,6 +269,17 @@ async function handlePullRequestAutomation(
       shouldTrigger = !!config.on.update;
       break;
     }
+    case "edited": {
+      // A retarget changes the PR's diff although its head did not move, so
+      // it is reviewed like a push (same `on.update` switch). The run is a
+      // NEW thread with its own delivery id (the engine's idempotency key)
+      // and stamps the new base, which the single writer's same-review key
+      // includes: an earlier review at this same head is not a duplicate of
+      // it. A title/body edit never triggers.
+      shouldTrigger =
+        baseRetargetedFrom(event) !== undefined && !!config.on.update;
+      break;
+    }
     default: {
       shouldTrigger = false;
     }
@@ -288,6 +321,7 @@ async function handlePullRequestAutomation(
       return;
     }
   }
+  const baseChangedFrom = baseRetargetedFrom(event);
   const prAuthorUserName = event.pull_request.user?.login;
   // Unconditional routing (mirror parity): match every PR regardless of author.
   if (config.filter.includeAllAuthors) {
@@ -302,6 +336,7 @@ async function handlePullRequestAutomation(
       prNumber,
       source: "automated",
       deliveryId,
+      ...(baseChangedFrom !== undefined ? { baseChangedFrom } : {}),
     }).catch((error) => {
       console.error(
         `Error running automation ${automation.id} for PR #${prNumber} in ${repoFullName}:`,
@@ -347,6 +382,7 @@ async function handlePullRequestAutomation(
     prNumber,
     source: "automated",
     deliveryId,
+    ...(baseChangedFrom !== undefined ? { baseChangedFrom } : {}),
   }).catch((error) => {
     console.error(
       `Error running automation ${automation.id} for PR #${prNumber} in ${repoFullName}:`,

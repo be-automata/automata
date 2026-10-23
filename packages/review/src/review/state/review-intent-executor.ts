@@ -80,6 +80,14 @@ export interface ExecuteReviewIntentOpts {
    * the verdict body — exactly ONE review object per cycle.
    */
   postInlineComments?: boolean;
+  /**
+   * Whether a same-verdict bot review already in force at HEAD is THIS review
+   * (skip: a redelivery) or an earlier review of a different change at the
+   * same commit (post, then dismiss it). The caller owns that judgement; this
+   * pipe only asks. Absent = always the same review (the `(headSha, verdict)`
+   * key below, unchanged).
+   */
+  isSameReview?: (existing: GitHubReview) => boolean;
 }
 
 const SUPERSEDE_AT_HEAD_REASON =
@@ -183,6 +191,8 @@ export async function executeReviewIntent(
 ): Promise<ReviewIntentOutcome> {
   const { github, repo, prNumber, headSha, botLogin, intent, logger } = opts;
 
+  const wantedState = reviewStateForVerdict(intent.verdict);
+  const isSameReview = opts.isSameReview;
   let existing: GitHubReview | null = null;
   try {
     existing = await findBotReviewAtHead({
@@ -192,7 +202,22 @@ export async function executeReviewIntent(
       headSha,
       botLogin,
     });
-    if (existing && existing.state === reviewStateForVerdict(intent.verdict)) {
+    const alreadyPosted = !existing
+      ? false
+      : !isSameReview
+        ? existing.state === wantedState
+        : // Every bot review in force at HEAD, not only the first: an earlier
+          // review of a different change that could not be dismissed (a
+          // COMMENT) must not hide a redelivery of this one.
+          (await github.listReviews(repo, prNumber)).some(
+            (r) =>
+              r.user?.login === botLogin &&
+              r.commitId === headSha &&
+              r.dismissedAt === null &&
+              r.state === wantedState &&
+              isSameReview(r),
+          );
+    if (alreadyPosted) {
       logger?.info(
         "review-executor: same-verdict bot review already at HEAD; skipping (idempotent)",
         { repo, prNumber, headSha, verdict: intent.verdict },
@@ -301,10 +326,14 @@ export async function executeReviewIntent(
     });
   }
 
-  // Verdict change at the same commit: supersede the prior bot review at HEAD so
-  // exactly one active bot review remains. Best-effort — a dismiss failure never
-  // undoes the freshly-posted verdict.
-  if (existing && existing.state !== reviewStateForVerdict(intent.verdict)) {
+  // Verdict change at the same commit (or, with `isSameReview`, a review of a
+  // different change at the same commit): supersede the prior bot review at
+  // HEAD so exactly one active bot review remains. Best-effort — a dismiss
+  // failure never undoes the freshly-posted verdict.
+  if (
+    existing &&
+    (existing.state !== wantedState || isSameReview !== undefined)
+  ) {
     try {
       await github.dismissReview(
         repo,

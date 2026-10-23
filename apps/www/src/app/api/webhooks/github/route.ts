@@ -92,6 +92,13 @@ export async function POST(request: NextRequest) {
       await handlePullRequestUpdated(payload, id);
     },
   );
+  // A retarget (base changed, e.g. a stacked PR's parent merged and GitHub
+  // moved the child onto the parent's base) changes the diff without moving
+  // the head: reviewed like a synchronize. A title/body edit (no
+  // `changes.base`) is dropped inside the handler and triggers nothing.
+  webhooks.on("pull_request.edited", async ({ id, payload }) => {
+    await handlePullRequestUpdated(payload, id);
+  });
   // Mirror-intake (pilot): event classes prod routes to a skill but the
   // chassis has no task-creation path for. Each creates an org-attributed shadow
   // task (see mirror-intake.ts).
