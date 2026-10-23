@@ -61,6 +61,10 @@ export interface AbnormalEndInput extends RunEnd {
  * stale attempt cancelled after a heartbeat reassignment while attempt n+1
  * of the SAME workflow run id still works the thread. Closing the thread
  * from that attempt would be wrong; the C4 sweep reconciles, as before.
+ *
+ * A stale attempt that THROWS still posts (daemon-failed / out-of-memory):
+ * that is no new exposure — before #437 the same throw reached the thread
+ * through onFailure's generic custom-error under the same run id.
  */
 export function classifyAbnormalEnd(o: AbnormalEndInput): TerminalCause | null {
   if (!o.thrown && !o.cancelled) return null;

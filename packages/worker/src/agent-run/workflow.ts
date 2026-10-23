@@ -520,6 +520,11 @@ async function runAgent(
  * the promise that settles when it ends. onFailure waits on it so a run's own
  * teardown (and its typed terminal) finishes first; a run that never started
  * here (a scheduleTimeout, another worker) is absent and is never waited for.
+ *
+ * Assumes ONE worker process per box, which is how every execution box runs
+ * today: if a run's onFailure lands on a different process (a second worker,
+ * or a restart between the cancel and onFailure) it does not wait, and the
+ * generic failure can win the first-terminal race as it did before #437.
  */
 const LIVE_RUNS = new Map<string, Promise<void>>();
 
@@ -2091,7 +2096,6 @@ function readMemoryStarvation(daemon: RunDaemon): unknown {
  * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
  * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
  */
-
 async function onAgentRunFailure(
   wire: AgentRunWireInput,
   ctx: { errors?: () => Record<string, string>; workflowRunId?: () => string },
