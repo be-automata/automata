@@ -460,15 +460,20 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
   async function makeAutomation({
     triggerType = "pull_request",
     skillName = "github-ops",
+    triggerConfig,
   }: {
     triggerType?: "pull_request" | "schedule";
     skillName?: string;
+    triggerConfig?: NonNullable<
+      Parameters<typeof createTestAutomation>[0]["values"]
+    >["triggerConfig"];
   } = {}) {
     const automation = await createTestAutomation({
       db,
       userId: user.id,
       values: {
         triggerType,
+        ...(triggerConfig ? { triggerConfig } : {}),
         action: {
           type: "skill_message",
           config: { skillName, version: "latest" },
@@ -626,8 +631,62 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
     expect(resolveReviewPromptMode).not.toHaveBeenCalled();
   });
 
-  it("a non-github-ops skill keeps its marker lines verbatim", async () => {
+  it("a non-github-ops review skill gets the resolved render and the stamp (#492)", async () => {
     const automation = await makeAutomation({ skillName: "custom-skill" });
+    const { version } = await storeBody(
+      "custom-skill",
+      MARKER_BODY,
+      automation.repoFullName,
+    );
+    await setRepoMode(automation.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toContain("LEAD REVIEWER.");
+    expect(text).not.toContain("CLASSIC ONLY.");
+    expect(text).not.toContain("<!-- automata:");
+    expect(sourceMetadata).toEqual({
+      type: "automation-skill",
+      skillName: "custom-skill",
+      contentSha: computeContentSha(MARKER_BODY),
+      source: "db-version",
+      versionId: version.id,
+      reviewPromptMode: "orchestrated",
+    });
+  });
+
+  it("a non-github-ops skill in a classic repo gets the classic render, no stamp", async () => {
+    const automation = await makeAutomation({ skillName: "custom-skill" });
+    await storeBody("custom-skill", MARKER_BODY, automation.repoFullName);
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toContain("CLASSIC ONLY.");
+    expect(text).not.toContain("LEAD REVIEWER.");
+    expect(text).not.toContain("<!-- automata:");
+    expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
+  });
+
+  it("a companion in an orchestrated repo renders classic, no stamp, no resolver call", async () => {
+    const automation = await makeAutomation({
+      skillName: "custom-skill",
+      triggerConfig: {
+        on: { open: true, update: true },
+        filter: { includeAllAuthors: true, companion: true },
+      },
+    });
     await storeBody("custom-skill", MARKER_BODY, automation.repoFullName);
     await setRepoMode(automation.repoFullName, "orchestrated");
 
@@ -639,12 +698,8 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
     });
 
     const { text, sourceMetadata } = threadCall(0);
-    expect(text).toBe(
-      MARKER_BODY.replaceAll(
-        "{{repoFullName}}",
-        automation.repoFullName,
-      ).replaceAll("{{baseBranch}}", "develop"),
-    );
+    expect(text).toContain("CLASSIC ONLY.");
+    expect(text).not.toContain("LEAD REVIEWER.");
     expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
     expect(resolveReviewPromptMode).not.toHaveBeenCalled();
   });

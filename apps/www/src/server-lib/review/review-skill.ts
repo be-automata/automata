@@ -42,7 +42,7 @@ export function stripFrontmatter(md: string): string {
 }
 
 /**
- * Review-mode sections (phase 6): ONE github-ops body carries both the classic
+ * Review-mode sections (phase 6): ONE review-skill body carries both the classic
  * prompt and the orchestrated (lead reviewer + sub-agents) prompt, and the
  * render step keeps the text that matches the run's resolved review mode.
  *
@@ -316,6 +316,25 @@ const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
   { mode: "orchestrated", runTests: false },
 ];
 
+/** Throws `<subject> has a malformed review-mode section: …` on a bad grammar. */
+function assertSectionGrammar(body: string, subject: string): void {
+  const sectionError = findReviewModeSectionError(body);
+  if (sectionError !== undefined) {
+    throw new Error(
+      `${subject} has a malformed review-mode section: ${sectionError}`,
+    );
+  }
+}
+
+/** Every text a body renders to, one per mode: just itself without markers. */
+function everyRender(body: string): string[] {
+  return body.includes(MARKER_PREFIX)
+    ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
+        renderReviewModeSections(body, prompt),
+      )
+    : [body];
+}
+
 /**
  * THE fenced-json verdict-contract check, shared by the tracked-file loader
  * (deploy/lib/review-skill-file.ts) and the live-skill resolver
@@ -334,19 +353,9 @@ export function assertReviewSkillContract(
   body: string,
   sourceLabel: string,
 ): void {
-  const sectionError = findReviewModeSectionError(body);
-  if (sectionError !== undefined) {
-    throw new Error(
-      `Review skill from ${sourceLabel} has a malformed review-mode section: ${sectionError}`,
-    );
-  }
+  assertSectionGrammar(body, `Review skill from ${sourceLabel}`);
   const contract = /```json[\s\S]*"verdict"[\s\S]*```/;
-  const renders = body.includes(MARKER_PREFIX)
-    ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
-        renderReviewModeSections(body, prompt),
-      )
-    : [body];
-  if (!renders.every((render) => contract.test(render))) {
+  if (!everyRender(body).every((render) => contract.test(render))) {
     throw new Error(
       `Review skill from ${sourceLabel} has no fenced-json verdict contract — ` +
         `wrong content or a truncated skill. Refusing to dispatch a review ` +
@@ -697,18 +706,29 @@ export function isCompanionLaneStamp(
  */
 export const FLUTTER_REVIEW_SKILL_NAME = "flutter-pr-review";
 
-const SKILL_VALIDATORS: Record<
-  string,
-  (body: string, sourceLabel: string) => void
-> = {
+type SkillValidator = (body: string, sourceLabel: string) => void;
+
+/**
+ * A lane that never resolves a review mode (mention, companion, audit) gets
+ * the classic render (#492), so its contract is checked on that text.
+ */
+function onClassicRender(validate: SkillValidator): SkillValidator {
+  return (body, sourceLabel) =>
+    validate(renderReviewModeSections(body), sourceLabel);
+}
+
+const SKILL_VALIDATORS: Record<string, SkillValidator> = {
+  // Review skills resolve a mode: their contract must survive every render.
   "github-ops": assertReviewSkillContract,
   [FLUTTER_REVIEW_SKILL_NAME]: assertReviewSkillContract,
-  [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
-  [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
-  [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,
-  [MENTION_SKILL_NAME]: assertMentionSkillContract,
-  [FLUTTER_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
-  [REACT_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
+  [PR_MERGED_SKILL_NAME]: onClassicRender(assertMergeAuditSkillContract),
+  [AUDIT_FINDINGS_SKILL_NAME]: onClassicRender(
+    assertAuditFindingsSkillContract,
+  ),
+  [AUDIT_FIX_SKILL_NAME]: onClassicRender(assertAuditFixSkillContract),
+  [MENTION_SKILL_NAME]: onClassicRender(assertMentionSkillContract),
+  [FLUTTER_COMPANION_SKILL_NAME]: onClassicRender(assertCompanionSkillContract),
+  [REACT_COMPANION_SKILL_NAME]: onClassicRender(assertCompanionSkillContract),
 };
 
 export function validateSkillBody(
@@ -716,12 +736,16 @@ export function validateSkillBody(
   body: string,
   sourceLabel: string,
 ): void {
+  // Every body's sections are rendered (#492), so a broken grammar is refused
+  // here instead of failing the run at render time.
+  assertSectionGrammar(body, `Skill '${skillName}' body from ${sourceLabel}`);
   const validator = SKILL_VALIDATORS[skillName];
   if (validator) {
     validator(body, sourceLabel);
     return;
   }
-  if (body.trim().length === 0) {
+  // An unregistered skill may run as a PR review in any mode.
+  if (everyRender(body).some((render) => render.trim().length === 0)) {
     throw new Error(
       `Skill '${skillName}' body from ${sourceLabel} is empty — refusing to ` +
         `dispatch an automation run with no instruction.`,

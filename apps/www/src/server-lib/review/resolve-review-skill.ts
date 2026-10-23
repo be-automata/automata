@@ -73,12 +73,13 @@ const FALLBACK_HISTORY_LIMIT = 20;
 
 /**
  * Render a skill body for one run. Two steps, in this order:
- *   1. Review-mode sections (phase 6) — OPT-IN: only when the caller passes
- *      `reviewPrompt` (runAutomation for github-ops). Without it the body is
- *      NOT section-processed, so every other caller (mirror-intake's
- *      github-pr-merged, non-github-ops skills) stays byte-identical even if
- *      a body contained marker lines. A placeholder inside a dropped block
- *      vanishes with it.
+ *   1. Review-mode sections (phase 6), for EVERY skill: the caller's
+ *      `reviewPrompt` picks the kept blocks, and an absent prompt keeps the
+ *      classic ones. A marker-free body is returned unchanged, so a body
+ *      without sections stays byte-identical. A marker-bearing body never
+ *      reaches an agent unrendered: one that did got both prompts at once and
+ *      its tagged verdict went unread (#492). A placeholder inside a dropped
+ *      block vanishes with it.
  *   2. Placeholders. Deliberately tiny: only `{{repoFullName}}` and
  *      `{{baseBranch}}` are defined; any OTHER `{{...}}` token is left
  *      verbatim (a skill author's literal braces must not be silently eaten,
@@ -93,10 +94,7 @@ export function renderSkillPlaceholders(
     reviewPrompt?: ReviewPromptMode;
   },
 ): string {
-  const sectioned = vars.reviewPrompt
-    ? renderReviewModeSections(body, vars.reviewPrompt)
-    : body;
-  return sectioned
+  return renderReviewModeSections(body, vars.reviewPrompt)
     .replaceAll("{{repoFullName}}", vars.repoFullName)
     .replaceAll("{{baseBranch}}", vars.baseBranch);
 }
