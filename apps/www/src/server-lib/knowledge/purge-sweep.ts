@@ -92,9 +92,9 @@ export async function runKnowledgePurgeSweep(
   for (const organizationId of due) {
     const remaining = budget.totalMs - (Date.now() - startedAt);
     if (remaining <= 0) break;
-    const outcome = await withinBudget(
-      Math.min(budget.perOrgMs, remaining),
-      () => deps.purge(organizationId, now),
+    const slotMs = Math.min(budget.perOrgMs, remaining);
+    const outcome = await withinBudget(slotMs, () =>
+      deps.purge(organizationId, now),
     );
     if (outcome.status === "done") {
       result.purged += 1;
@@ -108,6 +108,9 @@ export async function runKnowledgePurgeSweep(
         organizationId,
         error: "timeout",
       });
+      // A slot cut to the remaining total budget that timed out spent it. Stop
+      // here rather than trust the clock: a timer can fire a ms early.
+      if (slotMs === remaining) break;
     } else {
       result.failed += 1;
       deps.log.error("[cron:knowledge-purge]", {
