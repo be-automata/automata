@@ -10,6 +10,7 @@ import {
   isReplaceableAuditNotice,
   mergeAuditMarker,
   renderNoticeComment,
+  renderProviderAuditNotice,
   renderUnusableAuditNotice,
 } from "./merge-audit";
 import type { TrackerConfig } from "./tracker-config";
@@ -650,6 +651,51 @@ describe("executeMergeAudit", () => {
       expect(outcome).toMatchObject({ outcome: "posted" });
       expect(comments.upserts.at(-1)!.mode).toBe("replace-notice");
       expect(isReplaceableAuditNotice(comments.state.body!)).toBe(false);
+      expect(comments.state.body).toContain("ACME-1");
+      expect(tracker.commands).toHaveLength(1);
+    });
+
+    // protects=the provider notice (#441) is replaced the same way;
+    // fails_when=only the generic notice is treated as replaceable;
+    // no_claim=none beyond protects.
+    it("a settled re-run replaces an earlier provider notice with the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      comments.state.body = renderNoticeComment(
+        7,
+        renderProviderAuditNotice(["ACME-1"], {
+          kind: "usage_limit",
+          window: "weekly",
+          resetsAt: Date.UTC(2026, 9, 22, 17, 0),
+        }),
+      );
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted" });
+      expect(isReplaceableAuditNotice(comments.state.body!)).toBe(false);
+    });
+
+    // protects=a settled re-run whose PR has no marker comment (the first
+    // run's comment write failed, or it was deleted) posts the audit;
+    // fails_when=the settled path skips the write when no comment exists;
+    // no_claim=the re-rendered audit cannot show the original stage move.
+    it("a settled re-run with no PR comment posts the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      comments.state.body = null;
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted", transitions: 0 });
       expect(comments.state.body).toContain("ACME-1");
       expect(tracker.commands).toHaveLength(1);
     });

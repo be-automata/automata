@@ -59,7 +59,8 @@ import {
  *     existing audit comment;
  *   - a re-run that changes nothing leaves the existing audit comment alone,
  *     because it could only re-render it with LESS (the original stage move
- *     and linked-ticket actions are no longer observable).
+ *     and linked-ticket actions are no longer observable); it still replaces
+ *     a run-failure notice, or creates the comment when none exists (#474).
  */
 
 /** Dependants probed per ticket. Past this the ticket is an epic-style hub. */
