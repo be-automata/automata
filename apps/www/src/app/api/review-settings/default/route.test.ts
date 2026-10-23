@@ -1,5 +1,6 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
+import { sql } from "drizzle-orm";
 import { GET, PUT } from "./route";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
@@ -125,6 +126,42 @@ describe("/api/review-settings/default (#125 C6 org default)", () => {
         })
       )?.supersedePolicy,
     ).toBe("newest-wins");
+  });
+
+  it("a raw-SQL stamp with microseconds does not lock the page: the stamp GET returned saves (200), a different millisecond still 409s", async () => {
+    await actor("owner");
+    await put({ supersedePolicy: "newest-wins" });
+    await db.execute(
+      sql`UPDATE repo_review_settings
+          SET updated_at = '2026-10-23 18:28:39.410605'::timestamp
+          WHERE organization_id = ${orgId}
+            AND repo_full_name = ${ORG_DEFAULT_REPO_SENTINEL}`,
+    );
+    const seen = (
+      (await (await GET()).json()) as { setting: { updatedAt: string } }
+    ).setting.updatedAt;
+    expect(seen).toBe("2026-10-23T18:28:39.410Z");
+
+    const stale = await put({
+      supersedePolicy: "complete-run-queue",
+      expectedUpdatedAt: "2026-10-23T18:28:39.411Z",
+    });
+    expect(stale.status).toBe(409);
+
+    const res = await put({
+      supersedePolicy: "complete-run-discard",
+      expectedUpdatedAt: seen,
+    });
+    expect(res.status).toBe(200);
+    expect(
+      (
+        await getRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+        })
+      )?.supersedePolicy,
+    ).toBe("complete-run-discard");
   });
 
   it("#165: the retired 'app-side' value → 400, never stored", async () => {

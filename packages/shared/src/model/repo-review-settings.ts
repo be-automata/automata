@@ -1,5 +1,6 @@
 import { DB } from "../db";
 import { repoReviewSettings } from "../db/schema";
+import { eqAtMillisecond } from "../db/timestamp-fence";
 import { RepoReviewSetting } from "../db/types";
 import {
   and,
@@ -292,7 +293,8 @@ export async function upsertRepoReviewSetting({
   updatedByUserId?: string | null;
   /**
    * Optimistic concurrency (#131): when given, the write applies ONLY if the
-   * stored row's updatedAt still equals this value — enforced by the database
+   * stored row's updatedAt still equals this value (at millisecond precision,
+   * the precision the caller read it at) — enforced by the database
    * in the same statement (ON CONFLICT … DO UPDATE … WHERE), never by a
    * read-then-write. A mismatch throws {@link RepoReviewSettingConflictError}.
    * A row that does not exist yet is created (nothing to conflict with).
@@ -426,8 +428,10 @@ export async function upsertRepoReviewSetting({
   // supersede_policy must still be NULL). Both are enforced by the DATABASE
   // in the write itself; the loser's UPDATE matches no row and 409s — two
   // admins racing to CREATE the first override can never both get 200.
+  // The version fence compares at millisecond precision: a stamp written by
+  // raw SQL carries microseconds the caller never sees (see eqAtMillisecond).
   const setWhere = expectedUpdatedAt
-    ? eq(repoReviewSettings.updatedAt, expectedUpdatedAt)
+    ? eqAtMillisecond(repoReviewSettings.updatedAt, expectedUpdatedAt)
     : expectRowAbsent
       ? // Any pre-existing row loses: the ON CONFLICT UPDATE matches nothing.
         sql`false`
@@ -509,7 +513,7 @@ export async function removeRepoReviewSetting({
     eq(repoReviewSettings.organizationId, organizationId),
     eq(repoReviewSettings.repoFullName, repo),
     ...(expectedUpdatedAt
-      ? [eq(repoReviewSettings.updatedAt, expectedUpdatedAt)]
+      ? [eqAtMillisecond(repoReviewSettings.updatedAt, expectedUpdatedAt)]
       : []),
   );
   // The "does another family live on this row" decision is made BY THE
