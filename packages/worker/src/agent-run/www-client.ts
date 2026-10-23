@@ -318,7 +318,16 @@ export async function postRunFailed(
  * /api/daemon/egress-event body schema (#66 §3.3): `destinationPort` and
  * `policyLevel` optional, `source` fixed to "worker" for this plane.
  */
-export type RunTerminalResult = "applied" | "noop" | "rejected" | "error";
+/**
+ * `refused`: any other 4xx (a revoked token, a body www rejects) — final, never
+ * worth a retry; `error`: a transport failure or a 5xx.
+ */
+export type RunTerminalResult =
+  | "applied"
+  | "noop"
+  | "rejected"
+  | "refused"
+  | "error";
 
 /**
  * POST one typed terminal for THIS run (#125 C1/C4) — the sibling of
@@ -333,8 +342,21 @@ export async function postRunTerminal(
     runExternalId,
     cause,
     policy,
-  }: { runExternalId: string; cause: TerminalCause; policy?: string },
+    info,
+  }: {
+    runExternalId: string;
+    cause: TerminalCause;
+    policy?: string;
+    /** #437: worker-authored text shown under the error (≤ 300 chars, www-enforced). */
+    info?: string;
+  },
+  /** #437: a FRESH signal for teardown posts — the run's own is already aborted there. */
+  signal?: AbortSignal,
 ): Promise<RunTerminalResult> {
+  const detail = {
+    ...(policy ? { policy } : {}),
+    ...(info ? { info } : {}),
+  };
   let res: Response;
   try {
     res = await fetch(endpoint(opts.baseUrl, "/api/daemon/run-terminal"), {
@@ -345,8 +367,9 @@ export async function postRunTerminal(
         threadChatId: opts.threadChatId,
         runExternalId,
         cause,
-        ...(policy ? { detail: { policy } } : {}),
+        ...(Object.keys(detail).length > 0 ? { detail } : {}),
       }),
+      ...(signal ? { signal } : {}),
     });
   } catch (error) {
     console.error("[agent-run] postRunTerminal request failed (swallowed)", {
@@ -367,7 +390,7 @@ export async function postRunTerminal(
       cause,
       status: res.status,
     });
-    return "error";
+    return res.status >= 400 && res.status < 500 ? "refused" : "error";
   }
   const body = (await res.json().catch(() => ({}))) as { applied?: boolean };
   return body.applied ? "applied" : "noop";

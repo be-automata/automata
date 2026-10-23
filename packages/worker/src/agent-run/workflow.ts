@@ -41,7 +41,11 @@ import {
   type TokenRevoker,
 } from "./revoke-installation-tokens";
 import { resolveRunSecrets, type AgentRunWireInput } from "./run-secrets";
-import { formatRunStartLine, resolveRunLane } from "./run-lane";
+import {
+  formatRunStartLine,
+  ownsAbnormalTerminal,
+  resolveRunLane,
+} from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
 import {
   batterySeedForRun,
@@ -95,6 +99,12 @@ import {
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
 import { guardRunTerminal } from "./run-terminal-ledger";
+import {
+  claimAbnormalEnd,
+  newAbnormalEndState,
+  postAbnormalEnd,
+  type AbnormalEndState,
+} from "./abnormal-end";
 import {
   ensureRunNamespace,
   ensureSlotNamespace,
@@ -552,6 +562,13 @@ async function runAgentResolved(
   // (Asked AGAIN after a #371 deferral wait, inside runAgentInner.)
   const skipped = await staleSkip(input, ctx, wwwOpts);
   if (skipped) return skipped;
+  // #437: a task run's abnormal end is posted once, typed — from the daemon
+  // teardown when the run got that far, else from the catch below.
+  const abnormal = newAbnormalEndState({
+    owns: ownsAbnormalTerminal(input),
+    runStartedAt,
+    runExecutionTimeoutMs: RUN_EXECUTION_TIMEOUT_MS,
+  });
   try {
     const output = await runAgentInner(
       input,
@@ -562,6 +579,7 @@ async function runAgentResolved(
       wwwOpts,
       runStartedAt,
       runKey,
+      abnormal,
     );
     if (output.outcome === "stopped") {
       // A user Stop put the thread in `stopping`. The daemon never observes
@@ -587,6 +605,22 @@ async function runAgentResolved(
       }
     }
     return output;
+  } catch (err) {
+    // A throw that never reached the daemon teardown (admission, clone,
+    // credential, brokers): nothing to salvage, so the post happens here,
+    // after abandon() already cleaned up. A no-op when the teardown settled.
+    const end = claimAbnormalEnd(abnormal, {
+      thrown: { error: err },
+      cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
+      starvation: null,
+    });
+    if (end) {
+      await postAbnormalEnd(abnormal, end, {
+        wwwOpts,
+        log: (line) => ctx.log(`[agent-run ${input.threadId}] ${line}`),
+      });
+    }
+    throw err;
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts, runStartedAt);
@@ -1087,6 +1121,8 @@ async function runAgentInner(
   runStartedAt: number,
   /** #371: the workflow run's stable identity (reservation key); see runAgent. */
   runKey: string,
+  /** #437: shared with runAgentResolved so one abnormal terminal is posted. */
+  abnormal: AbnormalEndState,
 ): Promise<AgentRunOutput> {
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
@@ -1676,6 +1712,11 @@ async function runAgentInner(
   daemonForPoll = daemon;
   // Exactly one fix-check report per fix run: the check's, or "aborted".
   let fixReported = false;
+  // #437: what the daemon phase threw, and whether it RETURNED a normal end
+  // (completed / nothing-to-run / stopped): a cancel that lands after that is
+  // not what ended the run.
+  let runThrew: { error: unknown } | null = null;
+  let endedNormally = false;
   try {
     // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
     // bot (installation token + isolated config) in the workdir BEFORE spawning —
@@ -1702,6 +1743,7 @@ async function runAgentInner(
 
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
+    abnormal.daemonStarted = true;
     step(
       containerDaemon
         ? containerDaemon.spawnedLine()
@@ -1733,6 +1775,7 @@ async function runAgentInner(
         fixReported = true;
         step("self-heal fix-check: not reported (nothing to run)");
       }
+      endedNormally = true;
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,
@@ -1818,12 +1861,16 @@ async function runAgentInner(
         signal,
       });
     }
+    endedNormally = result.outcome !== "cancelled";
     return {
       threadId: input.threadId,
       threadChatId: input.threadChatId,
       outcome: result.outcome,
       finalStatus: result.finalStatus,
     };
+  } catch (err) {
+    runThrew = { error: err };
+    throw err;
   } finally {
     // #380: the teardown sequence below is wrapped so a throw in any step can
     // never skip the token revoke, the credential wipe or the lock release.
@@ -1870,6 +1917,25 @@ async function runAgentInner(
           log: admissionLog,
         });
       }
+      // #437 Part A2: claim and post the typed terminal of an abnormal end
+      // once the agent is dead, BEFORE the brokers close and the checkout goes.
+      // A normal end, or a run this plane does not own, claims null. The OOM
+      // signal is read here, after the teardown: a container's `.State` was
+      // refreshed before its removal, and the host daemon caches the count it
+      // read before removing the cgroup.
+      const cancelled =
+        !endedNormally && (ctx.cancelled || signal?.aborted === true);
+      const end =
+        abnormal.owns && (runThrew !== null || cancelled)
+          ? claimAbnormalEnd(abnormal, {
+              ...(runThrew ? { thrown: runThrew } : {}),
+              cancelled,
+              starvation: readMemoryStarvation(daemon),
+            })
+          : null;
+      if (end) {
+        await postAbnormalEnd(abnormal, end, { wwwOpts, log: step });
+      }
       // #66: close the egress proxy after the daemon is dead (no more child
       // traffic), then flush the last audit batch. Both are best-effort — an
       // audit/proxy teardown hiccup must never mask the run's real outcome.
@@ -1910,6 +1976,19 @@ async function runAgentInner(
         await boxLock?.release();
       }
     }
+  }
+}
+
+/**
+ * #437: the daemon's OOM signal (the error it would fail the run with), or
+ * null. Never throws: a failed read is "no signal", and a thrown
+ * MemoryStarvationError (when the poll loop raised it) still classifies.
+ */
+function readMemoryStarvation(daemon: RunDaemon): unknown {
+  try {
+    return daemon.memoryStarvation();
+  } catch {
+    return null;
   }
 }
 
