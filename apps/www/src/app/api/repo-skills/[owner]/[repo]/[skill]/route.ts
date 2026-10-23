@@ -7,7 +7,7 @@ import {
   getSkillVersion,
   listSkillVersions,
 } from "@terragon/shared/model/repo-skills";
-import { validateSkillBody } from "@/server-lib/review/review-skill";
+import { validateSkillBodyForSave } from "@/server-lib/review/skill-save-checks";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -24,7 +24,10 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * per-skill registry (`validateSkillBody`, review-skill.ts) — the same rules
  * the resolver applies at dispatch — and rejects a failing body with 422
  * BEFORE any write, so a saved version can never be one the resolver would
- * refuse. `source: "api"` marks provenance; the dashboard writes through
+ * refuse. It also runs the save-time-only rules (`validateSkillBodyForSave`,
+ * skill-save-checks.ts: a PR-diffing skill names its base as
+ * `{{baseBranch}}`), which the resolver never applies to stored versions.
+ * `source: "api"` marks provenance; the dashboard writes through
  * server actions with `source: "dashboard"` instead.
  */
 
@@ -169,7 +172,7 @@ export async function PUT(
   // dispatch. 422 (not 400): the request is well-formed; the CONTENT fails the
   // skill's semantic contract. The validator's message names what's missing.
   try {
-    validateSkillBody(skillName, payload.body, "API PUT");
+    validateSkillBodyForSave(skillName, payload.body, "API PUT");
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
