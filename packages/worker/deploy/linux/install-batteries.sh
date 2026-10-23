@@ -3043,7 +3043,9 @@ with tarfile.open(sys.argv[1]) as archive:
       if [ "$kind" = "skills" ]; then
         [ -d "$entry" ] || continue
       else
-        [ -f "$entry" ] && [[ "$name" == *.md ]] || continue
+        if [ ! -f "$entry" ] || [[ "$name" != *.md ]]; then
+          continue
+        fi
       fi
       ln -s "../../$root/$kind/$name" "$pack/claude/$kind/$name"
     done
