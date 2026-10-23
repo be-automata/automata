@@ -286,6 +286,8 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
           }),
         );
       }
+      if (a.script.includes("diff --cached --name-only"))
+        return ok("src/a.ts\0");
       if (a.script.includes("diff --cached")) return ok("", 1);
       if (a.script.includes("rev-list")) return ok(`${"a".repeat(40)}\n`);
       return ok();
@@ -564,5 +566,105 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
 
     expect(await salvage()).not.toBeNull();
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(true);
+  });
+});
+
+/**
+ * Roborev job 796: what the salvage publishes. Some target repos are public,
+ * so a staged secret file is refused before the commit (finding 1), and HEAD
+ * must be the work branch with no merge or rebase in progress (finding 2).
+ */
+describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 review, job 796)", () => {
+  it.each([
+    ".env",
+    "config/prod.pem",
+    "deploy/prod.env",
+    ".env.local",
+    "keys/id_ed25519",
+  ])(
+    "an untracked %s is refused before any commit, and nothing reaches the remote",
+    async (file) => {
+      // protects=finding 1: `git add -A` never publishes a secret file the
+      // agent wrote (e.g. a .env from injected repo/org env vars), and the
+      // path never reaches the journal; fails_when=the remote gains the work
+      // branch, a salvage commit is made, or the log names the file;
+      // no_claim=secrets inside ordinarily named files (out of scope: a name
+      // denylist, mirroring .claude/settings.json).
+      fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true });
+      fs.writeFileSync(path.join(work, file), "SECRET=1\n");
+      fs.writeFileSync(path.join(work, "ok.ts"), "export {};\n");
+      const before = git(work, "rev-parse", "HEAD");
+
+      expect(await salvage()).toBeNull();
+
+      expect(logs).toEqual(["salvage: skipped (possible secret file)"]);
+      expect(git(work, "rev-parse", "HEAD")).toBe(before);
+      expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+    },
+  );
+
+  it("near-miss names (.envrc, environment.ts, env.ts, .env.example, .env.sample) are salvaged", async () => {
+    // protects=the denylist matches names, not substrings: ordinary files,
+    // and the committed-by-convention example/sample env files, are still
+    // saved; fails_when=any of them blocks the salvage; no_claim=none beyond
+    // protects.
+    for (const f of [
+      ".envrc",
+      "environment.ts",
+      "env.ts",
+      ".env.example",
+      ".env.sample",
+      "src/keystore.ts",
+    ]) {
+      fs.mkdirSync(path.dirname(path.join(work, f)), { recursive: true });
+      fs.writeFileSync(path.join(work, f), "x\n");
+    }
+
+    const result = await salvage();
+
+    expect(result).not.toBeNull();
+    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(result?.sha);
+  });
+
+  it.each([
+    ["a detached HEAD", () => git(work, "checkout", "--quiet", "--detach")],
+    [
+      "another branch",
+      () => git(work, "checkout", "--quiet", "-b", "elsewhere"),
+    ],
+  ])(
+    "%s is skipped (HEAD not on work branch) and nothing is pushed",
+    async (_name, move) => {
+      // protects=finding 2: the push sends exactly the work branch's own HEAD;
+      // fails_when=a commit made on another branch or a detached HEAD reaches
+      // refs/heads/<workBranch>; no_claim=none beyond protects.
+      move();
+      agentCommit("elsewhere.ts", "agent: off the work branch");
+
+      expect(await salvage()).toBeNull();
+
+      expect(logs).toEqual(["salvage: skipped (HEAD not on work branch)"]);
+      expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+    },
+  );
+
+  it("a merge in progress is skipped (merge or rebase in progress) and nothing is pushed", async () => {
+    // protects=finding 2: a half-done merge is never committed and pushed as
+    // the agent's work; fails_when=the salvage commits the conflicted tree or
+    // pushes; no_claim=rebase/cherry-pick (same script, same check).
+    git(work, "checkout", "--quiet", "-b", "side", "main");
+    fs.writeFileSync(path.join(work, "README.md"), "side\n");
+    git(work, "commit", "--quiet", "-am", "side");
+    git(work, "checkout", "--quiet", WORK_BRANCH);
+    fs.writeFileSync(path.join(work, "README.md"), "work\n");
+    git(work, "commit", "--quiet", "-am", "work");
+    expect(() => git(work, "merge", "--quiet", "side")).toThrow();
+    const before = git(work, "rev-parse", "HEAD");
+
+    expect(await salvage()).toBeNull();
+
+    expect(logs).toEqual(["salvage: skipped (merge or rebase in progress)"]);
+    expect(git(work, "rev-parse", "HEAD")).toBe(before);
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 });

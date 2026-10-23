@@ -322,7 +322,21 @@ export function salvageCommitMessage(runExecutionTimeoutMs: number): string {
 // the self-heal checks (agent-command.ts). `exec git`: no shell stays between
 // the runner and git, so the process a budget kill reaches is git itself.
 const REF_FORMAT_SCRIPT = 'exec git check-ref-format "refs/heads/$1"';
+// HEAD must be the work branch itself, with no merge, rebase, cherry-pick or
+// revert half done: else what would be pushed is not the agent's work on
+// that branch. Paths via --git-path, so nothing assumes the .git layout.
+const EXIT_HEAD_ELSEWHERE = 10;
+const EXIT_OPERATION_IN_PROGRESS = 11;
+const HEAD_STATE_SCRIPT =
+  `head=$(git symbolic-ref -q HEAD) || exit ${EXIT_HEAD_ELSEWHERE}; ` +
+  `[ "$head" = "refs/heads/$1" ] || exit ${EXIT_HEAD_ELSEWHERE}; ` +
+  "for p in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD; do " +
+  `[ ! -e "$(git rev-parse --git-path "$p")" ] || exit ${EXIT_OPERATION_IN_PROGRESS}; ` +
+  "done";
 const ADD_SCRIPT = "exec git add -A";
+// The staged paths that would be published (deletions publish nothing).
+const STAGED_NAMES_SCRIPT =
+  "exec git diff --cached --name-only --no-renames -z --diff-filter=d --ignore-submodules=all";
 // Exit 1 = something is staged. --ignore-submodules=all: a submodule is never
 // entered, so git never runs under ITS local config, which no guard read.
 const STAGED_SCRIPT = "exec git diff --cached --quiet --ignore-submodules=all";
@@ -339,6 +353,32 @@ const PUSH_SCRIPT =
   'exec git push --quiet --no-verify --no-follow-tags --recurse-submodules=no --no-signed -- "$1" "HEAD:refs/heads/$2"';
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/**
+ * Basenames the salvage never publishes (some target repos are public): the
+ * repo's own .claude/settings.json secret-file denylist, plus SSH keys.
+ * Matched case-insensitively on the basename. `.env.example` and
+ * `.env.sample` are allowed — the conventional committed placeholders.
+ */
+const SECRET_FILE_NAMES: readonly RegExp[] = [
+  /^\.env$/,
+  /^\.env\..+$/,
+  /\.env$/,
+  /\.(pem|key|p8|p12|pfx|jks|keystore)$/,
+  /^service-account.*\.json$/,
+  /credentials.*\.json$/,
+  /^auth\.json$/,
+  /^\.netrc$/,
+  /^id_(rsa|ed25519|ecdsa)/,
+];
+const ALLOWED_ENV_PLACEHOLDERS = new Set([".env.example", ".env.sample"]);
+
+/** Would publishing this path risk a secret file? */
+export function isPossibleSecretFile(filePath: string): boolean {
+  const base = (filePath.split("/").pop() ?? "").toLowerCase();
+  if (ALLOWED_ENV_PLACEHOLDERS.has(base)) return false;
+  return SECRET_FILE_NAMES.some((re) => re.test(base));
+}
 
 /** A salvage step that did not succeed; its message is constant text. */
 class SalvageStepFailed extends Error {}
@@ -491,9 +531,30 @@ export async function salvageWorkBranch(
     if (guard === "unsafe") return skipped("unsafe local git config");
     if (guard === "error") throw new SalvageStepFailed("config guard failed");
     await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
+    const headState = await git(HEAD_STATE_SCRIPT, [workBranch]);
+    if (headState.exitCode === EXIT_HEAD_ELSEWHERE) {
+      return skipped("HEAD not on work branch");
+    }
+    if (headState.exitCode === EXIT_OPERATION_IN_PROGRESS) {
+      return skipped("merge or rebase in progress");
+    }
+    if (headState.exitCode !== 0) {
+      throw new SalvageStepFailed(
+        `head check failed (exit ${headState.exitCode ?? "killed"})`,
+      );
+    }
     await ok("add", ADD_SCRIPT);
     const staged = await git(STAGED_SCRIPT);
     if (staged.exitCode === 1) {
+      // Checked before the commit, so a refused salvage commits nothing (the
+      // index change dies with the workdir). Never logs the path.
+      const names = await ok("staged list", STAGED_NAMES_SCRIPT);
+      if (names.truncated) {
+        throw new SalvageStepFailed("staged list unreadable");
+      }
+      if (names.stdout.split("\0").some(isPossibleSecretFile)) {
+        return skipped("possible secret file");
+      }
       await ok("commit", COMMIT_SCRIPT, [
         salvageCommitMessage(args.runExecutionTimeoutMs),
       ]);

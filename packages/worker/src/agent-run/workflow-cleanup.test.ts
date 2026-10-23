@@ -3344,14 +3344,22 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   let gitBrokerClose: ReturnType<typeof vi.fn>;
 
   /** A git the agent left dirty: something staged, one commit to push. */
-  const STDOUT: Record<string, string> = { "rev-list": `${SALVAGE_SHA}\n` };
+  const STDOUT: Record<string, string> = {
+    "rev-list": `${SALVAGE_SHA}\n`,
+    "staged-names": "src/a.ts\0",
+  };
   const EXIT: Record<string, number> = { diff: 1 }; // diff --cached: staged
   const scriptedGit: RunAsAgent = async (a) => {
     salvageCalls.push(a);
-    // `exec git <verb> …`; the config guard is `test -d .git … git config`.
+    // `exec git <verb> …`; the config guard is `test -d .git … git config`
+    // and the HEAD check `head=$(git symbolic-ref …)`.
     const verb = a.script.startsWith("test -d .git")
       ? "guard"
-      : (a.script.split(" ")[2] ?? "?");
+      : a.script.startsWith("head=")
+        ? "head-state"
+        : a.script.includes("diff --cached --name-only")
+          ? "staged-names"
+          : (a.script.split(" ")[2] ?? "?");
     finallyOrder.push(`salvage:${verb}`);
     return {
       exitCode: EXIT[verb] ?? 0,
@@ -3457,8 +3465,10 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "uid-reap:teardown",
       "salvage:guard",
       "salvage:check-ref-format",
+      "salvage:head-state",
       "salvage:add",
       "salvage:diff",
+      "salvage:staged-names",
       "salvage:commit",
       "salvage:rev-list",
       "salvage:push",
