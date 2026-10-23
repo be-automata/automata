@@ -691,6 +691,12 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
     "deploy/prod.env",
     ".env.local",
     "keys/id_ed25519",
+    // job 814: unlisted key types and suffixed names, registry auth, direnv.
+    "keys/id_dsa",
+    "keys/id_rsa_work",
+    ".npmrc",
+    "pkg/.pypirc",
+    ".envrc",
   ])(
     "an untracked %s is refused before the push, and nothing reaches the remote",
     async (file) => {
@@ -802,13 +808,13 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 
-  it("near-miss names (.envrc, environment.ts, env.ts, .env.example, .env.sample) are salvaged", async () => {
+  it("near-miss names (environment.ts, env.ts, .env.example, .env.sample, an SSH .pub key) are salvaged", async () => {
     // protects=the denylist matches names, not substrings: ordinary files,
-    // and the committed-by-convention example/sample env files, are still
-    // saved; fails_when=any of them blocks the salvage; no_claim=none beyond
-    // protects.
+    // the committed-by-convention example/sample env files and a public key
+    // (job 814) are still saved; fails_when=any of them blocks the salvage;
+    // no_claim=none beyond protects.
     for (const f of [
-      ".envrc",
+      "keys/id_ed25519.pub",
       "environment.ts",
       "env.ts",
       ".env.example",

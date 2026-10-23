@@ -386,9 +386,11 @@ const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /**
  * Basenames the salvage never publishes (some target repos are public): the
- * repo's own .claude/settings.json secret-file denylist, plus SSH keys.
- * Matched case-insensitively on the basename. `.env.example` and
- * `.env.sample` are allowed — the conventional committed placeholders.
+ * repo's own .claude/settings.json secret-file denylist, plus SSH private
+ * keys (a `.pub` public key is allowed), package-registry auth files and
+ * direnv's `.envrc` (it usually exports secrets). Matched case-insensitively
+ * on the basename. `.env.example` and `.env.sample` are allowed — the
+ * conventional committed placeholders.
  */
 const SECRET_FILE_NAMES: readonly RegExp[] = [
   /^\.env$/,
@@ -399,7 +401,8 @@ const SECRET_FILE_NAMES: readonly RegExp[] = [
   /credentials.*\.json$/,
   /^auth\.json$/,
   /^\.netrc$/,
-  /^id_(rsa|ed25519|ecdsa)/,
+  /^\.(npmrc|pypirc|envrc)$/,
+  /^id_(rsa|dsa|ecdsa|ed25519)(?!.*\.pub$)/,
 ];
 const ALLOWED_ENV_PLACEHOLDERS = new Set([".env.example", ".env.sample"]);
 
