@@ -47,11 +47,20 @@ From the repo root. The build context is `packages/worker/deploy`, which holds t
 image reuses:
 
 ```bash
+SOMNIO_ENG_TOKEN="<read-only token for somnio-software/somnio-engineering-ai>" \
 docker buildx build --platform linux/amd64 \
   -f deploy/images/batteries/Dockerfile \
+  --secret id=somnio_eng_token,env=SOMNIO_ENG_TOKEN \
   -t automata-batteries:dev --load \
   packages/worker/deploy
 ```
+
+The Somnio engineering plugin's repo is private, so its fetch needs a read-only token, passed as
+the BuildKit secret `somnio_eng_token` (never a build arg: it is in no layer and no history). The
+plugin itself ships in the published image by operator decision (2026-10-23). It is pinned by
+commit and by each subtree's git tree id, the same pins `harness.json` holds for the host's
+`somnio-engineering` pack; bump both together. CI reads the token from the repository secret
+`SOMNIO_ENGINEERING_READ_TOKEN`.
 
 Needs network access to the Ubuntu snapshot archive, nodejs.org, GitHub, Google Cloud Storage
 (Flutter), the Playwright CDN, the npm registry and Hugging Face.
