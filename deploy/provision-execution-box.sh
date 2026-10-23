@@ -203,6 +203,17 @@ step_packages() {
     report ok packages "all present"
     return
   fi
+  # Never upgrade the root daemon that runs the engine stack: apt resolves a
+  # bare docker-ce-rootless-extras to the newest version and upgrades docker-ce
+  # with it, which restarts dockerd. On a box that has docker-ce, every Docker
+  # package added here is pinned to docker-ce's installed version.
+  local dce_ver
+  dce_ver="$(dpkg-query -W -f='${Version}' docker-ce 2>/dev/null || true)"
+  if [ -n "$dce_ver" ]; then
+    missing="$(for pkg in $missing; do
+      case "$pkg" in docker-ce*) printf ' %s=%s' "$pkg" "$dce_ver" ;; *) printf ' %s' "$pkg" ;; esac
+    done)"
+  fi
   if [ "$dry_run" -eq 1 ]; then
     report changed packages "would install:$missing"
     return

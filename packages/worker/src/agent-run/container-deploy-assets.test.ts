@@ -288,6 +288,20 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     expect(code).not.toMatch(/DEV_CONTAINER/);
   });
 
+  // card: protects=on a box that already runs docker-ce (the engine stack), a Docker package the script or the installer adds is pinned to docker-ce's installed version, so apt never upgrades docker-ce and restarts the root daemon; fails_when=either script passes a bare docker-ce* package to apt-get install; no_claim=apt's resolution itself (simulated on the production box, 2026-10-23: the bare name upgraded docker-ce 29.8.1 -> 29.9.2, the pinned one did not)
+  it("pins added Docker packages to the installed docker-ce version", () => {
+    const installer = read(
+      "packages/worker/deploy/linux/install-rootless-docker.sh",
+    );
+    for (const src of [code, installer]) {
+      expect(src).toMatch(/dpkg-query -W -f='\$\{Version\}' docker-ce\b/);
+    }
+    expect(code).toMatch(/docker-ce\*\) printf ' %s=%s' "\$pkg" "\$dce_ver"/);
+    expect(installer).toMatch(
+      /missing\[i\]="docker-ce-rootless-extras=\$dce_ver"/,
+    );
+  });
+
   // card: protects=the script accepts exactly the references the worker accepts (parsePinnedImage, ADR-013 I5): a tag, tag+digest, a short or uppercase digest, an uppercase repository or whitespace is refused (exit 2) before any step; a digest reference passes validation; fails_when=the shell check and the worker's parser disagree on any of these; no_claim=a reference the table does not list
   it.skipIf(process.getuid?.() === 0)(
     "refuses exactly the references the worker refuses",
