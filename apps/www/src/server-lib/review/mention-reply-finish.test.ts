@@ -202,6 +202,43 @@ describe("executeMentionReply", () => {
     }
   });
 
+  // Card: protects=#472, a mention whose run the provider refused names the
+  // cause (rejected credential, reconnect) instead of "couldn't complete";
+  // fails_when=the generic notice posts, the marker is lost, or a parsed reply
+  // is replaced by the notice; no_claim=how the classification is stored
+  // (handle-daemon-event suite).
+  it("a run the provider refused → the provider notice, never 'couldn't complete'", async () => {
+    const { github, calls } = fakeGitHub();
+    const outcome = await executeMentionReply({
+      github,
+      stamp: ISSUE_STAMP,
+      terminalText:
+        "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+      providerUnavailable: { kind: "auth_rejected" },
+    });
+    expect(outcome).toEqual({
+      outcome: "notice_posted",
+      reason: "provider_unavailable: auth_rejected",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toContain(MENTION_REPLY_NOTICE);
+    expect(calls[0]).toContain(
+      "Nothing was changed: Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. Mention me again once an org admin reconnects the Claude credential.",
+    );
+    expect(calls[0]).toContain(mentionReplyMarker(ISSUE_STAMP.commentId));
+
+    // A reply that parsed is posted as is, whatever the classification says.
+    const parsed = fakeGitHub();
+    await executeMentionReply({
+      github: parsed.github,
+      stamp: ISSUE_STAMP,
+      terminalText: block({ kind: "mention-reply", reply: "All good." }),
+      providerUnavailable: { kind: "auth_rejected" },
+    });
+    expect(parsed.calls[0]).toContain("All good.");
+    expect(parsed.calls[0]).not.toContain("credential");
+  });
+
   it("a marker lookup failure still posts (a lost reply is worse than a duplicate)", async () => {
     const { github } = fakeGitHub();
     github.listIssueCommentBodies.mockRejectedValueOnce(new Error("502"));
@@ -352,6 +389,48 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
       },
     );
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  // Card: protects=#472, the finish hook reads the chat's provider-unavailable
+  // classification into the reply; fails_when=the hook drops it and the
+  // mention gets "couldn't complete"; no_claim=the wording (unit test above).
+  it("a chat ended provider-unavailable → the reply names the rejected credential", async () => {
+    const revoked =
+      "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+    vi.mocked(getThreadChat).mockResolvedValue({
+      errorMessage: "provider-unavailable",
+      errorMessageInfo: JSON.stringify({ kind: "auth_rejected" }),
+      messages: [
+        {
+          type: "agent",
+          parent_tool_use_id: null,
+          parts: [{ type: "text", text: revoked }],
+        },
+      ],
+    } as never);
+    vi.mocked(getThreadMinimal).mockResolvedValue({
+      organizationId: "o-1",
+      terminalCause: null,
+      sourceMetadata: {
+        type: "automation-skill",
+        skillName: MENTION_SKILL_NAME,
+        contentSha: "x",
+        source: "db-version",
+        mention: ISSUE_STAMP,
+      },
+    } as never);
+    await handleMentionReplyAtFinish(args);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issue_number: 7,
+        body: expect.stringContaining("an org admin must reconnect it"),
+      }),
+    );
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.stringContaining(MENTION_REPLY_NOTICE),
+      }),
+    );
   });
 
   it("only the App's own comment carrying the marker counts as answered", async () => {

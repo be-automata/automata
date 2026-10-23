@@ -158,6 +158,32 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
     });
   });
 
+  // Card: protects=#472, the prod revoked-credential batch (the CLI's
+  // assistant text + an is_error result, 1 turn, zero cost) ends terminal as
+  // provider-unavailable / auth_rejected; fails_when=it is stored as
+  // agent-generic-error, or the legacy "OAuth token revoked" retry swallows
+  // it into a queued Continue; no_claim=the PR notices (lane suites).
+  it("a revoked credential ends terminal as provider-unavailable / auth_rejected", async () => {
+    const text =
+      "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+    const { chat } = await finish([
+      {
+        type: "assistant",
+        message: { role: "assistant", content: text },
+        parent_tool_use_id: null,
+        session_id: SESSION,
+      },
+      result(text),
+    ]);
+    expect(chat.status).toBe("working-error");
+    expect(checkpointThread).toHaveBeenCalledTimes(1);
+    expect(chat.errorMessage).toBe("provider-unavailable");
+    expect(parseProviderUnavailableInfo(chat.errorMessageInfo)).toEqual({
+      kind: "auth_rejected",
+    });
+    expect(chat.queuedMessages ?? []).toEqual([]);
+  });
+
   // Card: protects=decision 3, prose that mentions a limit changes nothing;
   // fails_when=an ordinary failed run is labelled provider-unavailable;
   // no_claim=other generic-error causes.

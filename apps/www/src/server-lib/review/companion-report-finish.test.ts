@@ -781,4 +781,23 @@ describe("executeCompanionReport — provider_unavailable (#441)", () => {
     expect(outcome).toEqual({ outcome: "created", report: "parsed" });
     expect(github.comments[0]!.body).not.toContain("credit");
   });
+
+  // Card: protects=#472, a companion run whose credential was rejected names
+  // the reconnect; fails_when=it says "without a usable report";
+  // no_claim=classification.
+  it("a rejected credential names the reconnect", async () => {
+    const github = fakeGitHub();
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+      providerUnavailable: { kind: "auth_rejected" },
+    });
+    const body = github.comments[0]!.body;
+    expect(body).toContain(
+      "The companion run for this commit could not run. Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it.",
+    );
+    expect(body).not.toContain("without a usable report");
+  });
 });

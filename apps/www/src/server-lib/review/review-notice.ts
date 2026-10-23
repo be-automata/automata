@@ -5,6 +5,7 @@ import type {
 import { sanitizeInline } from "@/server-lib/tracker/merge-audit";
 import {
   describeProviderUnavailable,
+  providerUnavailableIsIndefinite,
   providerUnavailableRetryWhen,
   type ProviderUnavailable,
 } from "@/agent/msg/classify-provider-result";
@@ -113,7 +114,7 @@ function reviewNoticeMarker(sha: string): string {
 
 /** When the provider cause ends: epoch ms, "unknown", or "never" on its own. */
 function providerUntil(provider: ProviderUnavailable): string {
-  if (provider.kind !== "usage_limit") return "never";
+  if (providerUnavailableIsIndefinite(provider)) return "never";
   return provider.resetsAt === undefined
     ? "unknown"
     : String(Math.trunc(provider.resetsAt));

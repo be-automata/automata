@@ -4,8 +4,9 @@ import type { DBMessage, DBResultMetaMessage } from "@terragon/shared";
 /**
  * #441 (epic #440 C1): recognise a run the PROVIDER refused — the connected
  * Claude subscription hit a usage limit, its organization disabled Claude
- * Code, or the API key ran out of credit — so every lane can say so instead
- * of "no JSON intent block found".
+ * Code, the API key ran out of credit, or (#472) the provider rejected the
+ * credential itself — so every lane can say so instead of "no JSON intent
+ * block found".
  *
  * Rules (epic decisions 3 and 4):
  *  - Input is the CURRENT attempt's message batch (the daemon event that
@@ -24,7 +25,9 @@ export const PROVIDER_UNAVAILABLE_ERROR = "provider-unavailable";
 export type ProviderUnavailableKind =
   | "usage_limit"
   | "subscription_disabled"
-  | "credit_exhausted";
+  | "credit_exhausted"
+  /** #472: the provider refused the credential (revoked, expired, invalid). */
+  | "auth_rejected";
 
 export type ProviderLimitWindow = "five_hour" | "weekly";
 
@@ -36,6 +39,22 @@ export interface ProviderUnavailable {
 }
 
 const SEPARATOR = "[·∙•]";
+
+/**
+ * #472: the CLI's text for an API 401. Matched on text because it is the only
+ * signal that reaches us: the CLI ends the run with a synthetic assistant
+ * message plus a `result` (`is_error: true`, one turn, zero cost) whose
+ * `result` repeats it, e.g. "Failed to authenticate. API Error: 401 OAuth
+ * access token has been revoked." The assistant message's own error tag is
+ * neither typed by the daemon nor stored, and the 401's JSON body is not
+ * always present. So, per epic #440 decision 3, the match stays narrow: the
+ * result field only (never the agent text part), anchored at the start on
+ * the CLI's "Failed to authenticate." prefix, or on a bare "API Error: 401"
+ * that also carries an authentication signature from the API body. A 401
+ * is never folded into the legacy rate-limit parser (decision 4).
+ */
+const AUTH_REJECTED_HEAD =
+  /^(?:Failed to authenticate\. API Error: 401\b|API Error: 401\b(?=.*(?:authentication_error|OAuth (?:access )?token|x-api-key)))/s;
 
 /** `· resets <text>` up to the next separator or the end. */
 const RESETS_CLAUSE = new RegExp(
@@ -83,6 +102,10 @@ const TEXT_RULES: readonly TextRule[] = [
   {
     head: /^Credit balance is too low/,
     classify: () => ({ kind: "credit_exhausted" }),
+  },
+  {
+    head: AUTH_REJECTED_HEAD,
+    classify: () => ({ kind: "auth_rejected" }),
   },
   // Legacy banners.
   {
@@ -309,6 +332,7 @@ const KINDS: readonly ProviderUnavailableKind[] = [
   "usage_limit",
   "subscription_disabled",
   "credit_exhausted",
+  "auth_rejected",
 ];
 
 /** The classification stored in `errorMessageInfo`, or null if malformed. */
@@ -365,6 +389,19 @@ export function formatResetUtc(epochMs: number): string {
 }
 
 /**
+ * True when the cause does not end on its own: only a person (an org admin
+ * reconnecting the credential, a Claude org admin re-enabling access, or
+ * someone adding credit) clears it. The hook #442 (mark the delivered
+ * credential unavailable with no `until`) and #444 (alert the operator)
+ * read; a usage limit is the only cause with a reset.
+ */
+export function providerUnavailableIsIndefinite(
+  provider: ProviderUnavailable,
+): boolean {
+  return provider.kind !== "usage_limit";
+}
+
+/**
  * One sentence naming the cause, for every lane's public notice. It never
  * names the account (epic decision 5): no email, no organization name.
  */
@@ -387,6 +424,8 @@ export function describeProviderUnavailable(
       return "The connected Claude subscription is unavailable: an admin of the connected Claude organization disabled Claude Code access; it will not reset on its own.";
     case "credit_exhausted":
       return "The Claude API credit balance is too low to run the agent.";
+    case "auth_rejected":
+      return "Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it.";
   }
 }
 
@@ -401,5 +440,7 @@ export function providerUnavailableRetryWhen(
       return "once Claude Code access is restored or another subscription is connected";
     case "credit_exhausted":
       return "once credit is added";
+    case "auth_rejected":
+      return "once an org admin reconnects the Claude credential";
   }
 }

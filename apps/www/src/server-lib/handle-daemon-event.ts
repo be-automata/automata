@@ -363,8 +363,11 @@ export async function handleDaemonEvent({
   const takesRateLimitRoute =
     isRateLimited && !!rateLimitResetTime && !!thread.codesandboxId;
   // A run the provider refused (usage limit, subscription disabled, credit
-  // exhausted), classified from THIS batch only against the server clock.
-  // The legacy route above wins where it applies, so that plane is unchanged.
+  // exhausted, or a rejected credential, #472), classified from THIS batch
+  // only against the server clock. The legacy route above wins where it
+  // applies, so that plane is unchanged. Hook for #442/#444: a classified
+  // result is where the delivered credential gets marked unavailable (with
+  // no `until` when `providerUnavailableIsIndefinite`) and the operator alerted.
   const providerUnavailable =
     threadChat.agent === "claudeCode" && !takesRateLimitRoute
       ? classifyProviderResult(dbMessages, { now: receivedAt })
