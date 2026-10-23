@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
   postEgressEvents,
+  EGRESS_POST_TIMEOUT_MS,
   postRunCredentialSource,
   pollUntilTerminal,
   postRunFailed,
@@ -144,6 +145,22 @@ describe("postEgressEvents (#66 audit sink, worker half)", () => {
     vi.stubGlobal("fetch", fetchMock);
     await postEgressEvents(opts, [event], async () => {});
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#473: a hung POST is cut at EGRESS_POST_TIMEOUT_MS and swallowed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn(async (_u: unknown, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("timed out", "TimeoutError");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      postEgressEvents(opts, [event], async () => {}),
+    ).resolves.toBeUndefined();
+    expect(timeoutSpy.mock.calls.map((c) => c[0])).toEqual([
+      EGRESS_POST_TIMEOUT_MS,
+    ]);
   });
 
   it("gives up quietly once the refusal repeats on every attempt", async () => {

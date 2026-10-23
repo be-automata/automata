@@ -456,6 +456,13 @@ export interface EgressEventWire {
  * workflow batcher flushes at 20, well under it) — an oversize batch would be
  * rejected by the route (rows lost, logged below), never silently truncated.
  */
+/**
+ * #473: each egress POST is bounded. The run's status poll awaits the batch
+ * before every read (beforeStatusRead), so an unbounded hang here would stall
+ * the poll loop where a Hatchet cancel cannot reach it.
+ */
+export const EGRESS_POST_TIMEOUT_MS = 10_000;
+
 export async function postEgressEvents(
   opts: WwwClientOpts,
   events: EgressEventWire[],
@@ -471,6 +478,7 @@ export async function postEgressEvents(
         method: "POST",
         headers: headers(opts),
         body: JSON.stringify({ events }),
+        signal: AbortSignal.timeout(EGRESS_POST_TIMEOUT_MS),
       });
       // A refusal at token verification wrote nothing, so the batch can be
       // re-sent without duplicating audit rows (AUTH_ERROR_CONFIRM_ATTEMPTS).
