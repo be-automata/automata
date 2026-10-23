@@ -210,6 +210,96 @@ describe("guardRunTerminal", () => {
   });
 });
 
+describe("guardRunTerminal: an attempt while the earlier one is still running", () => {
+  // The engine REASSIGNS a run after 30 s without a heartbeat even when the
+  // process is alive (an internal retry; `retries: 0` does not apply), so
+  // attempt n+1 can start in the same process while attempt n still runs.
+  function held<T>() {
+    let resolve: (v: T) => void = () => {};
+    let reject: (e: unknown) => void = () => {};
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("waits for the running attempt, then completes as a no-op once it RETURNED — never two attempts at once", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(rerun).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/^run\.concurrent_attempt .*"action":"wait"/),
+    );
+    first.resolve("done");
+    await expect(a).resolves.toBe("done");
+    await expect(b).resolves.toBe("noop");
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("waits for the running attempt, then is refused once it FAILED", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    first.reject(new Error("agent failed"));
+    await expect(a).rejects.toThrow("agent failed");
+    await expect(b).rejects.toBeInstanceOf(RunAlreadyTerminalError);
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("answers from the in-memory terminal when the ledger cannot be written", async () => {
+    const log = vi.fn();
+    const unwritable = path.join(root, "file-not-dir");
+    fs.writeFileSync(unwritable, "");
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root: unwritable, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root: unwritable, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    first.resolve("done");
+    await a;
+    await expect(b).resolves.toBe("noop");
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("does not wait on a different run id", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    await expect(
+      guardRunTerminal({ root, runId: "other-run", log }, async () => "other"),
+    ).resolves.toBe("other");
+    first.resolve("done");
+    await a;
+  });
+});
+
 describe("runTerminalRootBootLines", () => {
   it("names the root, and warns only for a Linux root under /tmp (wiped at boot)", () => {
     expect(
