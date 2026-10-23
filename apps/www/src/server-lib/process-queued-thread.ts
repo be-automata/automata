@@ -1,7 +1,10 @@
 import { env } from "@terragon/env/apps-www";
 import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import { db } from "@/lib/db";
-import { startAgentMessage } from "@/agent/msg/startAgentMessage";
+import {
+  failQueuedDispatch,
+  startAgentMessage,
+} from "@/agent/msg/startAgentMessage";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { getSandboxCreationRemaining } from "@/lib/rate-limit";
 import { getMaxConcurrentTaskCountForUser } from "@/lib/subscription-tiers";
@@ -11,8 +14,10 @@ import {
   getActiveThreadCount,
   getEligibleQueuedThreadChats as getEligibleQueuedThreadChatsModel,
   getQueuedThreadCounts,
+  getStrandedQueuedThreadChats,
   getThreadMinimal,
   updateThread,
+  updateThreadChatStatusAtomic,
 } from "@terragon/shared/model/threads";
 import { ensureThreadChatHasUserMessage } from "@/server-lib/retry-thread";
 import { updateThreadChatWithTransition } from "@/agent/update-status";
@@ -117,11 +122,19 @@ export async function isStaleQueuedThread(
   return NOT_STALE;
 }
 
+/** Why a queued run was retired: a stale-queue rule, or #471's stranded sweep. */
+type QueueRetiredKind = "age" | "closed" | "stranded";
+
 /** The ADR-009 notice text for a retired queued review, per retirement rule. */
-export function queueRetiredNoticeReason(kind: "age" | "closed"): string {
-  return kind === "closed"
-    ? "the PR was closed while this review waited in the queue."
-    : "this review waited longer than an hour in the queue; push a new commit to re-run.";
+export function queueRetiredNoticeReason(kind: QueueRetiredKind): string {
+  switch (kind) {
+    case "closed":
+      return "the PR was closed while this review waited in the queue.";
+    case "stranded":
+      return "this review never started: its dispatch failed before a run was created; push a new commit to re-run.";
+    case "age":
+      return "this review waited longer than an hour in the queue; push a new commit to re-run.";
+  }
 }
 
 /**
@@ -146,7 +159,7 @@ async function postQueueRetiredReviewNotice({
     githubPRNumber?: number | null;
     reviewedSha?: string | null;
   };
-  kind: "age" | "closed";
+  kind: QueueRetiredKind;
 }): Promise<void> {
   if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
   const repoFullName = thread.githubRepoFullName ?? null;
@@ -171,7 +184,20 @@ async function postQueueRetiredReviewNotice({
     }
     const [owner, repo] = parseRepoFullName(repoFullName);
     const octokit = await getOctokitForApp({ owner, repo });
-    const { headSha } = await getPrHeadState(octokit, repoFullName, prNumber);
+    const { headSha, isClosed } = await getPrHeadState(
+      octokit,
+      repoFullName,
+      prNumber,
+    );
+    if (kind === "stranded" && isClosed) {
+      // A stranded run is found late (it can sit for days); by then its PR
+      // may have merged, and a "push to re-run" notice there helps nobody.
+      console.warn(
+        "[queue] retired review: PR already closed; notice withheld",
+        logContext,
+      );
+      return;
+    }
     if (headSha !== sha) {
       console.warn("[queue] retired review: head moved on; notice withheld", {
         ...logContext,
@@ -229,6 +255,35 @@ async function postQueueRetiredReviewNotice({
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * The tail every queue retirement shares, once its status and error are
+ * written: archive, record the event, and for a review post the ADR-009
+ * notice (which never throws).
+ */
+async function finishQueueRetirement({
+  userId,
+  threadId,
+  threadChatId,
+  thread,
+  reason,
+  kind,
+}: {
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  thread: Parameters<typeof postQueueRetiredReviewNotice>[0]["thread"];
+  reason: string;
+  kind: QueueRetiredKind;
+}): Promise<void> {
+  await updateThread({ db, userId, threadId, updates: { archived: true } });
+  getPostHogServer().capture({
+    distinctId: userId,
+    event: "queued_thread_retired",
+    properties: { threadId, threadChatId, reason, kind },
+  });
+  await postQueueRetiredReviewNotice({ userId, threadId, thread, kind });
 }
 
 export async function getEligibleQueuedThreadChats({
@@ -347,16 +402,24 @@ export async function maybeStartQueuedThreadChat({
           errorMessageInfo: reason,
         },
       });
-      await updateThread({ db, userId, threadId, updates: { archived: true } });
-      getPostHogServer().capture({
-        distinctId: userId,
-        event: "queued_thread_retired",
-        properties: { threadId, threadChatId, reason, kind },
+      await finishQueueRetirement({
+        userId,
+        threadId,
+        threadChatId,
+        thread,
+        reason,
+        kind,
       });
-      await postQueueRetiredReviewNotice({ userId, threadId, thread, kind });
       continue; // retiring frees no slot — keep draining
     }
-    await ensureThreadChatHasUserMessage({ threadChat });
+    try {
+      await ensureThreadChatHasUserMessage({ threadChat });
+    } catch (error) {
+      // #471: the dequeue already moved the chat to plain `queued`, which no
+      // drain reads; end it rather than strand it there.
+      await failQueuedDispatch({ db, userId, threadId, threadChatId, error });
+      throw error;
+    }
     console.log(`Starting queued thread`, {
       threadId,
       threadChatId: threadChat.id,
@@ -386,4 +449,81 @@ export async function maybeStartQueuedThreadChat({
     // A slot is now consumed; loop re-checks eligibility (concurrency gate will
     // stop it once the cap is hit) to fill any remaining free slots.
   }
+}
+
+/**
+ * #471: a chat this long in plain `queued` with no write since is stranded.
+ * The state is transient (startAgentMessage leaves it within seconds: the
+ * longest built-in pre-boot wait is the multi-model stagger, a few seconds,
+ * and a Workers waitUntil does not outlive a few minutes), and both the
+ * queue instant AND the row's last write must be this old, so a dispatch in
+ * progress is never retired. 30 minutes is far past any of that and well
+ * inside the hour after which a queued review is retired anyway.
+ */
+export const STRANDED_QUEUED_AGE_MS = 30 * 60 * 1000;
+/** Bound on the rows one sweep tick retires; the next tick takes the rest. */
+const MAX_STRANDED_PER_SWEEP = 50;
+
+/**
+ * #471 backstop: retire chats stranded in plain `queued` (see
+ * getStrandedQueuedThreadChats). Same visible retirement as a stale queued
+ * run: complete + `queue-retired` + archived, and for a review the ADR-009
+ * notice at its dispatched head.
+ *
+ * Retire, never re-dispatch: a re-dispatch from here would start a review
+ * outside its webhook admission and the engine's supersession (one review per
+ * push), and "at most once" would need a new column to remember the attempt.
+ * The notice asks for a push, which re-runs the review through the normal
+ * path. Each row is moved by a compare-and-set from `queued`, so a chat that
+ * started meanwhile is left alone. One row's failure never stops the sweep.
+ */
+export async function retireStrandedQueuedThreads({
+  now = Date.now(),
+}: { now?: number } = {}): Promise<{ retired: number; failed: number }> {
+  const stranded = await getStrandedQueuedThreadChats({
+    db,
+    olderThan: new Date(now - STRANDED_QUEUED_AGE_MS),
+    limit: MAX_STRANDED_PER_SWEEP,
+  });
+  let retired = 0;
+  let failed = 0;
+  for (const { userId, threadId, threadChatId } of stranded) {
+    try {
+      const reason = `stranded in queued > ${STRANDED_QUEUED_AGE_MS / 60000}m with no run`;
+      // Status and error in one compare-and-set from `queued`.
+      const { didUpdateStatus } = await updateThreadChatStatusAtomic({
+        db,
+        userId,
+        threadId,
+        threadChatId,
+        fromStatus: "queued",
+        toStatus: "complete",
+        error: { errorMessage: "queue-retired", errorMessageInfo: reason },
+      });
+      if (!didUpdateStatus) continue;
+      console.warn("[queue] RETIRING stranded queued thread (archived)", {
+        threadId,
+        threadChatId,
+        reason,
+      });
+      const thread = await getThreadMinimal({ db, threadId, userId });
+      await finishQueueRetirement({
+        userId,
+        threadId,
+        threadChatId,
+        thread: thread ?? {},
+        reason,
+        kind: "stranded",
+      });
+      retired++;
+    } catch (error) {
+      failed++;
+      console.error("[queue] stranded queued thread: retirement failed", {
+        threadId,
+        threadChatId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { retired, failed };
 }

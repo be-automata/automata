@@ -12,6 +12,9 @@ const h = vi.hoisted(() => ({
   admit: vi.fn(),
   setHolder: vi.fn(),
   release: vi.fn(),
+  strandedSweep: vi.fn(),
+  stuckUsers: vi.fn(async (): Promise<string[]> => []),
+  drain: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -20,7 +23,7 @@ vi.mock("@terragon/shared/model/threads", () => ({
   stopStalledThreads: vi.fn(async () => {
     h.order.push("stop");
   }),
-  getUserIdsWithThreadsStuckInQueue: vi.fn(async () => []),
+  getUserIdsWithThreadsStuckInQueue: h.stuckUsers,
   getUserIdsWithThreadsReadyToProcess: vi.fn(async () => []),
   getScheduledThreadChatsDueToRun: vi.fn(async () => []),
 }));
@@ -39,7 +42,8 @@ vi.mock("@terragon/shared/model/self-heal-slot", () => ({
 }));
 vi.mock("@/agent/sandbox", () => ({ maybeHibernateSandboxById: vi.fn() }));
 vi.mock("@/server-lib/process-queued-thread", () => ({
-  maybeStartQueuedThreadChat: vi.fn(),
+  maybeStartQueuedThreadChat: h.drain,
+  retireStrandedQueuedThreads: h.strandedSweep,
 }));
 vi.mock("@/server-lib/review/review-sweep", () => ({
   runReviewSweep: vi.fn(async () => {
@@ -172,6 +176,33 @@ describe("runScheduledCron self-heal bulkhead", () => {
     await runScheduledCron("*/10 * * * *");
     expect(h.selfHeal).toHaveBeenCalledTimes(1);
     expect(h.selfHeal).toHaveBeenCalledWith("tick");
+  });
+
+  // #471: plain `queued` rows are outside every drain; the 10m tick retires
+  // the stranded ones first, and a failing sweep never skips the drain.
+  it("*/10: the stranded-queued sweep runs before the drain", async () => {
+    h.strandedSweep.mockReset();
+    h.strandedSweep.mockImplementation(async () => {
+      h.order.push("stranded-sweep");
+      return { retired: 0, failed: 0 };
+    });
+    h.stuckUsers.mockResolvedValueOnce(["u1"]);
+    h.drain.mockImplementation(async () => {
+      h.order.push("drain");
+    });
+    await runScheduledCron("*/10 * * * *");
+    expect(h.order).toEqual(["stranded-sweep", "drain", "self-heal:tick"]);
+  });
+
+  it("*/10: a throwing stranded-queued sweep does not skip the drain", async () => {
+    h.strandedSweep.mockReset();
+    h.strandedSweep.mockRejectedValue(new Error("db down"));
+    h.stuckUsers.mockResolvedValueOnce(["u1"]);
+    h.drain.mockImplementation(async () => {
+      h.order.push("drain");
+    });
+    await expect(runScheduledCron("*/10 * * * *")).resolves.toBeUndefined();
+    expect(h.order).toEqual(["drain", "self-heal:tick"]);
   });
 
   it("other patterns never run self-heal", async () => {

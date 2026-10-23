@@ -3,9 +3,11 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   createTestAutomation,
+  createTestOrganization,
   createTestUser,
   createTestThread,
 } from "@terragon/shared/model/test-helpers";
+import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import {
   thread as threadTable,
   threadChat as threadChatTable,
@@ -25,6 +27,7 @@ import { resolveBotLogin } from "./review/bot-login";
 import {
   isStaleQueuedThread,
   maybeStartQueuedThreadChat,
+  retireStrandedQueuedThreads,
 } from "./process-queued-thread";
 
 // test-setup.ts imports the process-thread-queue route, so this module and its
@@ -102,8 +105,13 @@ function installFakeAppOctokit() {
         },
       },
       pulls: {
-        get: async () => ({
-          data: { head: { sha: gh.headSha }, draft: false, user: null },
+        get: async ({ pull_number }: { pull_number: number }) => ({
+          data: {
+            head: { sha: gh.headSha },
+            draft: false,
+            user: null,
+            state: gh.sources.get(pull_number)?.state ?? "open",
+          },
         }),
         listReviews: async () => ({ data: [...gh.reviews] }),
       },
@@ -867,5 +875,278 @@ describe("isStaleQueuedThread — closed_at vs queued_at (#446)", () => {
   it("a GitHub error fails open (not stale)", async () => {
     gh.issuesGetError = new Error("HTTP 502");
     expect((await isStaleQueuedThread(base, now)).stale).toBe(false);
+  });
+});
+
+describe("#471 stranded plain `queued` chats", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    installFakeAppOctokit();
+    user = (await createTestUser({ db })).user;
+  });
+
+  /** A legacy thread left in plain `queued`, back-dated as given. */
+  async function strandedLegacy(opts: {
+    createdAt: Date;
+    queuedAt: Date | null;
+    updatedAt: Date;
+    overrides?: Partial<ThreadInsert>;
+  }) {
+    const { threadId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: opts.overrides,
+    });
+    await db
+      .update(threadTable)
+      .set({
+        status: "queued",
+        createdAt: opts.createdAt,
+        queuedAt: opts.queuedAt,
+        updatedAt: opts.updatedAt,
+      })
+      .where(eq(threadTable.id, threadId));
+    return threadId;
+  }
+
+  /** A chat-mode chat left in plain `queued`, back-dated as given. */
+  async function strandedChat(opts: {
+    createdAt: Date;
+    queuedAt: Date | null;
+    updatedAt: Date;
+    overrides?: Partial<ThreadInsert>;
+  }) {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: opts.overrides,
+      enableThreadChatCreation: true,
+    });
+    await db
+      .update(threadChatTable)
+      .set({
+        status: "queued",
+        createdAt: opts.createdAt,
+        queuedAt: opts.queuedAt,
+        updatedAt: opts.updatedAt,
+      })
+      .where(eq(threadChatTable.id, threadChatId));
+    return { threadId, threadChatId };
+  }
+
+  // Card: protects=a dispatch that dies before its first transition ends the
+  // chat (root fix, the prod shape: dequeued to plain `queued`, then the
+  // credential read failed); fails_when=the chat is left in `queued`;
+  // no_claim=the sweep.
+  it("a dequeued chat whose dispatch throws before boot is ended, not left in queued", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      enableThreadChatCreation: true,
+    });
+    await updateThreadChatWithTransition({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      eventType: "system.concurrency-limit",
+    });
+    const spy = vi
+      .spyOn(db.query.agentProviderCredentials, "findMany")
+      .mockRejectedValue(new Error("auth store unavailable"));
+    try {
+      await expect(
+        maybeStartQueuedThreadChat({ userId: user.id }),
+      ).rejects.toThrow("auth store unavailable");
+    } finally {
+      spy.mockRestore();
+    }
+
+    const row = await chatRow(threadId, threadChatId);
+    expect(row.status).toBe("complete");
+    expect(row.errorMessage).toBe("unknown-error");
+    expect(row.errorMessageInfo).toBe("auth store unavailable");
+  });
+
+  // Card: protects=a legacy row stranded in `queued` (queued_at set, no run)
+  // is retired visibly by the sweep; fails_when=it stays queued or is
+  // retired silently; no_claim=the notice (review cases below).
+  it("retires a legacy row stranded in queued > 30m (by queued_at)", async () => {
+    const threadId = await strandedLegacy({
+      createdAt: ago(50 * MIN),
+      queuedAt: ago(45 * MIN),
+      updatedAt: ago(45 * MIN),
+    });
+    const result = await retireStrandedQueuedThreads();
+    expect(result.retired).toBeGreaterThanOrEqual(1);
+
+    const row = await legacyRow(threadId);
+    expect(row.status).toBe("complete");
+    expect(row.errorMessage).toBe("queue-retired");
+    expect(row.errorMessageInfo).toContain("stranded in queued");
+    expect(row.archived).toBe(true);
+  });
+
+  // Card: protects=a chat-mode row is read from thread_chat, not from its
+  // thread row's creation-value status; fails_when=the chat stays queued.
+  it("retires a chat-mode chat stranded in queued > 30m (by created_at)", async () => {
+    const { threadId, threadChatId } = await strandedChat({
+      createdAt: ago(40 * MIN),
+      queuedAt: null,
+      updatedAt: ago(40 * MIN),
+    });
+    await retireStrandedQueuedThreads();
+
+    const row = await chatRow(threadId, threadChatId);
+    expect(row.status).toBe("complete");
+    expect(row.errorMessage).toBe("queue-retired");
+    expect(row.archived).toBe(true);
+  });
+
+  // Card: protects=a dispatch in progress is never retired; fails_when=a
+  // fresh row, or a follow-up just queued on an old thread, is retired.
+  it("leaves a fresh row and a just-queued follow-up on an old thread alone", async () => {
+    const fresh = await strandedLegacy({
+      createdAt: ago(1 * MIN),
+      queuedAt: null,
+      updatedAt: ago(1 * MIN),
+    });
+    const followUp = await strandedLegacy({
+      createdAt: ago(3 * 24 * 60 * MIN),
+      queuedAt: null,
+      updatedAt: ago(10 * 1000),
+    });
+    const recentQueue = await strandedChat({
+      createdAt: ago(2 * 60 * MIN),
+      queuedAt: ago(5 * MIN),
+      updatedAt: ago(5 * MIN),
+    });
+    await retireStrandedQueuedThreads();
+
+    expect((await legacyRow(fresh)).status).toBe("queued");
+    expect((await legacyRow(followUp)).status).toBe("queued");
+    const chat = await chatRow(recentQueue.threadId, recentQueue.threadChatId);
+    expect(chat.status).toBe("queued");
+    expect(chat.archived).toBe(false);
+  });
+
+  // Card: protects=shadow threads (created `queued`, never dispatched on
+  // purpose) keep their zero-side-effect promise; fails_when=a shadow thread
+  // is retired, archived or noticed.
+  it("leaves old shadow threads alone, legacy and chat-mode, with no notice", async () => {
+    gh.headSha = SHA;
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: { triggerType: "pull_request" },
+    });
+    const shadowOverrides = {
+      shadow: true,
+      githubPRNumber: 721,
+      reviewedSha: SHA,
+      automationId: automation.id,
+    };
+    const legacy = await strandedLegacy({
+      createdAt: ago(3 * 60 * MIN),
+      queuedAt: null,
+      updatedAt: ago(3 * 60 * MIN),
+      overrides: shadowOverrides,
+    });
+    const chat = await strandedChat({
+      createdAt: ago(3 * 60 * MIN),
+      queuedAt: null,
+      updatedAt: ago(3 * 60 * MIN),
+      overrides: shadowOverrides,
+    });
+    await retireStrandedQueuedThreads();
+
+    const legacyAfter = await legacyRow(legacy);
+    expect(legacyAfter.status).toBe("queued");
+    expect(legacyAfter.archived).toBe(false);
+    const chatAfter = await chatRow(chat.threadId, chat.threadChatId);
+    expect(chatAfter.status).toBe("queued");
+    expect(chatAfter.archived).toBe(false);
+    expect(gh.comments).toHaveLength(0);
+  });
+
+  // Card: protects=the sweep never touches a thread an engine run may own;
+  // fails_when=a thread with an in_flight run row is retired.
+  it("leaves a thread with an in_flight engine run alone", async () => {
+    const { organization } = await createTestOrganization({
+      db,
+      userId: user.id,
+    });
+    const threadId = await strandedLegacy({
+      createdAt: ago(50 * MIN),
+      queuedAt: ago(45 * MIN),
+      updatedAt: ago(45 * MIN),
+      overrides: { organizationId: organization.id },
+    });
+    await recordHatchetRun({
+      db,
+      threadId,
+      organizationId: organization.id,
+      repoFullName: "terragon/test-repo",
+      prNumber: 7,
+      externalId: `run-${threadId}`,
+    });
+    await retireStrandedQueuedThreads();
+
+    expect((await legacyRow(threadId)).status).toBe("queued");
+  });
+
+  /** A review thread at `SHA` on PR `prNumber`, stranded 45m ago. */
+  async function strandedReview(prNumber: number) {
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: { triggerType: "pull_request" },
+    });
+    return await strandedChat({
+      createdAt: ago(45 * MIN),
+      queuedAt: ago(45 * MIN),
+      updatedAt: ago(45 * MIN),
+      overrides: {
+        githubPRNumber: prNumber,
+        reviewedSha: SHA,
+        automationId: automation.id,
+      },
+    });
+  }
+
+  // Card: protects=a stranded review on an open PR gets the ADR-009 notice
+  // at its head, with the stranded wording; fails_when=no notice, or the
+  // queue-age wording.
+  it("a stranded review on an open PR is retired with one notice at its head", async () => {
+    gh.headSha = SHA;
+    const { threadId, threadChatId } = await strandedReview(711);
+    await retireStrandedQueuedThreads();
+
+    const row = await chatRow(threadId, threadChatId);
+    expect(row.status).toBe("complete");
+    expect(row.errorMessage).toBe("queue-retired");
+    expect(gh.comments).toHaveLength(1);
+    expect(gh.comments[0]!.body).toContain(
+      `<!-- automata:review-notice sha=${SHA} -->`,
+    );
+    expect(gh.comments[0]!.body).toContain("this review never started");
+  });
+
+  // Card: protects=no "push to re-run" notice on a PR that already closed
+  // (the prod rows' PRs had merged); fails_when=a notice lands there.
+  it("a stranded review on a closed PR is retired without a notice", async () => {
+    gh.headSha = SHA;
+    gh.sources.set(712, {
+      state: "closed",
+      closed_at: ago(10 * MIN).toISOString(),
+    });
+    const { threadId, threadChatId } = await strandedReview(712);
+    await retireStrandedQueuedThreads();
+
+    const row = await chatRow(threadId, threadChatId);
+    expect(row.status).toBe("complete");
+    expect(row.errorMessage).toBe("queue-retired");
+    expect(gh.comments).toHaveLength(0);
   });
 });

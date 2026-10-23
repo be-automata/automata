@@ -12,6 +12,7 @@ import {
   getQueuedThreadCounts,
   updateThread,
   updateThreadChat,
+  updateThreadChatStatusAtomic,
   getThreadChat,
   getThread,
 } from "@terragon/shared/model/threads";
@@ -78,18 +79,7 @@ async function checkTaskQueueLimit({ db, userId }: { db: DB; userId: string }) {
   }
 }
 
-export async function startAgentMessage({
-  db,
-  userId,
-  message,
-  threadId,
-  threadChatId,
-  isNewThread,
-  createNewBranch = true,
-  branchName,
-  deliveryId,
-  delayMs = 0,
-}: {
+type StartAgentMessageArgs = {
   db: DB;
   userId: string;
   // In some cases, the message we want to send to claude is already in the DB.
@@ -104,7 +94,133 @@ export async function startAgentMessage({
   /** #127: originating webhook delivery id, forwarded to the Hatchet dispatch. */
   deliveryId?: string;
   delayMs?: number;
-}) {
+};
+
+/**
+ * #471: a chat still in plain `queued` after its dispatch threw was never
+ * moved on, and nothing else ever will: the queue drain reads only the
+ * `queued-*` statuses. Errors inside the boot (withThreadChat) already end the
+ * chat; this covers what escapes it: the reads before withThreadChat (the
+ * credential lookup, the slash-command check), withThreadChat's own chat read,
+ * and an error write that itself failed. Ends the chat the way withThreadChat
+ * does, compare-and-set from `queued` so a chat that already moved on is never
+ * touched. Never throws: if the store is still down this write fails too, and
+ * the stranded-queued sweep (process-queued-thread) retires the row later.
+ */
+export async function failQueuedDispatch({
+  db,
+  userId,
+  threadId,
+  threadChatId,
+  error,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  error: unknown;
+}): Promise<void> {
+  const errorType: ThreadErrorType =
+    error instanceof ThreadError ? error.type : "unknown-error";
+  const errorInfo =
+    error instanceof ThreadError
+      ? error.info
+      : error instanceof Error
+        ? error.message
+        : "Unknown error";
+  let ended = false;
+  try {
+    // Status and error in ONE compare-and-set: the chat is never `complete`
+    // without the error that explains it.
+    ({ didUpdateStatus: ended } = await updateThreadChatStatusAtomic({
+      db,
+      userId,
+      threadId,
+      threadChatId,
+      fromStatus: "queued",
+      toStatus: "complete",
+      error: { errorMessage: errorType, errorMessageInfo: errorInfo },
+    }));
+  } catch (writeError) {
+    console.error(
+      "[dispatch] failed before boot and the chat could not be ended; the stranded-queued sweep retires it",
+      {
+        threadId,
+        threadChatId,
+        errorType,
+        error:
+          writeError instanceof Error ? writeError.message : String(writeError),
+      },
+    );
+    return;
+  }
+  if (!ended) return;
+  console.error("[dispatch] failed before boot; chat ended", {
+    threadId,
+    threadChatId,
+    errorType,
+    errorInfo,
+  });
+  try {
+    // The chat-history error entry is best effort: the chat is already ended
+    // with its error, so a failure here only loses the message bubble.
+    await updateThreadChat({
+      db,
+      userId,
+      threadId,
+      threadChatId,
+      updates: {
+        appendMessages: [
+          {
+            type: "error",
+            error_type: errorType,
+            error_info: errorInfo,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      },
+    });
+  } catch (writeError) {
+    console.error(
+      "[dispatch] chat ended, but its error message could not be appended",
+      {
+        threadId,
+        threadChatId,
+        errorType,
+        error:
+          writeError instanceof Error ? writeError.message : String(writeError),
+      },
+    );
+  }
+}
+
+export async function startAgentMessage(args: StartAgentMessageArgs) {
+  try {
+    await startAgentMessageUnguarded(args);
+  } catch (error) {
+    await failQueuedDispatch({
+      db: args.db,
+      userId: args.userId,
+      threadId: args.threadId,
+      threadChatId: args.threadChatId,
+      error,
+    });
+    throw error;
+  }
+}
+
+async function startAgentMessageUnguarded({
+  db,
+  userId,
+  message,
+  threadId,
+  threadChatId,
+  isNewThread,
+  createNewBranch = true,
+  branchName,
+  deliveryId,
+  delayMs = 0,
+}: StartAgentMessageArgs) {
   console.log("Starting agent message", { threadId, threadChatId });
   const userCredentials = await getUserCredentials({ userId });
   if (message) {

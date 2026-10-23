@@ -38,6 +38,7 @@ import {
   ThreadInfo,
   ThreadChatInsertRaw,
   ThreadErrorMessage,
+  ThreadErrorType,
 } from "../db/types";
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
@@ -1371,6 +1372,7 @@ export async function updateThreadChatStatusAtomic({
   fromStatus,
   toStatus,
   reattemptQueueAt,
+  error,
 }: {
   db: DB;
   userId: string;
@@ -1379,8 +1381,21 @@ export async function updateThreadChatStatusAtomic({
   fromStatus: ThreadStatus;
   toStatus: ThreadStatus;
   reattemptQueueAt?: Date | null;
+  /**
+   * #471: the chat's error, written in the SAME compare-and-set as the status,
+   * so a terminal never lands without the error that explains it.
+   */
+  error?: {
+    errorMessage: ThreadErrorType;
+    errorMessageInfo: string | null;
+  };
 }): Promise<{ didUpdateStatus: boolean }> {
-  const otherUpdates: Partial<ThreadChatInsert> = {};
+  const otherUpdates: Partial<ThreadChatInsert> = error
+    ? {
+        errorMessage: error.errorMessage,
+        errorMessageInfo: error.errorMessageInfo,
+      }
+    : {};
   // Clear reattemptQueueAt when transitioning away from rate-limited status
   if (
     toStatus !== "queued-sandbox-creation-rate-limit" &&
@@ -2275,6 +2290,114 @@ export async function getUserIdsWithThreadsReadyToProcess({ db }: { db: DB }) {
       ...threadChats.map((threadChat) => threadChat.userId),
     ]),
   );
+}
+
+/**
+ * #471: chats stranded in PLAIN `queued`. That status is the transient
+ * pre-boot state: startAgentMessage moves it on to `booting`, a `queued-*`
+ * wait or a terminal within seconds, and the queue drain only ever reads the
+ * `queued-*` statuses. A dispatch that dies before its first transition (the
+ * store it reads is down, the instance is evicted) leaves the row in `queued`
+ * with nothing left to move it.
+ *
+ * A row is stranded when, as of `olderThan`:
+ *  - its queue instant (`queued_at`, else `created_at`) is older, AND
+ *  - its own `updated_at` is older too. A follow-up entering `queued` on an
+ *    old thread clears `queued_at`, so the `created_at` fallback alone would
+ *    call a dispatch started a second ago stranded; its fresh `updated_at`
+ *    does not;
+ *  - the thread has no `in_flight` engine run row. A run is only dispatched
+ *    after the chat leaves `queued`, so this never matches a truly stranded
+ *    row; it keeps the sweep off any thread an engine run may still own;
+ *  - the thread is not a shadow thread. Shadow threads are created `queued`
+ *    and never dispatched on purpose (zero GitHub side effects), so they sit
+ *    in `queued` legitimately and must never be retired or noticed.
+ *
+ * Self-heal FIX threads stuck in `queued` are also reconciled by
+ * fix-dispatch-reconcile (its PRE_RUN_STATUSES), which owns their attempt
+ * ledger: it refunds the attempt and stops a dispatch Hatchet never saw, and
+ * its 10-minute grace runs out well before this 30-minute bound, so it
+ * normally acts first. If this sweep ends such a row first, the reconciler's
+ * terminal pass (RES-10) still closes the attempt.
+ *
+ * Status lives on the chat row for a chat-mode thread (its thread row keeps
+ * its creation value, `queued`, forever) and on the thread row for a legacy
+ * thread (no thread_chat row), so the two are read separately.
+ */
+export async function getStrandedQueuedThreadChats({
+  db,
+  olderThan,
+  limit,
+}: {
+  db: DB;
+  olderThan: Date;
+  limit: number;
+}): Promise<Array<{ userId: string; threadId: string; threadChatId: string }>> {
+  const noInFlightRun = sql`not exists (select 1 from ${schema.hatchetRun} where ${schema.hatchetRun.threadId} = ${schema.thread.id} and ${schema.hatchetRun.status} = 'in_flight')`;
+  const [legacyRows, chatRows] = await Promise.all([
+    db
+      .select({ userId: schema.thread.userId, threadId: schema.thread.id })
+      .from(schema.thread)
+      .where(
+        and(
+          eq(schema.thread.status, "queued"),
+          // version 0 = legacy (chat state on the thread row). A chat-mode
+          // thread (version 1) keeps `queued` here forever; filtering it out
+          // first keeps the anti-join below off every chat-mode thread.
+          eq(schema.thread.version, 0),
+          eq(schema.thread.shadow, false),
+          // Defensive: never read a thread that has chat rows. Correlated on
+          // user_id too, so thread_chat_user_id_thread_id_index serves it.
+          sql`not exists (select 1 from ${schema.threadChat} where ${schema.threadChat.userId} = ${schema.thread.userId} and ${schema.threadChat.threadId} = ${schema.thread.id})`,
+          or(
+            lt(schema.thread.queuedAt, olderThan),
+            and(
+              isNull(schema.thread.queuedAt),
+              lt(schema.thread.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.thread.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.thread.updatedAt))
+      .limit(limit),
+    db
+      .select({
+        userId: schema.threadChat.userId,
+        threadId: schema.threadChat.threadId,
+        threadChatId: schema.threadChat.id,
+      })
+      .from(schema.threadChat)
+      .innerJoin(
+        schema.thread,
+        eq(schema.thread.id, schema.threadChat.threadId),
+      )
+      .where(
+        and(
+          eq(schema.threadChat.status, "queued"),
+          eq(schema.thread.shadow, false),
+          or(
+            lt(schema.threadChat.queuedAt, olderThan),
+            and(
+              isNull(schema.threadChat.queuedAt),
+              lt(schema.threadChat.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.threadChat.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.threadChat.updatedAt))
+      .limit(limit),
+  ]);
+  return [
+    ...legacyRows.map((row) => ({
+      ...row,
+      threadChatId: LEGACY_THREAD_CHAT_ID,
+    })),
+    ...chatRows,
+  ].slice(0, limit);
 }
 
 export async function getUserIdsWithThreadsStuckInQueue({ db }: { db: DB }) {

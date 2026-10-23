@@ -455,6 +455,7 @@ describe("runReviewSweep — a PR the bot opened itself (self-heal fix PR)", () 
       headSha: HEAD,
       isDraft: false,
       authorLogin: BOT,
+      isClosed: false,
     });
     selected.rows = [candidate({ terminalCause: "timeout" })];
 
@@ -470,6 +471,7 @@ describe("runReviewSweep — a PR the bot opened itself (self-heal fix PR)", () 
       headSha: HEAD,
       isDraft: false,
       authorLogin: "octocat",
+      isClosed: false,
     });
     selected.rows = [candidate({ terminalCause: "timeout" })];
 
@@ -485,6 +487,7 @@ describe("runReviewSweep — a PR the bot opened itself (self-heal fix PR)", () 
       headSha: HEAD,
       isDraft: false,
       authorLogin: BOT,
+      isClosed: false,
     });
     prReviews.rows = [
       {

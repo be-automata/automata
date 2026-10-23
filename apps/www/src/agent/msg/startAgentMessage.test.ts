@@ -351,3 +351,56 @@ describe("startAgentMessage — resume clears the terminal PAIR (#153 read-tear 
     expect(t!.cause).toBeNull();
   });
 });
+
+/**
+ * #471: a dispatch that throws before its first transition (here the
+ * credential read, as during an auth-store outage) used to leave the new
+ * thread in plain `queued`, which no drain reads.
+ */
+describe("startAgentMessage — failure before boot", () => {
+  let user: User;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+  });
+
+  it("ends a queued thread with the error instead of leaving it queued, and rethrows", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        repoBaseBranchName: "main",
+      },
+    });
+    const spy = vi
+      .spyOn(db.query.agentProviderCredentials, "findMany")
+      .mockRejectedValue(new Error("auth store unavailable"));
+    try {
+      await expect(
+        startAgentMessage({
+          db,
+          userId: user.id,
+          message: null,
+          threadId,
+          threadChatId,
+          isNewThread: true,
+        }),
+      ).rejects.toThrow("auth store unavailable");
+    } finally {
+      spy.mockRestore();
+    }
+
+    const threadChat = await getThreadChat({
+      db,
+      threadId,
+      threadChatId,
+      userId: user.id,
+    });
+    expect(threadChat!.status).toBe("complete");
+    expect(threadChat!.errorMessage).toBe("unknown-error");
+    expect(threadChat!.errorMessageInfo).toBe("auth store unavailable");
+  });
+});
