@@ -482,8 +482,9 @@ when one crosses its threshold. Each trigger authorizes exactly one move:
 - `scale_composite` — any two of: > 5 clients, > 100 PRs/day, the enterprise
   questionnaire → start the per-run sandbox path.
 - `supersede_waste` — cancelled run time > 20 % of all run time → revisit the default
-  supersede policy. Only review-lane cancels count (`lane=review`): user Stops, self-heal
-  cancels and laneless pre-#373 rows are excluded from the numerator. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
+  supersede policy. Only review-lane cancels count (`lane=review`): task, pr and self-heal
+  cancels and laneless pre-#373 rows are excluded from the numerator. A review-lane cancel
+  counts whatever caused it, so a user Stop of a review run counts too. Like `queue_wait_p90` it reads engine timestamps, so a run superseded
   while deferred by #371 or parked on a #205 box slot counts that wait as waste although
   no agent compute ran. On a busy box, check `queue_wait_p90` and the `box.headroom_*`
   lines before reading a high ratio as a policy problem (follow-up #409).
@@ -539,9 +540,11 @@ A POST that TIMES OUT is backed off, since a sink that accepts late may already 
 posted it: after the k-th consecutive timeout of the same transition the next attempt
 waits 2^(k−1) ticks (attempts 1, 2, 4, 8, … ticks apart), capped at 1 h (12 ticks at the
 default 300 s interval; every tick when the interval is ≥ 1 h). The alert is never
-dropped: it stays pending until delivered. The backoff resets on delivery, on any
-non-timeout outcome, and when the transition stops applying (the trigger goes back to
-no transition is pending). Other failures (non-2xx, unreachable, redirect) retry every tick.
+dropped: it stays pending until delivered. The backoff resets on delivery, on a failure
+that is not a timeout, when no transition is pending any more, and when the pending
+state flips (a pending `fired` becomes a pending `cleared`, or back). A tick that runs
+out of its budget before POSTing keeps the backoff as it was. Other failures (non-2xx,
+unreachable, redirect) retry every tick.
 
 The engine read covers exactly the window: `since` = 00:00 UTC seven days ago and
 `until` = 00:00 UTC today, so today's partial day is never paged in. Because the window
@@ -560,8 +563,9 @@ State lives in `<WORKER_RUN_NAMESPACE_ROOT>/growth-triggers.json` (mode 0640, wr
 atomically every tick, and again right after each delivered alert so a worker that dies
 mid-tick does not resend it on restart). With the default root (`/tmp/automata-agent-run`)
 the file does not survive a reboot, since `/tmp` is cleared, so a trigger may re-fire once
-after a reboot. Runs dispatched before the #373 www deploy carry no org tag and count as
-`unattributed`; the client signals are meaningful only once the window holds 7 complete
+after a reboot, and a pending `cleared` is lost. Non-review runs dispatched before the
+#373 www deploy carry no org tag and count as `unattributed` (review runs have carried
+`orgId` and `lane=review` since #127); the client signals are meaningful only once the window holds 7 complete
 UTC days of tagged runs — up to 8 calendar days after the www deploy. The attribution gate enforces that: while more than 5 % of the window's run
 time is unattributed, `client_share` and the scale composite's clients arm read
 `unknown` (the share and the unattributed figures are still in the snapshot). The

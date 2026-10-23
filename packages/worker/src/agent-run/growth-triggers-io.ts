@@ -690,8 +690,9 @@ export function armGrowthTriggers(
   // timed-out POST of a (trigger, state) transition, the next attempt waits 2^(k−1) ticks
   // (attempts 1, 2, 4, … ticks apart), capped at GROWTH_WEBHOOK_BACKOFF_CAP_MS. The
   // transition itself is never dropped: it stays uncommitted and is retried when due.
-  // Cleared on delivery, on a non-timeout outcome, and when the transition no longer
-  // applies (no transition, or the other state).
+  // Cleared on delivery, on a non-timeout failure, and when the transition no longer
+  // applies (no transition, or the other state); kept when the tick ran out of budget
+  // before POSTing (DEADLINE_EXCEEDED), which says nothing about the sink.
   const backoffCapTicks = Math.max(
     1,
     Math.floor(GROWTH_WEBHOOK_BACKOFF_CAP_MS / intervalMs),
