@@ -2277,6 +2277,96 @@ export async function getUserIdsWithThreadsReadyToProcess({ db }: { db: DB }) {
   );
 }
 
+/**
+ * #471: chats stranded in PLAIN `queued`. That status is the transient
+ * pre-boot state: startAgentMessage moves it on to `booting`, a `queued-*`
+ * wait or a terminal within seconds, and the queue drain only ever reads the
+ * `queued-*` statuses. A dispatch that dies before its first transition (the
+ * store it reads is down, the instance is evicted) leaves the row in `queued`
+ * with nothing left to move it.
+ *
+ * A row is stranded when, as of `olderThan`:
+ *  - its queue instant (`queued_at`, else `created_at`) is older, AND
+ *  - its own `updated_at` is older too. A follow-up entering `queued` on an
+ *    old thread clears `queued_at`, so the `created_at` fallback alone would
+ *    call a dispatch started a second ago stranded; its fresh `updated_at`
+ *    does not;
+ *  - the thread has no `in_flight` engine run row. A run is only dispatched
+ *    after the chat leaves `queued`, so this never matches a truly stranded
+ *    row; it keeps the sweep off any thread an engine run may still own.
+ *
+ * Status lives on the chat row for a chat-mode thread (its thread row keeps
+ * its creation value, `queued`, forever) and on the thread row for a legacy
+ * thread (no thread_chat row), so the two are read separately.
+ */
+export async function getStrandedQueuedThreadChats({
+  db,
+  olderThan,
+  limit,
+}: {
+  db: DB;
+  olderThan: Date;
+  limit: number;
+}): Promise<Array<{ userId: string; threadId: string; threadChatId: string }>> {
+  const noInFlightRun = sql`not exists (select 1 from ${schema.hatchetRun} where ${schema.hatchetRun.threadId} = ${schema.thread.id} and ${schema.hatchetRun.status} = 'in_flight')`;
+  const [legacyRows, chatRows] = await Promise.all([
+    db
+      .select({ userId: schema.thread.userId, threadId: schema.thread.id })
+      .from(schema.thread)
+      .where(
+        and(
+          eq(schema.thread.status, "queued"),
+          sql`not exists (select 1 from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id})`,
+          or(
+            lt(schema.thread.queuedAt, olderThan),
+            and(
+              isNull(schema.thread.queuedAt),
+              lt(schema.thread.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.thread.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.thread.updatedAt))
+      .limit(limit),
+    db
+      .select({
+        userId: schema.threadChat.userId,
+        threadId: schema.threadChat.threadId,
+        threadChatId: schema.threadChat.id,
+      })
+      .from(schema.threadChat)
+      .innerJoin(
+        schema.thread,
+        eq(schema.thread.id, schema.threadChat.threadId),
+      )
+      .where(
+        and(
+          eq(schema.threadChat.status, "queued"),
+          or(
+            lt(schema.threadChat.queuedAt, olderThan),
+            and(
+              isNull(schema.threadChat.queuedAt),
+              lt(schema.threadChat.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.threadChat.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.threadChat.updatedAt))
+      .limit(limit),
+  ]);
+  return [
+    ...legacyRows.map((row) => ({
+      ...row,
+      threadChatId: LEGACY_THREAD_CHAT_ID,
+    })),
+    ...chatRows,
+  ].slice(0, limit);
+}
+
 export async function getUserIdsWithThreadsStuckInQueue({ db }: { db: DB }) {
   // Find users who have threads in "queued-tasks-concurrency" but no active threads
   // This indicates they might be stuck in the queue

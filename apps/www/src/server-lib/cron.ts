@@ -8,7 +8,10 @@ import {
 } from "@terragon/shared/model/threads";
 import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
-import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
+import {
+  maybeStartQueuedThreadChat,
+  retireStrandedQueuedThreads,
+} from "@/server-lib/process-queued-thread";
 import {
   AUDIT_FINDINGS_SKILL_NAME,
   skillNameIs,
@@ -149,6 +152,21 @@ export async function runStalledTasksCron(): Promise<void> {
  * never fires) — the finish-hook handles the common slot-free case.
  */
 export async function runQueuedTasksCron(): Promise<void> {
+  // #471: chats stranded in plain `queued` (a dispatch that died before its
+  // first transition) are outside every drain below; retire them visibly.
+  // Fail-soft: a sweep error must not skip the queue drain.
+  try {
+    const r = await retireStrandedQueuedThreads();
+    if (r.retired + r.failed > 0) {
+      console.log("[cron:queued] stranded queued sweep", r);
+    }
+  } catch (error) {
+    console.error(
+      "[cron:queued] stranded queued sweep failed (non-fatal)",
+      error,
+    );
+  }
+
   const [stuck, ready] = await Promise.all([
     getUserIdsWithThreadsStuckInQueue({ db }),
     getUserIdsWithThreadsReadyToProcess({ db }),
