@@ -1105,6 +1105,31 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     await batcher.close();
   });
 
+  it("#473: flush(signal) stops waiting when the signal aborts", async () => {
+    let settlePost: () => void = () => {};
+    postEgressEvents.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settlePost = resolve;
+        }),
+    );
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    const controller = new AbortController();
+    let flushed = false;
+    const flushing = batcher.flush(controller.signal).then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushed).toBe(false);
+
+    controller.abort();
+    await flushing;
+    expect(flushed).toBe(true);
+    settlePost();
+    await batcher.close();
+  });
+
   it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({

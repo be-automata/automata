@@ -280,16 +280,18 @@ const EGRESS_BATCH_FLUSH_MS = 2_000;
  *
  * #473: flush() resolves only once every post started so far has settled, so
  * the run can deliver its audit trail before the terminal status read revokes
- * the daemon token (pollUntilTerminal's beforeStatusRead).
+ * the daemon token (pollUntilTerminal's beforeStatusRead). Given a signal, it
+ * stops waiting when that aborts; the posts themselves carry on, and close()
+ * still awaits them.
  */
 export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   add: (event: EgressDecisionEvent) => void;
-  flush: () => Promise<void>;
+  flush: (signal?: AbortSignal) => Promise<void>;
   close: () => Promise<void>;
 } {
   let buffer: EgressEventWire[] = [];
   const inFlight = new Set<Promise<void>>();
-  const flush = async (): Promise<void> => {
+  const flush = async (signal?: AbortSignal): Promise<void> => {
     if (buffer.length > 0) {
       const events = buffer;
       buffer = [];
@@ -297,7 +299,24 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
       inFlight.add(post);
       void post.finally(() => inFlight.delete(post));
     }
-    await Promise.all(inFlight);
+    const settled = Promise.all(inFlight);
+    if (!signal) {
+      await settled;
+      return;
+    }
+    if (signal.aborted) {
+      return;
+    }
+    let onAbort = (): void => {};
+    const aborted = new Promise<void>((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([settled, aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   };
   const timer = setInterval(() => void flush(), EGRESS_BATCH_FLUSH_MS);
   // Never hold the worker process open for an audit flush tick.
@@ -1238,8 +1257,8 @@ async function runAgentInner(
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
     // #473: the terminal read revokes the daemon token, so the egress audit
     // batch goes out before every read — the final one included.
-    beforeStatusRead: async () => {
-      await egressEvents?.flush();
+    beforeStatusRead: async (signal?: AbortSignal) => {
+      await egressEvents?.flush(signal);
     },
   };
   let daemonForPoll: RunDaemon | null = null;

@@ -444,6 +444,13 @@ export interface EgressEventWire {
 }
 
 /**
+ * #473: each egress POST is bounded. The run's status poll awaits the batch
+ * before every read (beforeStatusRead), so an unbounded hang here would stall
+ * every poll pass.
+ */
+export const EGRESS_POST_TIMEOUT_MS = 10_000;
+
+/**
  * POST a batch of egress proxy decisions to the audit sink
  * (/api/daemon/egress-event, #66 §3.3). Same X-Daemon-Token custody as the
  * sibling endpoints; the run identity comes from the token server-side, so the
@@ -456,13 +463,6 @@ export interface EgressEventWire {
  * workflow batcher flushes at 20, well under it) — an oversize batch would be
  * rejected by the route (rows lost, logged below), never silently truncated.
  */
-/**
- * #473: each egress POST is bounded. The run's status poll awaits the batch
- * before every read (beforeStatusRead), so an unbounded hang here would stall
- * the poll loop where a Hatchet cancel cannot reach it.
- */
-export const EGRESS_POST_TIMEOUT_MS = 10_000;
-
 export async function postEgressEvents(
   opts: WwwClientOpts,
   events: EgressEventWire[],
@@ -616,11 +616,12 @@ export interface PollContext {
    * #473: awaited before EVERY status read. The read that serves terminal=true
    * also revokes the daemon token, so anything that must still reach www with
    * that token (the egress audit batch) is delivered here, never after. Must
-   * not throw.
+   * not throw, and must return once `signal` aborts so a cancel is answered
+   * promptly.
    *
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
-  beforeStatusRead?: () => Promise<void>;
+  beforeStatusRead?: (signal?: AbortSignal) => Promise<void>;
 }
 
 export interface PollResult {
@@ -697,7 +698,10 @@ export async function pollUntilTerminal(
       throw starved;
     }
 
-    await ctx.beforeStatusRead?.();
+    await ctx.beforeStatusRead?.(ctx.signal);
+    if (ctx.cancelled || ctx.signal?.aborted) {
+      return { outcome: "cancelled", finalStatus: lastStatus };
+    }
 
     let poll: ThreadStatusPoll;
     try {

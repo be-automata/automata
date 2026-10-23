@@ -1274,6 +1274,30 @@ describe("pollUntilTerminal: the run was memory-starved", () => {
     expect(order).toEqual(["flush", "read", "flush", "read"]);
   });
 
+  it("#473: a cancel during beforeStatusRead ends the loop without a read", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    let hookSignal: AbortSignal | undefined;
+    const result = await pollUntilTerminal(
+      {
+        cancelled: false,
+        signal: controller.signal,
+        log: () => {},
+        beforeStatusRead: async (signal) => {
+          hookSignal = signal;
+          controller.abort();
+        },
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(hookSignal).toBe(controller.signal);
+    expect(result.outcome).toBe("cancelled");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("a cancellation still wins — a superseded run is not re-labelled OOM", async () => {
     const result = await pollUntilTerminal(
       {
