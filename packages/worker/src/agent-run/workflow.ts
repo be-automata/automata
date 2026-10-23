@@ -104,7 +104,9 @@ import {
   newAbnormalEndState,
   postAbnormalEnd,
   salvageWorkBranch,
+  type AbnormalEnd,
   type AbnormalEndState,
+  type SalvageOutcome,
 } from "./abnormal-end";
 import {
   ensureRunNamespace,
@@ -1958,6 +1960,61 @@ async function runAgentInner(
     // #380: the teardown sequence below is wrapped so a throw in any step can
     // never skip the token revoke, the credential wipe or the lock release.
     try {
+      // #437 Part A2: claim the typed terminal of an abnormal end (posted
+      // below, BEFORE the brokers close and the checkout goes). A normal end,
+      // or a run this plane does not own, claims null. A normal end is
+      // settled too, so a later teardown throw cannot be claimed by the
+      // outer catch as `daemon-failed`.
+      const claimEnd = (): AbnormalEnd | null => {
+        const cancelled =
+          !endedNormally && (ctx.cancelled || signal?.aborted === true);
+        const abnormalExit = runThrew !== null || cancelled;
+        if (!abnormalExit) {
+          abnormal.claimed = true;
+          return null;
+        }
+        return abnormal.owns
+          ? claimAbnormalEnd(abnormal, {
+              ...(runThrew ? { thrown: runThrew } : {}),
+              cancelled,
+              starvation: readMemoryStarvation(daemon),
+            })
+          : null;
+      };
+      // #437 Part B: a timeout's work is pushed while the broker is open, and
+      // the post names the branch.
+      const salvageEnd = (claimed: AbnormalEnd): Promise<SalvageOutcome> =>
+        salvageWorkBranch({
+          cause: claimed.cause,
+          workBranch: input.workBranch,
+          lockLost: boxLock?.lost === true,
+          enabled: config.timeoutSalvage !== "off",
+          container: containerDaemon,
+          broker,
+          repoFullName: input.repoFullName,
+          workdir,
+          agentUser: config.agentUser,
+          botLogin: config.botLogin,
+          egressProxyUrl: egressProxy?.url ?? null,
+          runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
+          log: step,
+        });
+      let end: AbnormalEnd | null = null;
+      let salvage: SalvageOutcome | null = null;
+      let endSettled = false;
+      if (containerDaemon) {
+        // ADR-013: a container run's salvage runs git INSIDE its container
+        // (never host git on the container-written .git), so its end is
+        // claimed and a timeout salvaged BEFORE the removal below. The
+        // salvage first freezes the container's whole tree (SIGSTOP, init
+        // aside: prepareSalvage), so the agent is stopped, not dead, until
+        // the removal kills it. The OOM flag is re-read first, as the
+        // removal would have.
+        await containerDaemon.refresh();
+        end = claimEnd();
+        endSettled = true;
+        if (end) salvage = await salvageEnd(end);
+      }
       // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
@@ -2002,50 +2059,23 @@ async function runAgentInner(
       // ADR-013: a container's removal above replaced the uid-wide scan:
       // every process of the run lived in the container's pid namespace.
       if (!containerDaemon) await reapTeardownEscapees();
-      // #437 Part A2: claim and post the typed terminal of an abnormal end
-      // once the agent is dead, BEFORE the brokers close and the checkout goes.
-      // A normal end, or a run this plane does not own, claims null. The OOM
-      // signal is read here, after the teardown: a container's `.State` was
-      // refreshed before its removal, and the host daemon caches the count it
-      // read before removing the cgroup.
-      const cancelled =
-        !endedNormally && (ctx.cancelled || signal?.aborted === true);
-      // A normal end is settled here too, so a later teardown throw cannot be
-      // claimed by the outer catch as `daemon-failed`.
-      const abnormalExit = runThrew !== null || cancelled;
-      const end =
-        abnormal.owns && abnormalExit
-          ? claimAbnormalEnd(abnormal, {
-              ...(runThrew ? { thrown: runThrew } : {}),
-              cancelled,
-              starvation: readMemoryStarvation(daemon),
-            })
-          : null;
-      if (!abnormalExit) abnormal.claimed = true;
+      if (!endSettled) {
+        // A host run claims once the agent is dead and reaped. The OOM
+        // signal is read here, after the teardown: the host daemon caches
+        // the count it read before removing the cgroup.
+        end = claimEnd();
+        if (end) {
+          // Agent dead, broker open; then the salvage's own agent-uid git
+          // is reaped (same lost-lock rule) before the closes.
+          salvage = await salvageEnd(end);
+          if (salvage.spawned) await reapTeardownEscapees();
+        }
+      }
       if (end) {
-        // #437 Part B: a timeout's work is pushed now (agent dead, broker
-        // open) and the post names the branch; then the salvage's own
-        // agent-uid git is reaped (same lost-lock rule) before the closes.
-        const salvage = await salvageWorkBranch({
-          cause: end.cause,
-          workBranch: input.workBranch,
-          lockLost: boxLock?.lost === true,
-          enabled: config.timeoutSalvage !== "off",
-          containerRun: containerDaemon !== null,
-          broker,
-          repoFullName: input.repoFullName,
-          workdir,
-          agentUser: config.agentUser,
-          botLogin: config.botLogin,
-          egressProxyUrl: egressProxy?.url ?? null,
-          runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
-          log: step,
-        });
-        if (salvage.spawned && !containerDaemon) await reapTeardownEscapees();
         await postAbnormalEnd(abnormal, end, {
           wwwOpts,
           log: step,
-          salvage: salvage.result,
+          salvage: salvage?.result ?? null,
         });
       }
       // #66: close the egress proxy after the daemon is dead (no more child

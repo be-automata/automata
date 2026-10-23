@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { redactSecrets } from "@terragon/utils/redact";
 
+import type { ContainerSalvageTarget } from "./abnormal-end";
+import { runAsAgent, type RunAsAgent } from "./agent-command";
 import {
   readBoxTestServicesEnv,
   receivesBoxTestServices,
@@ -15,6 +17,7 @@ import {
   CONTAINER_DAEMON_BUNDLE,
   CONTAINER_DAEMON_SOCKET,
   CONTAINER_HOME,
+  CONTAINER_SOCKET_DIR,
   CONTAINER_USER,
   CONTAINER_WORKSPACE,
   containerLanePolicy,
@@ -154,6 +157,46 @@ export interface ContainerDaemonDeps {
   retryDelayMs?: number;
 }
 
+/**
+ * #437 Part B in a container: the loopback ports the salvage's own git
+ * broker bridge may take, first free one wins. Apart from the entry's
+ * bridges (CONTAINER_BRIDGES), whose frozen socat keeps its port.
+ */
+export const SALVAGE_BRIDGE_PORTS = [3139, 3140, 3141, 3142] as const;
+const EXIT_NO_BROKER_SOCKET = 20;
+const EXIT_NO_BRIDGE_PORT = 21;
+
+/**
+ * Run by bash INSIDE the container as its user: $1 = the forwarded git
+ * broker socket, $2.. = candidate ports. kill(-1) signals every process the
+ * caller may signal except init and the caller itself, so one SIGSTOP freezes
+ * the agent, every escapee, the daemon and the entry's bridges where they
+ * stand; the second catches a child forked across the first. With the tree
+ * frozen nothing else can bind a port, so a port no socket listens on before
+ * the bridge starts and that listens after is the bridge's own. The bridge
+ * stays up (stdio closed, so the exec returns) until the container goes.
+ * Prints the port. A constant: run-derived values travel as arguments only.
+ */
+export const SALVAGE_PREPARE_SCRIPT = [
+  "sock=$1; shift",
+  `[ -S "$sock" ] || exit ${EXIT_NO_BROKER_SOCKET}`,
+  "kill -s STOP -1 2>/dev/null; kill -s STOP -1 2>/dev/null",
+  // Any local address, v4 or v6, in LISTEN (0A); the port is upper-case hex.
+  'listening() { grep -Eq "^ *[0-9]+: [0-9A-F]+:$(printf \'%04X\' "$1") [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; }',
+  'for port in "$@"; do',
+  '  if listening "$port"; then continue; fi',
+  '  socat "TCP-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:${sock}" </dev/null >/dev/null 2>&1 &',
+  "  pid=$!",
+  "  for _ in $(seq 50); do",
+  '    if listening "$port"; then echo "$port"; exit 0; fi',
+  '    kill -0 "$pid" 2>/dev/null || break',
+  "    sleep 0.1",
+  "  done",
+  '  kill -s KILL "$pid" 2>/dev/null',
+  "done",
+  `exit ${EXIT_NO_BRIDGE_PORT}`,
+].join("\n");
+
 /** Bound on the workspace hand-back exec at teardown (a hung exec must not hold the slot). */
 export const WORKSPACE_HAND_BACK_TIMEOUT_MS = 30_000;
 
@@ -177,7 +220,9 @@ const DEFAULT_REMOVE_RETRY_MS = 2_000;
  * the run lives in the container's pid namespace under `--init`, so a
  * `setsid` escapee dies with it.
  */
-export class ContainerDaemonProcess implements RunDaemon {
+export class ContainerDaemonProcess
+  implements RunDaemon, ContainerSalvageTarget
+{
   private readonly cr: ContainerRunsConfig;
   private readonly runtime: ContainerRuntime;
   private readonly policy: ContainerLanePolicy;
@@ -623,6 +668,97 @@ export class ContainerDaemonProcess implements RunDaemon {
   async refresh(): Promise<void> {
     await this.refreshState();
   }
+
+  /** #437 Part B: the checkout as the salvage's git sees it. */
+  readonly salvageWorkdir = CONTAINER_WORKSPACE;
+
+  /**
+   * #437 Part B (ContainerSalvageTarget): freeze the container's tree and
+   * bridge its git broker socket on a port of the salvage's own
+   * (SALVAGE_PREPARE_SCRIPT). Null when there is no container, no broker
+   * socket (a review), or the exec failed; logs one
+   * `container.salvage_prepare` line. Never throws.
+   */
+  async prepareSalvage(timeoutMs: number): Promise<string | null> {
+    const id = this.containerId;
+    const line = (fields: Record<string, unknown>) =>
+      this.log(
+        `container.salvage_prepare ${JSON.stringify({ thread: this.input.threadId, ...fields })}`,
+      );
+    if (!id || this.teardownPromise) {
+      line({ skipped: "no container" });
+      return null;
+    }
+    if (!this.routed.broker) {
+      line({ skipped: "no git broker socket" });
+      return null;
+    }
+    try {
+      const r = await this.runtime.exec(
+        id,
+        [
+          "/bin/bash",
+          "-c",
+          SALVAGE_PREPARE_SCRIPT,
+          "bash",
+          `${CONTAINER_SOCKET_DIR}/git-broker.sock`,
+          ...SALVAGE_BRIDGE_PORTS.map(String),
+        ],
+        timeoutMs,
+      );
+      const port = Number(r.stdout.trim());
+      if (
+        r.code !== 0 ||
+        !(SALVAGE_BRIDGE_PORTS as readonly number[]).includes(port)
+      ) {
+        line({
+          code: r.code,
+          ...(r.stderr.trim()
+            ? { stderr: redactSecrets(r.stderr.trim().slice(0, 200)) }
+            : {}),
+        });
+        return null;
+      }
+      line({ code: 0, port });
+      return `http://127.0.0.1:${port}`;
+    } catch (err) {
+      line({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * #437 Part B (ContainerSalvageTarget): one salvage step through
+   * `docker exec` as the container's user, with runAsAgent's bounds (stdout
+   * cap, timeout, abort) on the docker CLI child. The step's env crosses by
+   * name only (ContainerRuntime.spawnExec): the bearer never rides an argv.
+   */
+  readonly runInContainer: RunAsAgent = (args) => {
+    const id = this.containerId;
+    if (!id) {
+      return Promise.resolve({
+        exitCode: null,
+        stdout: "",
+        timedOut: false,
+        truncated: false,
+      });
+    }
+    return runAsAgent({
+      ...args,
+      // The container's own user runs it; no sudo on this side.
+      agentUser: "",
+      spawn: (file, argv, opts) => {
+        const env: Record<string, string> = {};
+        for (const [key, value] of Object.entries(opts.env)) {
+          if (value !== undefined) env[key] = value;
+        }
+        return this.runtime.spawnExec(id, [file, ...argv], {
+          workdir: args.cwd,
+          env,
+        });
+      },
+    });
+  };
 
   /**
    * Remove the container: OOM flag first (it dies with the container), then
