@@ -407,7 +407,7 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     }
   });
 
-  it("#437: onFailure waits for a run still live in this process; a run that never started here, and a review run, post at once", async () => {
+  it("#437: onFailure waits for a task run still live in this process; a run that never started here, and a live review run, post at once", async () => {
     // protects=the typed timeout winning the first-terminal race on an
     // executionTimeout (onFailure is scheduled while the teardown still
     // runs); fails_when=onFailure posts before the live run ends, or a run
@@ -454,6 +454,41 @@ describe("agentRunWorkflow onFailure (#2)", () => {
       });
       expect(order).toEqual(["post"]);
       expect(Date.now() - started).toBeLessThan(1_000);
+
+      // A review run still live in this process: it owns no abnormal
+      // terminal, so its onFailure posts at once, before the run ends.
+      order.length = 0;
+      const reviewRunId = "4f6b0c96-8d2b-4f2b-9b5f-be9f7f6d5c4f";
+      let releaseReview!: () => void;
+      const reviewLive = _trackLiveRunForTests(
+        reviewRunId,
+        () =>
+          new Promise<void>((resolve) => {
+            releaseReview = () => {
+              order.push("review-ended");
+              resolve();
+            };
+          }),
+      );
+      const { installationToken, daemonToken, ...rest } = INPUT;
+      const reviewWire = { ...rest, prKey: "org-1/o/r/7" };
+      const { sealBindingOf, sealRunSecrets } = await import(
+        "@terragon/utils/payload-seal"
+      );
+      await workflowDef.onFailure.fn(
+        {
+          ...reviewWire,
+          sealedSecrets: await sealRunSecrets(
+            ringPlane.publicKey,
+            { installationToken, daemonToken },
+            sealBindingOf(reviewWire),
+          ),
+        },
+        { errors: () => ({ run: "boom" }), workflowRunId: () => reviewRunId },
+      );
+      releaseReview();
+      await reviewLive;
+      expect(order).toEqual(["post", "review-ended"]);
     } finally {
       vi.unstubAllGlobals();
     }

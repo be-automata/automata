@@ -3190,6 +3190,34 @@ describe("#437: a task run's abnormal end posts one typed terminal", () => {
     }
   });
 
+  it("an engine cancel before the limit posts nothing (a stale attempt must not close the thread)", async () => {
+    // protects=attempt n+1 of the same run id keeping its thread when a stale
+    // attempt is cancelled; fails_when=the cancelled attempt posts any
+    // terminal; no_claim=the C4 sweep that reconciles it.
+    const ctx = taskCtx("run-ext-early-cancel");
+    pollUntilTerminal.mockImplementation(async () => {
+      ctx.cancel();
+      return { outcome: "cancelled" };
+    });
+    const out = await runFn(INPUT, ctx);
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
+  it("a teardown throw after a normal end is not relabelled daemon-failed", async () => {
+    // protects=a completed run keeps its clean terminal; fails_when=the outer
+    // catch claims the cleanup throw and posts daemon-failed; no_claim=the
+    // cleanup throw itself still propagating (it does).
+    const ctx = taskCtx("run-ext-cleanup-throw");
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    cleanupWorkdir.mockRejectedValueOnce(new Error("rm failed"));
+    await expect(runFn(INPUT, ctx)).rejects.toThrow("rm failed");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
   it("a throw before the daemon starts posts `run-failed-unreported` once (AC8)", async () => {
     // protects=AC8; fails_when=it posts nothing, posts twice, or calls it
     // daemon-failed; no_claim=which other pre-daemon steps throw (the same

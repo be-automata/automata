@@ -1996,14 +1996,18 @@ async function runAgentInner(
       // read before removing the cgroup.
       const cancelled =
         !endedNormally && (ctx.cancelled || signal?.aborted === true);
+      // A normal end is settled here too, so a later teardown throw cannot be
+      // claimed by the outer catch as `daemon-failed`.
+      const abnormalExit = runThrew !== null || cancelled;
       const end =
-        abnormal.owns && (runThrew !== null || cancelled)
+        abnormal.owns && abnormalExit
           ? claimAbnormalEnd(abnormal, {
               ...(runThrew ? { thrown: runThrew } : {}),
               cancelled,
               starvation: readMemoryStarvation(daemon),
             })
           : null;
+      if (!abnormalExit) abnormal.claimed = true;
       if (end) {
         await postAbnormalEnd(abnormal, end, { wwwOpts, log: step });
       }

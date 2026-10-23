@@ -49,10 +49,18 @@ export interface AbnormalEndInput extends RunEnd {
  * First match wins (#437 Part A):
  *   1. OOM kill — even when a cancel lands in the same tick → `out-of-memory`
  *   2. cancel at the execution limit → `timeout`
- *   3. an earlier cancel → `user-cancelled`
+ *   3. an earlier cancel → null (see below)
  *   4. a throw before the daemon started → `run-failed-unreported`
  *   5. any other throw → `daemon-failed`
  * A run that neither threw nor was cancelled ended normally: null.
+ *
+ * Why an earlier cancel posts nothing (a deliberate departure from #437's
+ * `user-cancelled`): a user Stop never gets here — it reaches the worker as
+ * the `stopped` outcome and is posted as `user-cancelled` by the run fn. What
+ * is left is an engine-side cancel the worker cannot attribute, including a
+ * stale attempt cancelled after a heartbeat reassignment while attempt n+1
+ * of the SAME workflow run id still works the thread. Closing the thread
+ * from that attempt would be wrong; the C4 sweep reconciles, as before.
  */
 export function classifyAbnormalEnd(o: AbnormalEndInput): TerminalCause | null {
   if (!o.thrown && !o.cancelled) return null;
@@ -66,7 +74,7 @@ export function classifyAbnormalEnd(o: AbnormalEndInput): TerminalCause | null {
     const elapsed = o.now - o.runStartedAt;
     return elapsed >= o.runExecutionTimeoutMs - TIMEOUT_CANCEL_TOLERANCE_MS
       ? "timeout"
-      : "user-cancelled";
+      : null;
   }
   return o.daemonStarted ? "daemon-failed" : "run-failed-unreported";
 }

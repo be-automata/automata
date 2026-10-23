@@ -75,12 +75,15 @@ describe("classifyAbnormalEnd (#437 Part A)", () => {
     }
   });
 
-  it("an earlier cancel is user-cancelled", () => {
-    // protects=a cancel well before the limit is not called a timeout;
-    // fails_when=it is classified timeout; no_claim=none beyond protects.
-    expect(classifyAbnormalEnd(cancelledAt(START + LIMIT_MS - 15_001))).toBe(
-      "user-cancelled",
-    );
+  it("an earlier cancel is not ours to post, thrown or not (null)", () => {
+    // protects=a stale attempt cancelled after a heartbeat reassignment never
+    // closes the thread attempt n+1 still works; fails_when=an early cancel
+    // gets a cause; no_claim=the user Stop path (the `stopped` outcome).
+    const early = START + LIMIT_MS - 15_001;
+    expect(classifyAbnormalEnd(cancelledAt(early))).toBeNull();
+    expect(
+      classifyAbnormalEnd(base({ cancelled: true, now: early })),
+    ).toBeNull();
   });
 
   it("a throw before the daemon started is run-failed-unreported", () => {
@@ -260,7 +263,8 @@ describe("claimAbnormalEnd / postAbnormalEnd (#437)", () => {
 
   it("a cancel is timed by when the abort fired, not by when the slow teardown claimed it", () => {
     // protects=the 15 s tolerance staying 15 s; fails_when=a cancel 20 s
-    // before the limit, claimed after a 30 s teardown, reads as timeout;
+    // before the limit, claimed after a 30 s teardown, reads as timeout
+    // (it is an early cancel: null);
     // no_claim=the abort listener wiring (workflow.ts).
     const s = state();
     s.cancelledAt = START + LIMIT_MS - 20_000;
@@ -269,7 +273,7 @@ describe("claimAbnormalEnd / postAbnormalEnd (#437)", () => {
       { cancelled: true, starvation: null },
       START + LIMIT_MS + 10_000,
     );
-    expect(end?.cause).toBe("user-cancelled");
+    expect(end).toBeNull();
   });
 
   it("a run this plane does not own never claims", () => {
