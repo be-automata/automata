@@ -29,7 +29,7 @@ umask 022
 #   previous-image      the PREVIOUS digest stays pulled (pulled back if gone),
 #                       so an image rollback is an env change. This script never
 #                       removes an image.
-#   worker-runtime      full mode: node 24 and pnpm on the host (checked only:
+#   worker-runtime      full mode: node (the worker's floor) and pnpm on the host (checked only:
 #                       the cloud-init.yaml base bring-up installs them)
 #   worker-launcher     full mode: run-worker.sh.template -> ~/.automata/run-worker.sh
 #   worker-unit         full mode: automata-worker.service rendered and enabled
@@ -375,12 +375,21 @@ install_if_changed() {
 
 # The base bring-up the worker itself needs (cloud-init.yaml): checked, never
 # installed here.
+# The floor is the worker's own (node-floor.ts NODE_ENV_PROXY_FLOOR):
+# >=22.21.0 on 22.x, or >=24.0.0.
 step_worker_runtime() {
-  local major
-  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
-  [ "$major" = 24 ] || fail worker-runtime "node 24 is required on the host (got: ${major:-none}); run the cloud-init.yaml base bring-up first"
+  local version major minor
+  version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  major="${version%%.*}"
+  minor="$(printf '%s' "$version" | cut -d. -f2)"
+  case "$major" in
+    22) [ "${minor:-0}" -ge 21 ] 2>/dev/null || major="" ;;
+    '' | *[!0-9]*) major="" ;;
+    *) [ "$major" -ge 24 ] || major="" ;;
+  esac
+  [ -n "$major" ] || fail worker-runtime "node >=22.21.0 (22.x) or >=24 is required on the host (got: ${version:-none}); run the cloud-init.yaml base bring-up first"
   command -v pnpm >/dev/null 2>&1 || fail worker-runtime "pnpm is missing; run the cloud-init.yaml base bring-up first"
-  report ok worker-runtime "node $major, pnpm present"
+  report ok worker-runtime "node $version, pnpm present"
 }
 
 step_worker_launcher() {
