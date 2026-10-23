@@ -388,8 +388,9 @@ const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
  * Basenames the salvage never publishes (some target repos are public): the
  * repo's own .claude/settings.json secret-file denylist, plus SSH private
  * keys (not a `.pub` public key, nor a source file such as `id_rsa.ts`),
- * package-registry auth files and direnv's `.envrc` (it usually exports
- * secrets). Matched case-insensitively on the basename. `.env.example` and
+ * package-registry, git, Postgres, Docker, AWS, Kubernetes and Terraform
+ * credential files, and direnv's `.envrc` (it usually exports secrets).
+ * Matched case-insensitively on the basename. `.env.example` and
  * `.env.sample` are allowed — the conventional committed placeholders.
  */
 const SECRET_FILE_NAMES: readonly RegExp[] = [
@@ -402,6 +403,9 @@ const SECRET_FILE_NAMES: readonly RegExp[] = [
   /^auth\.json$/,
   /^\.netrc$/,
   /^\.(npmrc|pypirc|envrc)$/,
+  /^\.(git-credentials|pgpass|dockercfg|dockerconfigjson)$/,
+  /^(credentials|kubeconfig)$/,
+  /\.tfvars$/,
   // No dot after the key type: id_rsa.pub and id_rsa.ts are not keys.
   /^id_(rsa|dsa|ecdsa|ed25519)([_-][a-z0-9_-]*)?$/,
 ];
