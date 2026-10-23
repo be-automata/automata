@@ -153,6 +153,7 @@ describe("handleReviewEffectAtFinish — a PR the bot opened itself", () => {
       headSha: "head-sha",
       isDraft: false,
       authorLogin: "automata-ai-bot[bot]",
+      isClosed: false,
     });
     await runHook();
     const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
@@ -165,6 +166,7 @@ describe("handleReviewEffectAtFinish — a PR the bot opened itself", () => {
       headSha: "head-sha",
       isDraft: false,
       authorLogin: "octocat",
+      isClosed: false,
     });
     await runHook();
     const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];

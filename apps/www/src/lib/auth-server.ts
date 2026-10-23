@@ -29,6 +29,7 @@ import {
   DaemonTokenContext,
   daemonTokenContextFromApiKey,
 } from "./daemon-token-context";
+import { verifyDaemonApiKey } from "./daemon-api-key";
 
 export const getSessionOrNull = cache(
   async (): Promise<{
@@ -211,6 +212,10 @@ export async function getUserIdOrRedirect(): Promise<User["id"]> {
  * X-Daemon-Token API key. `organizationId` comes from the key's metadata (see
  * daemon-token-context.ts); it is null for personal keys. Downstream code can
  * read the org directly instead of inferring it from the user's active org.
+ *
+ * Null (→ 401) only for a missing, unknown, disabled or expired key. Throws
+ * DaemonAuthUnavailableError when the auth store fails; callers answer 503
+ * (withDaemonAuthUnavailable / daemonAuthUnavailableResponse).
  */
 export async function getDaemonTokenContext(
   request: Pick<Request, "headers">,
@@ -219,11 +224,8 @@ export async function getDaemonTokenContext(
   if (!token) {
     return null;
   }
-  const { valid, error, key } = await auth.api.verifyApiKey({
-    body: { key: token },
-  });
-  if (error || !valid) {
-    console.log("Unauthorized", "error", error, "valid", valid);
+  const key = await verifyDaemonApiKey(token);
+  if (!key) {
     return null;
   }
   const context = daemonTokenContextFromApiKey(key);
@@ -323,6 +325,15 @@ async function getAdminUserOrNull(): Promise<User | null> {
     return null;
   }
   return user;
+}
+
+/**
+ * True when the session user holds the PLATFORM role (`user.role === "admin"`,
+ * Terragon staff across every org). Not the same as `isOrgAdmin`, which checks
+ * the caller's owner/admin membership in one organization.
+ */
+export async function isPlatformAdmin(): Promise<boolean> {
+  return (await getAdminUserOrNull()) !== null;
 }
 
 export async function getAdminUserOrThrow(): Promise<User> {

@@ -8,7 +8,10 @@ import {
 } from "@terragon/shared/model/threads";
 import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
-import { maybeStartQueuedThreadChat } from "@/server-lib/process-queued-thread";
+import {
+  maybeStartQueuedThreadChat,
+  retireStrandedQueuedThreads,
+} from "@/server-lib/process-queued-thread";
 import {
   AUDIT_FINDINGS_SKILL_NAME,
   skillNameIs,
@@ -149,6 +152,21 @@ export async function runStalledTasksCron(): Promise<void> {
  * never fires) — the finish-hook handles the common slot-free case.
  */
 export async function runQueuedTasksCron(): Promise<void> {
+  // #471: chats stranded in plain `queued` (a dispatch that died before its
+  // first transition) are outside every drain below; retire them visibly.
+  // Fail-soft: a sweep error must not skip the queue drain.
+  try {
+    const r = await retireStrandedQueuedThreads();
+    if (r.retired + r.failed > 0) {
+      console.log("[cron:queued] stranded queued sweep", r);
+    }
+  } catch (error) {
+    console.error(
+      "[cron:queued] stranded queued sweep failed (non-fatal)",
+      error,
+    );
+  }
+
   const [stuck, ready] = await Promise.all([
     getUserIdsWithThreadsStuckInQueue({ db }),
     getUserIdsWithThreadsReadyToProcess({ db }),
@@ -186,6 +204,23 @@ export async function runScheduledTasksCron(): Promise<void> {
     }
   } catch (error) {
     console.error("[cron:scheduled] supersede sweep failed (non-fatal)", error);
+  }
+
+  // #107: dispatch the due automatic re-runs of failed reviews. Same
+  // bulkhead: a dispatcher error never skips scheduled-thread processing.
+  try {
+    const { runReviewRerunDispatcher } = await import(
+      "@/server-lib/review/review-rerun"
+    );
+    const r = await runReviewRerunDispatcher({ db });
+    if (r.dispatched + r.skipped + r.failed + r.expired > 0) {
+      console.log("[cron:scheduled] review re-runs", r);
+    }
+  } catch (error) {
+    console.error(
+      "[cron:scheduled] review re-run dispatch failed (non-fatal)",
+      error,
+    );
   }
 
   const { runScheduledThread } = await import("@/server-lib/scheduled-thread");
@@ -340,8 +375,13 @@ export async function runScheduledCron(cron: string): Promise<void> {
       try {
         await runStalledTasksCron();
       } finally {
-        // CRON-01: LAST, so self-heal work can never delay or skip recovery.
-        await runSelfHealCronSafe("hourly");
+        try {
+          // CRON-01: LAST, so self-heal work can never delay or skip recovery.
+          await runSelfHealCronSafe("hourly");
+        } finally {
+          // OPS-04: LAST, after recovery and self-heal; purge can never delay or skip them.
+          await runKnowledgePurgeSweepSafe();
+        }
       }
       return;
     case "*/1 * * * *": // every 1m — fire due scheduled thread-chats
@@ -377,5 +417,20 @@ async function runSelfHealCronSafe(kind: "tick" | "hourly"): Promise<void> {
     await runSelfHealCron(kind);
   } catch (error) {
     console.error("[cron:self-heal] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * OPS-04 offboarding purge. Dynamic import, bounded and fail-soft: every
+ * failure is logged and swallowed.
+ */
+async function runKnowledgePurgeSweepSafe(): Promise<void> {
+  try {
+    const { runKnowledgePurgeSweep } = await import(
+      "@/server-lib/knowledge/purge-sweep"
+    );
+    await runKnowledgePurgeSweep();
+  } catch (error) {
+    console.error("[cron:knowledge-purge] failed (non-fatal)", error);
   }
 }

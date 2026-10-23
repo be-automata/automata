@@ -11,6 +11,8 @@ import {
   checkRunStaleness,
   pullAgentCredentials,
   CREDENTIAL_PULL_ATTEMPTS,
+  AUTH_ERROR_CONFIRM_ATTEMPTS,
+  AUTH_ERROR_RETRY_MS,
   pullNextMessage,
   type PollContext,
   type WwwClientOpts,
@@ -115,6 +117,44 @@ describe("postRunFailed (#2 terminal-failure callback)", () => {
 });
 
 describe("postEgressEvents (#66 audit sink, worker half)", () => {
+  const event = {
+    destinationHost: "api.github.com",
+    action: "allow",
+    policyLevel: "domain",
+    source: "worker",
+  } as const;
+
+  it("re-sends a batch refused at token verification (401, then 200)", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { inserted: 1 }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    await postEgressEvents(opts, [event], async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS]);
+  });
+
+  it("never re-sends after a 500: the handler may have written rows", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await postEgressEvents(opts, [event], async () => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up quietly once the refusal repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(503, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      postEgressEvents(opts, [event], async () => {}),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
+  });
+
   it("POSTs the batch to /api/daemon/egress-event with the daemon-token header", async () => {
     const fetchMock = vi
       .fn()
@@ -365,6 +405,50 @@ describe("pullNextMessage", () => {
     );
     await expect(pullNextMessage(opts)).rejects.toThrow(/HTTP 500/);
   });
+
+  it("asks again after a 401 and returns the message when the token verifies", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { agent: "claudeCode", model: "opus" }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    const result = await pullNextMessage(opts, undefined, async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(result).toMatchObject({ agent: "claudeCode" });
+    expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS]);
+  });
+
+  it("asks again after a 503 (verification could not reach the database)", async () => {
+    const responses = [
+      jsonResponse(503, { error: "x" }),
+      jsonResponse(204, null),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pullNextMessage(opts, undefined, async () => {})).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not re-ask after a 500: the handler may already have claimed the message", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      pullNextMessage(opts, undefined, async () => {}),
+    ).rejects.toThrow(/HTTP 500/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws the 401 once it repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(401, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      pullNextMessage(opts, undefined, async () => {}),
+    ).rejects.toThrow(/HTTP 401/);
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
+  });
 });
 
 describe("pollThreadStatus", () => {
@@ -451,6 +535,8 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     const responses = [
       jsonResponse(200, { status: "working", terminal: false }),
       jsonResponse(401, { error: "revoked" }),
+      jsonResponse(401, { error: "revoked" }),
+      jsonResponse(401, { error: "revoked" }),
     ];
     vi.stubGlobal(
       "fetch",
@@ -460,6 +546,70 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /premature revocation/,
     );
+  });
+
+  it("rides out a single 401 between good polls (verify-time blip, not a revocation)", async () => {
+    // Prod 2026-10-22: www's verifyApiKey turned a database error into
+    // valid:false, the worker believed the one 401, and the run died while
+    // the token was still good.
+    const responses = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal("fetch", fetchMock);
+    const sleeps: number[] = [];
+    const result = await pollUntilTerminal(ctx(), opts, 1, async (ms) => {
+      sleeps.push(ms);
+    });
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(sleeps.filter((ms) => ms === AUTH_ERROR_RETRY_MS)).toHaveLength(3);
+  });
+
+  it("rides out a 5xx and a dropped connection between good polls", async () => {
+    const responses: Array<Response | Error> = [
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(503, { error: "x" }),
+      new TypeError("fetch failed"),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const next = responses.shift()!;
+        if (next instanceof Error) throw next;
+        return next;
+      }),
+    );
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+  });
+
+  it("fails the run once a 5xx repeats on every attempt", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(500, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
+      /HTTP 500/,
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
+  });
+
+  it("rides out a 401 on the FIRST poll when the next one succeeds", async () => {
+    const responses = [
+      jsonResponse(401, { error: "x" }),
+      jsonResponse(200, { status: "complete", terminal: true }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift()!),
+    );
+    const result = await pollUntilTerminal(ctx(), opts, 1, noSleep);
+    expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
   it("returns completed on terminal=true even if the token is revoked immediately after (revoke-on-read happy path)", async () => {
@@ -479,14 +629,13 @@ describe("pollUntilTerminal — terminal via terminal=true; auth-error is failur
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
-  it("throws when the FIRST poll is a 401 (a real auth error)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse(401, { error: "x" })),
-    );
+  it("throws when the FIRST polls keep answering 401 (a real auth error)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(401, { error: "x" }));
+    vi.stubGlobal("fetch", fetchMock);
     await expect(pollUntilTerminal(ctx(), opts, 1, noSleep)).rejects.toThrow(
       /first poll/,
     );
+    expect(fetchMock).toHaveBeenCalledTimes(AUTH_ERROR_CONFIRM_ATTEMPTS);
   });
 
   it("stops with outcome cancelled when the context is cancelled", async () => {
@@ -682,6 +831,87 @@ describe("postRunTerminal — superseded (#125 C1)", () => {
         policy: "newest-wins",
       }),
     ).resolves.toBe("error");
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("postRunTerminal — detail.info and a caller signal (#437)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    runExternalId: "run-1",
+  };
+
+  it("sends info under detail (beside policy when both are set) and passes the caller's signal to fetch", async () => {
+    // protects=the worker-authored line reaching www's detail.info, on the
+    // teardown's fresh signal; fails_when=info is dropped, policy is lost, or
+    // the fetch runs on no/the wrong signal; no_claim=www's 300-char cap.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    await postRunTerminal(
+      opts,
+      {
+        runExternalId: "run-1",
+        cause: "out-of-memory",
+        info: "Memory limit 5000M reached (13 process(es) killed).",
+      },
+      signal,
+    );
+    await postRunTerminal(opts, {
+      runExternalId: "run-1",
+      cause: "superseded",
+      policy: "newest-wins",
+      info: "x",
+    });
+    const [, first] = fetchMock.mock.calls[0]!;
+    expect(first.signal).toBe(signal);
+    expect(JSON.parse(first.body).detail).toEqual({
+      info: "Memory limit 5000M reached (13 process(es) killed).",
+    });
+    const [, second] = fetchMock.mock.calls[1]!;
+    expect(second.signal).toBeUndefined();
+    expect(JSON.parse(second.body).detail).toEqual({
+      policy: "newest-wins",
+      info: "x",
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("postRunTerminal — a 4xx is final (#437)", () => {
+  it("401/400 → 'refused'; 5xx, 408 and 429 stay 'error' (retryable)", async () => {
+    // protects=the retry loop telling a dead token from a www blip;
+    // fails_when=a 401 maps to 'error' (retried) or a 503/408/429 to
+    // 'refused' (a rate-limited post dropped after one attempt);
+    // no_claim=none beyond protects.
+    const opts = {
+      baseUrl: "https://www.example.com/",
+      daemonToken: "tok",
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+    };
+    for (const [status, want] of [
+      [401, "refused"],
+      [400, "refused"],
+      [503, "error"],
+      [408, "error"],
+      [429, "error"],
+    ] as const) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response("x", { status })),
+      );
+      await expect(
+        postRunTerminal(opts, { runExternalId: "r", cause: "timeout" }),
+      ).resolves.toBe(want);
+    }
     vi.unstubAllGlobals();
   });
 });

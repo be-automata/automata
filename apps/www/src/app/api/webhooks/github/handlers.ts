@@ -23,6 +23,7 @@ import {
 import {
   PullRequestTriggerConfig,
   IssueTriggerConfig,
+  isCompanionAutomation,
 } from "@terragon/shared/automations";
 import {
   runPullRequestAutomation,
@@ -46,6 +47,7 @@ import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import { mapLimit } from "@/lib/map-limit";
+import { deferWebhookWork, errorText } from "./defer-webhook-work";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
 // The issue actions routed to handleIssueEvent / handleIssueLabeledMirror.
@@ -134,10 +136,13 @@ export async function handlePullRequestUpdated(
     // moves it backwards. Best-effort; a failure never blocks the runs. This
     // handler only receives head-affecting actions (opened / ready_for_review
     // / synchronize).
+    // Review automations only: the desired head feeds the review lane's
+    // discard+recheck, which a PR companion never takes part in.
     if (deliveryId) {
       const orgIds = [
         ...new Set(
           automations
+            .filter((a) => !isCompanionAutomation(a))
             .map((a) => a.organizationId)
             .filter((o): o is string => o !== null),
         ),
@@ -186,8 +191,11 @@ export async function handlePullRequestUpdated(
   }
 }
 
-const BATCH_SIZE = 5;
 const AUTOMATION_CONCURRENCY = 5;
+// #447: issue automations run in waitUntil, which Workers cancels 30s after the
+// response. A batch of 5 took ~5s in prod, so 20s leaves room for the runs in
+// flight when the last one starts.
+const ISSUE_AUTOMATION_START_BUDGET_MS = 20_000;
 
 async function runPullRequestAutomations(
   event: PullRequestEvent,
@@ -644,7 +652,11 @@ export async function handleCheckSuiteEvent(
 }
 
 // Handle issue events
-export async function handleIssueEvent(event: IssueEvent): Promise<void> {
+export async function handleIssueEvent(
+  event: IssueEvent,
+  /** #447: the webhook's X-GitHub-Delivery id, for the deferred work's logs. */
+  deliveryId?: string,
+): Promise<void> {
   const repoFullName = event.repository.full_name;
   const issueNumber = event.issue.number;
   console.log(
@@ -662,26 +674,66 @@ export async function handleIssueEvent(event: IssueEvent): Promise<void> {
     console.log(
       `Found ${automations.length} issue automations for ${repoFullName}`,
     );
-    // Process each automation
-    for (let i = 0; i < automations.length; i += BATCH_SIZE) {
-      const batch = automations.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((automation) => handleIssueAutomation(event, automation)),
-      );
-      const failed = results.filter((result) => result.status === "rejected");
-      const succeeded = results.filter(
-        (result) => result.status === "fulfilled",
-      );
-      console.log(`Successfully handled ${succeeded.length} issue automations`);
-      if (failed.length > 0) {
-        console.error(
-          `Error handling ${failed.length} issue automations: ${failed.map((result) => result.reason).join(", ")}`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    // #447: ack fast, as #422 did for pull_request.synchronize. A run makes
+    // GitHub round trips (the author check, token mints) and creates a
+    // thread; awaited inline, plus a 1s pause per batch, issues.opened acks
+    // reached GitHub's 10s delivery timeout, and GitHub never retries a
+    // timed-out delivery. The response never depended on them (this handler
+    // swallows every error), so they run after it.
+    deferWebhookWork({
+      deliveryId,
+      eventName: `issues.${event.action}`,
+      label: "issue automations",
+      work: () => runIssueAutomations(event, automations, deliveryId),
+    });
   } catch (error) {
     console.error("Error handling issue event:", error);
+  }
+}
+
+async function runIssueAutomations(
+  event: IssueEvent,
+  automations: Automation[],
+  deliveryId: string | undefined,
+): Promise<void> {
+  // One waitUntil budget for all of them: at most AUTOMATION_CONCURRENCY in
+  // flight, a free lane takes the next at once, no pause between runs. Workers
+  // cancels waitUntil work 30s after the response, so no run starts past
+  // ISSUE_AUTOMATION_START_BUDGET_MS: one never started is named in the log
+  // below, where one cut off mid-run would leave no trace.
+  const startedAt = Date.now();
+  const failures: unknown[] = [];
+  const notStarted: string[] = [];
+  await mapLimit(automations, AUTOMATION_CONCURRENCY, async (automation) => {
+    if (Date.now() - startedAt > ISSUE_AUTOMATION_START_BUDGET_MS) {
+      notStarted.push(automation.id);
+      return;
+    }
+    try {
+      await handleIssueAutomation(event, automation, deliveryId);
+    } catch (error) {
+      failures.push(error);
+    }
+  });
+  console.log(
+    `Successfully handled ${automations.length - notStarted.length - failures.length} issue automations (delivery ${deliveryId ?? "unknown"})`,
+  );
+  if (notStarted.length > 0) {
+    console.error(
+      "[github webhook] issue automations not started: past the waitUntil budget",
+      {
+        deliveryId: deliveryId ?? null,
+        eventName: `issues.${event.action}`,
+        repoFullName: event.repository.full_name,
+        issueNumber: event.issue.number,
+        automationIds: notStarted,
+      },
+    );
+  }
+  if (failures.length > 0) {
+    console.error(
+      `Error handling ${failures.length} issue automations (delivery ${deliveryId ?? "unknown"}): ${failures.map(errorText).join(", ")}`,
+    );
   }
 }
 
@@ -877,6 +929,7 @@ export async function handleSelfHealIssueReopened(
 async function handleIssueAutomation(
   event: IssueEvent,
   automation: Automation,
+  deliveryId: string | undefined,
 ): Promise<void> {
   const issueNumber = event.issue.number;
   const repoFullName = event.repository.full_name;
@@ -924,7 +977,7 @@ async function handleIssueAutomation(
   }
   // Self-heal fix loop (BULK-01, WH-01): only mark the ledger finding ready;
   // the dispatcher starts runs. Runs before any author API check so this path
-  // makes zero GitHub calls inside the webhook budget.
+  // makes zero GitHub calls.
   if (isAuditFixAction(automation.action)) {
     await markSelfHealFindingReady(event, automation);
     return;
@@ -962,7 +1015,7 @@ async function handleIssueAutomation(
       source: "automated",
     }).catch((error) => {
       console.error(
-        `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
+        `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName} (delivery ${deliveryId ?? "unknown"}):`,
         error,
       );
     });
@@ -1006,7 +1059,7 @@ async function handleIssueAutomation(
     source: "automated",
   }).catch((error) => {
     console.error(
-      `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName}:`,
+      `Error running automation ${automation.id} for issue #${issueNumber} in ${repoFullName} (delivery ${deliveryId ?? "unknown"}):`,
       error,
     );
   });

@@ -13,9 +13,12 @@ import {
   renderNoticeComment,
   renderPrComment,
   renderPromotionComment,
+  renderProviderAuditNotice,
   renderTrackerComment,
+  renderUnusableAuditNotice,
   type TicketAuditResult,
 } from "./merge-audit";
+import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
 import {
   type MergeAuditIntent,
   parseMergeAuditIntent,
@@ -56,7 +59,8 @@ import {
  *     existing audit comment;
  *   - a re-run that changes nothing leaves the existing audit comment alone,
  *     because it could only re-render it with LESS (the original stage move
- *     and linked-ticket actions are no longer observable).
+ *     and linked-ticket actions are no longer observable); it still replaces
+ *     a run-failure notice, or creates the comment when none exists (#474).
  */
 
 /** Dependants probed per ticket. Past this the ticket is an epic-style hub. */
@@ -71,10 +75,13 @@ export interface MergedPullRequest {
 }
 
 /**
- * `replace`     — create the bot's marker comment or update it in place;
- * `create-only` — create it, but leave an existing one untouched.
+ * `replace`        — create the bot's marker comment or update it in place;
+ * `create-only`    — create it, but leave an existing one untouched;
+ * `replace-notice` — create it, or update an existing one only when it is the
+ *                    generic "no usable result" notice (`isReplaceableAuditNotice`),
+ *                    never an audit an earlier turn posted (#441).
  */
-export type MarkerCommentMode = "replace" | "create-only";
+export type MarkerCommentMode = "replace" | "create-only" | "replace-notice";
 
 export type MarkerCommentResult = "created" | "updated" | "kept_existing";
 
@@ -432,6 +439,7 @@ export async function executeMergeAudit({
   prNumber,
   pr,
   terminalText,
+  providerUnavailable,
   config,
   tracker,
   comments,
@@ -441,6 +449,12 @@ export async function executeMergeAudit({
   pr: MergedPullRequest;
   /** The agent's final message — where the emitted intent lives. */
   terminalText: string;
+  /**
+   * #441: the provider refused the run. Consulted only when no usable intent
+   * parsed: the notice then names the provider cause and corrects a generic
+   * notice an earlier run left.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
   config: TrackerConfig | null;
   tracker: TrackerClient | null;
   comments: AuditCommentClient;
@@ -453,11 +467,12 @@ export async function executeMergeAudit({
   const postNotice = async <T extends MergeAuditOutcome>(
     notice: string,
     outcome: T,
+    mode: MarkerCommentMode = "create-only",
   ): Promise<T | { outcome: "skipped_existing_comment" }> => {
     const posted = await comments.upsertMarkerComment(
       marker,
       renderNoticeComment(prNumber, notice),
-      "create-only",
+      mode,
     );
     return posted === "kept_existing"
       ? { outcome: "skipped_existing_comment" }
@@ -491,10 +506,20 @@ export async function executeMergeAudit({
   const parsed = parseUsableIntent(terminalText, prNumber);
   if (!parsed.ok) {
     logger.warn("audit intent not usable", { reason: parsed.reason });
-    return await postNotice(
-      `The audit run for ${extraction.auditKeys.join(", ")} did not produce a usable result, so no ticket was changed. Check the acceptance criteria by hand.`,
-      { outcome: "degraded_comment", reason: parsed.reason },
-    );
+    if (providerUnavailable) {
+      return await postNotice(
+        renderProviderAuditNotice(extraction.auditKeys, providerUnavailable),
+        {
+          outcome: "degraded_comment",
+          reason: `provider_unavailable: ${providerUnavailable.kind}`,
+        },
+        "replace-notice",
+      );
+    }
+    return await postNotice(renderUnusableAuditNotice(extraction.auditKeys), {
+      outcome: "degraded_comment",
+      reason: parsed.reason,
+    });
   }
 
   const live = config.writes === "live";
@@ -530,15 +555,12 @@ export async function executeMergeAudit({
   const results = outcomes.map((outcome) => outcome.result);
 
   // Every ticket already carries this PR's record and nothing was left to
-  // move: an earlier run did the work. Re-rendering now would drop the stage
-  // move and linked-ticket actions that run reported. (Shadow mode leaves no
-  // record to detect, so a shadow re-run just re-renders the same comment.)
-  if (live && outcomes.every((outcome) => outcome.settled)) {
-    logger.info("merge audit already recorded", { prNumber });
-    return { outcome: "skipped_already_recorded", tickets: results.length };
-  }
-
-  await comments.upsertMarkerComment(
+  // move: an earlier run did the work. Re-rendering over that run's audit
+  // would drop the stage move and linked-ticket actions it reported, so only
+  // a run-failure notice (or no comment at all) is replaced. (Shadow mode
+  // leaves no record to detect, so a shadow re-run just re-renders.)
+  const settled = live && outcomes.every((outcome) => outcome.settled);
+  const posted = await comments.upsertMarkerComment(
     marker,
     renderPrComment({
       prNumber,
@@ -550,8 +572,12 @@ export async function executeMergeAudit({
         url: tracker.issueUrl(key),
       })),
     }),
-    "replace",
+    settled ? "replace-notice" : "replace",
   );
+  if (posted === "kept_existing") {
+    logger.info("merge audit already recorded", { prNumber });
+    return { outcome: "skipped_already_recorded", tickets: results.length };
+  }
   const summary = {
     tickets: results.length,
     audited: results.filter((result) => result.audit !== null).length,

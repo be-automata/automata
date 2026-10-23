@@ -6,11 +6,15 @@ const h = vi.hoisted(() => ({
   order: [] as string[],
   getStalledThreads: vi.fn(),
   selfHeal: vi.fn(),
+  purge: vi.fn(),
   due: vi.fn(async (): Promise<unknown[]> => []),
   runAutomation: vi.fn(),
   admit: vi.fn(),
   setHolder: vi.fn(),
   release: vi.fn(),
+  strandedSweep: vi.fn(),
+  stuckUsers: vi.fn(async (): Promise<string[]> => []),
+  drain: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -19,7 +23,7 @@ vi.mock("@terragon/shared/model/threads", () => ({
   stopStalledThreads: vi.fn(async () => {
     h.order.push("stop");
   }),
-  getUserIdsWithThreadsStuckInQueue: vi.fn(async () => []),
+  getUserIdsWithThreadsStuckInQueue: h.stuckUsers,
   getUserIdsWithThreadsReadyToProcess: vi.fn(async () => []),
   getScheduledThreadChatsDueToRun: vi.fn(async () => []),
 }));
@@ -38,7 +42,8 @@ vi.mock("@terragon/shared/model/self-heal-slot", () => ({
 }));
 vi.mock("@/agent/sandbox", () => ({ maybeHibernateSandboxById: vi.fn() }));
 vi.mock("@/server-lib/process-queued-thread", () => ({
-  maybeStartQueuedThreadChat: vi.fn(),
+  maybeStartQueuedThreadChat: h.drain,
+  retireStrandedQueuedThreads: h.strandedSweep,
 }));
 vi.mock("@/server-lib/review/review-sweep", () => ({
   runReviewSweep: vi.fn(async () => {
@@ -59,6 +64,9 @@ vi.mock("@terragon/shared/model/egress-events", () => ({
 }));
 vi.mock("@/server-lib/audit/self-heal-cron", () => ({
   runSelfHealCron: h.selfHeal,
+}));
+vi.mock("@/server-lib/knowledge/purge-sweep", () => ({
+  runKnowledgePurgeSweep: h.purge,
 }));
 
 /**
@@ -91,6 +99,10 @@ describe("runScheduledCron self-heal bulkhead", () => {
     h.selfHeal.mockImplementation(async (kind: string) => {
       h.order.push(`self-heal:${kind}`);
     });
+    h.purge.mockReset();
+    h.purge.mockImplementation(async () => {
+      h.order.push("knowledge-purge");
+    });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
@@ -106,10 +118,11 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-egress",
       "stop",
       "self-heal:hourly",
+      "knowledge-purge",
     ]);
   });
 
-  it("hourly: a throwing self-heal cron does not break the run", async () => {
+  it("hourly: a throwing self-heal cron does not break the run or skip the purge", async () => {
     h.selfHeal.mockRejectedValue(new Error("self-heal down"));
     await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
     expect(h.order).toEqual([
@@ -117,7 +130,20 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-hatchet",
       "prune-egress",
       "stop",
+      "knowledge-purge",
     ]);
+  });
+
+  it("hourly: a throwing knowledge purge does not reject the cron", async () => {
+    h.purge.mockRejectedValue(new Error("purge down"));
+    await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
+    expect(h.order.at(-1)).toBe("self-heal:hourly");
+  });
+
+  it("other patterns never run the knowledge purge", async () => {
+    await runScheduledCron("*/10 * * * *");
+    await runScheduledCron("*/1 * * * *");
+    expect(h.purge).not.toHaveBeenCalled();
   });
 
   it("hourly: a hanging self-heal cron cannot have delayed anything before it", async () => {
@@ -150,6 +176,33 @@ describe("runScheduledCron self-heal bulkhead", () => {
     await runScheduledCron("*/10 * * * *");
     expect(h.selfHeal).toHaveBeenCalledTimes(1);
     expect(h.selfHeal).toHaveBeenCalledWith("tick");
+  });
+
+  // #471: plain `queued` rows are outside every drain; the 10m tick retires
+  // the stranded ones first, and a failing sweep never skips the drain.
+  it("*/10: the stranded-queued sweep runs before the drain", async () => {
+    h.strandedSweep.mockReset();
+    h.strandedSweep.mockImplementation(async () => {
+      h.order.push("stranded-sweep");
+      return { retired: 0, failed: 0 };
+    });
+    h.stuckUsers.mockResolvedValueOnce(["u1"]);
+    h.drain.mockImplementation(async () => {
+      h.order.push("drain");
+    });
+    await runScheduledCron("*/10 * * * *");
+    expect(h.order).toEqual(["stranded-sweep", "drain", "self-heal:tick"]);
+  });
+
+  it("*/10: a throwing stranded-queued sweep does not skip the drain", async () => {
+    h.strandedSweep.mockReset();
+    h.strandedSweep.mockRejectedValue(new Error("db down"));
+    h.stuckUsers.mockResolvedValueOnce(["u1"]);
+    h.drain.mockImplementation(async () => {
+      h.order.push("drain");
+    });
+    await expect(runScheduledCron("*/10 * * * *")).resolves.toBeUndefined();
+    expect(h.order).toEqual(["drain", "self-heal:tick"]);
   });
 
   it("other patterns never run self-heal", async () => {

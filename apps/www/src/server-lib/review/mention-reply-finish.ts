@@ -8,7 +8,14 @@ import {
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
+import type { ReviewLogger } from "@terragon/review/state/review-github-client";
 import { effectiveShadow } from "@/lib/github-side-effects";
+import {
+  describeProviderUnavailable,
+  providerUnavailableOfChat,
+  providerUnavailableRetryWhen,
+  type ProviderUnavailable,
+} from "@/agent/msg/classify-provider-result";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { getPostHogServer } from "@/lib/posthog-server";
 import {
@@ -26,7 +33,11 @@ import { isBotAuthor, isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import { isMentionLaneStamp, MENTION_REPLY_KIND } from "./review-skill";
-import { buildTaggedFence } from "./tagged-fence";
+import {
+  buildTaggedFence,
+  parseTaggedJsonBlock,
+  type ParseTaggedJsonResult,
+} from "./tagged-fence";
 import {
   mentionReplyMarker,
   reviewReplyTargetId,
@@ -48,7 +59,8 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
  *     tolerance floor and the verify-before-block reader, BEFORE the reply,
  *     so a crash between the two is finished by a redelivered run (the reply
  *     marker below makes the whole effect idempotent);
- *   - no parseable block → one short notice reply, never silence.
+ *   - no parseable block → one short notice reply, never silence; a run the
+ *     provider refused (#441/#472) names that cause instead.
  * Every reply carries the hidden marker `<!-- automata:mention-reply
  * comment=<id> -->`; an App-authored comment already carrying it means this
  * mention was answered and nothing is posted again. Only the App's own
@@ -57,6 +69,17 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
 
 export const MENTION_REPLY_NOTICE =
   "I couldn't complete this; a human should take a look.";
+
+/**
+ * The reply for a run the provider refused (#472): the generic "couldn't
+ * complete" would read as the agent failing at the task. Built from the
+ * classification alone, so it never names the account (epic #440 decision 5).
+ */
+export function renderMentionProviderNotice(
+  provider: ProviderUnavailable,
+): string {
+  return `Nothing was changed: ${describeProviderUnavailable(provider)} Mention me again ${providerUnavailableRetryWhen(provider)}.`;
+}
 
 export { mentionReplyMarker };
 
@@ -72,12 +95,7 @@ const mentionReplySchema = z.object({
 
 export type MentionReply = z.infer<typeof mentionReplySchema>;
 
-export type ParseMentionReplyResult =
-  | { ok: true; value: MentionReply }
-  | { ok: false; reason: string };
-
-/** Untagged ```json fences, the fallback when the agent dropped the tag. */
-const PLAIN_JSON_FENCE = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
+export type ParseMentionReplyResult = ParseTaggedJsonResult<MentionReply>;
 
 /**
  * Parse the agent's terminal text. The LAST tagged `json mention-reply` block
@@ -85,39 +103,7 @@ const PLAIN_JSON_FENCE = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
  * `mention-reply` (an agent that forgot the tag still gets its reply posted).
  */
 export function parseMentionReply(text: string): ParseMentionReplyResult {
-  let payload: string | null = null;
-  const tagged = MENTION_REPLY_FENCE.extractLast(text);
-  if (tagged !== null) {
-    if (!tagged.ok) return { ok: false, reason: tagged.reason };
-    payload = tagged.payload;
-  } else {
-    for (const match of text.matchAll(PLAIN_JSON_FENCE)) {
-      const candidate = match[1]?.trim() ?? "";
-      if (candidate.includes(`"${MENTION_REPLY_KIND}"`)) payload = candidate;
-    }
-  }
-  if (payload === null) {
-    return { ok: false, reason: "no mention-reply block in agent output" };
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(payload);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `mention-reply JSON parse failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  const parsed = mentionReplySchema.safeParse(raw);
-  if (!parsed.success) {
-    return {
-      ok: false,
-      reason: `mention-reply schema validation failed: ${parsed.error.issues
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-        .join("; ")}`,
-    };
-  }
-  return { ok: true, value: parsed.data };
+  return parseTaggedJsonBlock(text, MENTION_REPLY_FENCE, mentionReplySchema);
 }
 
 /** The GitHub surface the writer needs, App-scoped. */
@@ -146,11 +132,7 @@ export type MentionReplyOutcome =
   | { outcome: "skipped_existing" }
   | { outcome: "post_failed"; failureReason: string };
 
-interface Logger {
-  info(message: string, meta?: Record<string, unknown>): void;
-  warn(message: string, meta?: Record<string, unknown>): void;
-  error(message: string, meta?: Record<string, unknown>): void;
-}
+type Logger = ReviewLogger;
 
 /** The reply as posted: the agent's text, the pushed commit, the marker. */
 export function renderMentionReply(
@@ -174,12 +156,18 @@ export async function executeMentionReply({
   stamp,
   terminalText,
   runReview,
+  providerUnavailable,
   logger,
 }: {
   github: MentionReplyGitHub;
   stamp: MentionLaneStamp;
   terminalText: string;
   runReview?: (reviewIntentText: string) => Promise<ReviewFromIntentOutcome>;
+  /**
+   * The run's provider classification (`provider-unavailable`). Consulted
+   * only when no reply parsed: a parsed reply is always posted as is.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
   logger?: Logger;
 }): Promise<MentionReplyOutcome> {
   const marker = mentionReplyMarker(stamp.commentId);
@@ -233,9 +221,12 @@ export async function executeMentionReply({
     }
   }
 
+  const provider = parsed.ok ? null : (providerUnavailable ?? null);
   const body = parsed.ok
     ? renderMentionReply(parsed.value, stamp.commentId)
-    : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
+    : provider
+      ? `${renderMentionProviderNotice(provider)}\n\n${marker}`
+      : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
   try {
     if (inThread) {
       await github.replyToReviewComment(
@@ -253,11 +244,14 @@ export async function executeMentionReply({
     return { outcome: "post_failed", failureReason };
   }
   if (!parsed.ok) {
+    const reason = provider
+      ? `provider_unavailable: ${provider.kind}`
+      : parsed.reason;
     logger?.error("mention-reply: no usable block — posted the notice", {
       ...meta,
-      reason: parsed.reason,
+      reason,
     });
-    return { outcome: "notice_posted", reason: parsed.reason };
+    return { outcome: "notice_posted", reason };
   }
   return {
     outcome: "posted",
@@ -373,6 +367,7 @@ export async function handleMentionReplyAtFinish({
               reviewIntentText,
             })
         : undefined,
+      providerUnavailable: providerUnavailableOfChat(threadChat),
       logger,
     });
     getPostHogServer().capture({

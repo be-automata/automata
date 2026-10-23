@@ -56,7 +56,7 @@ async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
 }
 
 describe("deploy/migrations on a fresh database", () => {
-  it("applies all six, records six rows, and a re-run is a no-op", async () => {
+  it("applies all ten, records ten rows, and a re-run is a no-op", async () => {
     const db = await freshDb();
     const c = await db.connect();
 
@@ -68,9 +68,14 @@ describe("deploy/migrations on a fresh database", () => {
       "2026-10-08-organization-environment",
       "2026-10-14-environment-org-unique",
       "2026-10-19-knowledge-plane",
+      "2026-10-22-queued-at",
+      "2026-10-22-review-rerun",
+      "2026-10-23-knowledge-org-controls",
+      "2026-10-24-knowledge-op-fingerprint-index",
+      "2026-10-25-knowledge-updated-at",
     ]);
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(6);
+    expect(ledger).toHaveLength(11);
     expect(ledger.every((row) => row.mode === "applied")).toBe(true);
     expect(ledger.every((row) => row.appliedBy === "test@0")).toBe(true);
 
@@ -89,10 +94,17 @@ describe("deploy/migrations on a fresh database", () => {
           WHERE indexname IN ('environment_org_user_repo_unique', 'environment_user_global_unique')`,
       ),
     ).toBe(2);
+    expect(
+      await scalar<number>(
+        c,
+        `SELECT count(*)::int FROM information_schema.columns
+          WHERE table_name = 'organization_review_settings' AND column_name = 'knowledge_engine'`,
+      ),
+    ).toBe(1);
 
     const second = await applyDir(c, REPO_MIGRATIONS);
     expect(second.applied).toEqual([]);
-    expect(await readLedger(c)).toHaveLength(6);
+    expect(await readLedger(c)).toHaveLength(11);
   });
 
   it("refuses the baseline on a database that already has tables", async () => {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { buildRemoteDaemonMessage } from "@/server-lib/remote-daemon-message";
 
@@ -22,7 +23,9 @@ import { buildRemoteDaemonMessage } from "@/server-lib/remote-daemon-message";
  * H2: the response body carries the prompt (repo content + user text) — SENSITIVE.
  * Never log the body; logs record ids/org only.
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: NextRequest,
+): Promise<NextResponse> {
   const ctx = await getDaemonTokenContext(request);
   if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -114,4 +117,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // H2: do NOT log `message` — it contains the prompt.
   return NextResponse.json(message);
-}
+});

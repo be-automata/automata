@@ -34,6 +34,31 @@ export interface WwwClientOpts {
   runExternalId?: string;
 }
 
+/**
+ * How many consecutive 401/403s from a daemon-token endpoint it takes to believe
+ * the token is really dead, and the pause between asks. www answers 401 whenever
+ * better-auth's verifyApiKey says `valid: false`, and verifyApiKey also says that
+ * when its own database read THROWS (any non-APIError becomes INVALID_API_KEY).
+ * Prod 2026-10-21/22: runs died on a single 401 while the same token was accepted
+ * seconds before and after it. A real revocation stays revoked, so confirming it
+ * costs a few seconds; believing a blip costs the whole run.
+ */
+export const AUTH_ERROR_CONFIRM_ATTEMPTS = 3;
+export const AUTH_ERROR_RETRY_MS = 2000;
+
+/**
+ * Statuses www returns before a daemon handler runs: 401/403 from token
+ * verification, and 503 when verification itself could not reach the
+ * database. Re-sending a request refused this way cannot double-apply it.
+ */
+function isRefusedBeforeHandler(status: number): boolean {
+  return status === 401 || status === 403 || status === 503;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function endpoint(baseUrl: string, pathname: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathname}`;
 }
@@ -78,16 +103,30 @@ export class NextMessageHttpError extends Error {
 export async function pullNextMessage(
   opts: WwwClientOpts,
   signal?: AbortSignal,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<PulledDaemonMessage | null> {
-  const res = await fetch(endpoint(opts.baseUrl, "/api/daemon/next-message"), {
-    method: "POST",
-    headers: headers(opts),
-    body: JSON.stringify({
-      threadId: opts.threadId,
-      threadChatId: opts.threadChatId,
-    }),
-    signal,
-  });
+  let res: Response;
+  for (let attempt = 1; ; attempt++) {
+    res = await fetch(endpoint(opts.baseUrl, "/api/daemon/next-message"), {
+      method: "POST",
+      headers: headers(opts),
+      body: JSON.stringify({
+        threadId: opts.threadId,
+        threadChatId: opts.threadChatId,
+      }),
+      signal,
+    });
+    // Refused before the handler claims anything, so asking again is safe.
+    // See AUTH_ERROR_CONFIRM_ATTEMPTS.
+    if (
+      !isRefusedBeforeHandler(res.status) ||
+      attempt >= AUTH_ERROR_CONFIRM_ATTEMPTS ||
+      signal?.aborted
+    ) {
+      break;
+    }
+    await sleep(AUTH_ERROR_RETRY_MS);
+  }
   if (res.status === 204) {
     return null;
   }
@@ -279,7 +318,16 @@ export async function postRunFailed(
  * /api/daemon/egress-event body schema (#66 §3.3): `destinationPort` and
  * `policyLevel` optional, `source` fixed to "worker" for this plane.
  */
-export type RunTerminalResult = "applied" | "noop" | "rejected" | "error";
+/**
+ * `refused`: any other 4xx (a revoked token, a body www rejects) — final, never
+ * worth a retry; `error`: a transport failure, a 5xx, a 408 or a 429.
+ */
+export type RunTerminalResult =
+  | "applied"
+  | "noop"
+  | "rejected"
+  | "refused"
+  | "error";
 
 /**
  * POST one typed terminal for THIS run (#125 C1/C4) — the sibling of
@@ -294,8 +342,21 @@ export async function postRunTerminal(
     runExternalId,
     cause,
     policy,
-  }: { runExternalId: string; cause: TerminalCause; policy?: string },
+    info,
+  }: {
+    runExternalId: string;
+    cause: TerminalCause;
+    policy?: string;
+    /** #437: worker-authored text shown under the error (≤ 300 chars, www-enforced). */
+    info?: string;
+  },
+  /** #437: a FRESH signal for teardown posts — the run's own is already aborted there. */
+  signal?: AbortSignal,
 ): Promise<RunTerminalResult> {
+  const detail = {
+    ...(policy ? { policy } : {}),
+    ...(info ? { info } : {}),
+  };
   let res: Response;
   try {
     res = await fetch(endpoint(opts.baseUrl, "/api/daemon/run-terminal"), {
@@ -306,8 +367,9 @@ export async function postRunTerminal(
         threadChatId: opts.threadChatId,
         runExternalId,
         cause,
-        ...(policy ? { detail: { policy } } : {}),
+        ...(Object.keys(detail).length > 0 ? { detail } : {}),
       }),
+      ...(signal ? { signal } : {}),
     });
   } catch (error) {
     console.error("[agent-run] postRunTerminal request failed (swallowed)", {
@@ -328,7 +390,7 @@ export async function postRunTerminal(
       cause,
       status: res.status,
     });
-    return "error";
+    return isRetryableStatus(res.status) ? "error" : "refused";
   }
   const body = (await res.json().catch(() => ({}))) as { applied?: boolean };
   return body.applied ? "applied" : "noop";
@@ -397,17 +459,29 @@ export interface EgressEventWire {
 export async function postEgressEvents(
   opts: WwwClientOpts,
   events: EgressEventWire[],
+  sleep: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<void> {
   if (events.length === 0) {
     return;
   }
   let res: Response;
   try {
-    res = await fetch(endpoint(opts.baseUrl, "/api/daemon/egress-event"), {
-      method: "POST",
-      headers: headers(opts),
-      body: JSON.stringify({ events }),
-    });
+    for (let attempt = 1; ; attempt++) {
+      res = await fetch(endpoint(opts.baseUrl, "/api/daemon/egress-event"), {
+        method: "POST",
+        headers: headers(opts),
+        body: JSON.stringify({ events }),
+      });
+      // A refusal at token verification wrote nothing, so the batch can be
+      // re-sent without duplicating audit rows (AUTH_ERROR_CONFIRM_ATTEMPTS).
+      if (
+        !isRefusedBeforeHandler(res.status) ||
+        attempt >= AUTH_ERROR_CONFIRM_ATTEMPTS
+      ) {
+        break;
+      }
+      await sleep(AUTH_ERROR_RETRY_MS);
+    }
   } catch (error) {
     console.error("[agent-run] postEgressEvents request failed (swallowed)", {
       threadId: opts.threadId,
@@ -586,6 +660,7 @@ export async function pollUntilTerminal(
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
   let agentSeenDead = false;
+  let failedPollStreak = 0;
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -614,9 +689,29 @@ export async function pollUntilTerminal(
       if (ctx.cancelled || ctx.signal?.aborted) {
         return { outcome: "cancelled", finalStatus: lastStatus };
       }
+      // A 5xx or a dropped connection is the same blip a 401 can be: the
+      // status read is idempotent, so confirm it before failing the run.
+      failedPollStreak++;
+      if (failedPollStreak < AUTH_ERROR_CONFIRM_ATTEMPTS) {
+        ctx.log(
+          `thread-status: ${error instanceof Error ? error.message : String(error)} (${failedPollStreak}/${AUTH_ERROR_CONFIRM_ATTEMPTS}) — confirming before failing the run`,
+        );
+        await sleep(AUTH_ERROR_RETRY_MS);
+        continue;
+      }
       throw error;
     }
     if (poll.kind === "auth-error") {
+      // Confirm before believing it: one 401 can be a verify-time database
+      // error on www's side, not a revocation (AUTH_ERROR_CONFIRM_ATTEMPTS).
+      failedPollStreak++;
+      if (failedPollStreak < AUTH_ERROR_CONFIRM_ATTEMPTS) {
+        ctx.log(
+          `thread-status: HTTP ${poll.httpStatus} (${failedPollStreak}/${AUTH_ERROR_CONFIRM_ATTEMPTS}) — confirming before failing the run`,
+        );
+        await sleep(AUTH_ERROR_RETRY_MS);
+        continue;
+      }
       // Under revoke-on-terminal-READ (ADR-003), www revokes the daemon token only
       // AFTER serving terminal=true — which this loop returns on below (the poll.terminal
       // branch). So a 401/403 here, even after a prior successful poll, means the token
@@ -636,6 +731,7 @@ export async function pollUntilTerminal(
       );
     }
 
+    failedPollStreak = 0;
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);

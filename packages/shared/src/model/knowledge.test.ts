@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { createDb, type DB } from "../db";
@@ -6,7 +6,11 @@ import * as schema from "../db/schema";
 import {
   advanceKnowledgeCursor,
   decideKnowledgeOp,
+  DEFAULT_KNOWLEDGE_CAP_MICRO_USD,
+  effectiveKnowledgeBudgetMicroUsd,
   getKnowledgeCursor,
+  isKnowledgeEnabled,
+  knowledgeGateReason,
   knowledgeWindowStart,
   observeKnowledgeHead,
   reserveKnowledgeBudget,
@@ -78,7 +82,172 @@ describe("knowledge plane persistence", () => {
         .where(eq(schema.knowledgeOp.id, id))
     )[0]?.state;
 
+  async function setControls(
+    organizationId: string,
+    c: {
+      engine: boolean | null;
+      budget?: number | null;
+      offboardedAt?: Date | null;
+    },
+  ) {
+    const values = {
+      organizationId,
+      knowledgeEngine: c.engine,
+      knowledgeBudgetMicroUsd: c.budget ?? null,
+      knowledgeOffboardedAt: c.offboardedAt ?? null,
+    };
+    await db
+      .insert(schema.organizationReviewSettings)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [schema.organizationReviewSettings.organizationId],
+        set: values,
+      });
+  }
+
+  const windowsOf = (organizationId: string) =>
+    db
+      .select()
+      .from(schema.knowledgeUsageWindow)
+      .where(eq(schema.knowledgeUsageWindow.organizationId, organizationId));
+
+  describe("resolvers", () => {
+    const row = (
+      knowledgeEngine: boolean | null,
+      knowledgeOffboardedAt: Date | null = null,
+    ) => ({
+      knowledgeEngine,
+      knowledgeOffboardedAt,
+      knowledgeBudgetMicroUsd: null,
+    });
+
+    it("resolves OFF for missing, null and false; ON for true; offboarded wins", () => {
+      expect(knowledgeGateReason(undefined)).toBe("engine_off");
+      expect(knowledgeGateReason(row(null))).toBe("engine_off");
+      expect(knowledgeGateReason(row(false))).toBe("engine_off");
+      expect(knowledgeGateReason(row(true))).toBeNull();
+      expect(knowledgeGateReason(row(true, NOW))).toBe("offboarded");
+      expect(isKnowledgeEnabled(row(true))).toBe(true);
+      expect(isKnowledgeEnabled(row(true, NOW))).toBe(false);
+    });
+
+    it("resolves the effective budget", () => {
+      expect(effectiveKnowledgeBudgetMicroUsd(undefined)).toBe(
+        DEFAULT_KNOWLEDGE_CAP_MICRO_USD,
+      );
+      expect(
+        effectiveKnowledgeBudgetMicroUsd({ knowledgeBudgetMicroUsd: null }),
+      ).toBe(DEFAULT_KNOWLEDGE_CAP_MICRO_USD);
+      expect(
+        effectiveKnowledgeBudgetMicroUsd({
+          knowledgeBudgetMicroUsd: 5_000_000,
+        }),
+      ).toBe(5_000_000);
+      expect(
+        effectiveKnowledgeBudgetMicroUsd({ knowledgeBudgetMicroUsd: 0 }),
+      ).toBe(0);
+    });
+  });
+
   describe("budget reservation", () => {
+    beforeEach(async () => {
+      await setControls(orgA, { engine: true, budget: 1_000 });
+      await setControls(orgB, { engine: true, budget: 1_000 });
+    });
+
+    it("refuses with engine_off before creating any window", async () => {
+      const org = await createTestOrg({ db, name: "Initech" });
+      const r = await reserveKnowledgeBudget({
+        db,
+        organizationId: org,
+        estimateMicroUsd: 1,
+        now: NOW,
+      });
+      expect(r).toEqual({ ok: false, reason: "engine_off" });
+      expect(await windowsOf(org)).toHaveLength(0);
+    });
+
+    it("refuses an offboarded org even with the engine true", async () => {
+      await setControls(orgA, { engine: true, offboardedAt: NOW });
+      const r = await reserveKnowledgeBudget({
+        db,
+        organizationId: orgA,
+        estimateMicroUsd: 1,
+        now: NOW,
+      });
+      expect(r).toEqual({ ok: false, reason: "offboarded" });
+      expect(await windowsOf(orgA)).toHaveLength(0);
+    });
+
+    it("takes the window cap from the org budget, or the platform default", async () => {
+      await reserveKnowledgeBudget({
+        db,
+        organizationId: orgA,
+        estimateMicroUsd: 1,
+        now: NOW,
+      });
+      expect((await windowsOf(orgA))[0]?.capMicroUsd).toBe(1_000);
+      await setControls(orgB, { engine: true, budget: null });
+      await reserveKnowledgeBudget({
+        db,
+        organizationId: orgB,
+        estimateMicroUsd: 1,
+        now: NOW,
+      });
+      expect((await windowsOf(orgB))[0]?.capMicroUsd).toBe(
+        DEFAULT_KNOWLEDGE_CAP_MICRO_USD,
+      );
+    });
+
+    it("alerts exactly one of 5 concurrent denials and logs ids and integers only", async () => {
+      const log = { error: vi.fn() };
+      const reserve = () =>
+        reserveKnowledgeBudget({
+          db,
+          organizationId: orgA,
+          estimateMicroUsd: 5_000,
+          now: NOW,
+          log,
+        });
+      const results = await Promise.all([1, 2, 3, 4, 5].map(reserve));
+      expect(
+        results.filter((r) => !r.ok && "alerted" in r && r.alerted),
+      ).toHaveLength(1);
+      expect((await windowsOf(orgA))[0]?.capAlertedAt).not.toBeNull();
+      expect(log.error).toHaveBeenCalledTimes(1);
+      const [tag, payload] = log.error.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(tag).toBe("[knowledge:budget-cap]");
+      for (const v of Object.values(payload))
+        expect(["string", "number"]).toContain(typeof v);
+      const sixth = await reserve();
+      expect(sixth).toMatchObject({ ok: false, alerted: false });
+      expect(log.error).toHaveBeenCalledTimes(1);
+    });
+
+    it("still settles after the engine is turned off", async () => {
+      const r = await reserveKnowledgeBudget({
+        db,
+        organizationId: orgA,
+        estimateMicroUsd: 600,
+        now: NOW,
+      });
+      if (!r.ok) throw new Error("expected a reservation");
+      await setControls(orgA, { engine: false, budget: 1_000 });
+      await settleKnowledgeBudget({
+        db,
+        organizationId: orgA,
+        windowStart: r.windowStart,
+        reservedMicroUsd: r.reservedMicroUsd,
+        spentMicroUsd: 100,
+      });
+      const w = (await windowsOf(orgA))[0];
+      expect(w?.reservedMicroUsd).toBe(0);
+      expect(w?.spentMicroUsd).toBe(100);
+    });
+
     it("keys the window on the UTC calendar month", () => {
       expect(knowledgeWindowStart(new Date("2026-10-31T23:59:59Z"))).toEqual(
         new Date("2026-10-01T00:00:00Z"),
@@ -91,20 +260,19 @@ describe("knowledge plane persistence", () => {
         organizationId: orgA,
         estimateMicroUsd: 600,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       const second = await reserveKnowledgeBudget({
         db,
         organizationId: orgA,
         estimateMicroUsd: 600,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       expect(first.ok).toBe(true);
       expect(second).toEqual({
         ok: false,
         reason: "cap_exceeded",
         windowStart: knowledgeWindowStart(NOW),
+        alerted: true,
       });
     });
 
@@ -115,7 +283,6 @@ describe("knowledge plane persistence", () => {
           organizationId: orgA,
           estimateMicroUsd: 700,
           now: NOW,
-          defaultCapMicroUsd: 1_000,
         });
       const results = await Promise.all([reserve(), reserve(), reserve()]);
       expect(results.filter((r) => r.ok)).toHaveLength(1);
@@ -132,7 +299,6 @@ describe("knowledge plane persistence", () => {
         organizationId: orgA,
         estimateMicroUsd: 900,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       if (!r.ok) throw new Error("expected a reservation");
       await settleKnowledgeBudget({
@@ -153,7 +319,6 @@ describe("knowledge plane persistence", () => {
         organizationId: orgA,
         estimateMicroUsd: 750,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       expect(next.ok).toBe(true);
     });
@@ -164,14 +329,12 @@ describe("knowledge plane persistence", () => {
         organizationId: orgA,
         estimateMicroUsd: 1_000,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       const b = await reserveKnowledgeBudget({
         db,
         organizationId: orgB,
         estimateMicroUsd: 1_000,
         now: NOW,
-        defaultCapMicroUsd: 1_000,
       });
       expect(b.ok).toBe(true);
     });

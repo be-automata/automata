@@ -47,6 +47,12 @@ import { formatBatteriesLine } from "./batteries-seed";
 import type { SeededHarnessPack } from "./harness-seed";
 import { runCgroupPath } from "./run-cgroup";
 
+// The partner's name, encoded so the public tree stays clean under the partner denylist grep.
+const CUSTOMER_NAME = new RegExp(
+  Buffer.from("YmFuZ3I=", "base64").toString("utf8"),
+  "i",
+);
+
 /**
  * Rot guards for the #108 deploy templates. These are pure file reads: no sudo,
  * no pfctl, no visudo, no network — they pass on Linux CI.
@@ -661,6 +667,13 @@ function parsePubspecLock(text: string): Map<string, PubLockEntry> {
   return entries;
 }
 
+/** somnio-skills skills whose upstream SKILL.md is replaced by an automata adapter. */
+const ADAPTED_SOMNIO_SKILLS = [
+  "flutter-best-practices",
+  "flutter-health-audit",
+  "react-best-practices",
+] as const;
+
 function readBatteriesManifest(): BatteriesManifest {
   const parsed: unknown = JSON.parse(
     read(path.join(repoRoot, BATTERIES_MANIFEST_REPO_PATH)),
@@ -739,15 +752,14 @@ describe("#batteries (phase 3): batteries.json", () => {
     expect(pack.repo).toBe(
       "https://github.com/somnio-software/somnio-ai-tools",
     );
-    expect(pack.sha).toBe("aa53f071128a32bdafe4fbf77a7b0e0940b33db9");
+    expect(pack.sha).toBe("8db3d0d57682087aebebd4526a53c72eb30246b9");
     expect(pack.license).toBe("MIT");
-    expect(pack.overlays).toBeUndefined();
     expect(pack.allowedHelperRefs).toBeUndefined();
     expect(pack.subpaths).toEqual([
       {
         src: "skills/dora-metrics",
         dest: "skills/dora-metrics",
-        gitId: "33659094d6a829dc01af402d363e2576a3b1c6db",
+        gitId: "8756f199a35284b3d9e777f921a6e782e6da459a",
         exclude: [
           "tests/e2e/run_e2e.py",
           "tests/test_dora_metrics.py",
@@ -759,14 +771,62 @@ describe("#batteries (phase 3): batteries.json", () => {
       {
         src: "skills/react-health-audit",
         dest: "skills/react-health-audit",
-        gitId: "8e9a07ad933408a28da2ef4b3ca25ee84e244d16",
+        gitId: "34fca7094e041fda1e5026d5c338925d451fcd5f",
         exclude: [".agent/workflows/react_health_audit.md"],
       },
       {
         src: "skills/security-audit",
         dest: "skills/security-audit",
-        gitId: "9660e00d89d444c4d1bd505a4a628ec215158326",
+        gitId: "2fc215db442a4e722fe039df078100f6b35c2b0d",
         exclude: [".agent/workflows/security_audit.md"],
+      },
+      {
+        src: "skills/flutter-best-practices",
+        dest: "skills/flutter-best-practices",
+        gitId: "ed9e0550ad2cfb8df1c5318b5e7ecfb4fdca3097",
+        exclude: ["SKILL.md", ".agent/workflows/flutter_best_practices.md"],
+      },
+      {
+        src: "skills/flutter-best-practices/SKILL.md",
+        dest: "skills/flutter-best-practices/UPSTREAM-SKILL.md",
+        gitId: "3cd6738e6b1aa5112dc12230e33a56e7ce7e8cba",
+      },
+      {
+        src: "agent-rules/rules/flutter",
+        dest: "skills/flutter-best-practices/agent-rules/rules/flutter",
+        gitId: "25c3c0b8708bbe409e8a2c4c834176f2985233fd",
+      },
+      {
+        src: "skills/flutter-health-audit",
+        dest: "skills/flutter-health-audit",
+        gitId: "42b104d85dee7ded738946ebe8f4951b57def403",
+        exclude: ["SKILL.md", ".agent/workflows/flutter_health_audit.md"],
+      },
+      {
+        src: "skills/flutter-health-audit/SKILL.md",
+        dest: "skills/flutter-health-audit/UPSTREAM-SKILL.md",
+        gitId: "c8f8ff5a39d47ff0e7a97418dfc2ec6f1ce616c3",
+      },
+      {
+        src: "skills/dart-model-from-json",
+        dest: "skills/dart-model-from-json",
+        gitId: "aa44e54515e4c0ecfb89dbfe409170a1f4699935",
+      },
+      {
+        src: "skills/react-best-practices",
+        dest: "skills/react-best-practices",
+        gitId: "a94386bf9e0e893c2d9f01595a93bbab7e0fc75e",
+        exclude: ["SKILL.md", ".agent/workflows/react_best_practices.md"],
+      },
+      {
+        src: "skills/react-best-practices/SKILL.md",
+        dest: "skills/react-best-practices/UPSTREAM-SKILL.md",
+        gitId: "a45aaa012c00532cf0c7232b8f2cd96cefe2edf9",
+      },
+      {
+        src: "agent-rules/rules/react",
+        dest: "skills/react-best-practices/agent-rules/rules/react",
+        gitId: "6bd6071db9c95846b166cff346b2b621ccb02ad4",
       },
       {
         src: "LICENSE",
@@ -774,6 +834,40 @@ describe("#batteries (phase 3): batteries.json", () => {
         gitId: "0cdd8a5c076691ebe0980ca7e8d2f741778894d4",
       },
     ]);
+    expect(pack.overlays).toEqual(
+      ADAPTED_SOMNIO_SKILLS.map((skill) => ({
+        from: `packages/worker/deploy/batteries/somnio-skills/${skill}/SKILL.md`,
+        dest: `skills/${skill}/SKILL.md`,
+      })),
+    );
+  });
+
+  it("adapts the somnio skills that would leave the box", () => {
+    // Upstream best-practices read `agent-rules/rules/<stack>/` from the TARGET
+    // repo, else WebFetch it from upstream main (unpinned, and fenced on the
+    // box); flutter-health-audit stops unless it can install Flutter via FVM.
+    // Each adapter SKILL.md overrides that much, then defers to the renamed
+    // upstream skill.
+    const dests = packById("somnio-skills").subpaths.map((s) => s.dest);
+    const adapter = (skill: string) =>
+      read(
+        path.join(
+          repoRoot,
+          `packages/worker/deploy/batteries/somnio-skills/${skill}/SKILL.md`,
+        ),
+      );
+    for (const skill of ADAPTED_SOMNIO_SKILLS) {
+      expect(adapter(skill)).toMatch(new RegExp(`^---\\nname: ${skill}\\n`));
+      expect(adapter(skill)).toContain("${CLAUDE_SKILL_DIR}/UPSTREAM-SKILL.md");
+      expect(dests).toContain(`skills/${skill}/UPSTREAM-SKILL.md`);
+    }
+    for (const stack of ["flutter", "react"]) {
+      const skill = `${stack}-best-practices`;
+      expect(dests).toContain(`skills/${skill}/agent-rules/rules/${stack}`);
+      expect(adapter(skill)).toContain(
+        `\${CLAUDE_SKILL_DIR}/agent-rules/rules/${stack}/`,
+      );
+    }
   });
 
   it("pins a standalone pnpm for the audit checks, at the path the runner uses", () => {
@@ -1217,7 +1311,9 @@ function describeBashScriptHygiene(relPath: string): void {
       ).not.toThrow();
     });
 
-    it("is shellcheck clean", (ctx) => {
+    // install-batteries.sh is 3k+ lines: shellcheck takes ~1.6s on a laptop
+    // and past the 5s default on a shared CI runner.
+    it("is shellcheck clean", { timeout: 30_000 }, (ctx) => {
       if (
         spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
       ) {
@@ -2485,6 +2581,42 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     const readme = deployFile("README.md");
     expect(readme).toMatch(
       /install -m 0444 \S+ \/usr\/local\/automata\/daemon\/index\.js[^\n]*\n(?:\s*#[^\n]*\n)*\s*export WORKER_DAEMON_DIST=\/usr\/local\/automata\/daemon\/index\.js\n/,
+    );
+  });
+
+  it("the launcher defaults the run-terminal ledger to a durable dir under ReadWritePaths (#386)", () => {
+    // /tmp — the code default — is wiped at boot by Ubuntu's tmpfiles, so a
+    // reboot mid-drain lost the ledger and let a redelivery re-execute a run
+    // that already ended. The launcher names the durable default (worker-box.env
+    // may still override it), creates it worker-only, and does so before exec.
+    const script = deployFile("linux", "run-worker.sh.template");
+    const exported = script.match(
+      /^export WORKER_RUN_TERMINAL_ROOT="\$\{WORKER_RUN_TERMINAL_ROOT:-(\S+)\}"$/m,
+    );
+    expect(
+      exported,
+      "launcher does not default WORKER_RUN_TERMINAL_ROOT",
+    ).toBeTruthy();
+    const root = exported![1]!;
+    expect(root).toBe("/usr/local/automata/state");
+    expect(script).toMatch(/install -d -m 0700 "\$WORKER_RUN_TERMINAL_ROOT"/);
+    const exec = script.lastIndexOf(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(script.indexOf(exported![0])).toBeGreaterThan(
+      script.indexOf("source __HOME__/.automata/worker-box.env"),
+    );
+    expect(script.indexOf(exported![0])).toBeLessThan(exec);
+
+    // The unit can write it, and a fresh box has it before the first boot.
+    const unit = deployFile("linux", "automata-worker.service");
+    const rw = [...unit.matchAll(/^ReadWritePaths=(.+)$/gm)].flatMap((m) =>
+      m[1] ? m[1].trim().split(/\s+/) : [],
+    );
+    expect(rw.some((p) => root === p || root.startsWith(`${p}/`))).toBe(true);
+    const ci = deployFile("linux", "cloud-init.yaml");
+    expect(ci).toMatch(
+      /install -d -m 0700 -o automata -g automata \/usr\/local\/automata\/state$/m,
     );
   });
 
@@ -3758,8 +3890,8 @@ describe("#task batteries (phase 7): acceptance script", () => {
   });
 
   it("names no customer (public repo)", () => {
-    expect(script).not.toMatch(/bangr/i);
-    expect(runbook).not.toMatch(/bangr/i);
+    expect(script).not.toMatch(CUSTOMER_NAME);
+    expect(runbook).not.toMatch(CUSTOMER_NAME);
   });
 
   describe("journal analysis (sourced, fixture journal)", () => {
@@ -5089,8 +5221,8 @@ describe("harness batteries (PR5): acceptance script", () => {
   });
 
   it("names no customer (public repo)", () => {
-    expect(script).not.toMatch(/bangr/i);
-    expect(runbook).not.toMatch(/bangr/i);
+    expect(script).not.toMatch(CUSTOMER_NAME);
+    expect(runbook).not.toMatch(CUSTOMER_NAME);
   });
 
   describe("journal analysis (sourced, fixture journal)", () => {

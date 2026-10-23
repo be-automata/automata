@@ -28,6 +28,8 @@ import {
   type NoVerdictCause,
   type ReviewWriterClient,
 } from "./review-notice";
+import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
+import type { RerunPlan, RerunPlanner, RunFailure } from "./review-rerun";
 
 /**
  * The control-plane single writer for a review thread's effect (ADR-036 phase-2).
@@ -123,6 +125,17 @@ export type ReviewFromIntentOutcome =
       reason: string;
       workFailed: true;
     }
+  | {
+      /**
+       * #107: the run failed before it produced a verdict and an automatic
+       * re-run of this commit owns the outcome, so no notice is posted now.
+       * Still a failed run: telemetry is how an operator counts them.
+       */
+      outcome: "deferred_to_rerun";
+      attempt: number;
+      reason: string;
+      workFailed: true;
+    }
   | { outcome: "post_failed"; failureReason: string; workFailed: true };
 
 export interface ExecuteReviewFromIntentOpts {
@@ -183,6 +196,32 @@ export interface ExecuteReviewFromIntentOpts {
    */
   prAuthoredByBot?: boolean;
   /**
+   * The run's provider classification (#441), from the thread chat's
+   * `provider-unavailable` error. Consulted ONLY when no intent parsed: the
+   * notice then names the provider cause instead of `unparseable`. Absent /
+   * null = today's notice.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
+  /**
+   * #107: the run FAILED for an infra reason (`classifyRunFailure`). Consulted
+   * ONLY when no intent parsed and no provider cause applies: the notice then
+   * names the run's own error instead of "no JSON intent block", and
+   * `planRerun` may defer it to an automatic re-run. Absent / null = today.
+   */
+  runFailure?: RunFailure | null;
+  /**
+   * #107: the review thread this run is. Rendered on the no-verdict notice so
+   * a reader can join it to the worker logs without forensics. Absent = no
+   * Run line.
+   */
+  threadId?: string;
+  /**
+   * #107: schedules (or reports the spent budget of) the automatic re-run of
+   * this commit. Called only for a `runFailure` whose notice could speak for
+   * live HEAD. A throw is treated as "no re-run": the notice posts as before.
+   */
+  planRerun?: RerunPlanner;
+  /**
    * verify-before-block's reader: a file at a commit (the GitHub contents API
    * with the App token). When set, every finding that blocks under the floor
    * policy must reproduce its quote at `intent.commit` or it is de-fanged
@@ -220,6 +259,15 @@ export async function executeReviewFromIntent(
     preferTaggedIntent: opts.preferTaggedIntent,
   });
   if (!parsed.ok) {
+    // #441: a run the provider refused has no verdict BECAUSE of the
+    // provider; say so instead of "no JSON intent block found".
+    if (parsed.source !== "agent" && opts.providerUnavailable) {
+      return await reportNoVerdict(opts, {
+        cause: "provider_unavailable",
+        reason: parsed.reason,
+        provider: opts.providerUnavailable,
+      });
+    }
     return await reportNoVerdict(opts, {
       cause: parsed.source === "agent" ? "agent_unable" : "unparseable",
       reason: parsed.reason,
@@ -521,11 +569,16 @@ function isBareCommentOnReadyPr(
  */
 async function reportNoVerdict(
   opts: ExecuteReviewFromIntentOpts,
-  noVerdict: { cause: NoVerdictCause; reason: string; commit?: string },
+  noVerdict: {
+    cause: NoVerdictCause;
+    reason: string;
+    commit?: string;
+    provider?: ProviderUnavailable;
+  },
 ): Promise<ReviewFromIntentOutcome> {
   const { github, repoFullName, prNumber, botLogin, currentHeadSha, logger } =
     opts;
-  const { cause, reason } = noVerdict;
+  let { cause, reason } = noVerdict;
 
   // A NOTICE IS A CLAIM ABOUT LIVE HEAD: "this commit has no verdict". Three
   // cases make that claim false, and in ALL of them the run's silence is
@@ -568,6 +621,37 @@ async function reportNoVerdict(
     };
   }
 
+  // #107: a run that FAILED (infra) before producing anything readable gets
+  // bounded automatic re-runs of this commit before the PR hears about it.
+  // Only `unparseable` qualifies: an agent that answered `unable_to_review`
+  // or left a bare note spoke, and a provider refusal keeps its own notice.
+  let reruns: number | undefined;
+  if (cause === "unparseable" && opts.runFailure) {
+    const plan = await planRerunSafely(opts);
+    if (plan?.defer) {
+      logger?.warn(
+        "review-from-intent: run failed before a verdict — an automatic re-run owns this commit; notice deferred",
+        {
+          repoFullName,
+          prNumber,
+          currentHeadSha,
+          attempt: plan.attempt,
+          decision: plan.decision,
+          runError: opts.runFailure.detail,
+        },
+      );
+      return {
+        outcome: "deferred_to_rerun",
+        attempt: plan.attempt,
+        reason: opts.runFailure.detail ?? reason,
+        workFailed: true,
+      };
+    }
+    cause = "run_failed";
+    reason = opts.runFailure.detail ?? "";
+    reruns = plan?.attempts;
+  }
+
   const published = await publishReviewNotice({
     github,
     repoFullName,
@@ -576,6 +660,9 @@ async function reportNoVerdict(
     sha: currentHeadSha,
     cause,
     reason,
+    provider: noVerdict.provider,
+    reruns,
+    threadId: opts.threadId,
     logger,
   });
   if (published.result === "duplicate_at_commit") {
@@ -608,11 +695,33 @@ async function reportNoVerdict(
     });
   } else {
     logger?.error(
-      "review-from-intent: NO VERDICT — posted a notice in the PR conversation",
+      published.result === "updated"
+        ? "review-from-intent: NO VERDICT — corrected the notice at this commit in place"
+        : "review-from-intent: NO VERDICT — posted a notice in the PR conversation",
       { repoFullName, prNumber, cause, reason },
     );
   }
   return { outcome: "degraded_comment", cause, reason, workFailed: true };
+}
+
+/** The re-run planner, fail-open: any error means "no re-run, post the notice". */
+async function planRerunSafely(
+  opts: ExecuteReviewFromIntentOpts,
+): Promise<RerunPlan | null> {
+  if (!opts.planRerun) return null;
+  try {
+    return await opts.planRerun(opts.currentHeadSha);
+  } catch (err) {
+    opts.logger?.error(
+      "review-from-intent: re-run planning failed — posting the notice instead",
+      {
+        repoFullName: opts.repoFullName,
+        prNumber: opts.prNumber,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+    return null;
+  }
 }
 
 async function runExecutor(args: {

@@ -25,8 +25,10 @@ import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
  * clone, no daemon. A worker-loss redelivery of a run that never ENDED (a
  * crash mid-run, #152) finds no entry and re-executes as before.
  *
- * `root` is the run namespace root, shared by every worker process on the box
- * and kept across a restart (`PrivateTmp=no` in automata-worker.service).
+ * `root` is `WORKER_RUN_TERMINAL_ROOT` (config.ts `runTerminalRoot`), shared by
+ * every worker process on the box. On the execution box run-worker.sh names
+ * `/usr/local/automata/state`, which survives a reboot; the code default, the
+ * run namespace root under /tmp, survives only a restart (`PrivateTmp=no`).
  * Every op is best-effort: an unwritable or unreadable ledger fails OPEN (the
  * run executes) — it narrows the redelivery window, it never blocks a run.
  */
@@ -56,6 +58,16 @@ export interface RecordedRunTerminal extends RunTerminal {
   at: number;
 }
 
+interface InFlightAttempt {
+  /** Epoch ms when the attempt started. */
+  startedAt: number;
+  /** Settles with the attempt's terminal once it ends (never rejects). */
+  ended: Promise<RecordedRunTerminal>;
+}
+
+/** The attempts executing in THIS process, by workflow run id. */
+const IN_FLIGHT = new Map<string, InFlightAttempt>();
+
 /** A redelivered attempt of a run id that already reached a terminal on this box. */
 export class RunAlreadyTerminalError extends NonRetryableError {
   constructor(
@@ -68,6 +80,25 @@ export class RunAlreadyTerminalError extends NonRetryableError {
     );
     this.name = "RunAlreadyTerminalError";
   }
+}
+
+/**
+ * The boot log line naming the ledger root, plus a warning when that root is
+ * under /tmp on Linux: Ubuntu's tmpfiles (`D /tmp`) wipes it at boot, so a
+ * reboot mid-drain would let the engine re-execute a run that already ended.
+ */
+export function runTerminalRootBootLines(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): { line: string; warning: string | null } {
+  const underTmp = root === "/tmp" || root.startsWith("/tmp/");
+  return {
+    line: `run-terminal ledger root=${root}`,
+    warning:
+      platform === "linux" && underTmp
+        ? `run-terminal ledger root ${root} is under /tmp, which is wiped at boot — set WORKER_RUN_TERMINAL_ROOT to a durable dir (#386)`
+        : null,
+  };
 }
 
 function entryPath(root: string, runId: string): string | null {
@@ -129,10 +160,14 @@ export function recordRunTerminal(
   }
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith(".json")) continue;
-      // An unreadable entry is aged by its mtime instead of its `at`.
+      // A `.tmp` left by a crash mid-write is aged by its mtime like an
+      // unreadable entry; anything else is not ours.
+      const isTmp = name.endsWith(".tmp");
+      if (!isTmp && !name.endsWith(".json")) continue;
       const at =
-        readRunTerminal(root, name.slice(0, -".json".length))?.at ??
+        (isTmp
+          ? undefined
+          : readRunTerminal(root, name.slice(0, -".json".length))?.at) ??
         fs.statSync(path.join(dir, name)).mtimeMs;
       if (now - at > RUN_TERMINAL_TTL_MS) fs.rmSync(path.join(dir, name));
     }
@@ -147,34 +182,96 @@ export function recordRunTerminal(
  * Run `run` at most once to a terminal per workflow run id on this box: refuse
  * (RunAlreadyTerminalError) an id already recorded, otherwise run it and record
  * how it ended. Without a run id there is nothing to key on — run unguarded.
+ *
+ * `onAlreadyReturned` turns the refusal of a run whose first attempt RETURNED
+ * into a no-op output instead of a throw. Measured on hatchet-lite
+ * (run-terminal-redelivery.integration.test.ts): the drained attempt's own
+ * FINISHED event is ignored once the engine REASSIGNED the run, so the
+ * redelivered attempt's result IS the run's engine status — a throw would
+ * mark a run whose work completed FAILED and fire onFailure. A run whose first
+ * attempt failed is still refused with a throw: FAILED is its true status.
+ *
+ * An attempt of a run id whose earlier attempt is STILL RUNNING in this
+ * process (the engine REASSIGNED it after a heartbeat stall > 30 s while the
+ * process stayed alive — an engine-internal retry that ignores `retries: 0`)
+ * waits for that attempt to end, then is answered from its terminal exactly as
+ * above: never two attempts of one run at once. It waits before admission, so
+ * it holds no box slot meanwhile. Two worker processes, or a second box, are
+ * not covered here; the www generation fence is the backstop there.
  */
 export async function guardRunTerminal<T>(
-  opts: { root: string; runId: string; log: (msg: string) => void },
+  opts: {
+    root: string;
+    runId: string;
+    log: (msg: string) => void;
+    onAlreadyReturned?: (prior: RecordedRunTerminal) => T;
+  },
   run: () => Promise<T>,
 ): Promise<T> {
-  const { root, runId, log } = opts;
+  const { root, runId, log, onAlreadyReturned } = opts;
   if (!runId) return run();
-  const prior = readRunTerminal(root, runId);
+  const inFlight = IN_FLIGHT.get(runId);
+  let prior: RecordedRunTerminal | null;
+  if (inFlight) {
+    log(
+      `run.concurrent_attempt ${JSON.stringify({
+        runId,
+        priorStartedAt: new Date(inFlight.startedAt).toISOString(),
+        action: "wait",
+      })}`,
+    );
+    const ended = await inFlight.ended;
+    // The ledger write is best-effort; the in-memory terminal is not.
+    prior = readRunTerminal(root, runId) ?? ended;
+  } else {
+    prior = readRunTerminal(root, runId);
+  }
   if (prior) {
+    const noop = prior.outcome === "returned" && onAlreadyReturned;
     const err = new RunAlreadyTerminalError(runId, prior);
-    log(err.message);
+    log(
+      noop
+        ? `workflow run ${runId} already finished on this box at ` +
+            `${new Date(prior.at).toISOString()}; redelivered attempt completed as a no-op, not re-executed (#386)`
+        : err.message,
+    );
+    // One greppable, structured line per redelivery the ledger caught — the
+    // box has no metrics pipeline, so this is what a post-restart check reads.
+    log(
+      `run.redelivery_refused ${JSON.stringify({
+        runId,
+        prior: prior.outcome,
+        priorAt: new Date(prior.at).toISOString(),
+        gapMs: Date.now() - prior.at,
+        action: noop ? "noop" : "refused",
+      })}`,
+    );
+    if (noop) return onAlreadyReturned(prior);
     throw err;
   }
+  let settle: (terminal: RecordedRunTerminal) => void = () => {};
+  const entry: InFlightAttempt = {
+    startedAt: Date.now(),
+    ended: new Promise((resolve) => {
+      settle = resolve;
+    }),
+  };
+  IN_FLIGHT.set(runId, entry);
+  const end = (terminal: RunTerminal): void => {
+    const at = Date.now();
+    recordRunTerminal(root, runId, terminal, at, log);
+    if (IN_FLIGHT.get(runId) === entry) IN_FLIGHT.delete(runId);
+    settle({ ...terminal, at });
+  };
   try {
     const output = await run();
-    recordRunTerminal(root, runId, { outcome: "returned" }, Date.now(), log);
+    end({ outcome: "returned" });
     return output;
   } catch (err) {
-    recordRunTerminal(
-      root,
-      runId,
-      {
-        outcome: "failed",
-        detail: err instanceof Error ? `${err.name}: ${err.message}` : "",
-      },
-      Date.now(),
-      log,
-    );
+    end({
+      outcome: "failed",
+      detail: err instanceof Error ? `${err.name}: ${err.message}` : "",
+    });
     throw err;
   }
 }

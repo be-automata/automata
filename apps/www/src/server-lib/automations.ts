@@ -20,9 +20,12 @@ import {
   GitHubMentionTriggerConfig,
   AutomationTriggerType,
   AutomationAction,
+  isCompanionAutomation,
+  validateCompanionAutomation,
 } from "@terragon/shared/automations";
 import {
   AccessTier,
+  CompanionLaneStamp,
   DBUserMessage,
   MentionLaneStamp,
   ThreadTrustContext,
@@ -138,7 +141,16 @@ export async function runAutomation({
      * for the thread: the agent pushes its own fix to the PR head, and the
      * lane never auto-commits or opens a pull request.
      */
-    stampExtra?: { selfHealAttemptId?: string; mention?: MentionLaneStamp };
+    stampExtra?: {
+      selfHealAttemptId?: string;
+      mention?: MentionLaneStamp;
+      /**
+       * The PR companion lane: the PR and head the run reports on. Like
+       * `mention` it turns git checkpointing off: a companion never commits,
+       * pushes or opens a pull request.
+       */
+      companion?: CompanionLaneStamp;
+    };
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -305,6 +317,9 @@ export async function runAutomation({
             ...(options?.stampExtra?.mention
               ? { mention: options.stampExtra.mention }
               : {}),
+            ...(options?.stampExtra?.companion
+              ? { companion: options.stampExtra.companion }
+              : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
@@ -312,6 +327,7 @@ export async function runAutomation({
           githubIssueNumber: options?.issueNumber,
           disableGitCheckpointing:
             options?.stampExtra?.mention !== undefined ||
+            options?.stampExtra?.companion !== undefined ||
             (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
@@ -545,6 +561,14 @@ export async function validateAutomationCreationOrUpdate({
     triggerConfig,
     action: updates.action ?? automationOrNull?.action,
   });
+  const companionError = validateCompanionAutomation({
+    triggerType,
+    triggerConfig,
+    action: updates.action ?? automationOrNull?.action,
+  });
+  if (companionError !== null) {
+    throw new UserFacingError(companionError);
+  }
   if (triggerType) {
     switch (triggerType) {
       case "schedule": {
@@ -665,6 +689,7 @@ export async function runPullRequestAutomation({
   prNumber,
   source,
   deliveryId,
+  expectedHeadSha,
 }: {
   userId: string;
   automationId: string;
@@ -674,6 +699,12 @@ export async function runPullRequestAutomation({
   source: "automated" | "manual";
   /** #127: originating webhook delivery id (absent for manual runs). */
   deliveryId?: string;
+  /**
+   * #107: a re-run of a failed review is for ONE head. When set, the run is
+   * not started (returns false) unless the PR is open and its head is still
+   * this sha, read from the same pulls.get the run derives everything from.
+   */
+  expectedHeadSha?: string;
 }): Promise<boolean> {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
@@ -692,6 +723,25 @@ export async function runPullRequestAutomation({
   // is suppressed downstream in runAutomation → createNewThread).
   const shadow = await isAutomationShadow(automation.organizationId);
   const [owner, repo] = parseRepoFullName(repoFullName);
+  // #107: a re-run for one head reads the PR FIRST and refuses before any PR
+  // side effect — no eyes reaction, no check run — when the PR closed or its
+  // head moved. A refused re-run must leave nothing on the PR. A failed read
+  // is not a refusal: it falls through to the normal error handling below.
+  const earlyPrRead =
+    expectedHeadSha !== undefined
+      ? await readPullRequest({ userId, repoFullName, prNumber })
+      : undefined;
+  if (
+    earlyPrRead?.ok &&
+    (earlyPrRead.data.state !== "open" ||
+      earlyPrRead.data.head.sha !== expectedHeadSha)
+  ) {
+    console.warn(
+      `[automations] re-run refused: ${repoFullName}#${prNumber} is no longer open at ${expectedHeadSha}`,
+      { state: earlyPrRead.data.state, headSha: earlyPrRead.data.head.sha },
+    );
+    return false;
+  }
   // Independent, so concurrent: the eyes reaction (never throws), the checks
   // flag, and the PR read everything below is derived from.
   const [shouldCreateGitHubChecks, prRead] = await Promise.all([
@@ -700,7 +750,7 @@ export async function runPullRequestAutomation({
       userId,
       flagName: "createGitHubChecksForAutomations",
     }),
-    readPullRequest({ userId, repoFullName, prNumber }),
+    earlyPrRead ?? readPullRequest({ userId, repoFullName, prNumber }),
     shadow
       ? undefined
       : addEyesReactionToPullRequest({ owner, repo, issueNumber: prNumber }),
@@ -751,6 +801,28 @@ export async function runPullRequestAutomation({
     // this automation+PR are left entirely to the engine's per-PR concurrency
     // (the policy variant superseded/queued/discarded them at dispatch) and to
     // the C4 sweep's typed terminals. The pre-#165 archival block lived here.
+    // A PR companion touches no other thread either: it is not on the review
+    // plan (no prKey), so the engine never supersedes it or by it, and its
+    // terminal writer only ever edits its own marked comment.
+
+    // The PR companion lane: stamp the PR + head the report describes, so the
+    // finish writer posts ONE comment and never mistakes the run for a review.
+    let companion: CompanionLaneStamp | undefined;
+    if (isCompanionAutomation(automation)) {
+      if (automation.action.type !== "skill_message") {
+        // Unreachable through the write boundary (validateCompanionAutomation):
+        // a hand-written row must not dispatch a run that could never report.
+        throw new Error(
+          `Companion automation ${automationId} has no skill_message action`,
+        );
+      }
+      companion = {
+        repoFullName,
+        prNumber,
+        headSha,
+        skillName: automation.action.config.skillName,
+      };
+    }
 
     const runAutomationResult = await runAutomation({
       userId,
@@ -772,6 +844,7 @@ export async function runPullRequestAutomation({
         // read instead of fetching the same PR again.
         pullRequest: pr,
         trustContext,
+        ...(companion ? { stampExtra: { companion } } : {}),
         transformMessage: (message: DBUserMessage) => {
           return {
             ...message,

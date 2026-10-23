@@ -6,7 +6,13 @@ import {
   type MarkerCommentResult,
   type MergedPullRequest,
 } from "./execute-merge-audit";
-import { mergeAuditMarker } from "./merge-audit";
+import {
+  isReplaceableAuditNotice,
+  mergeAuditMarker,
+  renderNoticeComment,
+  renderProviderAuditNotice,
+  renderUnusableAuditNotice,
+} from "./merge-audit";
 import type { TrackerConfig } from "./tracker-config";
 import {
   type TrackerClient,
@@ -122,6 +128,12 @@ function fakeComments(existingBody: string | null = null) {
             return "created";
           }
           if (mode === "create-only") return "kept_existing";
+          if (
+            mode === "replace-notice" &&
+            !isReplaceableAuditNotice(state.body)
+          ) {
+            return "kept_existing";
+          }
           state.body = body;
           return "updated";
         },
@@ -585,7 +597,7 @@ describe("executeMergeAudit", () => {
       logger,
     });
 
-    it("a redelivered run moves nothing, comments nothing, and leaves the posted audit alone", async () => {
+    it("a redelivered run moves nothing and leaves the posted audit alone", async () => {
       const tracker = fakeTracker([
         issue("ACME-1", {
           links: [dependLink("OUTWARD", [["ACME-20", "Backlog"]])],
@@ -610,10 +622,82 @@ describe("executeMergeAudit", () => {
       expect(tracker.commands).toHaveLength(2); // ACME-1 → PR Merged, ACME-20 → To Do
       expect(tracker.added).toHaveLength(2);
       // The first run's stage move and promotion are still what the PR shows.
-      expect(comments.upserts).toHaveLength(1);
+      expect(comments.upserts.at(-1)!.mode).toBe("replace-notice");
       expect(comments.state.body).toBe(audit);
       expect(comments.state.body).toContain("`In Progress` → `PR Merged`");
       expect(comments.state.body).toContain("Promoted → To Do");
+    });
+
+    // protects=a re-run that finds every ticket already recorded still
+    // replaces an earlier run-failure notice on the PR with its audit;
+    // fails_when=the settled path returns before writing, leaving "did not
+    // produce a usable result" on a PR whose audit succeeded;
+    // no_claim=does not cover shadow mode, which always re-renders.
+    it("a settled re-run replaces an earlier failure notice with the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      // A later failed run left the generic notice in its place.
+      comments.state.body = renderNoticeComment(
+        7,
+        renderUnusableAuditNotice(["ACME-1"]),
+      );
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted" });
+      expect(comments.upserts.at(-1)!.mode).toBe("replace-notice");
+      expect(isReplaceableAuditNotice(comments.state.body!)).toBe(false);
+      expect(comments.state.body).toContain("ACME-1");
+      expect(tracker.commands).toHaveLength(1);
+    });
+
+    // protects=the provider notice (#441) is replaced the same way;
+    // fails_when=only the generic notice is treated as replaceable;
+    // no_claim=none beyond protects.
+    it("a settled re-run replaces an earlier provider notice with the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      comments.state.body = renderNoticeComment(
+        7,
+        renderProviderAuditNotice(["ACME-1"], {
+          kind: "usage_limit",
+          window: "weekly",
+          resetsAt: Date.UTC(2026, 9, 22, 17, 0),
+        }),
+      );
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted" });
+      expect(isReplaceableAuditNotice(comments.state.body!)).toBe(false);
+    });
+
+    // protects=a settled re-run whose PR has no marker comment (the first
+    // run's comment write failed, or it was deleted) posts the audit;
+    // fails_when=the settled path skips the write when no comment exists;
+    // no_claim=the re-rendered audit cannot show the original stage move.
+    it("a settled re-run with no PR comment posts the audit", async () => {
+      const tracker = fakeTracker([issue("ACME-1")]);
+      const comments = fakeComments();
+      const text = intentText([ticketAudit("ACME-1")]);
+      await executeMergeAudit(liveArgs(tracker, comments, text));
+      comments.state.body = null;
+
+      const outcome = await executeMergeAudit(
+        liveArgs(tracker, comments, text),
+      );
+
+      expect(outcome).toMatchObject({ outcome: "posted", transitions: 0 });
+      expect(comments.state.body).toContain("ACME-1");
+      expect(tracker.commands).toHaveLength(1);
     });
 
     it("a follow-up turn with no intent cannot overwrite the posted audit with a notice", async () => {
@@ -971,5 +1055,74 @@ describe("executeMergeAudit", () => {
       expect(outcome).toMatchObject({ transitions: 0 });
       expect(comments.upserts[0]!.body).toContain("did not apply");
     });
+  });
+});
+
+describe("executeMergeAudit — provider_unavailable (#441)", () => {
+  // Card: protects=a provider-refused audit run names the cause, writes no
+  // ticket, and asks to correct only a run-failure notice
+  // (`replace-notice`); fails_when=it says "did not produce a usable
+  // result", touches the tracker, or uses `replace` (which could overwrite a
+  // posted audit); no_claim=the real client's gating (merge-audit-finish
+  // suite).
+  it("posts the provider notice with replace-notice and changes no ticket", async () => {
+    const tracker = fakeTracker([issue("ACME-1")]);
+    const comments = fakeComments();
+    const outcome = await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText: "",
+      providerUnavailable: {
+        kind: "usage_limit",
+        window: "weekly",
+        resetsAt: Date.UTC(2026, 9, 22, 17, 0),
+      },
+      config: config("live"),
+      tracker: tracker.client,
+      comments: comments.client,
+      logger,
+    });
+    expect(outcome).toEqual({
+      outcome: "degraded_comment",
+      reason: "provider_unavailable: usage_limit",
+    });
+    expect(tracker.client.getIssue).not.toHaveBeenCalled();
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    expect(comments.upserts).toHaveLength(1);
+    expect(comments.upserts[0]!.mode).toBe("replace-notice");
+    expect(comments.upserts[0]!.body).toContain(
+      "The audit run for ACME-1 could not run. The connected Claude subscription hit its weekly usage limit; it resets at 17:00 UTC on 22 Oct. No ticket was changed.",
+    );
+    expect(comments.upserts[0]!.body).not.toContain(
+      "did not produce a usable result",
+    );
+  });
+
+  // Card: protects=#472, a merged audit whose credential was rejected says
+  // so and names the reconnect; fails_when=it posts the generic "did not
+  // produce a usable result" or touches the tracker; no_claim=classification.
+  it("a rejected credential names the reconnect and changes no ticket", async () => {
+    const tracker = fakeTracker([issue("ACME-1")]);
+    const comments = fakeComments();
+    const outcome = await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText:
+        "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+      providerUnavailable: { kind: "auth_rejected" },
+      config: config("live"),
+      tracker: tracker.client,
+      comments: comments.client,
+      logger,
+    });
+    expect(outcome).toEqual({
+      outcome: "degraded_comment",
+      reason: "provider_unavailable: auth_rejected",
+    });
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    expect(comments.upserts[0]!.mode).toBe("replace-notice");
+    expect(comments.upserts[0]!.body).toContain(
+      "The audit run for ACME-1 could not run. Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. No ticket was changed.",
+    );
   });
 });

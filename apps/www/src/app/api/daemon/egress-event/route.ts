@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
+import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { insertEgressEvents } from "@terragon/shared/model/egress-events";
 import { EGRESS_POLICY_LEVELS } from "@terragon/shared/model/egress-policy";
 
@@ -41,7 +42,9 @@ const bodySchema = z.object({
   events: z.array(eventSchema).min(1).max(MAX_EVENTS_PER_REQUEST),
 });
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withDaemonAuthUnavailable(async function POST(
+  request: NextRequest,
+): Promise<NextResponse> {
   const ctx = await getDaemonTokenContext(request);
   if (!ctx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -85,4 +88,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   });
 
   return NextResponse.json({ inserted: parsed.data.events.length });
-}
+});

@@ -46,7 +46,7 @@ Make the change with `Read` + `Edit` / `Write`, commit with a `<type>(<area>): <
 
 ### 3. Review pass ("please re-review", "look at this again", "run a refinement / simplify pass") — pull requests only
 
-Any instruction that asks you to assess the code and report back is a review — not only the literal words "re-review". Fill `review`: put every finding you can pin to a `path:line` in `findings`, each with an honest `severity` (and a `quote` for `warning`+); `summary` is the review text. For a re-review of prior asks, `summary` gets one bullet per prior ask, each `- <prior ask> — <addressed | still open>`.
+Any instruction that asks you to assess the code and report back is a review — not only the literal words "re-review". Fill `review`: put every finding you can pin to a `path:line` in `findings`, each with an honest `severity` (and a `quote` for every finding at or above the blocking tolerance: `warning` unless the tolerance note at the end of this prompt names another); `summary` is the review text. For a re-review of prior asks, `summary` gets one bullet per prior ask, each `- <prior ask> — <addressed | still open>`.
 
 <!-- include: review-finding-contract -->
 <!-- include: review-verdict-contract -->

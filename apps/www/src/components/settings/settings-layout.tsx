@@ -12,6 +12,7 @@ import {
   Package,
   CreditCard,
   ShieldCheck,
+  BookCheck,
 } from "lucide-react";
 import { useFeatureFlag } from "@/hooks/use-feature-flag";
 import { useRealtimeUser } from "@/hooks/useRealtime";
@@ -64,6 +65,12 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
       scope: "organization",
       label: "PR Review",
       icon: <ShieldCheck className="w-4 h-4" />,
+    },
+    {
+      href: "/settings/knowledge",
+      scope: "organization",
+      label: "Knowledge",
+      icon: <BookCheck className="w-4 h-4" />,
     },
     {
       href: "/settings/integrations",

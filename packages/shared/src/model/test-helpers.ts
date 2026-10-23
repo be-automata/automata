@@ -1,3 +1,5 @@
+import { randomInt } from "node:crypto";
+
 import { DB } from "../db";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid/non-secure";
@@ -18,6 +20,20 @@ import { createAutomation } from "./automations";
 import { recordHatchetRun } from "./hatchet-run";
 import type { SupersedeSnapshot } from "./repo-review-settings";
 import { createOrganization, addOrganizationMember } from "./organizations";
+
+// Unique keys must not come from a small random range: a suite creates
+// thousands of fixtures in one database, and 10^7 values collide by the
+// birthday bound (#452).
+
+/** A numeric GitHub account id string, as production parses with Number(). */
+export function randomTestGitHubAccountId(): string {
+  return randomInt(1, 2 ** 48 - 1).toString();
+}
+
+/** A PR number within the int4 column range. */
+export function randomTestPRNumber(): number {
+  return randomInt(1, 2 ** 31 - 1);
+}
 
 export async function createTestUser({
   db,
@@ -52,11 +68,11 @@ export async function createTestUser({
   const user = insertUserResult[0]!;
   await getUserFlags({ db, userId: user.id });
 
-  const accountId = Math.floor(Math.random() * 10000000).toString();
+  const accountId = randomTestGitHubAccountId();
   const insertAccountResult = await db
     .insert(schema.account)
     .values({
-      id: accountId,
+      id: nanoid(),
       accountId,
       providerId: "github",
       userId: user.id,
@@ -169,7 +185,7 @@ export async function createTestGitHubPR({
   db: DB;
   overrides?: Partial<GitHubPR>;
 }) {
-  const prNumber = overrides?.number ?? Math.floor(Math.random() * 10000000);
+  const prNumber = overrides?.number ?? randomTestPRNumber();
   const repoFullName = overrides?.repoFullName ?? "terragon/test-repo";
   await upsertGithubPR({
     db,

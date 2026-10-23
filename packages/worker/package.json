@@ -33,7 +33,7 @@
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/utils": "workspace:*",
-    "pg": "^8.16.0"
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",

@@ -1,4 +1,4 @@
-import { createDb, type DB } from "@terragon/shared/db";
+import { createDb, createDbFromHyperdrive, type DB } from "@terragon/shared/db";
 import { env } from "@terragon/env/apps-www";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
@@ -21,6 +21,14 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
  * ourselves (there is no safe "after the last query" hook to place it, and ending
  * early would break later queries in the same request).
  *
+ * Which per-request driver: when the Worker has a Hyperdrive binding
+ * (`env.HYPERDRIVE`, wrangler.jsonc), node-postgres connects through it.
+ * Hyperdrive holds warm pooled connections next to the database, so a request no
+ * longer pays its own WebSocket + TLS + Postgres-auth handshake to the database
+ * region (that per-request handshake was what hit the 5 s checkout timeout).
+ * Without the binding (rollback: delete it from wrangler.jsonc) a request falls
+ * back to a neon-serverless Pool on DATABASE_URL, the previous behaviour.
+ *
  * Off Workers (self-host/node/tests) getCloudflareContext() throws → we use a
  * long-lived singleton, which is correct: node-postgres' TCP pool is designed to be
  * shared and has no per-request I/O rule.
@@ -36,11 +44,36 @@ function offWorkersDb(): DB {
 
 const perRequestDb = new WeakMap<object, DB>();
 
+/** The part of a Hyperdrive binding this module reads. */
+interface HyperdriveBindingLike {
+  connectionString?: unknown;
+}
+
+function hyperdriveConnectionString(cfEnv: unknown): string | undefined {
+  const binding = (cfEnv as { HYPERDRIVE?: HyperdriveBindingLike } | undefined)
+    ?.HYPERDRIVE;
+  const connectionString = binding?.connectionString;
+  return typeof connectionString === "string" && connectionString.length > 0
+    ? connectionString
+    : undefined;
+}
+
+/** A fresh handle for one Workers request: Hyperdrive when bound, else Neon. */
+function createWorkersRequestDb(cfEnv: unknown): DB {
+  const hyperdrive = hyperdriveConnectionString(cfEnv);
+  return hyperdrive
+    ? createDbFromHyperdrive(hyperdrive)
+    : createDb(env.DATABASE_URL);
+}
+
 function resolveDb(): DB {
   let ctx: object | undefined;
+  let cfEnv: unknown;
   try {
     // The request's ExecutionContext — a distinct object per request on Workers.
-    ctx = getCloudflareContext().ctx as unknown as object | undefined;
+    const cf = getCloudflareContext();
+    ctx = cf.ctx as unknown as object | undefined;
+    cfEnv = cf.env;
   } catch {
     return offWorkersDb();
   }
@@ -49,7 +82,7 @@ function resolveDb(): DB {
   }
   let db = perRequestDb.get(ctx);
   if (!db) {
-    db = createDb(env.DATABASE_URL);
+    db = createWorkersRequestDb(cfEnv);
     perRequestDb.set(ctx, db);
   }
   return db;

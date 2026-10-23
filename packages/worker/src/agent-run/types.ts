@@ -225,6 +225,7 @@ export const TERMINAL_CAUSES = [
   "publish-failed",
   "plane-offline",
   "run-failed-unreported",
+  "out-of-memory",
 ] as const;
 export type TerminalCause = (typeof TERMINAL_CAUSES)[number];
 
@@ -253,6 +254,8 @@ export function describeTerminalCause(cause: TerminalCause): string {
       return "never became visible on the execution plane";
     case "run-failed-unreported":
       return "failed on the execution plane before reporting back";
+    case "out-of-memory":
+      return "run cgroup hit its memory limit";
     default:
       return assertNever(cause);
   }
@@ -300,7 +303,9 @@ export type AgentRunOutput = {
     | "cancelled"
     | "stale-skipped"
     /** www put the thread in `stopping` (user Stop): daemon torn down, `user-cancelled` posted. */
-    | "stopped";
+    | "stopped"
+    /** #386: a redelivery of a run that already returned on this box; nothing re-executed. */
+    | "already-terminal";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };

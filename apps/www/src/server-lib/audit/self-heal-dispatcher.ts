@@ -4,7 +4,10 @@ import type { Octokit } from "octokit";
 import type { DB } from "@terragon/shared/db";
 import { selfHealBreaker } from "@terragon/shared/db/schema";
 import type { Automation } from "@terragon/shared/db/types";
-import type { PullRequestTriggerConfig } from "@terragon/shared/automations";
+import {
+  isCompanionAutomation,
+  type PullRequestTriggerConfig,
+} from "@terragon/shared/automations";
 import type { AuditFindingRow } from "@terragon/shared/model/audit-findings";
 import {
   claimFixAttempt,
@@ -261,6 +264,8 @@ export function reviewsBotPullRequests(
   botLogin: string,
 ): boolean {
   if (automation.triggerType !== "pull_request") return false;
+  // A companion comments; it never reviews, so it cannot gate a fix PR.
+  if (isCompanionAutomation(automation)) return false;
   const config = automation.triggerConfig as PullRequestTriggerConfig;
   if (config.on?.open !== true) return false;
   if (config.filter?.includeAllAuthors === true) return true;

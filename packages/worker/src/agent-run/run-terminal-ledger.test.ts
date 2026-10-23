@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   RUN_TERMINAL_TTL_MS,
+  runTerminalRootBootLines,
   RunAlreadyTerminalError,
   guardRunTerminal,
   readRunTerminal,
@@ -68,6 +69,20 @@ describe("recordRunTerminal / readRunTerminal", () => {
     expect(readRunTerminal(root, old)).toBeNull();
     expect(readRunTerminal(root, RUN_ID)).not.toBeNull();
   });
+
+  it("prunes a .tmp left by a crash mid-write once it is older than the TTL", () => {
+    recordRunTerminal(root, RUN_ID, { outcome: "returned" }, 0);
+    const dir = path.join(root, "run-terminals");
+    const stale = path.join(dir, `${RUN_ID}.4242.tmp`);
+    const fresh = path.join(dir, `${RUN_ID}.4343.tmp`);
+    fs.writeFileSync(stale, "{");
+    fs.writeFileSync(fresh, "{");
+    const now = Date.now();
+    fs.utimesSync(stale, new Date(0), new Date(0));
+    recordRunTerminal(root, RUN_ID, { outcome: "returned" }, now);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
 });
 
 describe("guardRunTerminal", () => {
@@ -95,6 +110,81 @@ describe("guardRunTerminal", () => {
     expect(rerun).not.toHaveBeenCalled();
   });
 
+  it("a redelivered attempt of a run id that already RETURNED gets the caller's no-op output (engine records COMPLETED), without re-executing", async () => {
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
+    const rerun = vi.fn(async () => "ran again");
+    const noop = vi.fn((prior: { outcome: string }) => `noop:${prior.outcome}`);
+    await expect(
+      guardRunTerminal(
+        { root, runId: RUN_ID, log, onAlreadyReturned: noop },
+        rerun,
+      ),
+    ).resolves.toBe("noop:returned");
+    expect(rerun).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /already finished on this box .*redelivered attempt completed as a no-op, not re-executed/,
+      ),
+    );
+  });
+
+  it("logs one structured run.redelivery_refused line per caught redelivery, naming the action", async () => {
+    const lines: string[] = [];
+    const capture = (msg: string) => lines.push(msg);
+    const parse = (prefix: string) => {
+      const line = lines.find((l) => l.startsWith(prefix));
+      expect(line, lines.join("\n")).toBeTruthy();
+      return JSON.parse(line!.slice(prefix.length)) as Record<string, unknown>;
+    };
+    const event = "run.redelivery_refused ";
+
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
+    await guardRunTerminal(
+      { root, runId: RUN_ID, log: capture, onAlreadyReturned: () => "noop" },
+      async () => "ran again",
+    );
+    expect(parse(event)).toMatchObject({
+      runId: RUN_ID,
+      prior: "returned",
+      action: "noop",
+    });
+    expect(lines.filter((l) => l.startsWith(event))).toHaveLength(1);
+
+    lines.length = 0;
+    const failed = "22222222-2222-2222-2222-222222222222";
+    await guardRunTerminal({ root, runId: failed, log }, async () => {
+      throw new Error("boom");
+    }).catch(() => undefined);
+    await guardRunTerminal(
+      { root, runId: failed, log: capture, onAlreadyReturned: () => "noop" },
+      async () => "ran again",
+    ).catch(() => undefined);
+    const refused = parse(event);
+    expect(refused).toMatchObject({
+      runId: failed,
+      prior: "failed",
+      action: "refused",
+    });
+    expect(typeof refused.gapMs).toBe("number");
+    expect(lines).toContainEqual(
+      expect.stringMatching(/redelivered attempt refused, not re-executed/),
+    );
+  });
+
+  it("a redelivered attempt of a run id that already FAILED still throws, even with a no-op output on offer", async () => {
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => {
+      throw new Error("boom");
+    }).catch(() => undefined);
+    const noop = vi.fn(() => "noop");
+    await expect(
+      guardRunTerminal(
+        { root, runId: RUN_ID, log, onAlreadyReturned: noop },
+        async () => "ran again",
+      ),
+    ).rejects.toBeInstanceOf(RunAlreadyTerminalError);
+    expect(noop).not.toHaveBeenCalled();
+  });
+
   it("refuses a redelivered attempt of a run id that already RETURNED, also without re-executing", async () => {
     await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
     const rerun = vi.fn(async () => "ran again");
@@ -117,5 +207,113 @@ describe("guardRunTerminal", () => {
     await guardRunTerminal({ root, runId: "", log }, run);
     await guardRunTerminal({ root, runId: "", log }, run);
     expect(run).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("guardRunTerminal: an attempt while the earlier one is still running", () => {
+  // The engine REASSIGNS a run after 30 s without a heartbeat even when the
+  // process is alive (an internal retry; `retries: 0` does not apply), so
+  // attempt n+1 can start in the same process while attempt n still runs.
+  function held<T>() {
+    let resolve: (v: T) => void = () => {};
+    let reject: (e: unknown) => void = () => {};
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("waits for the running attempt, then completes as a no-op once it RETURNED — never two attempts at once", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(rerun).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/^run\.concurrent_attempt .*"action":"wait"/),
+    );
+    first.resolve("done");
+    await expect(a).resolves.toBe("done");
+    await expect(b).resolves.toBe("noop");
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("waits for the running attempt, then is refused once it FAILED", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    first.reject(new Error("agent failed"));
+    await expect(a).rejects.toThrow("agent failed");
+    await expect(b).rejects.toBeInstanceOf(RunAlreadyTerminalError);
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("answers from the in-memory terminal when the ledger cannot be written", async () => {
+    const log = vi.fn();
+    const unwritable = path.join(root, "file-not-dir");
+    fs.writeFileSync(unwritable, "");
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root: unwritable, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    const rerun = vi.fn(async () => "ran again");
+    const b = guardRunTerminal(
+      { root: unwritable, runId: RUN_ID, log, onAlreadyReturned: () => "noop" },
+      rerun,
+    );
+    first.resolve("done");
+    await a;
+    await expect(b).resolves.toBe("noop");
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("does not wait on a different run id", async () => {
+    const log = vi.fn();
+    const first = held<string>();
+    const a = guardRunTerminal(
+      { root, runId: RUN_ID, log },
+      () => first.promise,
+    );
+    await expect(
+      guardRunTerminal({ root, runId: "other-run", log }, async () => "other"),
+    ).resolves.toBe("other");
+    first.resolve("done");
+    await a;
+  });
+});
+
+describe("runTerminalRootBootLines", () => {
+  it("names the root, and warns only for a Linux root under /tmp (wiped at boot)", () => {
+    expect(
+      runTerminalRootBootLines("/usr/local/automata/state", "linux"),
+    ).toEqual({
+      line: "run-terminal ledger root=/usr/local/automata/state",
+      warning: null,
+    });
+    expect(
+      runTerminalRootBootLines("/tmp/automata-agent-run", "linux").warning,
+    ).toMatch(/under \/tmp, which is wiped at boot/);
+    expect(
+      runTerminalRootBootLines("/tmp/automata-agent-run", "darwin").warning,
+    ).toBeNull();
+    expect(runTerminalRootBootLines("/tmpfs/x", "linux").warning).toBeNull();
   });
 });

@@ -18,6 +18,7 @@ import {
   ne,
   or,
   sql,
+  type SQL,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { publishBroadcastUserMessage } from "../broadcast-server";
@@ -37,6 +38,7 @@ import {
   ThreadInfo,
   ThreadChatInsertRaw,
   ThreadErrorMessage,
+  ThreadErrorType,
 } from "../db/types";
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
@@ -452,6 +454,7 @@ export async function getThreadMinimal({
     errorMessageInfo,
     scheduleAt,
     reattemptQueueAt,
+    queuedAt,
     contextLength,
     permissionMode,
     messages,
@@ -805,6 +808,7 @@ type ThreadForThreadChatInfoFull = Pick<
   | "messages"
   | "activeRunExternalId"
   | "terminalCause"
+  | "queuedAt"
 > & {
   isUnread: boolean;
 };
@@ -847,6 +851,7 @@ function createLegacyThreadChatFull(
     // row, so these arrive from the same single read as status/errorMessage.
     activeRunExternalId: thread.activeRunExternalId,
     terminalCause: thread.terminalCause,
+    queuedAt: thread.queuedAt,
   };
 }
 
@@ -1092,6 +1097,26 @@ export async function setThreadActiveRun({
  */
 export const THREAD_SUPERSEDED_ERROR = "superseded";
 
+/**
+ * The `errorMessage` a typed terminal writes by default: the legacy
+ * `superseded` sentinel, or the user-visible error type the chat UI renders a
+ * dedicated case for (#437). Every other cause leaves it NULL.
+ */
+function defaultErrorMessageForCause(
+  cause: TerminalCause,
+): ThreadErrorMessage | null {
+  switch (cause) {
+    case "superseded":
+      return THREAD_SUPERSEDED_ERROR;
+    case "timeout":
+      return "request-timeout";
+    case "out-of-memory":
+      return "out-of-memory";
+    default:
+      return null;
+  }
+}
+
 export type ThreadGenerationCheck =
   | { ok: true }
   | {
@@ -1297,6 +1322,41 @@ export async function getThreadBrokerContextBySandboxId({
 }
 
 /**
+ * #446: `queued_at` bookkeeping, written in the same statement as the status
+ * CAS so it can never disagree with the transition that caused it. `column` is
+ * the row that carries the status: `thread_chat.queued_at`, or
+ * `thread.queued_at` for a legacy thread (production's shape).
+ *  - entering `queued-tasks-concurrency` stamps it ONCE per queue period
+ *    (COALESCE): a re-queue after a failed start keeps the first instant, so a
+ *    run cannot extend its own life by bouncing off the cap;
+ *  - the agent actually starting (`booting` / `working`) clears it;
+ *  - a NEW queue period (a follow-up, schedule or draft entering `queued` from
+ *    anything but a queue state) clears it, so the next stamp is fresh.
+ * The dequeue (`queued-*` -> `queued`) leaves it alone: stale evaluation runs
+ * after the dequeue and must still see it.
+ */
+function queuedAtUpdate({
+  column,
+  fromStatus,
+  toStatus,
+}: {
+  column: typeof schema.thread.queuedAt | typeof schema.threadChat.queuedAt;
+  fromStatus: ThreadStatus;
+  toStatus: ThreadStatus;
+}): { queuedAt?: SQL | null } {
+  if (toStatus === "queued-tasks-concurrency") {
+    return { queuedAt: sql`COALESCE(${column}, now())` };
+  }
+  if (toStatus === "booting" || toStatus === "working") {
+    return { queuedAt: null };
+  }
+  if (toStatus === "queued" && !fromStatus.startsWith("queued-")) {
+    return { queuedAt: null };
+  }
+  return {};
+}
+
+/**
  * When we update thread statuses, we want to ensure that we're the ones who updated the thread status
  * from the current status to the new status.
  *
@@ -1312,6 +1372,7 @@ export async function updateThreadChatStatusAtomic({
   fromStatus,
   toStatus,
   reattemptQueueAt,
+  error,
 }: {
   db: DB;
   userId: string;
@@ -1320,8 +1381,21 @@ export async function updateThreadChatStatusAtomic({
   fromStatus: ThreadStatus;
   toStatus: ThreadStatus;
   reattemptQueueAt?: Date | null;
+  /**
+   * #471: the chat's error, written in the SAME compare-and-set as the status,
+   * so a terminal never lands without the error that explains it.
+   */
+  error?: {
+    errorMessage: ThreadErrorType;
+    errorMessageInfo: string | null;
+  };
 }): Promise<{ didUpdateStatus: boolean }> {
-  const otherUpdates: Partial<ThreadChatInsert> = {};
+  const otherUpdates: Partial<ThreadChatInsert> = error
+    ? {
+        errorMessage: error.errorMessage,
+        errorMessageInfo: error.errorMessageInfo,
+      }
+    : {};
   // Clear reattemptQueueAt when transitioning away from rate-limited status
   if (
     toStatus !== "queued-sandbox-creation-rate-limit" &&
@@ -1337,7 +1411,15 @@ export async function updateThreadChatStatusAtomic({
     // from the current status to the new status.
     const updateResult = await db
       .update(schema.thread)
-      .set({ ...otherUpdates, status: toStatus })
+      .set({
+        ...otherUpdates,
+        ...queuedAtUpdate({
+          column: schema.thread.queuedAt,
+          fromStatus,
+          toStatus,
+        }),
+        status: toStatus,
+      })
       .where(
         and(
           eq(schema.thread.id, threadId),
@@ -1352,7 +1434,15 @@ export async function updateThreadChatStatusAtomic({
   } else {
     const updateResult = await db
       .update(schema.threadChat)
-      .set({ ...otherUpdates, status: toStatus })
+      .set({
+        ...otherUpdates,
+        ...queuedAtUpdate({
+          column: schema.threadChat.queuedAt,
+          fromStatus,
+          toStatus,
+        }),
+        status: toStatus,
+      })
       .where(
         and(
           eq(schema.threadChat.id, threadChatId),
@@ -1522,21 +1612,17 @@ export async function stopStalledThreads({
   //
   // markThreadsTerminal supplies all four: the typed cause, the threadChat write,
   // the reapable-status guard (idempotent under retry), and one transaction.
-  // `request-timeout` is passed through explicitly because the chat UI renders a
-  // dedicated case for it.
-  await markThreadsTerminal({
-    db,
-    threadIds,
-    cause: "timeout",
-    errorMessage: "request-timeout",
-  });
+  // Its default writes `request-timeout` for this cause, which the chat UI
+  // renders a dedicated case for.
+  await markThreadsTerminal({ db, threadIds, cause: "timeout" });
 }
 
 /**
  * Write ONE typed terminal to a set of threads (#125 C1/C4): status → complete,
- * `terminalCause` set. `errorMessage` carries the legacy `superseded` sentinel
- * ONLY for that cause (the pre-C4 contract the chat UI and old fence rows
- * read); every other cause leaves it NULL — the cause lives in ONE column.
+ * `terminalCause` set. `errorMessage` defaults per defaultErrorMessageForCause:
+ * the legacy `superseded` sentinel (the pre-C4 contract the chat UI and old
+ * fence rows read), a dedicated chat error type for `timeout` and
+ * `out-of-memory`, and NULL otherwise — the cause lives in ONE column.
  * Idempotent: only a reapable (non-terminal) thread transitions, so a retry,
  * a racing dispatch, or a second sweep tick never rewrites a terminal that a
  * thread legitimately reached. Broadcasts per moved thread so the UI reflects
@@ -1548,6 +1634,7 @@ export async function markThreadsTerminal({
   cause,
   supersededByThreadId,
   errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
@@ -1565,13 +1652,16 @@ export async function markThreadsTerminal({
   /** #125 C5: the newer run's thread when `cause === "superseded"` (chip link). */
   supersededByThreadId?: string | null;
   /**
-   * Override the `errorMessage` written alongside the terminal. Defaults to the
-   * legacy `superseded` sentinel for that cause and NULL otherwise. The stall
-   * watchdog passes `request-timeout`, which is a USER-VISIBLE error type the
-   * chat UI renders a dedicated case for (`chat-error.tsx`), so it must survive
-   * the move onto this typed-terminal path.
+   * Override the `errorMessage` written alongside the terminal. Defaults to
+   * defaultErrorMessageForCause(cause).
    */
   errorMessage?: ThreadErrorMessage | null;
+  /**
+   * #437: worker-authored detail shown under the error (e.g. the branch a
+   * timed-out run's work was saved to). Written on both tables with the
+   * terminal; omitted leaves the column untouched.
+   */
+  errorMessageInfo?: string | null;
 }): Promise<string[]> {
   if (threadIds.length === 0) return [];
   const terminal = {
@@ -1579,9 +1669,8 @@ export async function markThreadsTerminal({
     errorMessage:
       errorMessage !== undefined
         ? errorMessage
-        : cause === "superseded"
-          ? THREAD_SUPERSEDED_ERROR
-          : null,
+        : defaultErrorMessageForCause(cause),
+    ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
   };
   // ONE TRANSACTION (#153 prerequisite). A chat-mode thread terminates across
   // TWO tables: threadChat carries the live `status`, the thread row carries the
@@ -1665,6 +1754,7 @@ export async function markThreadsTerminal({
         .set({
           terminalCause: cause,
           ...(supersededByThreadId ? { supersededByThreadId } : {}),
+          ...(errorMessageInfo !== undefined ? { errorMessageInfo } : {}),
         })
         .where(
           and(
@@ -1697,12 +1787,18 @@ export async function markThreadTerminal({
   threadId,
   cause,
   supersededByThreadId,
+  errorMessage,
+  errorMessageInfo,
   unchangedSince,
 }: {
   db: DB;
   threadId: string;
   cause: TerminalCause;
   supersededByThreadId?: string | null;
+  /** See markThreadsTerminal. */
+  errorMessage?: ThreadErrorMessage | null;
+  /** See markThreadsTerminal. */
+  errorMessageInfo?: string | null;
   /** See markThreadsTerminal. */
   unchangedSince?: Date;
 }): Promise<boolean> {
@@ -1713,6 +1809,8 @@ export async function markThreadTerminal({
         threadIds: [threadId],
         cause,
         supersededByThreadId,
+        errorMessage,
+        errorMessageInfo,
         unchangedSince,
       })
     ).length > 0
@@ -1768,6 +1866,10 @@ export async function findOrphanRemoteThreads({
         isNotNull(schema.thread.organizationId),
         isNotNull(schema.thread.githubPRNumber),
         eq(schema.automations.triggerType, "pull_request"),
+        // A PR companion automation is not a review: dispatch never records
+        // a run row for it, so "no row" is its normal state, not an orphan.
+        // Rule (iii) still reconciles a companion run that died unreported.
+        sql`coalesce(${schema.automations.triggerConfig} -> 'filter' ->> 'companion', 'false') <> 'true'`,
         lt(schema.thread.createdAt, new Date(now.getTime() - olderThanMs)),
       ),
     );
@@ -1970,6 +2072,15 @@ type ThreadChatAndStatus = {
   threadId: string;
   threadChatId: string;
   status: ThreadStatus;
+  /**
+   * #446: read BEFORE the dequeue mutates the row. `queuedAt` is the
+   * queue-entry instant of whichever row carries the status (the chat row, or
+   * the thread row for a legacy thread); `updatedAt` is the fallback for rows
+   * queued before the column existed — the dequeue's CAS bumps `updated_at`,
+   * so it must be read here.
+   */
+  queuedAt?: Date | null;
+  updatedAt?: Date | null;
 };
 
 export async function getEligibleQueuedThreadChats({
@@ -2021,6 +2132,8 @@ export async function getEligibleQueuedThreadChats({
         columns: {
           id: true,
           status: true,
+          queuedAt: true,
+          updatedAt: true,
         },
         orderBy: (thread, { asc }) => asc(thread.createdAt),
       }),
@@ -2033,6 +2146,8 @@ export async function getEligibleQueuedThreadChats({
           id: true,
           threadId: true,
           status: true,
+          queuedAt: true,
+          updatedAt: true,
         },
         orderBy: (threadChat, { asc }) => asc(threadChat.createdAt),
       }),
@@ -2043,6 +2158,8 @@ export async function getEligibleQueuedThreadChats({
         threadId: thread.id,
         threadChatId: LEGACY_THREAD_CHAT_ID,
         status: thread.status,
+        queuedAt: thread.queuedAt,
+        updatedAt: thread.updatedAt,
       });
     }
     for (const threadChat of threadChats) {
@@ -2050,6 +2167,8 @@ export async function getEligibleQueuedThreadChats({
         threadId: threadChat.threadId,
         threadChatId: threadChat.id,
         status: threadChat.status,
+        queuedAt: threadChat.queuedAt,
+        updatedAt: threadChat.updatedAt,
       });
     }
     return result;
@@ -2069,6 +2188,9 @@ export async function atomicDequeueThreadChats({
       threadId: string;
       threadChatId: string;
       oldStatus: ThreadStatus;
+      /** Pre-dequeue values (see ThreadChatAndStatus). */
+      queuedAt: Date | null;
+      updatedAt: Date | null;
     }
   | undefined
 > {
@@ -2090,6 +2212,8 @@ export async function atomicDequeueThreadChats({
         threadId: threadChat.threadId,
         threadChatId: threadChat.threadChatId,
         oldStatus,
+        queuedAt: threadChat.queuedAt ?? null,
+        updatedAt: threadChat.updatedAt ?? null,
       };
     }
   }
@@ -2166,6 +2290,114 @@ export async function getUserIdsWithThreadsReadyToProcess({ db }: { db: DB }) {
       ...threadChats.map((threadChat) => threadChat.userId),
     ]),
   );
+}
+
+/**
+ * #471: chats stranded in PLAIN `queued`. That status is the transient
+ * pre-boot state: startAgentMessage moves it on to `booting`, a `queued-*`
+ * wait or a terminal within seconds, and the queue drain only ever reads the
+ * `queued-*` statuses. A dispatch that dies before its first transition (the
+ * store it reads is down, the instance is evicted) leaves the row in `queued`
+ * with nothing left to move it.
+ *
+ * A row is stranded when, as of `olderThan`:
+ *  - its queue instant (`queued_at`, else `created_at`) is older, AND
+ *  - its own `updated_at` is older too. A follow-up entering `queued` on an
+ *    old thread clears `queued_at`, so the `created_at` fallback alone would
+ *    call a dispatch started a second ago stranded; its fresh `updated_at`
+ *    does not;
+ *  - the thread has no `in_flight` engine run row. A run is only dispatched
+ *    after the chat leaves `queued`, so this never matches a truly stranded
+ *    row; it keeps the sweep off any thread an engine run may still own;
+ *  - the thread is not a shadow thread. Shadow threads are created `queued`
+ *    and never dispatched on purpose (zero GitHub side effects), so they sit
+ *    in `queued` legitimately and must never be retired or noticed.
+ *
+ * Self-heal FIX threads stuck in `queued` are also reconciled by
+ * fix-dispatch-reconcile (its PRE_RUN_STATUSES), which owns their attempt
+ * ledger: it refunds the attempt and stops a dispatch Hatchet never saw, and
+ * its 10-minute grace runs out well before this 30-minute bound, so it
+ * normally acts first. If this sweep ends such a row first, the reconciler's
+ * terminal pass (RES-10) still closes the attempt.
+ *
+ * Status lives on the chat row for a chat-mode thread (its thread row keeps
+ * its creation value, `queued`, forever) and on the thread row for a legacy
+ * thread (no thread_chat row), so the two are read separately.
+ */
+export async function getStrandedQueuedThreadChats({
+  db,
+  olderThan,
+  limit,
+}: {
+  db: DB;
+  olderThan: Date;
+  limit: number;
+}): Promise<Array<{ userId: string; threadId: string; threadChatId: string }>> {
+  const noInFlightRun = sql`not exists (select 1 from ${schema.hatchetRun} where ${schema.hatchetRun.threadId} = ${schema.thread.id} and ${schema.hatchetRun.status} = 'in_flight')`;
+  const [legacyRows, chatRows] = await Promise.all([
+    db
+      .select({ userId: schema.thread.userId, threadId: schema.thread.id })
+      .from(schema.thread)
+      .where(
+        and(
+          eq(schema.thread.status, "queued"),
+          // version 0 = legacy (chat state on the thread row). A chat-mode
+          // thread (version 1) keeps `queued` here forever; filtering it out
+          // first keeps the anti-join below off every chat-mode thread.
+          eq(schema.thread.version, 0),
+          eq(schema.thread.shadow, false),
+          // Defensive: never read a thread that has chat rows. Correlated on
+          // user_id too, so thread_chat_user_id_thread_id_index serves it.
+          sql`not exists (select 1 from ${schema.threadChat} where ${schema.threadChat.userId} = ${schema.thread.userId} and ${schema.threadChat.threadId} = ${schema.thread.id})`,
+          or(
+            lt(schema.thread.queuedAt, olderThan),
+            and(
+              isNull(schema.thread.queuedAt),
+              lt(schema.thread.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.thread.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.thread.updatedAt))
+      .limit(limit),
+    db
+      .select({
+        userId: schema.threadChat.userId,
+        threadId: schema.threadChat.threadId,
+        threadChatId: schema.threadChat.id,
+      })
+      .from(schema.threadChat)
+      .innerJoin(
+        schema.thread,
+        eq(schema.thread.id, schema.threadChat.threadId),
+      )
+      .where(
+        and(
+          eq(schema.threadChat.status, "queued"),
+          eq(schema.thread.shadow, false),
+          or(
+            lt(schema.threadChat.queuedAt, olderThan),
+            and(
+              isNull(schema.threadChat.queuedAt),
+              lt(schema.threadChat.createdAt, olderThan),
+            ),
+          ),
+          lt(schema.threadChat.updatedAt, olderThan),
+          noInFlightRun,
+        ),
+      )
+      .orderBy(asc(schema.threadChat.updatedAt))
+      .limit(limit),
+  ]);
+  return [
+    ...legacyRows.map((row) => ({
+      ...row,
+      threadChatId: LEGACY_THREAD_CHAT_ID,
+    })),
+    ...chatRows,
+  ].slice(0, limit);
 }
 
 export async function getUserIdsWithThreadsStuckInQueue({ db }: { db: DB }) {

@@ -5,6 +5,7 @@ import {
   ANTHROPIC_MESSAGES_OPUS_SKU,
   ANTHROPIC_MESSAGES_SONNET_SKU,
   USAGE_SKU_PRICING,
+  usdToMicroUsd,
 } from "./usage-pricing";
 
 describe("getAnthropicMessagesSkuForModel — fable routing", () => {
@@ -38,5 +39,24 @@ describe("getAnthropicMessagesSkuForModel — fable routing", () => {
     expect(fable.outputRatePerToken).toBeGreaterThanOrEqual(
       opus.outputRatePerToken,
     );
+  });
+});
+
+describe("usdToMicroUsd", () => {
+  it("rounds up to an integer", () => {
+    expect(usdToMicroUsd(0.0000011)).toBe(2);
+    expect(usdToMicroUsd(1)).toBe(1_000_000);
+    expect(usdToMicroUsd(0)).toBe(0);
+  });
+
+  it("does not round float noise up to an extra micro-USD", () => {
+    // 0.004015 * 1e6 === 4015.0000000000005 in IEEE 754
+    expect(usdToMicroUsd(0.004015)).toBe(4015);
+    expect(usdToMicroUsd(0.0012410000000000001)).toBe(1241);
+    expect(usdToMicroUsd(0.0040151)).toBe(4016);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])("rejects %s", (bad) => {
+    expect(() => usdToMicroUsd(bad)).toThrow(RangeError);
   });
 });

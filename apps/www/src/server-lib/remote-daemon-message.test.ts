@@ -6,6 +6,7 @@ import {
   createTestAutomation,
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
+import { setRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { User } from "@terragon/shared";
 import type { ThreadTrustContext } from "@terragon/shared/db/types";
 import { nanoid } from "nanoid";
@@ -212,6 +213,65 @@ describe("buildRemoteDaemonMessage — permission-mode floor (#82)", () => {
       threadId,
       threadChatId,
     });
+    expect(message?.permissionMode).toBe("allowAll");
+  });
+
+  it("org-lane mention on a PR: the prompt carries the repo's tolerance directive, the mode stays uncapped", async () => {
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      blockTolerance: "info",
+    });
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: {
+        organizationId: orgId,
+        repoFullName: "acme/widgets",
+        triggerType: "github_mention",
+        triggerConfig: { filter: { orgLane: true } } as any,
+      },
+    });
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        automationId: automation.id,
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 7,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "sha",
+          source: "default",
+          mention: {
+            repoFullName: "acme/widgets",
+            issueOrPrNumber: 7,
+            isPullRequest: true,
+            commentId: 1,
+            commentKind: "issue",
+            commenterLogin: "someone",
+          },
+        },
+      },
+      chatOverrides: {
+        appendMessages: [
+          {
+            type: "user",
+            model: "sonnet",
+            parts: [{ type: "text", text: "please re-review" }],
+          },
+        ],
+      },
+    });
+    const message = await buildRemoteDaemonMessage({
+      userId: user.id,
+      threadId,
+      threadChatId,
+    });
+    expect(message?.prompt).toContain("Repository review tolerance: `info`");
     expect(message?.permissionMode).toBe("allowAll");
   });
 });

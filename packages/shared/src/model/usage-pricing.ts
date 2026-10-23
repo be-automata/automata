@@ -300,3 +300,27 @@ export function getGoogleSkuForModel(model?: string | null): UsageSku {
   console.warn(`Unknown Google model: ${model}`);
   return GOOGLE_DEFAULT_SKU;
 }
+
+/** Below this distance from a whole micro-USD, a product is float noise. */
+const MICRO_USD_FLOAT_NOISE = 1e-6;
+
+/**
+ * Dollars to integer micro-USD, rounded up so a reservation never under-counts.
+ * A product within float noise of a whole micro-USD snaps to it, so 0.004015
+ * (4015.0000000000005 after scaling) is 4015, not 4016.
+ */
+export function usdToMicroUsd(usd: number): number {
+  if (!Number.isFinite(usd) || usd < 0) {
+    throw new RangeError("usd must be a finite non-negative number");
+  }
+  const scaled = usd * 1_000_000;
+  const nearest = Math.round(scaled);
+  const micro =
+    Math.abs(scaled - nearest) < MICRO_USD_FLOAT_NOISE
+      ? nearest
+      : Math.ceil(scaled);
+  if (!Number.isSafeInteger(micro)) {
+    throw new RangeError("usd is too large to convert to micro-USD");
+  }
+  return micro;
+}

@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type { RunAsAgent } from "./agent-command";
+import { checkLocalGitConfig, hardenGitEnv } from "./untrusted-checkout-git";
 import { gitExec } from "./provision";
 import { runPathsForRepo } from "./run-owned-paths";
 import { runSelfHealChecks } from "./self-heal-checks";
@@ -140,13 +141,6 @@ const GIT_STEP_TIMEOUT_MS = 30_000;
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
-const EXIT_UNSAFE_GITDIR = 3;
-// The checkout must be a plain .git directory, and none of the info files that
-// re-point attributes, history or the object store may exist.
-const GUARD_SCRIPT =
-  `test -d .git && test ! -L .git || exit ${EXIT_UNSAFE_GITDIR}; ` +
-  `test ! -e .git/info/attributes && test ! -e .git/info/grafts && test ! -e .git/commondir || exit ${EXIT_UNSAFE_GITDIR}; ` +
-  "exec git config --local --no-includes --name-only --list";
 const CAT_FILE_SCRIPT = 'git cat-file -e "$1^{commit}"';
 const CHECKOUT_SCRIPT = 'git checkout --quiet --force --detach "$1"';
 // -ff: an untracked nested repository is removed too (one -f skips it).
@@ -161,41 +155,6 @@ const SCRATCH_SCRIPT = 'mkdir -m 700 "$1" && mkdir -m 700 "$1/home" "$1/tmp"';
 const MERGE_BASE_SCRIPT = 'git merge-base "$2" "$1"';
 // --no-renames: a rename out of a denied path must list the denied side too.
 const DIFF_SCRIPT = 'git diff --no-renames --name-only -z "$2" "$1"';
-
-/**
- * Local config keys a clean clone (plus the agent's own commits and pushes)
- * can legitimately carry; single-level push.* / pull.* keys (an agent's
- * `push.autoSetupRemote`) only steer push/pull, which the check never runs.
- * Anything else — filter.*, include.*, core.worktree, diff/alias/extensions
- * keys — could steer the commands below, so the check refuses to run and
- * reports a counted check failure (the agent wrote it).
- */
-const ALLOWED_LOCAL_CONFIG =
-  /^(core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)|remote\.origin\.(url|fetch)|branch\.[^\s]+\.(remote|merge)|user\.(name|email)|(push|pull)\.[a-z]+)$/;
-
-/** Env every command of the check runs with, on top of the caller's. */
-export function hardenGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out: NodeJS.ProcessEnv = {
-    ...env,
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-  };
-  const parsed = Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10);
-  let count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  const add = (key: string, value: string): void => {
-    out[`GIT_CONFIG_KEY_${count}`] = key;
-    out[`GIT_CONFIG_VALUE_${count}`] = value;
-    count += 1;
-  };
-  // Command scope wins over the agent-writable .git/config.
-  add("core.hooksPath", "/dev/null");
-  add("core.fsmonitor", "false");
-  out.GIT_CONFIG_COUNT = String(count);
-  return out;
-}
 
 export interface RunFixCheckArgs {
   fix: SelfHealFixShape;
@@ -308,12 +267,15 @@ export async function runFixCheck(
     ];
     let early = stop();
     if (early) return early;
-    const guard = await git(GUARD_SCRIPT, []);
-    if (!ok(guard)) {
+    // The guard (untrusted-checkout-git.ts): a local key outside the
+    // allowlist could steer the commands below (the check never pushes or
+    // pulls, so push.* / pull.* are inert here), so the check refuses to run
+    // and reports a counted check failure (the agent wrote it).
+    const guard = await checkLocalGitConfig((script) => git(script, []));
+    if (guard === "error") {
       return stop() ?? failed("error", "unsafe or unreadable .git");
     }
-    const keys = guard.stdout.split("\n").filter((k) => k.length > 0);
-    if (keys.some((k) => !ALLOWED_LOCAL_CONFIG.test(k.toLowerCase()))) {
+    if (guard === "unsafe") {
       // The agent wrote it: a counted failure of the fix (R2), never an
       // infra error that is refunded and re-run.
       args.note?.("unsafe local git config");
@@ -354,6 +316,9 @@ export async function runFixCheck(
       HOME: path.join(scratch, "home"),
       TMPDIR: path.join(scratch, "tmp"),
     };
+    // hardenGitEnv's /dev/null config home is for git in the checkout; the
+    // checks themselves get the scratch HOME's default, as before.
+    delete checkEnv.XDG_CONFIG_HOME;
     const own = args.fix.checks;
     const ownFingerprints = new Set(own.map((c) => c.fingerprint));
     const regression = (args.fix.regressionChecks ?? []).filter(

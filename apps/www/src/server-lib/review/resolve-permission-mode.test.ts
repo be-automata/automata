@@ -168,6 +168,41 @@ describe("resolvePermissionModeForDispatch (dispatch snapshot)", () => {
     expect(mode).toBe("allowAll");
   });
 
+  it("PR companion: pinned to review even when configured allowAll on a trusted-internal PR", async () => {
+    await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgId,
+      patch: { trustedAuthorThreshold: "MEMBER" },
+    });
+    const automation = await createTestAutomation({
+      db,
+      userId,
+      values: {
+        organizationId: orgId,
+        repoFullName: "acme/widgets",
+        triggerType: "pull_request",
+        triggerConfig: {
+          on: { open: true },
+          filter: { includeAllAuthors: true, companion: true },
+          // A hand-written row: the write boundary refuses this, the
+          // resolver must still never honour it.
+          permissionMode: "allowAll",
+        },
+      },
+    });
+    const mode = await resolvePermissionModeForDispatch({
+      db,
+      organizationId: orgId,
+      repoFullName: "acme/widgets",
+      automation,
+      thread: {
+        trustContext: trust({ isFork: false, authorAssociation: "OWNER" }),
+      },
+      threadChatPermissionMode: "allowAll",
+    });
+    expect(mode).toBe("review");
+  });
+
   it("fork PR configured allowAll -> review regardless of T_eff", async () => {
     const automation = await createTestAutomation({
       db,

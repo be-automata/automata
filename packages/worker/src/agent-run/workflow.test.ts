@@ -406,6 +406,93 @@ describe("agentRunWorkflow onFailure (#2)", () => {
       resetPlaneKeyRingForTests();
     }
   });
+
+  it("#437: onFailure waits for a task run still live in this process; a run that never started here, and a live review run, post at once", async () => {
+    // protects=the typed timeout winning the first-terminal race on an
+    // executionTimeout (onFailure is scheduled while the teardown still
+    // runs); fails_when=onFailure posts before the live run ends, or a run
+    // that never ran here / a review run is delayed; no_claim=the engine's
+    // scheduling itself (simulated with a held run fn), and the 120 s bound.
+    const { _trackLiveRunForTests, ON_FAILURE_EXECUTION_TIMEOUT } =
+      await import("./workflow");
+    expect(ON_FAILURE_EXECUTION_TIMEOUT).toBe("3m");
+    const order: string[] = [];
+    const fetchMock = vi.fn(async () => {
+      order.push("post");
+      return new Response("OK", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const runId = "2d4f8a74-6b0f-4d0f-9f3e-9c7f5e4b3a2d";
+      let finishTeardown!: () => void;
+      const live = _trackLiveRunForTests(
+        runId,
+        () =>
+          new Promise<void>((resolve) => {
+            finishTeardown = () => {
+              order.push("teardown-finished");
+              resolve();
+            };
+          }),
+      );
+      const failure = workflowDef.onFailure.fn(await sealedInput(), {
+        errors: () => ({ run: "Task exceeded timeout of 30m" }),
+        workflowRunId: () => runId,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(order).toEqual([]);
+      finishTeardown();
+      await Promise.all([live, failure]);
+      expect(order).toEqual(["teardown-finished", "post"]);
+
+      // Never live here (e.g. a scheduleTimeout): no wait at all.
+      order.length = 0;
+      const started = Date.now();
+      await workflowDef.onFailure.fn(await sealedInput(), {
+        errors: () => ({ run: "boom" }),
+        workflowRunId: () => "3e5a9b85-7c1a-4e1a-8a4f-ad8f6f5c4b3e",
+      });
+      expect(order).toEqual(["post"]);
+      expect(Date.now() - started).toBeLessThan(1_000);
+
+      // A review run still live in this process: it owns no abnormal
+      // terminal, so its onFailure posts at once, before the run ends.
+      order.length = 0;
+      const reviewRunId = "4f6b0c96-8d2b-4f2b-9b5f-be9f7f6d5c4f";
+      let releaseReview!: () => void;
+      const reviewLive = _trackLiveRunForTests(
+        reviewRunId,
+        () =>
+          new Promise<void>((resolve) => {
+            releaseReview = () => {
+              order.push("review-ended");
+              resolve();
+            };
+          }),
+      );
+      const { installationToken, daemonToken, ...rest } = INPUT;
+      const reviewWire = { ...rest, prKey: "org-1/o/r/7" };
+      const { sealBindingOf, sealRunSecrets } = await import(
+        "@terragon/utils/payload-seal"
+      );
+      await workflowDef.onFailure.fn(
+        {
+          ...reviewWire,
+          sealedSecrets: await sealRunSecrets(
+            ringPlane.publicKey,
+            { installationToken, daemonToken },
+            sealBindingOf(reviewWire),
+          ),
+        },
+        { errors: () => ({ run: "boom" }), workflowRunId: () => reviewRunId },
+      );
+      releaseReview();
+      await reviewLive;
+      expect(order).toEqual(["post", "review-ended"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("resolveUseCredits — the worker's final say", () => {

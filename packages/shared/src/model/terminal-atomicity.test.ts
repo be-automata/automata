@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../db";
+import * as schema from "../db/schema";
 import { markThreadsTerminal } from "./threads";
 import { createOrganization } from "./organizations";
 import { createTestRemoteRun, createTestUser } from "./test-helpers";
@@ -103,5 +105,95 @@ describe("markThreadsTerminal — the terminal write is ONE transaction", () => 
 
     expect(seq[0]).toBe("tx-commit");
     expect(seq).toContain("broadcast");
+  });
+
+  it("writes errorMessageInfo on BOTH rows in the same transition (#437)", async () => {
+    // protects=the worker-authored info (e.g. the salvage branch) reaching the
+    // thread and its chat row; fails_when=the info lands on one table only or
+    // not at all; no_claim=what the chat UI renders from it.
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 93,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+    });
+
+    const moved = await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "timeout",
+      errorMessageInfo: "The run reached its 30-minute limit.",
+    });
+    expect(moved).toEqual([threadId]);
+
+    const [chat] = await db
+      .select({
+        status: schema.threadChat.status,
+        errorMessage: schema.threadChat.errorMessage,
+        errorMessageInfo: schema.threadChat.errorMessageInfo,
+        terminalCause: schema.threadChat.terminalCause,
+      })
+      .from(schema.threadChat)
+      .where(eq(schema.threadChat.threadId, threadId));
+    expect(chat).toEqual({
+      status: "complete",
+      errorMessage: "request-timeout",
+      errorMessageInfo: "The run reached its 30-minute limit.",
+      terminalCause: "timeout",
+    });
+    const [thread] = await db
+      .select({
+        errorMessageInfo: schema.thread.errorMessageInfo,
+        terminalCause: schema.thread.terminalCause,
+      })
+      .from(schema.thread)
+      .where(eq(schema.thread.id, threadId));
+    expect(thread).toEqual({
+      errorMessageInfo: "The run reached its 30-minute limit.",
+      terminalCause: "timeout",
+    });
+  });
+
+  it("a later terminal for an already-terminal thread never rewrites its info (#437)", async () => {
+    // protects=the typed terminal posted first wins over the onFailure
+    // backstop; fails_when=a second write replaces the cause or info;
+    // no_claim=the daemon-event custom-error route itself (www).
+    const { threadId } = await createTestRemoteRun({
+      db,
+      userId,
+      organizationId: orgA,
+      prNumber: 94,
+      externalId: nanoid(),
+      enableThreadChatCreation: true,
+    });
+    await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "out-of-memory",
+      errorMessageInfo: "Memory limit 5000M reached (3 process(es) killed).",
+    });
+    const second = await markThreadsTerminal({
+      db,
+      threadIds: [threadId],
+      cause: "daemon-failed",
+      errorMessage: "agent-generic-error",
+      errorMessageInfo: "run: {raw}",
+    });
+    expect(second).toEqual([]);
+    const [chat] = await db
+      .select({
+        errorMessage: schema.threadChat.errorMessage,
+        errorMessageInfo: schema.threadChat.errorMessageInfo,
+        terminalCause: schema.threadChat.terminalCause,
+      })
+      .from(schema.threadChat)
+      .where(eq(schema.threadChat.threadId, threadId));
+    expect(chat).toEqual({
+      errorMessage: "out-of-memory",
+      errorMessageInfo: "Memory limit 5000M reached (3 process(es) killed).",
+      terminalCause: "out-of-memory",
+    });
   });
 });

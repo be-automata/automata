@@ -6,6 +6,7 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getAutomation } from "@terragon/shared/model/automations";
+import { isCompanionAutomation } from "@terragon/shared/automations";
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import { promoteLastKnownGood } from "@terragon/shared/model/repo-skills";
 import type { ThreadSourceMetadata } from "@terragon/shared";
@@ -13,6 +14,7 @@ import { getPostHogServer } from "@/lib/posthog-server";
 import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
+import { providerUnavailableOfChat } from "@/agent/msg/classify-provider-result";
 import {
   createFileAtCommitReader,
   createOctokitReviewClient,
@@ -28,6 +30,7 @@ import { isPrAuthoredByBot, resolveBotLogin } from "./bot-login";
 import { findLastLeadAgentText } from "./lead-text";
 import { hasTaggedReviewIntentOpener } from "./parse-review-intent";
 import { resolveApproveFloor } from "./resolve-approve-floor";
+import { classifyRunFailure, createRerunPlanner } from "./review-rerun";
 import { PR_MERGED_SKILL_NAME } from "./review-skill";
 
 /**
@@ -43,11 +46,16 @@ import { PR_MERGED_SKILL_NAME } from "./review-skill";
  */
 
 /**
- * A review thread = one dispatched from a `pull_request`-triggered automation
- * (the PR-review path). Mention threads are `github_mention`; those keep the
- * mention-reply path and must NOT run the review executor.
+ * Which PR-automation lane a thread's automation belongs to:
+ *   - `review`: a `pull_request` automation without the companion flag (the
+ *     PR-review path: review plan, verdict writer, sweeps);
+ *   - `companion`: a `pull_request` automation with `filter.companion: true`
+ *     (advisory, one PR comment, never a review);
+ *   - null: anything else (no automation, a mention, an issue, a schedule).
  */
-export async function isReviewThread({
+export type PrAutomationLane = "review" | "companion";
+
+export async function getPrAutomationLane({
   db,
   userId,
   automationId,
@@ -57,15 +65,32 @@ export async function isReviewThread({
   userId: string;
   automationId: string | null;
   organizationId?: string | null;
-}): Promise<boolean> {
-  if (!automationId) return false;
+}): Promise<PrAutomationLane | null> {
+  if (!automationId) return null;
   const automation = await getAutomation({
     db,
     userId,
     automationId,
     organizationId,
   });
-  return automation?.triggerType === "pull_request";
+  if (automation?.triggerType !== "pull_request") return null;
+  return isCompanionAutomation(automation) ? "companion" : "review";
+}
+
+/**
+ * A review thread = one dispatched from a `pull_request`-triggered automation
+ * (the PR-review path). Mention threads are `github_mention`; those keep the
+ * mention-reply path and must NOT run the review executor. A PR companion
+ * automation is `pull_request` too, but it is NOT a review: it never gets the
+ * review plan, the verdict writer or the review sweep.
+ */
+export async function isReviewThread(args: {
+  db: DB;
+  userId: string;
+  automationId: string | null;
+  organizationId?: string | null;
+}): Promise<boolean> {
+  return (await getPrAutomationLane(args)) === "review";
 }
 
 type WorkFailedByOutcome = Record<ReviewFromIntentOutcome["outcome"], boolean> &
@@ -118,6 +143,8 @@ const WORK_FAILED_BY_OUTCOME: WorkFailedByOutcome = {
   degraded_comment: true,
   post_failed: true,
   skipped_duplicate_degrade_at_commit: true,
+  // #107: the notice waits for an automatic re-run, but THIS run still failed.
+  deferred_to_rerun: true,
 };
 
 export function isWorkFailedOutcome(
@@ -289,6 +316,7 @@ async function handleMergeAuditAtFinish({
     prNumber,
     terminalText: extractTerminalAgentText(threadChat?.messages ?? null),
     botLogin: resolveBotLogin(),
+    providerUnavailable: providerUnavailableOfChat(threadChat),
   });
   getPostHogServer().capture({
     distinctId: userId,
@@ -449,6 +477,21 @@ export async function handleReviewEffectAtFinish({
         // could. Neither gate can withhold a parsed verdict.
         reviewedSha: thread?.reviewedSha ?? null,
         runAbandoned: isAbandonedTerminalCause(thread?.terminalCause ?? null),
+        // #441: a run the provider refused names that cause on the PR.
+        providerUnavailable: providerUnavailableOfChat(threadChat),
+        // #107: a run that failed (infra) before a verdict is re-run for this
+        // commit before the notice posts — the same two inputs the sweep passes.
+        runFailure: classifyRunFailure(threadChat?.messages ?? null),
+        planRerun: createRerunPlanner({
+          db,
+          threadId,
+          organizationId: thread?.organizationId ?? null,
+          automationId: thread?.automationId ?? null,
+          repoFullName,
+          prNumber,
+        }),
+        // #107: the notice names this run, so a reader can join it to the logs.
+        threadId,
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),

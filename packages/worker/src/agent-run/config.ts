@@ -5,6 +5,10 @@ import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
 import { BOX_SLOTS_MAX } from "./slot-limits";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
+  parseContainerRunsConfig,
+  type ContainerRunsConfig,
+} from "./container-config";
+import {
   ADMISSION_BACKOFF,
   ADMISSION_DEFERRAL_BUDGET_S,
   sumBackoffSeconds,
@@ -185,6 +189,12 @@ export interface WorkerConfig {
    */
   runNamespaceRoot: string;
   /**
+   * #386: where the run-terminal ledger lives (`<root>/run-terminals/`).
+   * Defaults to runNamespaceRoot. A box whose /tmp is wiped at boot points it
+   * at a durable, worker-only dir so a reboot mid-drain keeps the ledger.
+   */
+  runTerminalRoot: string;
+  /**
    * Per-run GitHub credential brokering (#81). "on" (default): the workflow
    * starts the git + gh brokers and the agent child never sees the
    * installation token — only a per-run bearer, in EVERY lane. "legacy-direct"
@@ -194,6 +204,13 @@ export interface WorkerConfig {
    * to a raw-token env.
    */
   credentialBroker: "on" | "legacy-direct";
+  /**
+   * #437 Part B: a task run cancelled at its execution limit commits and
+   * pushes its unfinished work to its work branch before the checkout is
+   * deleted. "on" (default); only the exact string "off" disables it — the
+   * one-env-var rollback for the salvage alone.
+   */
+  timeoutSalvage: "on" | "off";
   /**
    * #380: the plane's seal key ring (`{"keys":[…]}`, see
    * payload-seal-keys.ts). Every run unseals its `sealedSecrets` with it.
@@ -233,6 +250,12 @@ export interface WorkerConfig {
   maintBatch: number;
   /** Optional loopback /healthz port. null → no new listener (default). */
   healthPort: number | null;
+  /**
+   * ADR-013 P1: the DEV-ONLY container run path (container-config.ts). null —
+   * the default, and always in production — is the host-uid path, unchanged.
+   * Set only when `WORKER_DEV_CONTAINER_RUNS=1`; deleted by the release PR.
+   */
+  containerRuns: ContainerRunsConfig | null;
 }
 
 function defaultDaemonDist(): string {
@@ -344,6 +367,25 @@ export function parseMemoryMax(raw: string | undefined): number {
     );
   }
   return bytes;
+}
+
+/**
+ * #386: the ledger root. Unset ⇒ the namespace root. A relative path is
+ * refused at boot: it would resolve against the worker's cwd (the repo
+ * checkout) and silently change with it.
+ */
+export function parseRunTerminalRoot(
+  raw: string | undefined,
+  runNamespaceRoot: string,
+): string {
+  const v = raw?.trim() ?? "";
+  if (!v) return runNamespaceRoot;
+  if (!path.isAbsolute(v)) {
+    throw new Error(
+      `WORKER_RUN_TERMINAL_ROOT must be an absolute path (got ${JSON.stringify(v)})`,
+    );
+  }
+  return v;
 }
 
 /** Upper bound on `WORKER_BOX_SLOTS`; a typo like `30` must not mint 30 accounts' worth of lock files. */
@@ -528,6 +570,12 @@ export function loadWorkerConfig(
   // capacity model needs (global cap, worker slots, per-run ceiling, swap) starts
   // with this one not being a typo.
   const memoryMaxBytes = parseMemoryMax(env.WORKER_RUN_MEMORY_MAX);
+  const runNamespaceRoot =
+    env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT;
+  const runTerminalRoot = parseRunTerminalRoot(
+    env.WORKER_RUN_TERMINAL_ROOT,
+    runNamespaceRoot,
+  );
   // ONLY VALIDATED WHEN THE CEILING IS ON. `parseTasksMax` throws on a set-but-
   // invalid value, and running it unconditionally meant a box that never enabled
   // the ceiling could be stopped from booting by a stray `WORKER_RUN_TASKS_MAX` —
@@ -563,6 +611,15 @@ export function loadWorkerConfig(
     }
   }
 
+  // ADR-013 P1: parsed before the uid-drop pairings below, which it relaxes
+  // (a run container is fenced by the container, not by a slot account).
+  // null unless WORKER_DEV_CONTAINER_RUNS=1, so every refusal below is
+  // byte-for-byte what it was for a host-model box.
+  const containerRuns = parseContainerRunsConfig(
+    env,
+    memoryMaxBytes,
+    parseBytesEnv,
+  );
   const agentUser = env.WORKER_AGENT_USER?.trim() || "";
   if (agentUser) {
     assertAgentUser(agentUser);
@@ -583,7 +640,9 @@ export function loadWorkerConfig(
   // the operator asked for a ceiling, the box booted happily, and every run went
   // uncapped with one 'skipped' line to show for it. Rejecting here fails at
   // boot AND at every run, because every caller loads this config.
-  if (memoryMaxBytes > 0 && !agentUser) {
+  // A container run takes the ceiling as `--memory` instead (ADR-013), so the
+  // uid drop is not what makes it enforceable there.
+  if (memoryMaxBytes > 0 && !agentUser && !containerRuns) {
     throw new Error(
       "WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty: the per-run " +
         "memory ceiling caps the AGENT, which only exists as a separate process " +
@@ -599,7 +658,9 @@ export function loadWorkerConfig(
   // without either is a misconfiguration, not a degraded mode — refuse here,
   // at boot AND at every run, since every caller loads this config.
   const boxSlots = parseBoxSlots(env.WORKER_BOX_SLOTS);
-  if (boxSlots > 1 && !agentUser) {
+  // Container runs: each run is its own container (pid, mount and network
+  // namespaces), so the slot accounts are not the fence between them.
+  if (boxSlots > 1 && !agentUser && !containerRuns) {
     throw new Error(
       `WORKER_BOX_SLOTS=${boxSlots} but WORKER_AGENT_USER is empty: concurrent ` +
         "runs are fenced from each other by running each slot as its own agent " +
@@ -723,8 +784,8 @@ export function loadWorkerConfig(
         ? pollIntervalMs
         : 7000,
     botLogin: env.WORKER_BOT_LOGIN?.trim() || "automata-ai-bot[bot]",
-    runNamespaceRoot:
-      env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT,
+    runNamespaceRoot,
+    runTerminalRoot,
     // Only the exact rollback string opts OUT — anything else (unset, typo)
     // stays brokered, so a misconfigured box degrades to the mode that keeps
     // the installation token out of agent env.
@@ -732,6 +793,7 @@ export function loadWorkerConfig(
       env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
         ? "legacy-direct"
         : "on",
+    timeoutSalvage: env.WORKER_TIMEOUT_SALVAGE?.trim() === "off" ? "off" : "on",
     payloadSealKeyFile:
       env.WORKER_PAYLOAD_SEAL_KEY_FILE?.trim() || DEFAULT_PAYLOAD_SEAL_KEY_FILE,
 
@@ -753,6 +815,7 @@ export function loadWorkerConfig(
     slotMinAgeS: parsePositiveInt(env.HATCHET_SLOT_MIN_AGE_S, 600),
     maintIntervalS: parsePositiveInt(env.HATCHET_MAINT_INTERVAL_S, 60),
     maintBatch: parsePositiveInt(env.HATCHET_MAINT_BATCH, 100),
+    containerRuns,
     healthPort: (() => {
       const n = Number(env.WORKER_HEALTH_PORT);
       return env.WORKER_HEALTH_PORT?.trim() && Number.isFinite(n) && n > 0

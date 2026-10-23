@@ -269,15 +269,32 @@ not a rolling restart:
 > **A drained run's terminal can be redelivered (#386).** On SIGTERM the SDK
 > (v1.26.0 `exitGracefully`) pauses the worker, stops its heartbeat and
 > unsubscribes BEFORE it waits for in-flight runs; each run still sends its own
-> COMPLETED/FAILED event before the drain ends. The engine can nevertheless hand the
-> same workflow run (attempt 0) to the relaunched process — seen in prod when a
-> run deferring on memory headroom failed five minutes into a drain. The worker
+> COMPLETED/FAILED event before the drain ends. But once the drain outlasts the
+> engine's heartbeat window the engine marks the run `REASSIGNED`, ignores the
+> drained attempt's own event, and hands the same workflow run to the relaunched
+> process (measured on hatchet-lite: a 5 s drain is not redelivered, 45 s is —
+> `run-terminal-redelivery.integration.test.ts`). Seen in prod when a run
+> deferring on memory headroom failed five minutes into a drain. The worker
 > therefore records every run id that reached a terminal in
-> `<WORKER_RUN_NAMESPACE_ROOT>/run-terminals/` (kept 24h; `PrivateTmp=no` keeps
-> it across a restart) and refuses a redelivered attempt of a recorded id with
-> `RunAlreadyTerminalError` — no clone, no daemon. The journal line reads
-> `redelivered attempt refused, not re-executed`. A run that never ended (worker
-> crash mid-run, #152) has no entry and is re-executed as before. A deferring run
+> `<WORKER_RUN_TERMINAL_ROOT>/run-terminals/` (kept 24h) and never re-executes a
+> recorded id. In code `WORKER_RUN_TERMINAL_ROOT` defaults to the run namespace
+> root under `/tmp`, which `PrivateTmp=no` keeps across a restart but Ubuntu's
+> tmpfiles (`D /tmp`) wipes at boot, so on the execution box `run-worker.sh`
+> defaults it to `/usr/local/automata/state` (worker-only, under the unit's
+> `ReadWritePaths`, created by cloud-init and again by the launcher);
+> `worker-box.env` may override it. Boot logs
+> `[worker-boot] run-terminal ledger root=<path>` and warns when it is under
+> `/tmp`. Of a recorded id, a run whose first attempt returned completes as a
+> no-op (output `outcome: already-terminal`, engine COMPLETED, journal
+> `redelivered attempt completed as a no-op`); one whose first attempt failed is
+> refused with `RunAlreadyTerminalError` (engine FAILED, journal
+> `redelivered attempt refused, not re-executed`). Either way no clone, no
+> daemon, and one structured line
+> `run.redelivery_refused {"runId","prior","priorAt","gapMs","action":"noop"|"refused"}`.
+> After any restart with a run in flight, grep the unit's journal for
+> `run.redelivery_refused`. First seen live 2026-10-22: a 41 s drain the engine
+> REASSIGNED 29 s in, completed as a no-op. A run
+> that never ended (worker crash mid-run, #152) has no entry and is re-executed as before. A deferring run
 > (`box.headroom_deferred_wait`) holds the drain for up to its 12-minute budget,
 > and has no cgroup yet, so a cgroup idle check does not see it.
 
@@ -349,6 +366,66 @@ cat /usr/local/lib/automata-batteries/harness.sha256   # absent = last harness i
 
 A harness failure never invalidates the review batteries' `manifest.sha256`;
 it only leaves `harness.sha256.invalid` behind.
+
+## Container runs (DEV/TEST ONLY until the ADR-013 release PR)
+
+[ADR-013](../../../docs/adr/ADR-013-image-per-run-execution.md) moves every agent run into a
+fresh container from the pinned batteries image. Until its release PR the container path is
+**dark**: the worker takes it only with `WORKER_DEV_CONTAINER_RUNS=1`, set by hand on a throwaway
+box and **never on the production box** (no provisioning step writes it). Unset, `0` or any other
+value is the host-uid path, unchanged. With it on, the worker logs a boot `WARNING` and refuses to
+boot unless the rootless daemon answers and the pinned digest is already in its store; it then
+removes every run container a dead worker of this box left behind (label `automata.box`).
+
+| Variable                         | Default                            | Meaning                                                                                            |
+| -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `WORKER_DEV_CONTAINER_RUNS`      | unset (off)                        | Exactly `1` turns the container path on.                                                           |
+| `WORKER_BATTERIES_IMAGE`         | none (required when on)            | `ghcr.io/be-automata/automata-batteries@sha256:<digest>`; a tag is refused. Never pulled by a run. |
+| `WORKER_CONTAINER_DOCKER_SOCKET` | `/run/automata-docker/docker.sock` | The rootless daemon's socket (group `automata-docker`).                                            |
+| `WORKER_RUN_MEMORY_MAX`          | none (required when on)            | The slot tuple's ceiling, used as `--memory` and `--memory-swap`.                                  |
+| `WORKER_RUN_TASKS_MAX`           | 4096                               | `--pids-limit`.                                                                                    |
+| `WORKER_CONTAINER_CPUS`          | 2                                  | `--cpus`.                                                                                          |
+| `WORKER_CONTAINER_TMP_SIZE`      | 512M                               | The `/tmp` tmpfs cap (counts against `--memory`).                                                  |
+| `WORKER_CONTAINER_SHM_SIZE`      | 256M                               | `--shm-size` (counts against `--memory`).                                                          |
+| `WORKER_CONTAINER_RUN_GID`       | unset (no hand-over)               | The rootless daemon user's primary gid: the run dir is handed to it (setgid, group rw).            |
+
+The slot tuple (`WORKER_BOX_SLOTS=3`, `WORKER_GLOBAL_MAX_RUNS=3`, `WORKER_PER_ORG_MAX_RUNS=2`)
+works unchanged; with containers on it does not need `WORKER_AGENT_USER`. A container run gets no
+network (`--network none`) and, until C3 (#430) bridges the egress proxy and brokers over unix
+sockets, no route to the control plane either: this path is for proving the container lifecycle,
+not for serving real runs.
+
+Install the rootless daemon on the throwaway box (root; idempotent; never on production):
+
+```bash
+packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata
+packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata --check   # verify only
+```
+
+It creates `automata-runner` (no login, no sudo) with its own subuid/subgid range, the
+`automata-docker` group (the worker joins it), cgroup v2 delegation for
+`user@<uid>.service` (`Delegate=cpu cpuset io memory pids`), lingering, and the user unit
+`linux/automata-runner-docker.service`. Then pull by digest, verify, and prove the limits, which
+is the ADR-013 P0 blocker. The first published digest (C1) is
+`sha256:d4c75aa6ecd404a5771c0ab441518b1def1ac569ea8f130c11afc90a5ca7d56f` (not `sha256:17c1197a…`,
+which is its one-layer attestation manifest). It takes **12.5 GB** on disk per daemon store: the
+rootless daemon keeps its own copy (data root `~automata-runner/docker`), so check `df` first and
+drop any copy in the root daemon's store that nothing uses.
+
+```bash
+img=ghcr.io/be-automata/automata-batteries@sha256:d4c75aa6ecd404a5771c0ab441518b1def1ac569ea8f130c11afc90a5ca7d56f
+uid=$(id -u automata-runner)
+sudo -u automata-runner env XDG_RUNTIME_DIR=/run/user/$uid \
+  docker -H unix:///run/automata-docker/docker.sock pull "$img"
+sudo -u automata env DOCKER_HOST=unix:///run/automata-docker/docker.sock \
+  deploy/images/batteries/verify.sh "$img"
+sudo -u automata packages/worker/deploy/linux/prove-container-limits.sh \
+  /run/automata-docker/docker.sock "$img"
+```
+
+`prove-container-limits.sh` prints one `PASS`/`FAIL` line per probe (memory OOM-kill, pids with a
+control run, cpu throttling, and `docker rm -f` reaping a `setsid` child) and exits 0 only when all
+pass.
 
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 

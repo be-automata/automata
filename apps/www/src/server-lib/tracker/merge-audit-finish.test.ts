@@ -7,6 +7,12 @@ import {
   runMergeAuditAtFinish,
 } from "./merge-audit-finish";
 import { resolveTrackerConfig } from "./tracker-config";
+import {
+  isReplaceableAuditNotice,
+  renderNoticeComment,
+  renderProviderAuditNotice,
+  renderUnusableAuditNotice,
+} from "./merge-audit";
 
 // `@/lib/github` is already mocked by the global test setup: getOctokitForApp
 // is a vi.fn(), parseRepoFullName is the real one.
@@ -244,5 +250,50 @@ describe("runMergeAuditAtFinish", () => {
 
     expect(outcome).toEqual({ outcome: "tracker_unconfigured" });
     expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createAuditCommentClient — replace-notice (#441)", () => {
+  // Card: protects=a provider notice corrects ONLY a run-failure notice and
+  // never a posted audit; fails_when=a real audit comment is overwritten, or
+  // the generic notice is left beside a second comment; no_claim=the notice
+  // wording (execute-merge-audit suite).
+  it("updates a run-failure notice in place and keeps a posted audit", async () => {
+    const generic = renderNoticeComment(
+      7,
+      renderUnusableAuditNotice(["ACME-1"]),
+    );
+    expect(isReplaceableAuditNotice(generic)).toBe(true);
+    const providerNotice = renderNoticeComment(
+      7,
+      renderProviderAuditNotice(["ACME-1"], { kind: "credit_exhausted" }),
+    );
+    expect(isReplaceableAuditNotice(providerNotice)).toBe(true);
+
+    const onNotice = fakeOctokit([{ id: 2, login: BOT, body: generic }]);
+    expect(
+      await client(onNotice).upsertMarkerComment(
+        MARKER,
+        providerNotice,
+        "replace-notice",
+      ),
+    ).toBe("updated");
+    expect(onNotice.rest.issues.updateComment).toHaveBeenCalledWith(
+      expect.objectContaining({ comment_id: 2, body: providerNotice }),
+    );
+    expect(onNotice.rest.issues.createComment).not.toHaveBeenCalled();
+
+    const audit = `${MARKER}\n## Post-merge ticket audit\n\n### ACME-1\nAC-1 met. The audit run for ACME-1 could not run. (quoted)`;
+    expect(isReplaceableAuditNotice(audit)).toBe(false);
+    const onAudit = fakeOctokit([{ id: 3, login: BOT, body: audit }]);
+    expect(
+      await client(onAudit).upsertMarkerComment(
+        MARKER,
+        providerNotice,
+        "replace-notice",
+      ),
+    ).toBe("kept_existing");
+    expect(onAudit.rest.issues.updateComment).not.toHaveBeenCalled();
+    expect(onAudit.rest.issues.createComment).not.toHaveBeenCalled();
   });
 });

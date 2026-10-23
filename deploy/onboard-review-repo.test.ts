@@ -17,10 +17,14 @@ import { describe, test } from "node:test";
 import {
   OnboardArgsError,
   REVIEW_MAX_TURNS,
+  buildCompanionAutomation,
   buildMentionAutomation,
   buildReviewAutomation,
   buildReviewSettingsPatch,
+  companionAutomationName,
   diffFields,
+  isCompanionRow,
+  laneAutomationName,
   mentionAutomationName,
   parseOnboardArgs,
   reviewAutomationName,
@@ -269,6 +273,148 @@ describe("--mention (the org-owned mention lane)", () => {
         },
         disableGitCheckpointing: true,
       },
+    );
+  });
+});
+
+describe("--companion (the PR companion lane)", () => {
+  const parseCompanion = (...extra: string[]) =>
+    parseOnboardArgs(["example-org", "acme/widgets", ...extra], ALLOWED);
+
+  test("`--companion <skill> --model <m>` configures; created disabled unless --enable", () => {
+    assert.deepEqual(
+      parseCompanion("--companion", "flutter-pr-companion", "--model", "opus"),
+      {
+        kind: "configure-companion",
+        orgSlug: "example-org",
+        repoFullName: "acme/widgets",
+        skillName: "flutter-pr-companion",
+        model: "opus",
+        enabled: undefined,
+        dryRun: false,
+      },
+    );
+    const on = parseCompanion(
+      "react-pr-companion",
+      "--companion",
+      "--model",
+      "sonnet",
+      "--enable",
+    );
+    assert.equal(on.kind, "configure-companion");
+    assert.equal(on.kind === "configure-companion" && on.enabled, true);
+    assert.equal(
+      on.kind === "configure-companion" && on.skillName,
+      "react-pr-companion",
+    );
+  });
+
+  test("--companion with --enable/--disable alone flips the companion automation", () => {
+    assert.deepEqual(
+      parseCompanion("--companion", "flutter-pr-companion", "--disable"),
+      {
+        kind: "flip",
+        lane: "companion",
+        orgSlug: "example-org",
+        repoFullName: "acme/widgets",
+        skillName: "flutter-pr-companion",
+        enabled: false,
+        dryRun: false,
+      },
+    );
+  });
+
+  test("rejects review-lane flags, --mention together, unknown models and an empty run", () => {
+    const cases: [string[], RegExp][] = [
+      [
+        ["--companion", "x-pr-companion", "--model", "opus", "--drafts"],
+        /--drafts is a review-lane flag and is not used with --companion/,
+      ],
+      [
+        [
+          "--companion",
+          "x-pr-companion",
+          "--model",
+          "opus",
+          "--tolerance",
+          "info",
+        ],
+        /--tolerance is a review-lane flag/,
+      ],
+      [
+        ["--companion", "x-pr-companion", "--mention", "--model", "opus"],
+        /mutually exclusive/,
+      ],
+      [
+        ["--companion", "x-pr-companion", "--model", "gpt-4"],
+        /not a known model: gpt-4/,
+      ],
+      [["--companion", "x-pr-companion"], /Nothing to do/],
+      [["--companion", "--model", "opus"], /positional argument/],
+    ];
+    for (const [extra, message] of cases) {
+      assert.throws(
+        () => parseCompanion(...extra),
+        (err: unknown) =>
+          err instanceof OnboardArgsError && message.test(err.message),
+        extra.join(" "),
+      );
+    }
+  });
+
+  test("automation: a pull_request companion, emit-only mode, no bots, skill_message with model, no checkpointing", () => {
+    assert.equal(
+      companionAutomationName("flutter-pr-companion"),
+      "PR companion (flutter-pr-companion)",
+    );
+    assert.equal(
+      laneAutomationName("companion", "flutter-pr-companion"),
+      "PR companion (flutter-pr-companion)",
+    );
+    assert.equal(
+      laneAutomationName("review", "flutter-pr-review"),
+      reviewAutomationName("flutter-pr-review"),
+    );
+    const row = buildCompanionAutomation({
+      repoFullName: "acme/Widgets",
+      skillName: "flutter-pr-companion",
+      model: "opus",
+    });
+    assert.deepEqual(row, {
+      name: "PR companion (flutter-pr-companion)",
+      triggerType: "pull_request",
+      triggerConfig: {
+        filter: {
+          includeAllAuthors: true,
+          excludeBotSenders: true,
+          companion: true,
+        },
+        on: { open: true, update: true },
+        permissionMode: "review",
+      },
+      repoFullName: "acme/Widgets",
+      branchName: "main",
+      action: {
+        type: "skill_message",
+        config: {
+          skillName: "flutter-pr-companion",
+          version: "latest",
+          model: "opus",
+        },
+      },
+      disableGitCheckpointing: true,
+    });
+    assert.equal(isCompanionRow(row), true);
+    assert.equal(
+      isCompanionRow(
+        buildReviewAutomation({
+          repoFullName: "acme/widgets",
+          skillName: "flutter-pr-review",
+          drafts: false,
+          model: "opus",
+        }),
+      ),
+      false,
     );
   });
 });

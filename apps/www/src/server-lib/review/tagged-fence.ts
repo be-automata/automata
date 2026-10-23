@@ -1,3 +1,5 @@
+import type { z } from "zod";
+
 /**
  * Tagged-fence helper shared by the review lane (`json review-intent`) and the
  * audit lane. A tagged block opens with a WHOLE fence line at a line start:
@@ -17,6 +19,8 @@ export type TaggedExtraction =
   | null;
 
 export interface TaggedFence {
+  /** The tag after `json` on the opener line (also the payload's `kind`). */
+  info: string;
   openerRe: RegExp;
   hasOpener(text: string): boolean;
   /** null = no tagged opener; ok:false = opener present but never closed. */
@@ -44,6 +48,7 @@ export function buildTaggedFence(info: string): TaggedFence {
   }
 
   return {
+    info,
     openerRe,
     hasOpener: (text) => openerRe.test(text),
     extractLast(text) {
@@ -60,4 +65,59 @@ export function buildTaggedFence(info: string): TaggedFence {
       return { ok: true, payload: rest.slice(0, close.index).trim() };
     },
   };
+}
+
+/** Untagged ```json fences, the fallback when the agent dropped the tag. */
+const PLAIN_JSON_FENCE = /```json[ \t]*\r?\n([\s\S]*?)\r?\n```/g;
+
+export type ParseTaggedJsonResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: string };
+
+/**
+ * An emit-only lane's terminal block (the mention and companion lanes): the
+ * LAST tagged `json <info>` block decides; without one, the last plain
+ * ```json block naming `"<info>"` (an agent that forgot the tag still gets
+ * its block read). The payload is then JSON-parsed and schema-validated;
+ * every failure is a reason, never a throw.
+ */
+export function parseTaggedJsonBlock<T>(
+  text: string,
+  fence: TaggedFence,
+  schema: z.ZodType<T>,
+): ParseTaggedJsonResult<T> {
+  const kind = fence.info;
+  let payload: string | null = null;
+  const tagged = fence.extractLast(text);
+  if (tagged !== null) {
+    if (!tagged.ok) return { ok: false, reason: tagged.reason };
+    payload = tagged.payload;
+  } else {
+    for (const match of text.matchAll(PLAIN_JSON_FENCE)) {
+      const candidate = match[1]?.trim() ?? "";
+      if (candidate.includes(`"${kind}"`)) payload = candidate;
+    }
+  }
+  if (payload === null) {
+    return { ok: false, reason: `no ${kind} block in agent output` };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(payload);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `${kind} JSON parse failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      reason: `${kind} schema validation failed: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join("; ")}`,
+    };
+  }
+  return { ok: true, value: parsed.data };
 }

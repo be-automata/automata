@@ -170,6 +170,7 @@ export async function materialiseAgentCredentials({
   seed,
   foregroundOnly = false,
   batteries,
+  trustWorkdir,
 }: {
   credentials: PulledAgentCredentials;
   agent: string;
@@ -186,6 +187,12 @@ export async function materialiseAgentCredentials({
   foregroundOnly?: boolean;
   /** Test/override seam for seedBatteries; production passes only `log`. */
   batteries?: Omit<SeedBatteriesOptions, "agentUser">;
+  /**
+   * The path the agent sees its clone at, when that is not `run.repo`: a
+   * container run (ADR-013) mounts the clone at `/workspace`, so the trust
+   * seed must name that path. Absent = `run.repo` (the host path, unchanged).
+   */
+  trustWorkdir?: string;
 }): Promise<MaterialisedCredentials> {
   const home = run.home;
   const users = agentUser ? [agentUser] : [];
@@ -223,7 +230,7 @@ export async function materialiseAgentCredentials({
   // MCP servers go, and it is written whole, once.
   await seedWorkspaceTrust({
     home,
-    workdir: run.repo,
+    workdir: trustWorkdir ?? run.repo,
     grant,
     mcpServers: harnessMcpServers(seeded?.harness),
   });

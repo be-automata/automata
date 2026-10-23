@@ -15,6 +15,8 @@ import { onTestFinished } from "vitest";
 import {
   generateSidecar,
   stubUpdater,
+  type Claim,
+  type DraftOp,
   type ReconcileDiff,
   type Sidecar,
   type Updater,
@@ -68,6 +70,31 @@ If SSO sign-in loops back to the sign-in page, clear the ag_session cookie and s
 
 The SSO loop was fixed in version 2.4.1.
 `,
+  "repo/ratelimit.py": `RATE_LIMIT_PER_MINUTE = 120
+BURST_ALLOWANCE = 20
+
+
+def window_seconds() -> int:
+    return 60
+`,
+  "repo/config.yaml": `limits:
+  api:
+    requests_per_minute: 120
+  seats:
+    max_free: 3
+`,
+  "repo/README.md": `# Limits
+
+The API allows 120 requests per minute per workspace.
+`,
+  "wiki/limits-faq.md": `# Limits FAQ
+
+The API allows 120 requests per minute.
+
+Bursts may exceed the limit by 20 requests.
+
+The limits README states 120 requests per minute per workspace.
+`,
 };
 
 export const SEED = [
@@ -91,6 +118,28 @@ export const SEED = [
     id: "sso-fixed-in",
     statement: "The SSO loop was fixed in version 2.4.1.",
     evidence: ["ticket://SUP-12#/resolution/fixedIn"],
+  },
+];
+
+/** A second page grounded on whitespace-significant code and config (py, yaml) and on a prose repo file. */
+export const LIMITS_PAGE = "limits-faq";
+
+export const LIMITS_SEED = [
+  {
+    id: "api-rate",
+    statement: "The API allows 120 requests per minute.",
+    evidence: ["repo://ratelimit.py#L1-L1", "repo://config.yaml#L3-L3"],
+  },
+  {
+    id: "burst",
+    statement: "Bursts may exceed the limit by 20 requests.",
+    evidence: ["repo://ratelimit.py#L2-L2"],
+  },
+  {
+    id: "readme-rate",
+    statement:
+      "The limits README states 120 requests per minute per workspace.",
+    evidence: ["repo://README.md#L3-L3"],
   },
 ];
 
@@ -118,6 +167,65 @@ export const diffOf = (now: string[], header: string): ReconcileDiff => ({
   newText: `${now.join("\n")}\n`,
 });
 
+/** A diff of any repo file, described by one or more -U0 hunk headers; oldPath marks a rename. */
+export const diffOfFile = (
+  path: string,
+  oldText: string,
+  newText: string,
+  header: string,
+  oldPath?: string,
+): ReconcileDiff => ({
+  path,
+  ...(oldPath ? { oldPath } : {}),
+  hunks: parseHunks(header),
+  oldText,
+  newText,
+});
+
+/** A diff entry that names a file but changes none of its lines: only its path (and rename source) matter. */
+export const emptyDiff = (path: string, oldPath?: string): ReconcileDiff => ({
+  path,
+  ...(oldPath ? { oldPath } : {}),
+  hunks: [],
+  oldText: "",
+  newText: "",
+});
+
+/** The fixture text of `repo/<rel>`, i.e. the `oldText` side of a diff against the corpus. */
+export const repoFixture = (rel: string) => FIXTURES[`repo/${rel}`] ?? "";
+
+/** The sidecar with one claim changed; every other claim is untouched. */
+export const withClaim = (
+  sc: Sidecar,
+  id: string,
+  change: (c: Claim) => Claim,
+): Sidecar => ({
+  ...sc,
+  claims: sc.claims.map((c) => (c.id === id ? change(c) : c)),
+});
+
+/** The op on a claim (optionally of one kind), or undefined: for asserting that no op was raised. */
+export const findOp = (ops: DraftOp[], claimId: string, op?: DraftOp["op"]) =>
+  ops.find((o) => o.claimId === claimId && (op === undefined || o.op === op));
+
+/** The op on a claim (optionally of one kind); throws naming what is missing, so a failure reads plainly. */
+export function opFor(
+  ops: DraftOp[],
+  claimId: string,
+  op?: DraftOp["op"],
+): DraftOp {
+  const found = findOp(ops, claimId, op);
+  if (!found) throw new Error(`no ${op ?? "op"} for ${claimId}`);
+  return found;
+}
+
+/** Write `<root>/repo/<rel>`, creating parent directories. */
+export function writeRepo(root: string, rel: string, text: string): void {
+  const p = join(root, "repo", rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text);
+}
+
 /** The stub updater, recording which claims reached it. */
 export function countingUpdater(): { llm: Updater; seen: string[] } {
   const inner = stubUpdater();
@@ -139,6 +247,19 @@ export function useCorpus(): { root: string; sc: Sidecar } {
   const { root, cleanup } = makeCorpus();
   onTestFinished(cleanup);
   return { root, sc: generateSidecar(root, PAGE, pageOf(root), SEED) };
+}
+
+export const limitsPageOf = (root: string) =>
+  readFileSync(join(root, "wiki", `${LIMITS_PAGE}.md`), "utf8");
+
+/** A fresh corpus with the limits page's sidecar, removed when the current test finishes. */
+export function useLimitsCorpus(): { root: string; sc: Sidecar } {
+  const { root, cleanup } = makeCorpus();
+  onTestFinished(cleanup);
+  return {
+    root,
+    sc: generateSidecar(root, LIMITS_PAGE, limitsPageOf(root), LIMITS_SEED),
+  };
 }
 
 /** Materialize the corpus into a fresh temp directory; call the returned cleanup when done. */

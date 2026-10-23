@@ -2,6 +2,7 @@ import type { DB } from "@terragon/shared/db";
 import type { Automation, ThreadTrustContext } from "@terragon/shared/db/types";
 import { getOrganizationReviewSetting } from "@terragon/shared/model/organization-review-settings";
 import { getRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { isCompanionAutomation } from "@terragon/shared/automations";
 import { resolveComposedTrustedAuthorThreshold } from "@terragon/review/settings/review-floor-resolver";
 import {
   resolvePermissionMode,
@@ -75,6 +76,14 @@ export async function resolvePermissionModeForDispatch({
    */
   threadChatPermissionMode?: "allowAll" | "plan" | null;
 }): Promise<PermissionMode> {
+  // A PR companion is emit-only on every PR, trusted or not: pinned to the
+  // least-privilege element, whatever is configured (tighten-only, ADR-005).
+  // `review` keeps Read/Grep/Glob/Bash (analyzers and tests in the checkout)
+  // while the daemon withholds every GitHub credential and denies gh and
+  // git push (ADR-004), so a companion can never push to the PR branch.
+  if (isCompanionAutomation(automation)) {
+    return "review";
+  }
   const isPrFamily = automation?.triggerType === "pull_request";
 
   const automationConfiguredRaw =

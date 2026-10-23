@@ -71,6 +71,32 @@ describe("loadWorkerConfig", () => {
     ).toBe("/data/agent-runs");
   });
 
+  describe("runTerminalRoot (#386) — where the run-terminal ledger lives", () => {
+    it("defaults to the run namespace root (today's behaviour)", () => {
+      expect(loadWorkerConfig({}).runTerminalRoot).toBe(
+        "/tmp/automata-agent-run",
+      );
+      expect(
+        loadWorkerConfig({ WORKER_RUN_NAMESPACE_ROOT: "/data/agent-runs" })
+          .runTerminalRoot,
+      ).toBe("/data/agent-runs");
+    });
+
+    it("honours WORKER_RUN_TERMINAL_ROOT — a durable dir survives the boot-time /tmp wipe", () => {
+      expect(
+        loadWorkerConfig({
+          WORKER_RUN_TERMINAL_ROOT: " /usr/local/automata/state ",
+        }).runTerminalRoot,
+      ).toBe("/usr/local/automata/state");
+    });
+
+    it("refuses a relative WORKER_RUN_TERMINAL_ROOT at boot", () => {
+      expect(() =>
+        loadWorkerConfig({ WORKER_RUN_TERMINAL_ROOT: "state" }),
+      ).toThrow(/WORKER_RUN_TERMINAL_ROOT must be an absolute path/);
+    });
+  });
+
   describe("boxTrust (D1) — who the box belongs to decides how runs authenticate", () => {
     it("defaults to shared: an unconfigured box never gets a provider credential on disk", () => {
       expect(loadWorkerConfig({}).boxTrust).toBe("shared");
@@ -133,6 +159,27 @@ describe("loadWorkerConfig", () => {
           loadWorkerConfig({ WORKER_CREDENTIAL_BROKER: value })
             .credentialBroker,
           `WORKER_CREDENTIAL_BROKER=${JSON.stringify(value)} must not opt out`,
+        ).toBe("on");
+      }
+    });
+  });
+
+  describe("timeoutSalvage (#437 Part B) — the salvage's one-env-var rollback", () => {
+    it("defaults to on, and only the exact string 'off' turns it off", () => {
+      // protects=the Rollback note: WORKER_TIMEOUT_SALVAGE=off disables the
+      // salvage, anything else keeps it on; fails_when=the default is off, a
+      // padded "off" is ignored, or a typo ("OFF", "false", "0") disables it;
+      // no_claim=the workflow honouring the value (workflow-cleanup tests).
+      expect(loadWorkerConfig({}).timeoutSalvage).toBe("on");
+      for (const value of ["off", " off "]) {
+        expect(
+          loadWorkerConfig({ WORKER_TIMEOUT_SALVAGE: value }).timeoutSalvage,
+        ).toBe("off");
+      }
+      for (const value of ["on", "OFF", "false", "0", "", undefined]) {
+        expect(
+          loadWorkerConfig({ WORKER_TIMEOUT_SALVAGE: value }).timeoutSalvage,
+          `WORKER_TIMEOUT_SALVAGE=${JSON.stringify(value)} must keep it on`,
         ).toBe("on");
       }
     });
