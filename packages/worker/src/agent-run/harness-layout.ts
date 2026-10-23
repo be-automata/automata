@@ -17,8 +17,8 @@ import {
  *                                  installer's checkout; renamed to
  *                                  harness.sha256.invalid by a failed harness
  *                                  install (manifest.sha256 is never touched)
- *   <root>/<id>@<pin>/             {{packDir}}; pin = sha (git-setup) or
- *                                  version (npm-lock)
+ *   <root>/<id>@<pin>/             {{packDir}}; pin = sha (git-setup,
+ *                                  plugin-tarball) or version (npm-lock)
  *     .stamp                       `stamp <64 hex>` first, and a `node <major>`
  *                                  line: the Node major the native modules
  *                                  were built against
@@ -34,6 +34,9 @@ import {
  *     mcp-tools.json               optional: every tool the UNFILTERED MCP
  *                                  server registers (a JSON string array)
  *     ms-playwright/               gstack's Chromium (PLAYWRIGHT_BROWSERS_PATH)
+ *     src/<paths>                  a plugin-tarball pack's verified subtrees;
+ *                                  its claude/ entries are links into them
+ *     bin/<wrapper>                a plugin-tarball pack's env-aliasing shims
  *
  * Everything is root-owned and not group/other-writable; symlinks resolve
  * inside their own pack dir.
@@ -54,9 +57,9 @@ export const HARNESS_SHARED_DIRS: Readonly<Record<string, readonly string[]>> =
     gsd: ["gsd-core"],
   };
 
-/** The pin in a pack dir's name: the commit for git-setup, the version for npm-lock. */
+/** The pin in a pack dir's name: the commit for git-setup and plugin-tarball, the version for npm-lock. */
 export function harnessPackPin(pack: HarnessPack): string {
-  return pack.kind === "git-setup" ? pack.sha : pack.version;
+  return pack.kind === "npm-lock" ? pack.version : pack.sha;
 }
 
 export function harnessPackDirName(pack: HarnessPack): string {

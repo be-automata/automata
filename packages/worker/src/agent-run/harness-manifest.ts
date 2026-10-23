@@ -20,8 +20,8 @@ import {
 
 /**
  * Contract for packages/worker/deploy/harness.json — the HARNESS packs: full
- * upstream tool suites (gstack, GSD, ruflo) with their bin/, hooks, internal
- * symlinks and, for ruflo, an MCP server. Task and PR lanes only; a review run
+ * upstream tool suites (gstack, GSD, ruflo, the Somnio engineering plugin)
+ * with their bin/, hooks, internal symlinks and, for ruflo, an MCP server. Task and PR lanes only; a review run
  * never gets one (shared HARNESS_PACK_IDS are rejected by the review setting).
  *
  * A separate manifest from batteries.json on purpose: the review packs there
@@ -31,9 +31,23 @@ import {
  * a different, explicit set of rules:
  *
  * - kinds: `git-setup` (a pinned commit plus its own setup script, run with
- *   `setupArgs`, with sha256-pinned `dependencies` such as bun) and `npm-lock`
- *   (an exact npm package version, with exact `overrides`). No ranges, no tags,
- *   no `latest`: every version is an exact semver.
+ *   `setupArgs`, with sha256-pinned `dependencies` such as bun), `npm-lock`
+ *   (an exact npm package version, with exact `overrides`) and
+ *   `plugin-tarball` (a Claude Code plugin from a PRIVATE repo: no build step
+ *   and no credential on the box; the operator stages `git archive <sha>
+ *   <paths>` and the installer accepts it only when every `paths` entry
+ *   recomputes to its pinned git `tree` id). No ranges, no tags, no `latest`:
+ *   every version is an exact semver.
+ * - a plugin-tarball pack is NOT loaded as a plugin: its `pluginRoot`'s
+ *   skills/, agents/ and commands/ are linked like any harness pack's, its
+ *   hooks and `.mcp.json` never load, and `env.CLAUDE_PLUGIN_ROOT` points the
+ *   skills' own `${CLAUDE_PLUGIN_ROOT}` paths at the pack. `wrappers` are
+ *   fixed shell shims in `bin/` that exec a pack file with tracker env names
+ *   aliased (the plugin's ytctl reads YOUTRACK_TOKEN; a run's agent holds
+ *   YOUTRACK_AGENT_TOKEN, never the control plane's token).
+ * - npm-lock `agentFiles` derive `claude/agents/<name>.md` from a sha256-pinned
+ *   agent definition inside the installed closure, with its frontmatter
+ *   `hooks` dropped (ruflo's agents shell out to unpinned `npx` there).
  * - lockfiles: an npm-lock pack names OUR committed `lockOverlay`
  *   (packages/worker/deploy/batteries/<id>/package-lock.json, its package.json
  *   beside it) with `lockSha256`/`packageJsonSha256`; the installer installs
@@ -48,7 +62,8 @@ import {
  *   `discard` (paths under the claude dir never published; a segment may be
  *   `*`) and `smoke` (argv lists `automata-batteries verify-as-agent` runs).
  * - `env` keys are confined to the battery prefixes the daemon reserves from
- *   repo env (GSTACK_, PLAYWRIGHT_, MCP_, CLAUDE_FLOW_); a value is either a
+ *   repo env (GSTACK_, PLAYWRIGHT_, MCP_, CLAUDE_FLOW_) and the two exact keys
+ *   it also reserves (CLAUDE_PLUGIN_ROOT, YTCTL); a value is either a
  *   plain word/number (no `/`) or a path confined to the pack:
  *   `{{packDir}}` or `{{packDir}}/<relative path>` without `..` segments.
  * - `mcpServers` commands are a wrapper inside the pack (`{{packDir}}/…`);
@@ -85,14 +100,19 @@ import {
 export const HARNESS_MANIFEST_REPO_PATH = "packages/worker/deploy/harness.json";
 
 /** Mirror of shared HARNESS_PACK_IDS, in manifest order (deploy-assets pins them equal). */
-export const HARNESS_PACK_IDS = ["gstack", "gsd", "ruflo"] as const;
+export const HARNESS_PACK_IDS = [
+  "gstack",
+  "gsd",
+  "ruflo",
+  "somnio-engineering",
+] as const;
 
 /** The only placeholder a manifest value may hold; the installer substitutes the pack dir. */
 export const HARNESS_PACK_DIR_PLACEHOLDER = "{{packDir}}";
 
-/** Env keys a harness pack may set: the battery prefixes repo env can never set. */
+/** Env keys a harness pack may set: the battery prefixes and exact keys repo env can never set. */
 export const HARNESS_ENV_KEY =
-  /^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$/;
+  /^((GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+|CLAUDE_PLUGIN_ROOT|YTCTL)$/;
 /** A plain env value (or one path segment under {{packDir}}): a word or number, no `/`, no shell metacharacters. */
 const ENV_VALUE_WORD = /^[A-Za-z0-9._:-]*$/;
 /** An npm package name, optionally scoped. */
@@ -199,6 +219,32 @@ export interface HarnessMcpServe {
   env: Record<string, string>;
 }
 
+/** A `claude/agents/<name>.md` derived from an agent file in the installed closure. */
+export interface HarnessAgentFile {
+  /** Under node_modules/: the upstream agent definition. */
+  from: string;
+  /** sha256 of `from` as installed (before the frontmatter `hooks` are dropped). */
+  sha256: string;
+  name: string;
+}
+
+/** One repo subtree a plugin-tarball pack ships, at `src/<path>`. */
+export interface HarnessTarballPath {
+  path: string;
+  /** The git tree id of `path` at the pack's `sha`. */
+  tree: string;
+}
+
+/** A fixed shim at `bin/<name>` that execs a pack file with env names aliased. */
+export interface HarnessWrapper {
+  /** `bin/<name>`, relative to the pack. */
+  path: string;
+  /** The executable it runs, relative to the pack (`src/...`). */
+  exec: string;
+  /** target name → source name: the target is set from the source when the source is non-empty. */
+  aliasEnv: Record<string, string>;
+}
+
 export interface HarnessMcpServer {
   /** `{{packDir}}/<relative path>`: a wrapper inside the pack. */
   command: string;
@@ -259,9 +305,23 @@ export interface HarnessNpmLockPack extends HarnessPackBase {
   warmup?: HarnessWarmupCall[];
   /** Present exactly when `mcpServers` is. */
   mcpServe?: HarnessMcpServe;
+  agentFiles?: HarnessAgentFile[];
 }
 
-export type HarnessPack = HarnessGitSetupPack | HarnessNpmLockPack;
+export interface HarnessPluginTarballPack extends HarnessPackBase {
+  kind: "plugin-tarball";
+  repo: string;
+  sha: string;
+  paths: HarnessTarballPath[];
+  /** One of `paths`, or a dir under one: whose skills/, agents/ and commands/ are linked. */
+  pluginRoot: string;
+  wrappers?: HarnessWrapper[];
+}
+
+export type HarnessPack =
+  | HarnessGitSetupPack
+  | HarnessNpmLockPack
+  | HarnessPluginTarballPack;
 
 export interface HarnessManifest {
   schemaVersion: 1;
@@ -310,7 +370,24 @@ const NPM_LOCK_KEYS = [
   "postInstall",
   "warmup",
   "mcpServe",
+  "agentFiles",
 ] as const;
+const PLUGIN_TARBALL_KEYS = [
+  ...BASE_KEYS,
+  "repo",
+  "sha",
+  "paths",
+  "pluginRoot",
+  "wrappers",
+] as const;
+const AGENT_FILE_KEYS = ["from", "sha256", "name"] as const;
+const TARBALL_PATH_KEYS = ["path", "tree"] as const;
+const WRAPPER_KEYS = ["path", "exec", "aliasEnv"] as const;
+/** The env names a wrapper may alias, both sides: tracker credentials only. */
+const WRAPPER_ALIAS_ENV = /^(YOUTRACK|JIRA)_[A-Z0-9_]+$/;
+/** Subtrees per plugin-tarball pack, and wrappers: a few each. */
+const TARBALL_PATHS_MAX = 8;
+const WRAPPERS_MAX = 4;
 const BROWSER_KEYS = [
   "name",
   "revision",
@@ -364,7 +441,7 @@ const BROWSE_SMOKE_KEYS = ["cli"] as const;
 /** PATH entries per pack: a few bin dirs, never a tree walk. */
 const PATH_DIRS_MAX = 4;
 const MCP_SERVER_KEYS = ["command", "args"] as const;
-const HARNESS_KINDS = ["git-setup", "npm-lock"] as const;
+const HARNESS_KINDS = ["git-setup", "npm-lock", "plugin-tarball"] as const;
 
 /** A list of distinct strings each matching `pattern`. */
 function findNameListError(
@@ -940,7 +1017,143 @@ function findNpmLockPackError(
       value.mcpServe,
       value.mcpServers !== undefined,
       `${at}.mcpServe`,
+    ) ??
+    findAgentFilesError(value.agentFiles, `${at}.agentFiles`)
+  );
+}
+
+function findAgentFilesError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  return (
+    findListError(
+      value,
+      at,
+      (item, itemAt) => {
+        if (!isRecord(item)) return `${itemAt}: must be an object`;
+        return (
+          findUnknownKey(item, AGENT_FILE_KEYS, itemAt) ??
+          (isSafeRelPath(item.from) &&
+          item.from.startsWith("node_modules/") &&
+          item.from.endsWith(".md")
+            ? undefined
+            : `${itemAt}.from: must be a .md file under node_modules/`) ??
+          findStringError(item.sha256, SHA256_HEX, `${itemAt}.sha256`) ??
+          findStringError(item.name, ID_OR_NAME, `${itemAt}.name`)
+        );
+      },
+      { allowEmpty: false },
+    ) ?? findDuplicateError(value as Record<string, unknown>[], "name", at)
+  );
+}
+
+/** `path` is `root` itself or lies under it. */
+function isUnder(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+function findTarballPathsError(value: unknown, at: string): string | undefined {
+  if (Array.isArray(value) && value.length > TARBALL_PATHS_MAX) {
+    return `${at}: at most ${TARBALL_PATHS_MAX} paths`;
+  }
+  const error = findListError(
+    value,
+    at,
+    (item, itemAt) => {
+      if (!isRecord(item)) return `${itemAt}: must be an object`;
+      return (
+        findUnknownKey(item, TARBALL_PATH_KEYS, itemAt) ??
+        (isSafeRelPath(item.path)
+          ? undefined
+          : `${itemAt}.path: must be a relative path`) ??
+        findStringError(item.tree, SHA1_HEX, `${itemAt}.tree`)
+      );
+    },
+    { allowEmpty: false },
+  );
+  if (error !== undefined) return error;
+  const paths = (value as HarnessTarballPath[]).map((p) => p.path);
+  for (const [index, p] of paths.entries()) {
+    if (paths.some((other, j) => j !== index && isUnder(p, other))) {
+      return `${at}[${index}].path: overlaps another path`;
+    }
+  }
+  return undefined;
+}
+
+function findWrappersError(value: unknown, at: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value) && value.length > WRAPPERS_MAX) {
+    return `${at}: at most ${WRAPPERS_MAX} wrappers`;
+  }
+  return (
+    findListError(
+      value,
+      at,
+      (item, itemAt) => {
+        if (!isRecord(item)) return `${itemAt}: must be an object`;
+        const unknown = findUnknownKey(item, WRAPPER_KEYS, itemAt);
+        if (unknown !== undefined) return unknown;
+        if (
+          typeof item.path !== "string" ||
+          !/^bin\/[a-z0-9][a-z0-9_-]*$/.test(item.path)
+        ) {
+          return `${itemAt}.path: must be bin/<name>`;
+        }
+        if (
+          typeof item.exec !== "string" ||
+          !isSafeRelPath(item.exec) ||
+          !item.exec.startsWith("src/")
+        ) {
+          return `${itemAt}.exec: must be a relative path under src/`;
+        }
+        if (!isRecord(item.aliasEnv)) {
+          return `${itemAt}.aliasEnv: must be an object`;
+        }
+        for (const [target, source] of Object.entries(item.aliasEnv)) {
+          if (
+            !WRAPPER_ALIAS_ENV.test(target) ||
+            typeof source !== "string" ||
+            !WRAPPER_ALIAS_ENV.test(source) ||
+            target === source
+          ) {
+            return `${itemAt}.aliasEnv.${target}: both names must match ${WRAPPER_ALIAS_ENV.source} and differ`;
+          }
+        }
+        return undefined;
+      },
+      { allowEmpty: true },
+    ) ?? findDuplicateError(value as Record<string, unknown>[], "path", at)
+  );
+}
+
+function findPluginTarballPackError(
+  value: Record<string, unknown>,
+  at: string,
+): string | undefined {
+  return (
+    findUnknownKey(value, PLUGIN_TARBALL_KEYS, at) ??
+    findBaseError(value, at) ??
+    (value.mcpServers === undefined
+      ? undefined
+      : `${at}.mcpServers: a plugin-tarball pack runs no MCP server`) ??
+    findStringError(value.repo, GITHUB_REPO, `${at}.repo`) ??
+    findStringError(value.sha, SHA1_HEX, `${at}.sha`) ??
+    findTarballPathsError(value.paths, `${at}.paths`) ??
+    (isSafeRelPath(value.pluginRoot) &&
+    (value.paths as HarnessTarballPath[]).some((p) =>
+      isUnder(value.pluginRoot as string, p.path),
     )
+      ? undefined
+      : `${at}.pluginRoot: must be one of paths or a dir under one`) ??
+    findWrappersError(value.wrappers, `${at}.wrappers`) ??
+    (Array.isArray(value.wrappers) &&
+    value.wrappers.length > 0 &&
+    !(
+      Array.isArray(value.pathDirs) &&
+      value.pathDirs.includes(`${HARNESS_PACK_DIR_PLACEHOLDER}/bin`)
+    )
+      ? `${at}.pathDirs: must include ${HARNESS_PACK_DIR_PLACEHOLDER}/bin with wrappers`
+      : undefined)
   );
 }
 
@@ -948,6 +1161,9 @@ function findHarnessPackError(value: unknown, at: string): string | undefined {
   if (!isRecord(value)) return `${at}: must be an object`;
   if (value.kind === "git-setup") return findGitSetupPackError(value, at);
   if (value.kind === "npm-lock") return findNpmLockPackError(value, at);
+  if (value.kind === "plugin-tarball") {
+    return findPluginTarballPackError(value, at);
+  }
   return `${at}.kind: must be one of ${HARNESS_KINDS.join(", ")}`;
 }
 

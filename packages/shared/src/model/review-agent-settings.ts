@@ -19,7 +19,7 @@
  * worker's deploy-assets test pins the two lists equal. `REVIEW_BATTERY_PACK_IDS`
  * is the review setting's allowed subset and stays exactly the three review
  * packs. `HARNESS_PACK_IDS` are the full upstream tool suites (gstack, GSD,
- * ruflo) a separate manifest (packages/worker/deploy/harness.json) installs;
+ * ruflo, the Somnio engineering plugin) a separate manifest (packages/worker/deploy/harness.json) installs;
  * the same deploy-assets test pins those two lists equal. The task setting
  * validates against `TASK_BATTERY_PACK_IDS` (manifest packs + harness packs);
  * a harness id is never a valid review pack.
@@ -79,7 +79,12 @@ export type BatteryPackId = (typeof BATTERY_PACK_IDS)[number];
  * lanes only — the review setting rejects them and the worker never seeds
  * them into a review run.
  */
-export const HARNESS_PACK_IDS = ["gstack", "gsd", "ruflo"] as const;
+export const HARNESS_PACK_IDS = [
+  "gstack",
+  "gsd",
+  "ruflo",
+  "somnio-engineering",
+] as const;
 export type HarnessPackId = (typeof HARNESS_PACK_IDS)[number];
 
 export function isHarnessPackId(value: unknown): value is HarnessPackId {
@@ -232,6 +237,8 @@ export const HARNESS_PACK_LABELS: Record<HarnessPackId, string> = {
   gstack: "gstack (full suite)",
   gsd: "GSD (full suite)",
   ruflo: "ruflo (MCP memory and tasks)",
+  "somnio-engineering":
+    "Somnio engineering plugin (dev-execution, UAT, YouTrack)",
 };
 
 /** Short plain labels for every pack the task setting offers. */

@@ -414,6 +414,10 @@ const RESERVED_REPO_ENV_KEYS = new Set([
   "HTTPS_PROXY",
   "ALL_PROXY",
   "NO_PROXY",
+  // The somnio-engineering pack's ytctl shim (HARNESS_ENV_KEY): a repo value
+  // would swap the tracker CLI its skills run. CLAUDE_PLUGIN_ROOT, the pack's
+  // other key, is already under CLAUDE_.
+  "YTCTL",
 ]);
 const RESERVED_REPO_ENV_PREFIXES = [
   "LD_",

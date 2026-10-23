@@ -1004,7 +1004,7 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
   });
 
   const claudeDir = () => path.join(fx.home, ".claude");
-  const HARNESS = ["gstack", "gsd", "ruflo"];
+  const HARNESS = ["gstack", "gsd", "ruflo", "somnio-engineering"];
   const readJson = async (file: string) =>
     JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
   const breadcrumb = () =>
@@ -1048,7 +1048,7 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       });
       expect(await listTree(claudeDir())).toEqual(["settings.json"]);
       expect(logs.filter((l) => l.endsWith("reason=review-lane"))).toHaveLength(
-        3,
+        4,
       );
     });
 
@@ -1078,13 +1078,16 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       "agents",
       "agents/gsd-debugger.md",
       "agents/gsd-planner.compact.md",
+      "agents/planner.md",
       "agents/sub",
+      "agents/tester.md",
       "commands",
       "commands/gsd",
       "gsd-core",
       "settings.json",
       "skills",
       "skills/dart-model-from-json",
+      "skills/dev-execution",
       "skills/dora-metrics",
       "skills/flutter-best-practices",
       "skills/flutter-health-audit",
@@ -1121,7 +1124,8 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
           "gsd-core",
         ],
       ],
-      ["ruflo", []],
+      ["ruflo", ["agents/planner.md"]],
+      ["somnio-engineering", ["skills/dev-execution", "agents/tester.md"]],
     ]);
   });
 
@@ -1177,18 +1181,23 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
     expect(JSON.stringify(harness)).not.toMatch(/TOKEN|KEY|SECRET/);
   });
 
-  it("PATH dirs: gstack's resolved <pack>/bin, only when gstack is selected and verified", async () => {
+  it("PATH dirs: each pack's resolved <pack>/bin, only when that pack is selected and verified", async () => {
     const gstackBin = path.join(
       await fs.realpath(hx.harnessPackDir("gstack")),
       "bin",
     );
+    const somnioBin = path.join(
+      await fs.realpath(hx.harnessPackDir("somnio-engineering")),
+      "bin",
+    );
     const all = await seedBatteries(fx.home, HARNESS, opts);
-    expect(harnessRunEnv(all.harness).pathDirs).toEqual([gstackBin]);
+    expect(harnessRunEnv(all.harness).pathDirs).toEqual([gstackBin, somnioBin]);
     if (!all.harness?.ok) throw new Error("expected a seeded harness");
     expect(all.harness.packs.map((p) => [p.id, p.pathDirs])).toEqual([
       ["gstack", [gstackBin]],
       ["gsd", []],
       ["ruflo", []],
+      ["somnio-engineering", [somnioBin]],
     ]);
 
     const without = await seedBatteries(fx.home, ["gsd", "ruflo"], opts);
@@ -1197,7 +1206,22 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
     // Selected but not verified (no stamp): its bin dir is not on PATH.
     await fs.rm(path.join(hx.harnessPackDir("gstack"), ".stamp"));
     const unverified = await seedBatteries(fx.home, HARNESS, opts);
-    expect(harnessRunEnv(unverified.harness).pathDirs).toEqual([]);
+    expect(harnessRunEnv(unverified.harness).pathDirs).toEqual([somnioBin]);
+  });
+
+  it("somnio-engineering: the plugin's skills resolve through its root, and its env names the pack", async () => {
+    const result = await seedBatteries(fx.home, ["somnio-engineering"], opts);
+    const real = await fs.realpath(hx.harnessPackDir("somnio-engineering"));
+    expect(harnessRunEnv(result.harness).env).toEqual({
+      CLAUDE_PLUGIN_ROOT: path.join(real, "src/plugins/somnio-engineering-ai"),
+      YTCTL: path.join(real, "bin/ytctl"),
+    });
+    // Two in-pack hops (claude/ → plugin root → top-level skills/) land on
+    // the pinned skill; the plugin's hooks/ and .mcp.json are never linked.
+    expect(
+      await fs.realpath(path.join(claudeDir(), "skills/dev-execution")),
+    ).toBe(path.join(real, "src/skills/dev-execution"));
+    expect(await listTree(claudeDir())).not.toContain("hooks");
   });
 
   it("writes the breadcrumb and gstack config (0644) for the agent to read", async () => {
@@ -1220,9 +1244,21 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
           {
             id: "ruflo",
             pin: "3.56.7",
-            linked: [],
+            linked: ["agents/planner.md"],
             headlessSafe: [],
             mcpServers: ["ruflo"],
+          },
+          {
+            id: "somnio-engineering",
+            pin: "510facec180a30205e9630956d76db344ba4d94b",
+            linked: ["skills/dev-execution", "agents/tester.md"],
+            headlessSafe: [
+              "harness-audit",
+              "optimize-context-rules",
+              "dev-execution",
+              "youtrack",
+            ],
+            mcpServers: [],
           },
         ],
       },
@@ -1545,7 +1581,7 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
       opts,
     );
     expect(formatBatteriesLine(result, { kind: "seed", lane: "task" })).toBe(
-      `batteries: lane=task packs=somnio-skills manifest=${fx.manifestHash.slice(0, 12)} harness=${hx.harnessHash.slice(0, 12)} harness-packs=gstack,gsd,ruflo`,
+      `batteries: lane=task packs=somnio-skills manifest=${fx.manifestHash.slice(0, 12)} harness=${hx.harnessHash.slice(0, 12)} harness-packs=gstack,gsd,ruflo,somnio-engineering`,
     );
   });
 
@@ -1560,14 +1596,14 @@ describe("seedBatteries harness packs (gstack, gsd, ruflo)", () => {
 
     it("every pack ok", async () => {
       expect(await harnessDoctorLine(doctorOpts())).toBe(
-        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,gsd,ruflo`,
+        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,gsd,ruflo,somnio-engineering`,
       );
     });
 
     it("names skipped packs with their reasons", async () => {
       await fs.rm(hx.harnessPackDir("gsd"), { recursive: true });
       expect(await harnessDoctorLine(doctorOpts())).toBe(
-        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,ruflo skipped=gsd(missing)`,
+        `harness: hash=${hx.harnessHash.slice(0, 12)} node=${process.versions.node} ok=gstack,ruflo,somnio-engineering skipped=gsd(missing)`,
       );
     });
 
