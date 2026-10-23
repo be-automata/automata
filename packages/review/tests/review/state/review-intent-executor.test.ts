@@ -278,3 +278,46 @@ describe("executeReviewIntent — inline-comment flag (dedup the COMMENTED wrapp
     assert.match(body as string, /`src\/c\.ts:3` — x/);
   });
 });
+
+describe("executeReviewIntent — caller-owned isSameReview (retarget at an unchanged head)", () => {
+  const withBody = (id: number, body: string): GitHubReview => ({
+    ...botReviewAtHead("APPROVED", id),
+    body,
+  });
+
+  test("a same-verdict review the caller says is DIFFERENT is posted over, then dismissed", async () => {
+    const github = makeGithub([withBody(5, "base:feat/parent")]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: APPROVE,
+      isSameReview: (r) => r.body === "base:main",
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "approve" });
+    assert.equal(github.submitReview.mock.calls.length, 1);
+    assert.equal(github.dismissReview.mock.calls.length, 1);
+    assert.equal(github.dismissReview.mock.calls[0].arguments[2], 5);
+  });
+
+  test("any matching review in force at HEAD skips, even behind an undismissed different one", async () => {
+    const github = makeGithub([
+      withBody(5, "base:feat/parent"),
+      withBody(6, "base:main"),
+    ]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: APPROVE,
+      isSameReview: (r) => r.body === "base:main",
+    });
+    assert.deepEqual(res, { outcome: "skipped_existing" });
+    assert.equal(github.submitReview.mock.calls.length, 0);
+    assert.equal(github.dismissReview.mock.calls.length, 0);
+  });
+});

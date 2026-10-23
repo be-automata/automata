@@ -172,6 +172,11 @@ export interface PrHeadState {
   authorLogin: string | null;
   /** GitHub reports a merged PR as closed. */
   isClosed: boolean;
+  /**
+   * The PR's base ref now (raw, untrusted). Optional so a caller that never
+   * read it stays valid; the review writer treats absent as unknown.
+   */
+  baseRef?: string | null;
 }
 
 /**
@@ -198,6 +203,7 @@ export async function getPrHeadState(
     isDraft: data.draft === true,
     authorLogin: data.user?.login ?? null,
     isClosed: data.state === "closed",
+    baseRef: data.base?.ref ?? null,
   };
 }
 
