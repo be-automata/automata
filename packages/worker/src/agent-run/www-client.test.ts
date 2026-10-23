@@ -886,9 +886,10 @@ describe("postRunTerminal — detail.info and a caller signal (#437)", () => {
 });
 
 describe("postRunTerminal — a 4xx is final (#437)", () => {
-  it("401/400 → 'refused'; 5xx stays 'error' (retryable)", async () => {
+  it("401/400 → 'refused'; 5xx, 408 and 429 stay 'error' (retryable)", async () => {
     // protects=the retry loop telling a dead token from a www blip;
-    // fails_when=a 401 maps to 'error' (retried) or a 503 to 'refused';
+    // fails_when=a 401 maps to 'error' (retried) or a 503/408/429 to
+    // 'refused' (a rate-limited post dropped after one attempt);
     // no_claim=none beyond protects.
     const opts = {
       baseUrl: "https://www.example.com/",
@@ -900,6 +901,8 @@ describe("postRunTerminal — a 4xx is final (#437)", () => {
       [401, "refused"],
       [400, "refused"],
       [503, "error"],
+      [408, "error"],
+      [429, "error"],
     ] as const) {
       vi.stubGlobal(
         "fetch",

@@ -98,7 +98,7 @@ import {
   type BrokerHandoff,
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
-import { guardRunTerminal } from "./run-terminal-ledger";
+import { guardRunTerminal, waitForRunTerminal } from "./run-terminal-ledger";
 import {
   claimAbnormalEnd,
   newAbnormalEndState,
@@ -2016,6 +2016,12 @@ function readMemoryStarvation(daemon: RunDaemon): unknown {
  * H2: the reason is built ONLY from Hatchet's own error summary (ctx.errors()),
  * never agent output or the prompt. Wrapped so onFailure never throws uncaught.
  */
+/**
+ * #437: how long onFailure waits for a task run's own teardown (and its typed
+ * terminal) before posting the generic failure: AC1's 90 s plus margin.
+ */
+export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 120_000;
+
 async function onAgentRunFailure(
   wire: AgentRunWireInput,
   ctx: { errors?: () => Record<string, string>; workflowRunId?: () => string },
@@ -2034,6 +2040,23 @@ async function onAgentRunFailure(
       `[agent-run ${wire.threadId}] onFailure: run secrets unavailable (${err instanceof Error ? err.message : String(err)}) — run-failed not posted; the control plane's sweep rule (iii) reconciles`,
     );
     return;
+  }
+  // #437: a task run posts its own typed terminal from its teardown. On an
+  // executionTimeout this handler is scheduled while that teardown still runs,
+  // and www keeps the FIRST terminal — so wait (bounded) for the task fn to
+  // finish before posting the generic one, which is then absorbed as a no-op.
+  const runId = ctx.workflowRunId?.() || "";
+  if (runId && ownsAbnormalTerminal(input)) {
+    const finished = await waitForRunTerminal({
+      root: loadWorkerConfig().runTerminalRoot,
+      runId,
+      timeoutMs: ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    });
+    if (!finished) {
+      console.error(
+        `[agent-run ${input.threadId}] onFailure: the run's teardown did not finish within ${ON_FAILURE_TYPED_TERMINAL_WAIT_MS / 1000}s — posting the generic failure`,
+      );
+    }
   }
   try {
     await postRunFailed(

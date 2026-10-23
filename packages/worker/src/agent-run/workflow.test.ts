@@ -406,6 +406,77 @@ describe("agentRunWorkflow onFailure (#2)", () => {
       resetPlaneKeyRingForTests();
     }
   });
+
+  it("#437: a task run's onFailure waits for the run's own teardown to finish before the generic post; a review run does not wait", async () => {
+    // protects=the typed timeout winning the first-terminal race on an
+    // executionTimeout (onFailure is scheduled while the teardown still
+    // runs); fails_when=onFailure posts before the run's ledger entry exists,
+    // or a review run is delayed; no_claim=the engine's scheduling itself
+    // (simulated by recording the entry ~1 s after onFailure starts).
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { recordRunTerminal } = await import("./run-terminal-ledger");
+    const root = mkdtempSync(path.join(tmpdir(), "onfailure-ledger-"));
+    process.env.WORKER_RUN_TERMINAL_ROOT = root;
+    const order: string[] = [];
+    const fetchMock = vi.fn(async () => {
+      order.push("post");
+      return new Response("OK", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const runId = "2d4f8a74-6b0f-4d0f-9f3e-9c7f5e4b3a2d";
+      const recorded = new Promise<void>((resolve) =>
+        setTimeout(() => {
+          order.push("teardown-finished");
+          recordRunTerminal(
+            root,
+            runId,
+            { outcome: "returned" },
+            Date.now(),
+            () => {},
+          );
+          resolve();
+        }, 1_000),
+      );
+      await workflowDef.onFailure.fn(await sealedInput(), {
+        errors: () => ({ run: "Task exceeded timeout of 30m" }),
+        workflowRunId: () => runId,
+      });
+      await recorded;
+      expect(order).toEqual(["teardown-finished", "post"]);
+
+      // A review run (prKey) posts at once: its run id has no entry and it
+      // must not wait the 120 s bound.
+      order.length = 0;
+      const { installationToken, daemonToken, ...rest } = INPUT;
+      const reviewWire = { ...rest, prKey: "org-1/o/r/7" };
+      const { sealBindingOf, sealRunSecrets } = await import(
+        "@terragon/utils/payload-seal"
+      );
+      const started = Date.now();
+      await workflowDef.onFailure.fn(
+        {
+          ...reviewWire,
+          sealedSecrets: await sealRunSecrets(
+            ringPlane.publicKey,
+            { installationToken, daemonToken },
+            sealBindingOf(reviewWire),
+          ),
+        },
+        {
+          errors: () => ({ run: "boom" }),
+          workflowRunId: () => "3e5a9b85-7c1a-4e1a-8a4f-ad8f6f5c4b3e",
+        },
+      );
+      expect(order).toEqual(["post"]);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      delete process.env.WORKER_RUN_TERMINAL_ROOT;
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("resolveUseCredits — the worker's final say", () => {

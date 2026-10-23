@@ -320,7 +320,7 @@ export async function postRunFailed(
  */
 /**
  * `refused`: any other 4xx (a revoked token, a body www rejects) — final, never
- * worth a retry; `error`: a transport failure or a 5xx.
+ * worth a retry; `error`: a transport failure, a 5xx, a 408 or a 429.
  */
 export type RunTerminalResult =
   | "applied"
@@ -390,7 +390,7 @@ export async function postRunTerminal(
       cause,
       status: res.status,
     });
-    return res.status >= 400 && res.status < 500 ? "refused" : "error";
+    return isRetryableStatus(res.status) ? "error" : "refused";
   }
   const body = (await res.json().catch(() => ({}))) as { applied?: boolean };
   return body.applied ? "applied" : "noop";
