@@ -900,6 +900,48 @@ container), record `lockSha256`/`packageJsonSha256` in `harness.json`, and
 re-pin any prebuild for the new version. Then run the deploy-assets tests, the
 dry run and the container drill.
 
+### Staging a plugin tarball (somnio-engineering)
+
+The Somnio engineering plugin lives in a PRIVATE repo, so the box never fetches
+it and holds no credential for it. Its `plugin-tarball` pack is built from a
+tar the operator stages; the installer runs none of its code and accepts the
+tar only when every `paths` entry recomputes to its pinned git tree id (a
+tampered or wrong-commit tar is a `FAIL harness pack somnio-engineering: <path>
+recomputes to tree …`). From a laptop with access to the repo:
+
+```bash
+SHA=<harness.json packs[somnio-engineering].sha>
+git clone --filter=blob:none https://github.com/somnio-software/somnio-engineering-ai /tmp/sea
+git -C /tmp/sea archive --format=tar "$SHA" plugins/somnio-engineering-ai skills templates \
+  > "somnio-engineering-$SHA.tar"   # the paths list of the manifest entry, in any order
+ssh root@<box> install -d -m 0700 /var/lib/automata/harness-src
+scp "somnio-engineering-$SHA.tar" root@<box>:/var/lib/automata/harness-src/
+```
+
+Then run the installer as usual. What it builds:
+
+- `src/<paths>`: the subtrees as committed (the plugin's skills are links into
+  the repo's top-level `skills/`, which is why that path ships too).
+- `claude/{skills,agents,commands}/<name>`: links into the plugin root, minus
+  the manifest `discard` (`commands/install.md`, the laptop bootstrap). The
+  plugin is linked, not installed as a plugin: its `hooks/` and `.mcp.json`
+  never load (the plugin's own ruflo server would bypass the ruflo pack's
+  allowlist).
+- `bin/ytctl`: a fixed shim that sets `YOUTRACK_TOKEN` from
+  `YOUTRACK_AGENT_TOKEN` and runs the plugin's ytctl. A run's agent only ever
+  holds the AGENT token (the org's control-plane `YOUTRACK_TOKEN` is stripped
+  before a run starts); `YTCTL` and `CLAUDE_PLUGIN_ROOT` point the plugin's
+  skills at the pack.
+
+The ruflo pack also derives `claude/agents/planner.md` and `refinement.md`
+(dev-execution spawns them by name) from the pinned `@claude-flow/cli` closure,
+with their frontmatter `hooks` dropped: upstream runs unpinned
+`npx claude-flow@alpha` there.
+
+Bumping the plugin: set `sha` and each `paths[].tree`
+(`git -C /tmp/sea rev-parse "$SHA:<path>"`), update the deploy-assets pins,
+stage the new tar, re-run the installer.
+
 ## Harness rollout (gstack, GSD and ruflo in task runs)
 
 Turns the installed harness packs on for task and PR-mention runs: one canary

@@ -29,8 +29,12 @@ import {
  * - gsd: a skill, agent files and an agent subdir, `commands/gsd/`, the
  *   shared `gsd-core/` dir, a `hooks/` dir and an upstream `settings.json`
  *   with a statusLine and an update hook (neither may reach a run);
- * - ruflo: `bin/ruflo-mcp` and `mcp-tools.json` (the allowlist plus two
- *   forbidden tools).
+ * - ruflo: `bin/ruflo-mcp`, `mcp-tools.json` (the allowlist plus two
+ *   forbidden tools) and a derived `claude/agents/planner.md`;
+ * - somnio-engineering: the plugin under `src/`, its skill a link into the
+ *   repo's top-level `src/skills/` (as upstream ships it), `claude/` links
+ *   into the plugin root, an inert `hooks/hooks.json` and `.mcp.json`
+ *   (never loaded: the plugin is linked, not installed) and `bin/ytctl`.
  */
 export interface HarnessFixture {
   manifest: HarnessManifest;
@@ -147,7 +151,41 @@ export async function addHarnessInstall(
     );
     await normaliseModes(dir);
   }
+  await write(path.join(ruflo, "claude/agents/planner.md"), SKILL("planner"));
+
+  const somnio = harnessPackDir("somnio-engineering");
+  const pluginRoot = "src/plugins/somnio-engineering-ai";
+  await write(
+    path.join(somnio, "src/skills/dev-execution/SKILL.md"),
+    SKILL("dev-execution"),
+  );
+  await fs.mkdir(path.join(somnio, pluginRoot, "skills"), { recursive: true });
+  await fs.symlink(
+    "../../../skills/dev-execution",
+    path.join(somnio, pluginRoot, "skills/dev-execution"),
+  );
+  await write(
+    path.join(somnio, pluginRoot, "agents/tester.md"),
+    SKILL("tester"),
+  );
+  await write(
+    path.join(somnio, pluginRoot, "hooks/hooks.json"),
+    '{"hooks":{"SessionStart":[]}}\n',
+  );
+  await fs.mkdir(path.join(somnio, "claude/skills"), { recursive: true });
+  await fs.symlink(
+    `../../${pluginRoot}/skills/dev-execution`,
+    path.join(somnio, "claude/skills/dev-execution"),
+  );
+  await fs.mkdir(path.join(somnio, "claude/agents"), { recursive: true });
+  await fs.symlink(
+    `../../${pluginRoot}/agents/tester.md`,
+    path.join(somnio, "claude/agents/tester.md"),
+  );
+  await write(path.join(somnio, "bin/ytctl"), "#!/bin/sh\nexit 0\n");
+
   await fs.chmod(path.join(ruflo, "bin/ruflo-mcp"), 0o755);
+  await fs.chmod(path.join(somnio, "bin/ytctl"), 0o755);
   await write(path.join(fx.root, "harness.sha256"), `${harnessHash}\n`);
   await fs.chmod(path.join(fx.root, "harness.sha256"), 0o644);
   await fs.chmod(fx.root, 0o755);

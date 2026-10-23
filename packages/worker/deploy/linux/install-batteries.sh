@@ -110,6 +110,17 @@ umask 022
 # - A pack browser gets an AppArmor profile granting `userns` to its exact
 #   pinned executable path; the sysctl is never changed and --no-sandbox is
 #   never configured.
+# - A `plugin-tarball` pack (a Claude Code plugin from a PRIVATE repo) runs no
+#   upstream code at all and needs no credential on the box: the operator
+#   stages `git archive --format=tar <sha> <paths...>` as
+#   $HARNESS_SRC_DIR/<id>-<sha>.tar, root extracts it with Python's `data`
+#   filter (no absolute paths, no `..`, no links out, no devices) and accepts
+#   it only when every `paths` entry recomputes to its pinned git tree id. The
+#   plugin root's skills/, agents/ and commands/ become claude/ links into
+#   src/; `wrappers` are fixed shims in bin/.
+# - An npm-lock pack's `agentFiles` are derived by root after assembly: the
+#   sha256-pinned upstream agent file, its frontmatter `hooks` dropped, at
+#   claude/agents/<name>.md (the scan then proves no hooks are left).
 # - A dependency with `installTo` (gstack's bun: its browse CLI spawns `bun` by
 #   PATH lookup) is also a RUNTIME: root extracts its own sha256-verified copy
 #   into a root-only dir before any build code runs, copies it into the
@@ -187,6 +198,8 @@ HARNESS_MIN_FREE_KB=$((5 * 1024 * 1024))
 # ...and their downloads pass through WORK first.
 HARNESS_MIN_WORK_KB=$((1024 * 1024))
 APPARMOR_DIR="/etc/apparmor.d"
+# Where the operator stages a plugin-tarball pack's `git archive` tar.
+HARNESS_SRC_DIR="/var/lib/automata/harness-src"
 # The Ubuntu 24.04 runtime libraries Playwright's Chromium needs (the
 # `playwright install-deps chromium` list for ubuntu24.04-x64, plus fonts).
 CHROMIUM_RUNTIME_PACKAGES=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64
@@ -1842,10 +1855,10 @@ harness_shape_errors() {
       errs($label; {
         "bad id": ($p.id | id),
         "class must be harness": ($p.class == "harness"),
-        "kind must be git-setup or npm-lock": ($p.kind == "git-setup" or $p.kind == "npm-lock"),
+        "kind must be git-setup, npm-lock or plugin-tarball": ($p.kind == "git-setup" or $p.kind == "npm-lock" or $p.kind == "plugin-tarball"),
         "license is empty": ($p.license | str),
         "nodeMajor must be an integer": ($p.nodeMajor | type == "number" and . == floor and . >= 20),
-        "env keys must be battery prefixes with plain values": ($p.env | env_ok("^(GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+$")),
+        "env keys must be battery prefixes with plain values": ($p.env | env_ok("^((GSTACK|PLAYWRIGHT|MCP|CLAUDE_FLOW)_[A-Z0-9_]+|CLAUDE_PLUGIN_ROOT|YTCTL)$")),
         "discard entries must be safe relative paths (a segment may be *)": (($p.discard // []) | type == "array" and all((split("/") | map(if . == "*" then "x" else . end) | join("/") | safe_rel) and (split("/") | any(. != "*")))),
         "smoke entries must be argv lists": (($p.smoke // []) | type == "array" and all(argv_ok)),
         "pathDirs must be distinct {{packDir}}/<dir> paths (at most 4, no colon)": ($p.pathDirs == null or ($p.pathDirs | type == "array" and length > 0 and length <= 4
@@ -1906,7 +1919,25 @@ harness_shape_errors() {
         "toolAllowlist must name tools, never a spawn/network/terminal/github/browser/federation tool": ($p.mcpServers == null or (
           $p.toolAllowlist | type == "array" and length > 0
           and all(type == "string" and test("^[a-z][a-z0-9_-]*$"))
-          and all(. as $t | $forbidden | all(. as $f | $t | startswith($f) | not))))
+          and all(. as $t | $forbidden | all(. as $f | $t | startswith($f) | not)))),
+        "agentFiles must be sha256-pinned .md files under node_modules/ with distinct names": (($p.agentFiles // []) | type == "array"
+          and all((.from | safe_rel and startswith("node_modules/") and endswith(".md")) and (.sha256 | sha256) and (.name | id))
+          and (map(.name) | length == (unique | length)))
+      }) elif $p.kind == "plugin-tarball" then errs($label; {
+        "repo must be a github https url": ($p.repo | type == "string" and test("^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")),
+        "sha is not 40 hex": ($p.sha | sha1),
+        "paths must be 1-8 distinct, non-overlapping safe paths with 40-hex trees": ($p.paths | type == "array" and length > 0 and length <= 8
+          and all((.path | safe_rel) and (.tree | sha1))
+          and (map(.path) as $ps | [$ps[] as $a | $ps[] as $b | select($a != $b and ($a | startswith($b + "/")))] | length == 0)
+          and (map(.path) | length == (unique | length))),
+        "pluginRoot must be one of paths or under one": (($p.pluginRoot | safe_rel) and ($p.pluginRoot as $r | $p.paths | any(.path as $q | $r == $q or ($r | startswith($q + "/"))))),
+        "a plugin-tarball pack runs no MCP server": ($p.mcpServers == null and $p.toolAllowlist == null),
+        "wrappers must be bin/<name> shims of src/ files aliasing YOUTRACK_/JIRA_ names": (($p.wrappers // []) | type == "array" and length <= 4
+          and all((.path | type == "string" and test("^bin/[a-z0-9][a-z0-9_-]*$")) and (.exec | safe_rel and startswith("src/"))
+            and (.aliasEnv | type == "object" and (to_entries | all((.key | test("^(YOUTRACK|JIRA)_[A-Z0-9_]+$"))
+              and (.value | type == "string" and test("^(YOUTRACK|JIRA)_[A-Z0-9_]+$")) and .key != .value))))
+          and (map(.path) | length == (unique | length))),
+        "wrappers need {{packDir}}/bin in pathDirs": ((($p.wrappers // []) | length) == 0 or (($p.pathDirs // []) | index("{{packDir}}/bin") != null))
       }) else empty end)
     end' "$HARNESS" 2>/dev/null || echo "manifest: not valid JSON"
 }
@@ -1943,14 +1974,14 @@ harness_rows() {
   jq -r '.packs | to_entries[] | [(.key | tostring), .value.id, .value.kind] | @tsv' "$HARNESS"
 }
 
-# The published dir name of harness pack <index>: <id>@<sha> (git-setup) or
-# <id>@<version> (npm-lock) — harnessPackDirName in harness-layout.ts.
+# The published dir name of harness pack <index>: <id>@<version> (npm-lock)
+# or <id>@<sha> — harnessPackDirName in harness-layout.ts.
 harness_dir_name() {
   local i="$1"
-  if [ "$(hfield "$i" .kind)" = "git-setup" ]; then
-    printf '%s@%s\n' "$(hfield "$i" .id)" "$(hfield "$i" .sha)"
-  else
+  if [ "$(hfield "$i" .kind)" = "npm-lock" ]; then
     printf '%s@%s\n' "$(hfield "$i" .id)" "$(hfield "$i" .version)"
+  else
+    printf '%s@%s\n' "$(hfield "$i" .id)" "$(hfield "$i" .sha)"
   fi
 }
 
@@ -2949,6 +2980,187 @@ harness_apparmor() {
   record "INSTALLED harness apparmor $id ($n browser profile(s))"
 }
 
+# stage_plugin_tarball <index> <stage>: the operator-staged `git archive` tar
+# of the pinned commit, extracted by root into <pack>/src with Python's `data`
+# filter, every `paths` entry checked against its pinned git tree id, then the
+# plugin root's skills/, agents/ and commands/ linked under <pack>/claude.
+# No upstream code runs. Sets STEP_ERROR and returns 1 on failure.
+stage_plugin_tarball() {
+  local i="$1" stage="$2" pack="$2/pack" id sha tar n p path tree got root kind name entry rel
+  id="$(hfield "$i" .id)"
+  sha="$(hfield "$i" .sha)"
+  tar="$HARNESS_SRC_DIR/$id-$sha.tar"
+  if [ ! -f "$tar" ] || [ -L "$tar" ]; then
+    STEP_ERROR="no source tarball at $tar (deploy/PILOT-RUNBOOK.md: staging a plugin tarball)"
+    return 1
+  fi
+  mkdir -p "$pack/src"
+  # shellcheck disable=SC2016 # a Python program, not shell
+  if ! python3 -I -c '
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1]) as archive:
+    archive.extractall(sys.argv[2], filter="data")
+' "$tar" "$pack/src" >"$WORK/harness-extract.log" 2>&1; then
+    STEP_ERROR="cannot extract $tar: $(tail -n 1 "$WORK/harness-extract.log")"
+    return 1
+  fi
+  n="$(jq -r --argjson i "$i" '.packs[$i].paths | length' "$HARNESS")"
+  for ((p = 0; p < n; p++)); do
+    path="$(hfield "$i" ".paths[$p].path")"
+    tree="$(hfield "$i" ".paths[$p].tree")"
+    if [ ! -d "$pack/src/$path" ] || [ "$(realpath -e -- "$pack/src/$path" 2>/dev/null)" != "$pack/src/$path" ]; then
+      STEP_ERROR="$path is not a plain dir of the tarball"
+      return 1
+    fi
+    rm -rf "$WORK/harness-tree" && mkdir -p "$WORK/harness-tree"
+    got="$(git -C "$WORK/harness-tree" -c init.defaultBranch=main init -q &&
+      git -C "$WORK/harness-tree" -c core.autocrlf=false -c core.fileMode=true -c core.symlinks=true \
+        --work-tree="$pack/src/$path" add -A -f &&
+      git -C "$WORK/harness-tree" write-tree)" || got=""
+    if [ "$got" != "$tree" ]; then
+      STEP_ERROR="$path recomputes to tree ${got:-<error>}, pinned $tree (the tarball is not $sha)"
+      return 1
+    fi
+  done
+  # Nothing beyond the pinned paths may ride along in the tarball.
+  for entry in "$pack/src"/* "$pack/src"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    rel="${entry#"$pack/src/"}"
+    jq -e --argjson i "$i" --arg r "$rel" 'any(.packs[$i].paths[].path; . == $r or startswith($r + "/"))' "$HARNESS" >/dev/null || {
+      STEP_ERROR="the tarball holds $rel, which no pinned path names"
+      return 1
+    }
+  done
+  root="src/$(hfield "$i" .pluginRoot)"
+  for kind in skills agents commands; do
+    [ -d "$pack/$root/$kind" ] || continue
+    mkdir -p "$pack/claude/$kind"
+    for entry in "$pack/$root/$kind"/*; do
+      [ -e "$entry" ] || continue
+      name="$(basename "$entry")"
+      if [ "$kind" = "skills" ]; then
+        [ -d "$entry" ] || continue
+      else
+        [ -f "$entry" ] && [[ "$name" == *.md ]] || continue
+      fi
+      ln -s "../../$root/$kind/$name" "$pack/claude/$kind/$name"
+    done
+  done
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    # shellcheck disable=SC2086 # the unquoted pattern is what expands a `*` segment
+    for entry in "$pack/claude/"$rel; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      rm -rf "$entry"
+      log "harness $id: discarded ${entry#"$pack"/} (manifest discard list)"
+    done
+  done < <(jq -r --argjson i "$i" '.packs[$i].discard // [] | .[]' "$HARNESS")
+  log "harness $id: $n path(s) at their pinned trees; linked $(find "$pack/claude" -mindepth 2 -maxdepth 2 | wc -l) entries"
+}
+
+# derive_agent_files <index> <pack>: each npm-lock `agentFiles` entry, after
+# assembly (root's tree now): the sha256-pinned upstream file, never a link,
+# copied to claude/agents/<name>.md with its top-level frontmatter `hooks` key
+# and that key's indented block dropped; every other byte is kept.
+derive_agent_files() {
+  local i="$1" pack="$2" n a from sha256 name out dir
+  n="$(jq -r --argjson i "$i" '.packs[$i].agentFiles // [] | length' "$HARNESS")"
+  [ "$n" -gt 0 ] || return 0
+  dir="$pack/claude/agents"
+  mkdir -p "$dir"
+  if [ "$(realpath -e -- "$dir" 2>/dev/null)" != "$dir" ]; then
+    STEP_ERROR="claude/agents is reached through a link"
+    return 1
+  fi
+  for ((a = 0; a < n; a++)); do
+    from="$(hfield "$i" ".agentFiles[$a].from")"
+    sha256="$(hfield "$i" ".agentFiles[$a].sha256")"
+    name="$(hfield "$i" ".agentFiles[$a].name")"
+    out="$dir/$name.md"
+    if [ ! -f "$pack/$from" ] || [ -L "$pack/$from" ] ||
+      [ "$(realpath -e -- "$pack/$from" 2>/dev/null)" != "$pack/$from" ]; then
+      STEP_ERROR="agent file $from is not a regular file of the pack"
+      return 1
+    fi
+    if [ "$(sha256_of "$pack/$from")" != "$sha256" ]; then
+      STEP_ERROR="agent file $from does not match its pinned sha256"
+      return 1
+    fi
+    if [ -e "$out" ] || [ -L "$out" ]; then
+      STEP_ERROR="claude/agents/$name.md already exists in the pack"
+      return 1
+    fi
+    if ! drop_frontmatter_hooks <"$pack/$from" >"$out"; then
+      rm -f "$out"
+      STEP_ERROR="agent file $from has no closed leading frontmatter block"
+      return 1
+    fi
+    log "harness $(hfield "$i" .id): agent $name from $from (frontmatter hooks dropped)"
+  done
+}
+
+# drop_frontmatter_hooks < in > out: the leading --- block without its
+# top-level `hooks` key (bare or quoted) and every line of that key's block,
+# up to the next top-level key or the closing fence. Fails without a block.
+drop_frontmatter_hooks() {
+  awk '
+    { line = $0; sub(/\r$/, "", line) }
+    NR == 1 { if (line != "---") exit 3; fm = 1; print; next }
+    fm && line ~ /^---[ \t]*$/ { fm = 0; skip = 0; print; next }
+    fm && line ~ /^["\047]?[A-Za-z0-9_-]+["\047]?[ \t]*:/ { skip = (line ~ /^["\047]?hooks["\047]?[ \t]*:/) }
+    fm && skip { next }
+    { print }
+    END { if (NR == 0 || fm) exit 4 }
+  '
+}
+
+# write_wrappers <index> <pack> <target>: each plugin-tarball `wrappers` entry
+# as FIXED shell text: every aliasEnv target is set from its source when the
+# source is non-empty, then the pack file is exec'd. Only shape-checked names
+# and the final pack path are interpolated, the path single-quoted.
+write_wrappers() {
+  local i="$1" pack="$2" target="$3" n w path exec alias_to alias_from
+  n="$(jq -r --argjson i "$i" '.packs[$i].wrappers // [] | length' "$HARNESS")"
+  [ "$n" -gt 0 ] || return 0
+  case "$target" in
+    *"'"*)
+      STEP_ERROR="the install root contains a single quote"
+      return 1
+      ;;
+  esac
+  for ((w = 0; w < n; w++)); do
+    path="$(hfield "$i" ".wrappers[$w].path")"
+    exec="$(hfield "$i" ".wrappers[$w].exec")"
+    if [ ! -f "$pack/$exec" ] || [ ! -x "$pack/$exec" ]; then
+      STEP_ERROR="wrapper $path: $exec is not an executable file of the pack"
+      return 1
+    fi
+    mkdir -p "$pack/$(dirname "$path")"
+    if [ -e "$pack/$path" ] || [ -L "$pack/$path" ]; then
+      STEP_ERROR="wrapper $path already exists in the pack"
+      return 1
+    fi
+    {
+      printf '#!/bin/sh\n'
+      printf '# Written by install-batteries.sh (harness wrapper). Do not edit.\n'
+      while IFS=$'\t' read -r alias_to alias_from; do
+        [ -n "$alias_to" ] || continue
+        # shellcheck disable=SC2016 # expands when the wrapper runs
+        printf 'if [ -n "${%s:-}" ]; then %s="$%s"; export %s; fi\n' \
+          "$alias_from" "$alias_to" "$alias_from" "$alias_to"
+      done < <(jq -r --argjson i "$i" --argjson w "$w" '.packs[$i].wrappers[$w].aliasEnv | to_entries[] | [.key, .value] | @tsv' "$HARNESS")
+      printf "exec '%s' \"\$@\"\n" "$target/$exec"
+    } >"$pack/$path" || {
+      STEP_ERROR="cannot write wrapper $path"
+      return 1
+    }
+    chmod 0755 "$pack/$path"
+    log "harness $(hfield "$i" .id): wrapper $path -> $exec"
+  done
+}
+
 # install_harness_pack <index>: SKIPPED at pin; else staged in a private dir
 # under <root>, built as the build account, assembled and scanned by root,
 # stamped and published by rename.
@@ -2997,6 +3209,8 @@ install_harness_pack() {
       HARNESS_PLACEHOLDER="$target"
     fi
     stage_git_setup "$i" "$stage" "$target" || STEP_ERROR="${STEP_ERROR:-staging failed}"
+  elif [ "$kind" = "plugin-tarball" ]; then
+    stage_plugin_tarball "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}"
   else
     stage_npm_lock "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-staging failed}"
   fi
@@ -3017,6 +3231,12 @@ install_harness_pack() {
   fi
   if [ -z "$STEP_ERROR" ]; then
     assemble_pack "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-cannot assemble the pack}"
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    derive_agent_files "$i" "$pack" || STEP_ERROR="${STEP_ERROR:-cannot derive the agent files}"
+  fi
+  if [ -z "$STEP_ERROR" ]; then
+    write_wrappers "$i" "$pack" "$target" || STEP_ERROR="${STEP_ERROR:-cannot write the wrappers}"
   fi
   if [ -z "$STEP_ERROR" ]; then
     place_runtimes "$i" "$stage" || STEP_ERROR="${STEP_ERROR:-cannot place the pack runtimes}"
@@ -3060,6 +3280,8 @@ install_harness_pack() {
           '.packs[$i].browsers // [] | .[] | "\($pw | ltrimstr("{{packDir}}/"))/\(.dir)/\(.executable)"' "$HARNESS"
         # The runtimes put on the agent's PATH (re-hashed like the browsers).
         jq -r --argjson i "$i" '.packs[$i].dependencies // [] | .[] | .installTo // empty' "$HARNESS"
+        # Derived agent files and wrapper shims: root wrote them, the stamp pins them.
+        jq -r --argjson i "$i" '(.packs[$i].agentFiles // [] | .[] | "claude/agents/\(.name).md"), (.packs[$i].wrappers // [] | .[] | .path)' "$HARNESS"
       } |
         while IFS= read -r file; do
           printf 'file %s %s\n' "$(sha256_of "$pack/$file")" "$file"

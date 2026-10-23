@@ -12,6 +12,7 @@ import {
   type HarnessGitSetupPack,
   type HarnessManifest,
   type HarnessNpmLockPack,
+  type HarnessPluginTarballPack,
 } from "./harness-manifest";
 
 /**
@@ -19,7 +20,7 @@ import {
  * harness tree profile. The committed manifest is checked in
  * deploy-assets.test.ts.
  *
- * Mutators index the fixture with `!`: validFixture() always builds the three
+ * Mutators index the fixture with `!`: validFixture() always builds the four
  * packs in HARNESS_PACK_IDS order. Invalid values are written with
  * Object.assign / Reflect.deleteProperty, which the types allow.
  */
@@ -133,7 +134,43 @@ function validFixture(): HarnessManifest {
           env: { CLAUDE_FLOW_HEADLESS: "true" },
         },
         toolAllowlist: ["memory_store", "system_health"],
+        agentFiles: [
+          {
+            from: "node_modules/@claude-flow/cli/.claude/agents/core/planner.md",
+            sha256: SHA256,
+            name: "planner",
+          },
+        ],
         headlessSafe: [],
+        frontmatterHookSkills: [],
+      },
+      {
+        id: "somnio-engineering",
+        class: "harness",
+        kind: "plugin-tarball",
+        repo: "https://github.com/owner/somnio-engineering-ai",
+        sha: SHA_A,
+        license: "proprietary",
+        paths: [
+          { path: "plugins/somnio-engineering-ai", tree: SHA_A },
+          { path: "skills", tree: SHA_A },
+        ],
+        pluginRoot: "plugins/somnio-engineering-ai",
+        discard: ["commands/install.md"],
+        nodeMajor: 24,
+        env: {
+          CLAUDE_PLUGIN_ROOT: "{{packDir}}/src/plugins/somnio-engineering-ai",
+          YTCTL: "{{packDir}}/bin/ytctl",
+        },
+        pathDirs: ["{{packDir}}/bin"],
+        wrappers: [
+          {
+            path: "bin/ytctl",
+            exec: "src/skills/youtrack/scripts/ytctl",
+            aliasEnv: { YOUTRACK_TOKEN: "YOUTRACK_AGENT_TOKEN" },
+          },
+        ],
+        headlessSafe: ["dev-execution"],
         frontmatterHookSkills: [],
       },
     ],
@@ -142,6 +179,8 @@ function validFixture(): HarnessManifest {
 
 const gstackOf = (m: HarnessManifest) => m.packs[0]! as HarnessGitSetupPack;
 const rufloOf = (m: HarnessManifest) => m.packs[2]! as HarnessNpmLockPack;
+const somnioOf = (m: HarnessManifest) =>
+  m.packs[3]! as HarnessPluginTarballPack;
 
 function errorAfter(mutate: (m: HarnessManifest) => void): string | undefined {
   const manifest = validFixture();
@@ -165,7 +204,7 @@ describe("findHarnessManifestError — valid input", () => {
 describe("findHarnessManifestError — ids", () => {
   it("rejects a missing harness pack", () => {
     expect(errorAfter((m) => m.packs.pop())).toContain(
-      "ids must be exactly gstack, gsd, ruflo",
+      "ids must be exactly gstack, gsd, ruflo, somnio-engineering",
     );
   });
 
@@ -1074,6 +1113,106 @@ describe("findHarnessManifestError — prefetch (PR3 review M3)", () => {
     expect(
       errorAfter((m) =>
         rufloOf(m).prefetch!.push({ ...rufloOf(m).prefetch![0]! }),
+      ),
+    ).toContain("duplicate");
+  });
+});
+
+describe("findHarnessManifestError — plugin-tarball packs", () => {
+  it("rejects a path without a 40-hex tree, and overlapping paths", () => {
+    expect(
+      errorAfter((m) => Object.assign(somnioOf(m).paths[0]!, { tree: "abc" })),
+    ).toContain("paths[0].tree");
+    expect(
+      errorAfter((m) =>
+        somnioOf(m).paths.push({ path: "skills/youtrack", tree: SHA_A }),
+      ),
+    ).toContain("overlaps another path");
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m).paths[1]!, { path: "../skills" }),
+      ),
+    ).toContain("paths[1].path");
+  });
+
+  it("requires the plugin root to sit inside a pinned path", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m), { pluginRoot: "plugins/other" }),
+      ),
+    ).toContain("pluginRoot");
+  });
+
+  it("runs no MCP server", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m), {
+          mcpServers: { x: { command: "{{packDir}}/bin/x", args: [] } },
+          toolAllowlist: ["memory_store"],
+        }),
+      ),
+    ).toContain("runs no MCP server");
+  });
+
+  it("confines wrappers to bin/, src/ executables and tracker env names", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m).wrappers![0]!, { path: "lib/ytctl" }),
+      ),
+    ).toContain("bin/<name>");
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m).wrappers![0]!, { exec: "bin/ytctl" }),
+      ),
+    ).toContain("under src/");
+    for (const aliasEnv of [
+      { PATH: "YOUTRACK_AGENT_TOKEN" },
+      { YOUTRACK_TOKEN: "GITHUB_TOKEN" },
+      { YOUTRACK_TOKEN: "YOUTRACK_TOKEN" },
+    ]) {
+      expect(
+        errorAfter((m) =>
+          Object.assign(somnioOf(m).wrappers![0]!, { aliasEnv }),
+        ),
+      ).toContain("aliasEnv");
+    }
+  });
+
+  it("puts the wrappers' bin/ on PATH", () => {
+    expect(
+      errorAfter((m) => Object.assign(somnioOf(m), { pathDirs: undefined })),
+    ).toContain("pathDirs");
+  });
+
+  it("accepts CLAUDE_PLUGIN_ROOT and YTCTL as env keys, and nothing else new", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(somnioOf(m).env, { CLAUDE_CODE_SIMPLE: "1" }),
+      ),
+    ).toContain("CLAUDE_CODE_SIMPLE");
+    expect(
+      errorAfter((m) => Object.assign(somnioOf(m).env, { YTCTLX: "1" })),
+    ).toContain("YTCTLX");
+  });
+});
+
+describe("findHarnessManifestError — npm-lock agentFiles", () => {
+  it("pins a .md under node_modules/ by sha256, with a distinct name", () => {
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m).agentFiles![0]!, {
+          from: "agents/planner.md",
+        }),
+      ),
+    ).toContain("agentFiles[0].from");
+    expect(
+      errorAfter((m) =>
+        Object.assign(rufloOf(m).agentFiles![0]!, { sha256: "x" }),
+      ),
+    ).toContain("agentFiles[0].sha256");
+    expect(
+      errorAfter((m) =>
+        rufloOf(m).agentFiles!.push({ ...rufloOf(m).agentFiles![0]! }),
       ),
     ).toContain("duplicate");
   });

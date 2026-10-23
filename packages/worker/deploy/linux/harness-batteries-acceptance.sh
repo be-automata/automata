@@ -68,7 +68,7 @@ AGENT_USER=automata-agent
 BUILD_USER="automata-build"
 HARNESS_REL=packages/worker/deploy/harness.json
 # HARNESS_PACK_IDS in packages/shared/src/model/review-agent-settings.ts.
-HARNESS_PACKS="gstack,gsd,ruflo"
+HARNESS_PACKS="gstack,gsd,ruflo,somnio-engineering"
 CGROUP_FS=/sys/fs/cgroup
 # The #204 ceiling root when the boot journal does not name one.
 DEFAULT_CEILING_ROOT=/sys/fs/cgroup/system.slice/automata-worker.service

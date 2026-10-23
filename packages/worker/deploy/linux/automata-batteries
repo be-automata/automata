@@ -70,10 +70,10 @@ host_node_abi() {
   "$NODE_BIN" -p 'process.versions.modules' 2>/dev/null || echo ""
 }
 
-# The published dir of pack <index>: <id>@<sha> (git-setup) or <id>@<version>.
+# The published dir of pack <index>: <id>@<version> (npm-lock) or <id>@<sha>.
 pack_dir() {
   jq -r --argjson i "$1" --arg root "$ROOT" \
-    '.packs[$i] | "\($root)/\(.id)@\(if .kind == "git-setup" then .sha else .version end)"' "$MANIFEST"
+    '.packs[$i] | "\($root)/\(.id)@\(if .kind == "npm-lock" then .version else .sha end)"' "$MANIFEST"
 }
 
 # Re-hashes every `file` line of <dir>/.stamp; prints the mismatched paths.
@@ -146,6 +146,8 @@ doctor_json() {
           present: $present,
           pins: (if $p.kind == "git-setup"
             then {repo: $p.repo, sha: $p.sha, browsers: [($p.browsers // [])[] | {name, version, sha256}]}
+            elif $p.kind == "plugin-tarball"
+            then {repo: $p.repo, sha: $p.sha, paths: $p.paths}
             else {package: $p.package, version: $p.version, lockSha256: $p.lockSha256} end),
           linked: {skills: $skillNames, agents: ($agents | lines), commands: ($commands | lines)},
           headlessSafe: $p.headlessSafe,
