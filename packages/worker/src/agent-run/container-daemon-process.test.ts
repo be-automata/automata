@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -339,6 +340,190 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     await vi.waitFor(() => expect(String(d.memoryStarvation())).toMatch(OOM));
     rt.child.exit(137);
     await vi.waitFor(() => expect(String(d.agentFailure())).toMatch(OOM));
+  });
+});
+
+describe("ContainerDaemonProcess C3 forwards (#430)", () => {
+  // Short root: unix socket paths are capped at ~104 bytes (macOS).
+  let root: string;
+  let run: RunPaths;
+  let config: WorkerConfig;
+  let proxy: net.Server;
+  let gh: net.Server;
+  let proxyPort: number;
+  const input = {
+    threadId: "thr_c3",
+    threadChatId: "chat_1",
+    repoFullName: "acme/app",
+    daemonCallbackUrl: "https://www.example.test",
+  } as unknown as AgentRunInput;
+
+  const listen = async (
+    tag: string,
+    bind: (s: net.Server, done: () => void) => void,
+  ): Promise<net.Server> => {
+    const s = net.createServer((sock) => {
+      sock.on("data", (d) => sock.write(`${tag}:${d.toString()}`));
+      sock.on("error", () => {});
+    });
+    await new Promise<void>((r) => bind(s, r));
+    return s;
+  };
+  const ask = (socketPath: string, msg: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const c = net.createConnection(socketPath);
+      c.once("error", reject);
+      c.once("data", (d) => {
+        c.end();
+        resolve(d.toString());
+      });
+      c.write(msg);
+    });
+
+  beforeEach(async () => {
+    root = fs.mkdtempSync("/tmp/c3d-");
+    run = runPaths(path.join(root, "r"));
+    fs.mkdirSync(run.repo, { recursive: true });
+    fs.mkdirSync(run.home, { recursive: true });
+    fs.writeFileSync(path.join(root, "daemon.js"), "");
+    proxy = await listen("proxy", (s, d) => s.listen(0, "127.0.0.1", d));
+    proxyPort = (proxy.address() as net.AddressInfo).port;
+    gh = await listen("gh", (s, d) => s.listen(path.join(root, "gh.sock"), d));
+    config = {
+      ...loadWorkerConfig({
+        WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
+        WORKER_DEV_CONTAINER_RUNS: "1",
+        WORKER_BATTERIES_IMAGE: IMAGE,
+        WORKER_RUN_MEMORY_MAX: "2G",
+        WORKER_DAEMON_DIST: path.join(root, "daemon.js"),
+        ANTHROPIC_API_KEY: "sk-ant-box",
+        WORKER_BOX_ID: "box-t",
+      }),
+      boxSlot: 0,
+    };
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => proxy.close(() => r()));
+    await new Promise<void>((r) => gh.close(() => r()));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  function make(lane: RunLane, rt: ReturnType<typeof fakeRuntime>, over = {}) {
+    return new ContainerDaemonProcess(
+      config,
+      input,
+      run,
+      { home: run.home, delivered: false, env: {} },
+      lane,
+      {
+        secrets: { daemonToken: "daemon-token-secret" },
+        runtime: rt as unknown as ContainerRuntime,
+        probeSocket: async () => {},
+        log: () => {},
+        boxTestServicesEnvPath: path.join(root, "absent.env"),
+        egressProxyUrl: `http://run:proxy-secret@127.0.0.1:${proxyPort}`,
+        broker: {
+          gitUrl: `http://127.0.0.1:${proxyPort}`,
+          ghSocketPath: path.join(root, "gh.sock"),
+          bearer: "run-bearer",
+          repoFullName: "acme/app",
+        },
+        ...over,
+      },
+    );
+  }
+
+  /** The sock/ entries present when `docker create` ran (the entry bridges only those). */
+  function socketsAtCreate(rt: ReturnType<typeof fakeRuntime>): () => string[] {
+    let seen: string[] = [];
+    const create = rt.create.getMockImplementation();
+    rt.create.mockImplementation(async (argv: readonly string[]) => {
+      seen = fs.readdirSync(path.join(run.runDir, "sock")).sort();
+      return create!(argv);
+    });
+    return () => seen;
+  }
+
+  // card: protects=a task container gets the proxy, git and gh broker sockets BEFORE create, each forwarding to its host listener, and an env that points at the entry's loopback ports (proxy credential kept) plus a gh config naming the mounted socket; teardown closes every forward; fails_when=a socket is missing at create, forwards elsewhere, the env names a host address, or a forward outlives teardown; no_claim=the in-container socat bridge and real brokers (box proof)
+  it("task: proxy + git + gh forwarded, env on the bridge ports, closed at teardown", async () => {
+    const rt = fakeRuntime();
+    const seen = socketsAtCreate(rt);
+    const d = make("task", rt);
+    await d.start();
+    expect(seen()).toEqual([
+      "egress-proxy.sock",
+      "gh-broker.sock",
+      "git-broker.sock",
+    ]);
+    const sock = (n: string) => path.join(run.runDir, "sock", n);
+    expect(await ask(sock("egress-proxy.sock"), "a")).toBe("proxy:a");
+    expect(await ask(sock("git-broker.sock"), "b")).toBe("proxy:b");
+    expect(await ask(sock("gh-broker.sock"), "c")).toBe("gh:c");
+    const files = rt.copied[0] ?? {};
+    const env = files[".automata-run/run.env"] ?? "";
+    expect(env).toContain(
+      "export HTTPS_PROXY='http://run:proxy-secret@127.0.0.1:3128'",
+    );
+    expect(env).toContain("export AUTOMATA_DAEMON_CALLBACK_VIA_PROXY='1'");
+    expect(env).toContain("url.http://127.0.0.1:3129/.insteadOf");
+    expect(env).toContain("export GH_TOKEN='run-bearer'");
+    expect(env).not.toContain(String(proxyPort));
+    expect(files[".config/gh/config.yml"]).toBe(
+      "version: 1\nhttp_unix_socket: /run/automata/gh-broker.sock\n",
+    );
+    await d.teardown();
+    await expect(ask(sock("egress-proxy.sock"), "x")).rejects.toThrow();
+  });
+
+  // card: protects=a review container gets the egress proxy only — no git or gh broker socket and no GitHub credential, even when the workflow passes a broker; fails_when=a broker socket or bearer reaches a review; no_claim=the daemon-side review strip (host path)
+  it("review: proxy only, no broker socket, no credential", async () => {
+    const rt = fakeRuntime();
+    const seen = socketsAtCreate(rt);
+    await make("review", rt).start();
+    expect(seen()).toEqual(["egress-proxy.sock"]);
+    const files = rt.copied[0] ?? {};
+    expect(files[".automata-run/run.env"]).not.toMatch(
+      /GH_TOKEN|GITHUB_TOKEN|Authorization|3129/,
+    );
+    expect(files[".config/gh/config.yml"]).toBeUndefined();
+  });
+
+  // card: protects=no proxy URL means no proxy socket and no proxy env (a container with no route out, never a silent direct one); fails_when=a socket or HTTPS_PROXY appears without a proxy; no_claim=that the workflow always passes one (workflow wiring)
+  it("no proxy: no egress socket, no proxy env", async () => {
+    const rt = fakeRuntime();
+    const seen = socketsAtCreate(rt);
+    await make("task", rt, { egressProxyUrl: null, broker: null }).start();
+    expect(seen()).toEqual([]);
+    expect(rt.copied[0]?.[".automata-run/run.env"] ?? "").not.toMatch(
+      /HTTPS_PROXY|CALLBACK_VIA_PROXY/,
+    );
+  });
+
+  // card: protects=an opted-in repo's test Postgres is forwarded and its URL rewritten to the entry's 25432 bridge, credentials kept; fails_when=the container gets the host address or no socket; no_claim=the box's Postgres itself
+  it("test Postgres: opted-in repo gets the socket and a bridge URL", async () => {
+    const pg = await listen("pg", (s, d) => s.listen(0, "127.0.0.1", d));
+    const pgPort = (pg.address() as net.AddressInfo).port;
+    const envPath = path.join(root, "test-services.env");
+    fs.writeFileSync(
+      envPath,
+      `TEST_SERVICES_REPOS=acme/app\nTEST_DATABASE_ADMIN_URL=postgresql://agent:pw@127.0.0.1:${pgPort}/postgres\n`,
+      { mode: 0o600 },
+    );
+    try {
+      const rt = fakeRuntime();
+      const seen = socketsAtCreate(rt);
+      await make("task", rt, { boxTestServicesEnvPath: envPath }).start();
+      expect(seen()).toContain("test-postgres.sock");
+      expect(
+        await ask(path.join(run.runDir, "sock", "test-postgres.sock"), "q"),
+      ).toBe("pg:q");
+      expect(rt.copied[0]?.[".automata-run/run.env"]).toContain(
+        "export TEST_DATABASE_ADMIN_URL='postgresql://agent:pw@127.0.0.1:25432/postgres'",
+      );
+    } finally {
+      await new Promise<void>((r) => pg.close(() => r()));
+    }
   });
 });
 

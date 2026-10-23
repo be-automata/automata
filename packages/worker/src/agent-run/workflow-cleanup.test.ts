@@ -325,12 +325,18 @@ vi.mock("./agent-command", async (importOriginal) => {
   };
 });
 
+/** Constructor args of every stand-in container daemon (C3 wiring checks). */
+const containerCtorArgs: unknown[][] = [];
+
 // ADR-013 (dev-only) container path: a stand-in container daemon, so the
 // workflow's container branch runs without Docker. Its teardown is the
 // container removal (a promise the workflow awaits).
 vi.mock("./container-daemon-process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./container-daemon-process")>()),
   ContainerDaemonProcess: class {
+    constructor(...args: unknown[]) {
+      containerCtorArgs.push(args);
+    }
     pid = 4242;
     preflightGhAuth = vi.fn(async () => {});
     start = vi.fn(async () => {});
@@ -3620,15 +3626,22 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   });
 
   it("the container path (ADR-013, dev-only) logs `salvage: skipped (container run)` and still posts `timeout`", async () => {
-    // protects=the operator's container-path fallback: no container route to
-    // the git broker exists until C3 (#430), and host-side git on the
-    // container-written checkout would run its .git/config as the worker;
+    // protects=the operator's container-path fallback: the salvage runs after
+    // the container is gone, and host-side git on the container-written
+    // checkout would run its .git/config as the worker;
     // fails_when=any git runs, the line differs, the timeout is not posted, or
     // the container is not removed before the post; no_claim=a live
     // container (ContainerDaemonProcess is a stand-in here).
     process.env.WORKER_DEV_CONTAINER_RUNS = "1";
     process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
     process.env.WORKER_RUN_MEMORY_MAX = "3G";
+    // C3: a container run always gets an egress proxy (its only route out).
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => 0,
+      close: vi.fn(async () => {}),
+    });
     const c = timeoutCtx("run-ext-salvage-container");
 
     const out = await runFn(TASK_INPUT, c);
@@ -3638,6 +3651,14 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: skipped (container run)",
     );
+    // C3 (#430): the container gets this run's proxy (and the broker handoff
+    // the workflow built), never a fresh route of its own.
+    const deps = containerCtorArgs.at(-1)?.[5] as {
+      egressProxyUrl?: string | null;
+      broker?: unknown;
+    };
+    expect(deps.egressProxyUrl).toBe("http://127.0.0.1:41234");
+    expect(deps).toHaveProperty("broker");
     expect(postRunTerminal.mock.calls[0]![1]).toEqual(
       limitPost("run-ext-salvage-container"),
     );

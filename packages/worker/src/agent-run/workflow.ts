@@ -1652,7 +1652,9 @@ async function runAgentInner(
   const egressMode: "enforce" | "observe" = input.egressPolicy
     ? "enforce"
     : "observe";
-  if (input.egressPolicy || config.agentUser) {
+  // ADR-013 C3: a `--network none` container's only route out is this proxy,
+  // so a container run always gets one (observe when the repo has no policy).
+  if (input.egressPolicy || config.agentUser || config.containerRuns) {
     try {
       const batcher = createEgressEventBatcher(wwwOpts);
       egressEvents = batcher;
@@ -1772,6 +1774,10 @@ async function runAgentInner(
             ? { repoEnv: secrets.repoEnv }
             : {}),
         },
+        // C3 (#430): the same proxy and brokers as the host path, reached
+        // through forwarded sockets; a review lane gets no broker socket.
+        egressProxyUrl: egressProxy?.url ?? null,
+        broker,
         // The bot-identity precondition runs on the host against the
         // brokers, exactly as on the host path, then its scratch is removed.
         hostPreflight: async () => {
