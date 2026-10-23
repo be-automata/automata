@@ -1311,7 +1311,9 @@ function describeBashScriptHygiene(relPath: string): void {
       ).not.toThrow();
     });
 
-    it("is shellcheck clean", (ctx) => {
+    // install-batteries.sh is 3k+ lines: shellcheck takes ~1.6s on a laptop
+    // and past the 5s default on a shared CI runner.
+    it("is shellcheck clean", { timeout: 30_000 }, (ctx) => {
       if (
         spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
       ) {
