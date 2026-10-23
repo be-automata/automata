@@ -310,6 +310,12 @@ export function renderReviewModeSections(
   return kept.join("\n");
 }
 
+const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
+  CLASSIC_REVIEW_PROMPT,
+  { mode: "orchestrated", runTests: true },
+  { mode: "orchestrated", runTests: false },
+];
+
 /** Throws `<subject> has a malformed review-mode section: …` on a bad grammar. */
 function assertSectionGrammar(body: string, subject: string): void {
   const sectionError = findReviewModeSectionError(body);
@@ -320,7 +326,7 @@ function assertSectionGrammar(body: string, subject: string): void {
   }
 }
 
-/** Every distinct text a body can render to: itself when it has no markers. */
+/** Every text a body renders to, one per mode: just itself without markers. */
 function everyRender(body: string): string[] {
   return body.includes(MARKER_PREFIX)
     ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
@@ -328,12 +334,6 @@ function everyRender(body: string): string[] {
       )
     : [body];
 }
-
-const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
-  CLASSIC_REVIEW_PROMPT,
-  { mode: "orchestrated", runTests: true },
-  { mode: "orchestrated", runTests: false },
-];
 
 /**
  * THE fenced-json verdict-contract check, shared by the tracked-file loader
