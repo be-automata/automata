@@ -3351,13 +3351,16 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   const EXIT: Record<string, number> = { diff: 1 }; // diff --cached: staged
   const scriptedGit: RunAsAgent = async (a) => {
     salvageCalls.push(a);
-    // `exec git <verb> …`; the config guard is `test -d .git … git config`
-    // and the HEAD check `head=$(git symbolic-ref …)`.
+    // `exec git <verb> …`; the config guard is `test -d .git … git config`,
+    // the HEAD check `head=$(git symbolic-ref …)` and the submodule check
+    // `test ! -e .gitmodules …`.
     const verb = a.script.startsWith("test -d .git")
       ? "guard"
       : a.script.startsWith("head=")
         ? "head-state"
-        : (a.script.split(" ")[2] ?? "?");
+        : a.script.startsWith("test ! -e .gitmodules")
+          ? "submodules"
+          : (a.script.split(" ")[2] ?? "?");
     finallyOrder.push(`salvage:${verb}`);
     return {
       exitCode: EXIT[verb] ?? 0,
@@ -3464,6 +3467,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "salvage:guard",
       "salvage:check-ref-format",
       "salvage:head-state",
+      "salvage:submodules",
       "salvage:add",
       "salvage:diff",
       "salvage:commit",

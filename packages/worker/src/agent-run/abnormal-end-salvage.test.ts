@@ -555,6 +555,79 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
     expect(fs.existsSync(marker)).toBe(false);
   });
 
+  /** A nested repo `dir` in the checkout whose own config runs a clean filter writing `marker`. */
+  function nestedRepoWithFilter(dir: string, marker: string): void {
+    const sub = path.join(work, dir);
+    fs.mkdirSync(sub);
+    git(sub, "init", "--quiet", "-b", "main");
+    fs.writeFileSync(path.join(sub, "f"), "one\n");
+    fs.writeFileSync(path.join(sub, ".gitattributes"), "* filter=x\n");
+    git(sub, "add", "f", ".gitattributes");
+    git(sub, "commit", "--quiet", "-m", "sub");
+    // Configured after the sub's own commits, so only a later git run in
+    // the sub can trigger it.
+    git(sub, "config", "filter.x.clean", `touch ${marker}; cat`);
+  }
+
+  it("a tracked gitlink is refused before `add -A` enters it, and its filter never runs (job 801)", async () => {
+    // protects=job 801 finding 1: `add -A` runs `git status` inside every
+    // tracked gitlink, under the SUBMODULE's agent-writable config, which
+    // the guard never read; fails_when=the sub's filter marker is written or
+    // anything is pushed; no_claim=none beyond protects.
+    const marker = path.join(root, "SUBMODULE_FILTER_RAN");
+    nestedRepoWithFilter("s", marker);
+    git(work, "-c", "advice.addEmbeddedRepo=false", "add", "s");
+    git(work, "commit", "--quiet", "-m", "agent: add gitlink s");
+    expect(git(work, "ls-files", "-s", "s").startsWith("160000 ")).toBe(true);
+    fs.writeFileSync(path.join(work, "s", "f"), "two\n");
+    fs.writeFileSync(path.join(work, "top.ts"), "export {};\n");
+
+    const result = await salvage();
+
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(result).toBeNull();
+    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+  });
+
+  it("a .gitmodules file is refused the same way (job 801)", async () => {
+    // protects=the declared-submodule shape of the same hole; fails_when=the
+    // salvage proceeds; no_claim=none beyond protects.
+    fs.writeFileSync(
+      path.join(work, ".gitmodules"),
+      '[submodule "s"]\n\tpath = s\n\turl = https://github.com/o/s.git\n',
+    );
+
+    expect(await salvage()).toBeNull();
+
+    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+  });
+
+  it("an UNTRACKED nested repo is still salvaged, never entered, and lands as a gitlink only (job 801)", async () => {
+    // protects=what `add -A` does with an untracked nested repo: it records
+    // the nested HEAD as an embedded gitlink without running git inside it,
+    // so the nested filter never runs and none of the nested repo's files
+    // are published; fails_when=the marker is written, the salvage is
+    // refused, or nested content reaches the remote; no_claim=the gitlink
+    // itself pointing at a commit GitHub does not have (documented).
+    const marker = path.join(root, "NESTED_FILTER_RAN");
+    nestedRepoWithFilter("inner", marker);
+    fs.writeFileSync(path.join(work, "inner", "f"), "two\n");
+    fs.writeFileSync(path.join(work, "top.ts"), "export {};\n");
+
+    const result = await salvage();
+
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(result).not.toBeNull();
+    const tree = git(bare, "ls-tree", result!.sha);
+    expect(tree).toMatch(/^160000 commit [0-9a-f]{40}\tinner$/m);
+    expect(tree).toMatch(/\ttop\.ts$/m);
+    expect(git(bare, "ls-tree", "-r", "--name-only", result!.sha)).not.toMatch(
+      /^inner\//m,
+    );
+  });
+
   it("the allowed keys an agent commonly writes do not block the salvage", async () => {
     // protects=the guard is not so strict it throws away work for ordinary
     // config (the self-heal allowlist: user.*, push.*, branch tracking);
@@ -611,6 +684,39 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
     agentCommit(".env", "agent: config");
     agentCommit("later.ts", "agent: later");
     expect(git(work, "status", "--porcelain")).toBe("");
+
+    expect(await salvage()).toBeNull();
+
+    expect(logs).toEqual(["salvage: skipped (possible secret file)"]);
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+  });
+
+  it.each([".env.test", "config/dev.env"])(
+    "an edited, already-tracked %s fixture is salvaged (job 801)",
+    async (file) => {
+      // protects=job 801 finding 2: only secret-named files NEW to the
+      // range are refused, so a fixture the repo commits on purpose does not
+      // block the agent's work on it; fails_when=the edit is refused;
+      // no_claim=none beyond protects.
+      fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true });
+      agentCommit(file, "repo: fixture");
+      publish(WORK_BRANCH);
+      fs.writeFileSync(path.join(work, file), "EDITED=1\n");
+
+      const result = await salvage();
+
+      expect(result).not.toBeNull();
+      expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(result?.sha);
+    },
+  );
+
+  it("a .env added in one unpushed commit and modified in a later one is still refused (job 801)", async () => {
+    // protects=the add stays visible across the range even when a later
+    // commit only modifies it; fails_when=the push goes out; no_claim=none
+    // beyond protects.
+    agentCommit(".env", "agent: add env");
+    fs.writeFileSync(path.join(work, ".env"), "SECRET=2\n");
+    git(work, "commit", "--quiet", "-am", "agent: change env");
 
     expect(await salvage()).toBeNull();
 

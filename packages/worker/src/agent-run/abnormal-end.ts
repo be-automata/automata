@@ -333,14 +333,26 @@ const HEAD_STATE_SCRIPT =
   "for p in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD; do " +
   `[ ! -e "$(git rev-parse --git-path "$p")" ] || exit ${EXIT_OPERATION_IN_PROGRESS}; ` +
   "done";
+// `add -A` runs `git status` INSIDE every tracked gitlink, under that
+// submodule's own agent-writable config and attributes, which no guard read
+// (a filter there runs as the agent uid; diff.ignoreSubmodules does not stop
+// it). So no gitlink (mode 160000) may be in the index, and no .gitmodules
+// may exist. NUL-separated records, so a path cannot fake a mode; a path
+// holding a newline can only cause a refusal. Listed twice so a failing
+// ls-files fails the step instead of passing the pipeline.
+const EXIT_SUBMODULES = 12;
+const SUBMODULE_SCRIPT =
+  `test ! -e .gitmodules || exit ${EXIT_SUBMODULES}; ` +
+  "git ls-files -s -z >/dev/null || exit 1; " +
+  `if git ls-files -s -z | tr '\\0' '\\n' | grep -q '^160000 '; then exit ${EXIT_SUBMODULES}; fi`;
 const ADD_SCRIPT = "exec git add -A";
-// Every path the push would publish: each commit HEAD holds that no origin/*
-// ref does — the salvage commit AND the agent's own unpushed commits —
-// listed per commit (deletions publish nothing).
-const UNPUSHED_NAMES_SCRIPT =
-  "exec git log --format= --name-only -z --no-renames --diff-filter=d --ignore-submodules=all HEAD --not --remotes=origin";
-// Exit 1 = something is staged. --ignore-submodules=all: a submodule is never
-// entered, so git never runs under ITS local config, which no guard read.
+// Every secret-named path the push would ADD: each commit HEAD holds that no
+// origin/* ref does — the salvage commit AND the agent's own unpushed
+// commits. Only adds: a fixture the repo already tracks (.env.test) may be
+// edited; --no-renames keeps a rename onto a secret name visible as an add.
+const UNPUSHED_ADDED_SCRIPT =
+  "exec git log --format= --name-only -z --no-renames --diff-filter=A --ignore-submodules=all HEAD --not --remotes=origin";
+// Exit 1 = something is staged (no gitlink is in the index: see above).
 const STAGED_SCRIPT = "exec git diff --cached --quiet --ignore-submodules=all";
 const COMMIT_SCRIPT =
   'exec git commit --quiet --no-verify --no-gpg-sign -m "$1"';
@@ -450,6 +462,9 @@ export function salvageGitEnv({
       : []),
     ...gitProxyAuthConfig(egressProxyUrl),
     ["push.pushOption", ""],
+    // `git commit` otherwise spawns a DETACHED `git maintenance run --auto`.
+    ["maintenance.auto", "false"],
+    ["gc.auto", "0"],
   ]);
   if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
   return hardenGitEnv(env);
@@ -545,6 +560,15 @@ export async function salvageWorkBranch(
         `head check failed (exit ${headState.exitCode ?? "killed"})`,
       );
     }
+    const submodules = await git(SUBMODULE_SCRIPT);
+    if (submodules.exitCode === EXIT_SUBMODULES) {
+      return skipped("unsafe local git config");
+    }
+    if (submodules.exitCode !== 0) {
+      throw new SalvageStepFailed(
+        `submodule check failed (exit ${submodules.exitCode ?? "killed"})`,
+      );
+    }
     await ok("add", ADD_SCRIPT);
     const staged = await git(STAGED_SCRIPT);
     if (staged.exitCode === 1) {
@@ -564,7 +588,7 @@ export async function salvageWorkBranch(
     // The whole range the push would send, after the salvage's own commit: a
     // refused salvage leaves that commit local, and the workdir is wiped.
     // Never logs the path.
-    const names = await ok("unpushed list", UNPUSHED_NAMES_SCRIPT);
+    const names = await ok("unpushed list", UNPUSHED_ADDED_SCRIPT);
     if (names.truncated) {
       throw new SalvageStepFailed("unpushed list unreadable");
     }
