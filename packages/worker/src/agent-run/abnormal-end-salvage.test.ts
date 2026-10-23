@@ -263,6 +263,25 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     expect(git(work, "log", "-1", "--format=%s")).toBe(SALVAGE_MESSAGE);
   });
 
+  it("a step whose runner never settles (stdio held under sudo) still ends at the budget (job 808)", async () => {
+    // protects=job 808 finding 1: a SIGKILLed sudo whose git still holds the
+    // stdout pipe never resolves runAsAgent, and the teardown (post, lock
+    // release) must not wait on it; fails_when=the salvage waits for the
+    // runner, throws, or reports spawned=false (the workflow's second reap
+    // keys on it); no_claim=the reap itself (workflow-cleanup tests) — the
+    // runner here ignores its signal and never settles.
+    const run: RunAsAgent = () => new Promise<AgentCommandResult>(() => {});
+    const budgetMs = 100;
+    const t0 = Date.now();
+
+    const outcome = await salvageWorkBranch(args({ run, budgetMs }));
+
+    // Budget + timer slack on a loaded box.
+    expect(Date.now() - t0).toBeLessThan(budgetMs + 250);
+    expect(outcome).toEqual({ result: null, spawned: true });
+    expect(logs).toEqual(["salvage: failed (budget exceeded)"]);
+  }, 5_000);
+
   it("a push that outlives the budget is cut off by the budget's own signal and logged, never thrown", async () => {
     // protects=the hard budget on a fresh signal: a hung push cannot hold the
     // teardown (and the box lock) past it; fails_when=the salvage waits for
@@ -709,6 +728,46 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
       expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(result?.sha);
     },
   );
+
+  /** origin/<work> published, then main gains `.env.test` upstream. */
+  function workAndBaseDiverged(): void {
+    agentCommit("w.ts", "agent: work");
+    publish(WORK_BRANCH);
+    git(work, "checkout", "--quiet", "main");
+    agentCommit(".env.test", "repo: fixture upstream");
+    publish("main");
+    git(work, "checkout", "--quiet", WORK_BRANCH);
+  }
+
+  it("a merge whose resolution adds a .env (in neither parent) is refused (job 808)", async () => {
+    // protects=job 808 finding 2: a merge commit's own additions are
+    // scanned (dense combined diff); fails_when=the resolution's .env is
+    // pushed; no_claim=none beyond protects.
+    workAndBaseDiverged();
+    git(work, "merge", "--quiet", "--no-ff", "--no-commit", "main");
+    fs.writeFileSync(path.join(work, ".env"), "SECRET=1\n");
+    git(work, "add", ".env");
+    git(work, "commit", "--quiet", "-m", "agent: merge main");
+
+    expect(await salvage()).toBeNull();
+
+    expect(logs).toEqual(["salvage: skipped (possible secret file)"]);
+    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).not.toBe(
+      git(work, "rev-parse", "HEAD"),
+    );
+  });
+
+  it("an ordinary merge of a base that added a tracked .env.test fixture is salvaged (job 808)", async () => {
+    // protects=the merge scan does not refuse what the base itself added
+    // (first-parent diffs would flag .env.test); fails_when=the merge is
+    // refused; no_claim=none beyond protects.
+    workAndBaseDiverged();
+    git(work, "merge", "--quiet", "--no-ff", "--no-edit", "main");
+    const head = git(work, "rev-parse", "HEAD");
+
+    expect(await salvage()).toEqual({ branch: WORK_BRANCH, sha: head });
+    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(head);
+  });
 
   it("a .env added in one unpushed commit and modified in a later one is still refused (job 801)", async () => {
     // protects=the add stays visible across the range even when a later

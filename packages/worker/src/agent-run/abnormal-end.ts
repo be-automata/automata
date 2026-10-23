@@ -1,6 +1,10 @@
 import { redactSecrets } from "@terragon/utils/redact";
 
-import { runAsAgent, type RunAsAgent } from "./agent-command";
+import {
+  runAsAgent,
+  type AgentCommandResult,
+  type RunAsAgent,
+} from "./agent-command";
 import { SHA1_HEX } from "./batteries-manifest";
 import {
   appendGitConfig,
@@ -350,8 +354,11 @@ const ADD_SCRIPT = "exec git add -A";
 // origin/* ref does — the salvage commit AND the agent's own unpushed
 // commits. Only adds: a fixture the repo already tracks (.env.test) may be
 // edited; --no-renames keeps a rename onto a secret name visible as an add.
+// --cc: a merge commit lists what its resolution adds in NEITHER parent (a
+// plain log lists nothing for merges), while a file merged in from the base
+// is not listed (first-parent diffs would refuse every upstream fixture).
 const UNPUSHED_ADDED_SCRIPT =
-  "exec git log --format= --name-only -z --no-renames --diff-filter=A --ignore-submodules=all HEAD --not --remotes=origin";
+  "exec git log --format= --name-only -z --no-renames --diff-filter=A --cc --ignore-submodules=all HEAD --not --remotes=origin";
 // Exit 1 = something is staged (no gitlink is in the index: see above).
 const STAGED_SCRIPT = "exec git diff --cached --quiet --ignore-submodules=all";
 const COMMIT_SCRIPT =
@@ -481,8 +488,9 @@ export function salvageGitEnv({
  * never changes the cause, opens no PR; logs exactly one line:
  * `salvage: pushed <sha8> to <branch>` | `salvage: nothing to save` |
  * `salvage: failed (<reason>)` | `salvage: skipped (<reason>)`, the reason
- * constant text (runAsAgent discards stderr). A budget kill reaches sudo, not
- * the git under it; the workflow's post-salvage reap bounds that git.
+ * constant text (runAsAgent discards stderr). The budget ends the salvage
+ * even when a step's runner never settles (a killed sudo whose git still
+ * holds its pipe); the workflow's post-salvage reap kills that git.
  */
 export async function salvageWorkBranch(
   args: SalvageWorkBranchArgs,
@@ -520,7 +528,7 @@ export async function salvageWorkBranch(
     const git = async (script: string, scriptArgs: string[] = []) => {
       if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
       spawned = true;
-      const r = await run({
+      const step = run({
         agentUser: args.agentUser,
         cwd: args.workdir,
         script,
@@ -529,7 +537,23 @@ export async function salvageWorkBranch(
         timeoutMs: budgetMs,
         signal: budget,
       });
-      if (r.timedOut || budget.aborted) {
+      // The budget ends the step even when the runner never settles: a
+      // SIGKILLed sudo whose git still holds the stdout pipe never closes.
+      // That step is left to settle unobserved (the post-salvage reap kills
+      // its git); the abort listener goes with every step.
+      step.catch(() => {});
+      let onAbort = (): void => {};
+      const aborted = new Promise<null>((resolve) => {
+        onAbort = () => resolve(null);
+        budget.addEventListener("abort", onAbort, { once: true });
+      });
+      let r: AgentCommandResult | null;
+      try {
+        r = await Promise.race([step, aborted]);
+      } finally {
+        budget.removeEventListener("abort", onAbort);
+      }
+      if (r === null || r.timedOut || budget.aborted) {
         throw new SalvageStepFailed("budget exceeded");
       }
       return r;
