@@ -210,8 +210,8 @@ export async function runAutomation({
         // Review-mode sections (phase 6): a PR review (the same predicate
         // dispatch's isReviewThread uses) renders the mode the Phase 4
         // resolver picks, whatever the skill; anything else renders classic.
-        // A body without sections is unchanged in every mode. The render happens per
-        // thread creation (per push), so flipping a repo back to classic
+        // A body without sections is unchanged in every mode. The render
+        // happens per thread creation (per push), so flipping a repo back to classic
         // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
         // Independent of the skill body, so resolved alongside it.
         const [resolved, reviewPrompt] = await Promise.all([
@@ -253,7 +253,7 @@ export async function runAutomation({
         const reviewDiffBase =
           options?.prBaseBranchName ?? automation.branchName;
         const orchestratedApplied =
-          reviewPrompt?.mode === "orchestrated" &&
+          reviewPrompt.mode === "orchestrated" &&
           hasReviewModeSections(resolved.body);
         const renderedBody = renderSkillPlaceholders(resolved.body, {
           repoFullName: automation.repoFullName,
@@ -377,8 +377,9 @@ export async function runAutomation({
 
 /**
  * The review-prompt mode a skill_message thread renders: the resolved mode for
- * an org's PR review, classic otherwise. Any skill: only a body with
- * review-mode sections is changed by it.
+ * an org's PR review, classic otherwise. Any review skill: only a body with
+ * review-mode sections is changed by it. A companion is not a review (the
+ * worker never runs it orchestrated), so it always renders classic.
  */
 async function resolveRenderedReviewPrompt({
   automation,
@@ -391,6 +392,7 @@ async function resolveRenderedReviewPrompt({
 }): Promise<ReviewPromptMode> {
   if (
     automation.triggerType !== "pull_request" ||
+    isCompanionAutomation(automation) ||
     !automation.organizationId ||
     prNumber === undefined
   ) {

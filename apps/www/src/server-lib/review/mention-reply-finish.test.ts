@@ -560,4 +560,22 @@ describe("github-mention skill validator", () => {
       validateSkillBody(MENTION_SKILL_NAME, "Reply with mention-reply.", "v2"),
     ).toThrow(/mention-reply/);
   });
+
+  it("checks the contract on the classic render the lane receives (#492)", () => {
+    const tracked = readFileSync(
+      new URL(
+        "../../../../../deploy/skills/github-mention/SKILL.md",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const wrap = (condition: string) =>
+      `Intro.\n<!-- automata:if ${condition} -->\n${tracked}\n<!-- automata:endif -->`;
+    expect(() =>
+      validateSkillBody(MENTION_SKILL_NAME, wrap("classic"), "classic"),
+    ).not.toThrow();
+    expect(() =>
+      validateSkillBody(MENTION_SKILL_NAME, wrap("orchestrated"), "orch"),
+    ).toThrow(/mention-reply/);
+  });
 });

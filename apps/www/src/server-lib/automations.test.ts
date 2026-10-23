@@ -674,6 +674,34 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
     expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
   });
 
+  it("a companion in an orchestrated repo renders classic, no stamp, no resolver call", async () => {
+    const automation = await makeAutomation({ skillName: "custom-skill" });
+    await db
+      .update(automationsTable)
+      .set({
+        triggerConfig: {
+          on: { open: true, update: true },
+          filter: { includeAllAuthors: true, companion: true },
+        },
+      })
+      .where(eq(automationsTable.id, automation.id));
+    await storeBody("custom-skill", MARKER_BODY, automation.repoFullName);
+    await setRepoMode(automation.repoFullName, "orchestrated");
+
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: PR_OPTIONS,
+    });
+
+    const { text, sourceMetadata } = threadCall(0);
+    expect(text).toContain("CLASSIC ONLY.");
+    expect(text).not.toContain("LEAD REVIEWER.");
+    expect(sourceMetadata).not.toHaveProperty("reviewPromptMode");
+    expect(resolveReviewPromptMode).not.toHaveBeenCalled();
+  });
+
   it("flip-back: the next run after returning to classic gets the classic render", async () => {
     const automation = await makeAutomation();
     await storeBody("github-ops", MARKER_BODY, automation.repoFullName);

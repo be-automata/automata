@@ -716,8 +716,16 @@ export function validateSkillBody(
   body: string,
   sourceLabel: string,
 ): void {
-  // Every body's sections are rendered (#492), so a broken marker grammar is
-  // refused here, for every skill, instead of failing the run at render time.
+  const validator = SKILL_VALIDATORS[skillName];
+  // A review skill's validator checks the grammar and every render itself.
+  if (validator === assertReviewSkillContract) {
+    validator(body, sourceLabel);
+    return;
+  }
+  // Every other skill's sections are rendered too (#492). Its contract
+  // (mention, companion, audit lanes) renders classic, as those lanes never
+  // resolve a review mode, so it is checked on that text. A broken grammar is
+  // refused here instead of failing the run at render time.
   const sectionError = findReviewModeSectionError(body);
   if (sectionError) {
     throw new Error(
@@ -725,12 +733,12 @@ export function validateSkillBody(
         `review-mode section: ${sectionError}`,
     );
   }
-  const validator = SKILL_VALIDATORS[skillName];
+  const rendered = renderReviewModeSections(body);
   if (validator) {
-    validator(body, sourceLabel);
+    validator(rendered, sourceLabel);
     return;
   }
-  if (body.trim().length === 0) {
+  if (rendered.trim().length === 0) {
     throw new Error(
       `Skill '${skillName}' body from ${sourceLabel} is empty — refusing to ` +
         `dispatch an automation run with no instruction.`,

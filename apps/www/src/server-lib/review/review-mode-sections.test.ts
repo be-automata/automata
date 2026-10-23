@@ -186,7 +186,7 @@ describe("assertReviewSkillContract with review-mode sections", () => {
       /malformed review-mode section: line 1: unknown condition "fancy"/,
     );
     const good =
-      "<!-- automata:if orchestrated -->\nX\n<!-- automata:endif -->";
+      "Intro\n<!-- automata:if orchestrated -->\nX\n<!-- automata:endif -->";
     expect(() => validateSkillBody("other-skill", good, "t")).not.toThrow();
     expect(() => validateSkillBody("other-skill", "  ", "t")).toThrow(/empty/);
   });
