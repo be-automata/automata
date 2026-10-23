@@ -1152,6 +1152,9 @@ importers:
       '@terragon/env':
         specifier: workspace:*
         version: link:../env
+      '@terragon/knowledge':
+        specifier: workspace:*
+        version: link:../knowledge
       '@terragon/types':
         specifier: workspace:*
         version: link:../types

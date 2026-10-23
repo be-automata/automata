@@ -300,3 +300,15 @@ export function getGoogleSkuForModel(model?: string | null): UsageSku {
   console.warn(`Unknown Google model: ${model}`);
   return GOOGLE_DEFAULT_SKU;
 }
+
+/** Dollars to integer micro-USD, rounded up so a reservation never under-counts. */
+export function usdToMicroUsd(usd: number): number {
+  if (!Number.isFinite(usd) || usd < 0) {
+    throw new RangeError("usd must be a finite non-negative number");
+  }
+  const micro = Math.ceil(usd * 1_000_000);
+  if (!Number.isSafeInteger(micro)) {
+    throw new RangeError("usd is too large to convert to micro-USD");
+  }
+  return micro;
+}

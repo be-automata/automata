@@ -13,6 +13,7 @@ import {
   bigint,
   foreignKey,
   primaryKey,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
@@ -1645,6 +1646,11 @@ export const repoReviewSettings = pgTable(
  * — one row per org, looked up by PK alone (no repo slug in this table).
  * `updatedByUserId` records provenance for the audit trail, mirroring
  * `repoReviewSettings`.
+ *
+ * Knowledge org controls (Phase 12): `knowledgeEngine` (kill switch),
+ * `knowledgeBudgetMicroUsd` (monthly cap), `knowledgeOffboardedAt` and
+ * `knowledgePurgedAt` (offboarding). All nullable with NO column default; the
+ * resolver maps NULL to the safe value (engine OFF, platform default budget).
  */
 export const organizationReviewSettings = pgTable(
   "organization_review_settings",
@@ -1665,6 +1671,21 @@ export const organizationReviewSettings = pgTable(
      * see `repoReviewSettings.trustedAuthorThreshold` doc for the same note.
      */
     trustedAuthorThreshold: text("trusted_author_threshold"),
+    /**
+     * Knowledge engine kill switch. NULL and false both resolve OFF: the
+     * default is a RESOLVER default, never a column default.
+     */
+    knowledgeEngine: boolean("knowledge_engine"),
+    /** Monthly knowledge budget in micro-USD. NULL = platform default. */
+    knowledgeBudgetMicroUsd: bigint("knowledge_budget_micro_usd", {
+      mode: "number",
+    }),
+    /** Set when the org is offboarded; forces the engine off. Purge runs 7 days later. */
+    knowledgeOffboardedAt: timestamp("knowledge_offboarded_at", {
+      mode: "date",
+    }),
+    /** Set by the purge; a purge is due only while NULL or older than offboarded_at. */
+    knowledgePurgedAt: timestamp("knowledge_purged_at", { mode: "date" }),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
@@ -2525,6 +2546,9 @@ export const selfHealAdminLog = pgTable(
 //         │
 //         └──< knowledge_op ──< knowledge_decision      (append-only)
 //   knowledge_cursor        one per (org, repo): default-branch progress
+//   knowledge_intent        durable reconcile intent per (org, repo, target sha)
+//   knowledge_admin_log     append-only log of org control changes
+//   knowledge_platform_settings  singleton: platform budget ceiling (no org id)
 //   knowledge_usage_window  one per (org, month): the model-call cap
 // ---------------------------------------------------------------------------
 
@@ -2634,6 +2658,11 @@ export const knowledgeOp = pgTable(
       .default("proposed"),
     proposal: jsonb("proposal").notNull(),
     mergeRev: text("merge_rev").notNull(),
+    /**
+     * Copy of proposal.evidenceFingerprint for indexed rejection lookup
+     * (Phase 11 ENG-02 hand-off). Nullable: rows predate it.
+     */
+    evidenceFingerprint: text("evidence_fingerprint"),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
@@ -2641,6 +2670,10 @@ export const knowledgeOp = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
+    index("knowledge_op_claim_evidence_fingerprint_index").on(
+      table.claimId,
+      table.evidenceFingerprint,
+    ),
     index("knowledge_op_org_state_created_index").on(
       table.organizationId,
       table.state,
@@ -2720,6 +2753,113 @@ export const knowledgeCursor = pgTable(
   ],
 );
 
+export type KnowledgeIntentState =
+  | "pending"
+  | "processing"
+  | "processed"
+  | "failed";
+
+/**
+ * Durable reconcile intent. `id` is deterministic
+ * (`intent:<orgId>:<repo>@<target_sha>`) so a webhook redelivery is an
+ * idempotent insert and two orgs' intents for one repo never collide.
+ */
+export const knowledgeIntent = pgTable(
+  "knowledge_intent",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    defaultBranch: text("default_branch").notNull(),
+    targetSha: text("target_sha").notNull(),
+    state: text("state")
+      .$type<KnowledgeIntentState>()
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { mode: "date" })
+      .notNull()
+      .defaultNow(),
+    /** Enum-like code only, never free text (OPS-04). */
+    lastErrorCode: text("last_error_code"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    processedAt: timestamp("processed_at", { mode: "date" }),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("knowledge_intent_org_repo_sha_unique").on(
+      table.organizationId,
+      table.repoFullName,
+      table.targetSha,
+    ),
+    index("knowledge_intent_state_next_attempt_index").on(
+      table.state,
+      table.nextAttemptAt,
+    ),
+  ],
+);
+
+export type KnowledgeAdminAction =
+  | "engine_toggle"
+  | "budget_change"
+  | "offboard"
+  | "offboard_undo";
+
+/** Append-only log of knowledge org control changes. */
+export const knowledgeAdminLog = pgTable(
+  "knowledge_admin_log",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    /** No FK on purpose: the log survives user deletion. */
+    actorUserId: text("actor_user_id").notNull(),
+    action: text("action").notNull().$type<KnowledgeAdminAction>(),
+    /** Ids, integers, booleans and enum values only; never free text or partner content. */
+    target: jsonb("target"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("knowledge_admin_log_org_created_index").on(
+      table.organizationId,
+      table.createdAt,
+    ),
+  ],
+);
+
+/**
+ * Platform-wide knowledge settings: a singleton row (id is always 'global').
+ * No organization_id on purpose: this is not tenant data (ADR-001 does not
+ * apply). Written only by platform admins. A NULL ceiling means the code
+ * default applies.
+ */
+export const knowledgePlatformSettings = pgTable(
+  "knowledge_platform_settings",
+  {
+    id: text("id").primaryKey(),
+    budgetCeilingMicroUsd: bigint("budget_ceiling_micro_usd", {
+      mode: "number",
+    }),
+    /** No FK to user: survives user deletion, like the admin log actor. */
+    updatedByUserId: text("updated_by_user_id"),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    check("knowledge_platform_settings_singleton", sql`${table.id} = 'global'`),
+  ],
+);
+
 /**
  * The per-org monthly cap on knowledge-plane model calls. Amounts are integer
  * micro-USD. A call first reserves its estimate with one conditional UPDATE
@@ -2740,6 +2880,8 @@ export const knowledgeUsageWindow = pgTable(
     spentMicroUsd: bigint("spent_micro_usd", { mode: "number" })
       .notNull()
       .default(0),
+    /** Exactly-once cap alert claim for this window; cleared when the cap is raised. */
+    capAlertedAt: timestamp("cap_alerted_at", { mode: "date" }),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
       .defaultNow()

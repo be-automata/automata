@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   order: [] as string[],
   getStalledThreads: vi.fn(),
   selfHeal: vi.fn(),
+  purge: vi.fn(),
   due: vi.fn(async (): Promise<unknown[]> => []),
   runAutomation: vi.fn(),
   admit: vi.fn(),
@@ -60,6 +61,9 @@ vi.mock("@terragon/shared/model/egress-events", () => ({
 vi.mock("@/server-lib/audit/self-heal-cron", () => ({
   runSelfHealCron: h.selfHeal,
 }));
+vi.mock("@/server-lib/knowledge/purge-sweep", () => ({
+  runKnowledgePurgeSweep: h.purge,
+}));
 
 /**
  * Enterprise-hardening #2 watchdog delta (amendment 5): the hourly stalled-task cron
@@ -91,6 +95,10 @@ describe("runScheduledCron self-heal bulkhead", () => {
     h.selfHeal.mockImplementation(async (kind: string) => {
       h.order.push(`self-heal:${kind}`);
     });
+    h.purge.mockReset();
+    h.purge.mockImplementation(async () => {
+      h.order.push("knowledge-purge");
+    });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
@@ -106,10 +114,11 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-egress",
       "stop",
       "self-heal:hourly",
+      "knowledge-purge",
     ]);
   });
 
-  it("hourly: a throwing self-heal cron does not break the run", async () => {
+  it("hourly: a throwing self-heal cron does not break the run or skip the purge", async () => {
     h.selfHeal.mockRejectedValue(new Error("self-heal down"));
     await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
     expect(h.order).toEqual([
@@ -117,7 +126,20 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-hatchet",
       "prune-egress",
       "stop",
+      "knowledge-purge",
     ]);
+  });
+
+  it("hourly: a throwing knowledge purge does not reject the cron", async () => {
+    h.purge.mockRejectedValue(new Error("purge down"));
+    await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
+    expect(h.order.at(-1)).toBe("self-heal:hourly");
+  });
+
+  it("other patterns never run the knowledge purge", async () => {
+    await runScheduledCron("*/10 * * * *");
+    await runScheduledCron("*/1 * * * *");
+    expect(h.purge).not.toHaveBeenCalled();
   });
 
   it("hourly: a hanging self-heal cron cannot have delayed anything before it", async () => {

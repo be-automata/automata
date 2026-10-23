@@ -357,8 +357,13 @@ export async function runScheduledCron(cron: string): Promise<void> {
       try {
         await runStalledTasksCron();
       } finally {
-        // CRON-01: LAST, so self-heal work can never delay or skip recovery.
-        await runSelfHealCronSafe("hourly");
+        try {
+          // CRON-01: LAST, so self-heal work can never delay or skip recovery.
+          await runSelfHealCronSafe("hourly");
+        } finally {
+          // OPS-04: LAST, after recovery and self-heal; purge can never delay or skip them.
+          await runKnowledgePurgeSweepSafe();
+        }
       }
       return;
     case "*/1 * * * *": // every 1m — fire due scheduled thread-chats
@@ -394,5 +399,20 @@ async function runSelfHealCronSafe(kind: "tick" | "hourly"): Promise<void> {
     await runSelfHealCron(kind);
   } catch (error) {
     console.error("[cron:self-heal] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * OPS-04 offboarding purge. Dynamic import, bounded and fail-soft: every
+ * failure is logged and swallowed.
+ */
+async function runKnowledgePurgeSweepSafe(): Promise<void> {
+  try {
+    const { runKnowledgePurgeSweep } = await import(
+      "@/server-lib/knowledge/purge-sweep"
+    );
+    await runKnowledgePurgeSweep();
+  } catch (error) {
+    console.error("[cron:knowledge-purge] failed (non-fatal)", error);
   }
 }
