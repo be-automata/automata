@@ -207,6 +207,18 @@ export class ContainerRuntime {
     );
   }
 
+  /**
+   * `docker exec <id> <argv>` as the container's configured user, bounded.
+   * Returns the result; the caller decides what a non-zero exit means.
+   */
+  async exec(
+    id: string,
+    argv: readonly string[],
+    timeoutMs: number,
+  ): Promise<ExecResult> {
+    return this.run(["exec", id, ...argv], timeoutMs);
+  }
+
   /** The container's state, or null when it does not exist. */
   async inspectState(id: string): Promise<ContainerState | null> {
     const r = await this.run(

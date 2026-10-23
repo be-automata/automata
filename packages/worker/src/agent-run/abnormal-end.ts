@@ -526,10 +526,11 @@ export async function salvageWorkBranch(
   if (!args.enabled) return skipped("disabled");
   if (!workBranch) return skipped("no work branch");
   if (args.lockLost) return skipped("lock lost");
-  // ADR-013 (dev-only): a container's only route to GitHub is meant to be the
-  // git broker bridged in over a unix socket (C3, #430), not built yet; host
-  // git as the worker on the container-written .git would run its config as
-  // the worker uid. Unlocked by C3.
+  // ADR-013 (dev-only): a container reaches the git broker only through its
+  // forwarded socket (C3, #430), and the salvage runs after the container is
+  // gone; host git as the worker on the container-written .git would run its
+  // config as the worker uid. A container salvage has to run git inside the
+  // container before teardown: a follow-up, not this switch.
   if (args.containerRun) return skipped("container run");
   if (!broker) return skipped("no git broker");
   if (!REPO_SLUG.test(args.repoFullName)) {

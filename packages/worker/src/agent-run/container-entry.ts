@@ -9,8 +9,8 @@ import { CONTAINER_HOME, CONTAINER_WORKSPACE } from "./container-argv";
  *
  *   1. read the run env file the worker copied into HOME (the secrets that
  *      must not ride the docker argv), then delete it;
- *   2. start the socat bridges for the sockets that are present — the C3 seam
- *      (#430): this PR mounts no bridge socket, so the loop finds none;
+ *   2. start the socat bridges for the sockets that are present (C3, #430):
+ *      the worker forwards only the exits this run is entitled to;
  *   3. install the Somnio agent rules into the checkout for the stacks the
  *      worker detected, restore every tracked path the installer rewrote and
  *      git-exclude every path it added, so `git status` is unchanged;
@@ -24,10 +24,11 @@ import { CONTAINER_HOME, CONTAINER_WORKSPACE } from "./container-argv";
 export const CONTAINER_RUN_ENV_FILE = `${CONTAINER_HOME}/.automata-run/run.env`;
 
 /**
- * The socket names C3 will mount under /run/automata and bridge to loopback
- * TCP ports (egress proxy → 3128, git broker, test Postgres → 25432). Listed
- * here so the entry's bridge loop and the C3 wiring share one table; in C2 the
- * worker mounts none of them, so no bridge starts.
+ * The socket names the worker forwards under /run/automata (C3, #430) and the
+ * entry bridges to loopback TCP ports (egress proxy → 3128, git broker → 3129,
+ * test Postgres → 25432). One table for the entry's bridge loop and the
+ * worker's forwards (container-daemon-process.ts). The gh broker socket is
+ * not here: gh speaks HTTP over a unix socket itself.
  */
 export const CONTAINER_BRIDGES: ReadonlyArray<{
   socket: string;
@@ -55,7 +56,7 @@ export function buildEntryScript(): string {
     // 1. The run env: secrets that must never be in `docker inspect`.
     `env_file=${CONTAINER_RUN_ENV_FILE}`,
     'if [ -f "$env_file" ]; then set -a; . "$env_file"; set +a; rm -f -- "$env_file"; fi',
-    // 2. Bridges (C3 seam): only for sockets the worker mounted.
+    // 2. Bridges (C3): only for sockets the worker forwarded.
     `for pair in ${bridges}; do`,
     '  sock="/run/automata/${pair%%:*}"; port="${pair##*:}"',
     '  if [ -S "$sock" ]; then',

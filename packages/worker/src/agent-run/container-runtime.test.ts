@@ -49,6 +49,28 @@ describe("ContainerRuntime: the CLI against ONE configured socket", () => {
   });
 
   // card: protects=removal is idempotent (an absent container is success) but any other failure throws, so a slot is never released over a container the daemon refused to remove; fails_when=`No such container` throws or a daemon error is swallowed; no_claim=daemon semantics of rm -f
+  // card: protects=exec runs `docker exec <id> <argv>` on the configured socket as the container's own user (no --user override) and returns a failure instead of throwing; fails_when=exec targets another socket, adds a user/privilege flag, or throws on a non-zero exit; no_claim=what the command does inside the container
+  it("exec: docker exec on the socket, container's own user, result returned", async () => {
+    const { exec, calls } = fakeExec(() => ({ code: 1, stderr: "nope" }));
+    const rt = new ContainerRuntime({ socketPath: SOCK, exec });
+    const r = await rt.exec(
+      "c1",
+      ["chmod", "-R", "g+rwX", "/workspace"],
+      5_000,
+    );
+    expect(r.code).toBe(1);
+    expect(calls[0]).toEqual([
+      "-H",
+      `unix://${SOCK}`,
+      "exec",
+      "c1",
+      "chmod",
+      "-R",
+      "g+rwX",
+      "/workspace",
+    ]);
+  });
+
   it("remove: absent is fine, any other failure throws", async () => {
     const absent = new ContainerRuntime({
       socketPath: SOCK,
