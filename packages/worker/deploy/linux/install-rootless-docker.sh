@@ -22,9 +22,15 @@ umask 022
 #   - group `automata-docker`: the runner and the worker account are members.
 #     Membership is what lets the worker reach the daemon's socket WITHOUT sudo,
 #     and reaching it is acting as `automata-runner`, never as host root;
+#   - the worker account joins `automata-runner`'s PRIMARY group too: the
+#     run-dir hand-over (ADR-013 "Daemon socket") makes <runDir> setgid and
+#     group-owned by that group (WORKER_CONTAINER_RUN_GID, container gid 0 via
+#     `--group-add 0`), and the worker can only chgrp to a group it is in;
 #   - /run/automata-docker (tmpfiles.d, 0750 automata-runner:automata-docker):
 #     the socket lives here, outside /run/user/<uid> (0700) and outside every
-#     run namespace;
+#     run namespace. The socket itself is automata-runner:automata-docker 0660,
+#     set by the unit from the host side (see automata-runner-docker.service:
+#     dockerd's own --group resolves inside the user namespace);
 #   - cgroup v2 delegation for the runner's user manager:
 #     /etc/systemd/system/user@<uid>.service.d/10-automata-delegate.conf with
 #     `Delegate=cpu cpuset io memory pids`, so --memory, --pids-limit and
@@ -33,10 +39,12 @@ umask 022
 #   - lingering for the runner (its user manager runs without a login);
 #   - the user unit automata-runner-docker.service (this dir), enabled and
 #     started in the runner's user manager;
-#   - verifies (also all `--check` does): the worker is in the group, the
+#   - verifies (also all `--check` does): the worker is in both groups, the
 #     runner has its subuid/subgid ranges and lingers, its user manager
-#     delegates the cpu, memory and pids controllers, and, AS THE WORKER
-#     ACCOUNT, that the socket answers and the daemon is rootless on cgroup v2.
+#     delegates the cpu, memory and pids controllers, the socket dir and the
+#     socket carry the owner, group and mode above (nothing for "other"), and,
+#     AS THE WORKER ACCOUNT, that the socket answers and the daemon is rootless
+#     on cgroup v2.
 #     It does not prove the limits are enforced: prove-container-limits.sh does.
 #
 # Usage: install-rootless-docker.sh [--worker-user NAME] [--check]
@@ -76,6 +84,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 log() { printf 'rootless-docker: %s\n' "$*"; }
+# in_group USER GROUP: USER is a member of GROUP (primary or supplementary).
+in_group() { id -nG "$1" | tr ' ' '\n' | grep -qx "$2"; }
 die() {
   printf 'rootless-docker: FATAL: %s\n' "$*" >&2
   exit 1
@@ -88,15 +98,40 @@ id -u "$worker_user" >/dev/null 2>&1 || die "worker account $worker_user does no
 
 # ── verification (also the tail of every install run) ─────────────────────────
 verify() {
-  local fail=0 uid info ctrl
+  local fail=0 uid run_group info ctrl got
   uid="$(id -u "$RUNNER" 2>/dev/null)" || {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
   }
-  if id -nG "$worker_user" | tr ' ' '\n' | grep -x "$GROUP" >/dev/null; then
+  run_group="$(id -gn "$RUNNER")"
+  if in_group "$worker_user" "$GROUP"; then
     echo "ok   worker-group        $worker_user is in $GROUP"
   else
     echo "FAIL worker-group        $worker_user is not in $GROUP"
+    fail=1
+  fi
+  # The run-dir hand-over (WORKER_CONTAINER_RUN_GID, --group-add 0).
+  if in_group "$worker_user" "$run_group"; then
+    echo "ok   worker-run-group    $worker_user is in $run_group ($RUNNER's primary group)"
+  else
+    echo "FAIL worker-run-group    $worker_user is not in $run_group ($RUNNER's primary group)"
+    fail=1
+  fi
+  # The group grant is the whole access control: the dir admits only the
+  # group, the socket only owner and group. A subordinate gid on the socket
+  # (dockerd's --group resolved inside the user namespace) fails here.
+  got="$(stat -c '%U:%G %a' "$SOCK_DIR" 2>/dev/null || echo missing)"
+  if [ "$got" = "$RUNNER:$GROUP 750" ]; then
+    echo "ok   socket-dir          $SOCK_DIR is $got"
+  else
+    echo "FAIL socket-dir          $SOCK_DIR is $got, want $RUNNER:$GROUP 750"
+    fail=1
+  fi
+  got="$(stat -c '%U:%G %a' "$SOCK" 2>/dev/null || echo missing)"
+  if [ -S "$SOCK" ] && [ "$got" = "$RUNNER:$GROUP 660" ]; then
+    echo "ok   socket-perms        $SOCK is $got"
+  else
+    echo "FAIL socket-perms        $SOCK is $got, want a socket $RUNNER:$GROUP 660"
     fail=1
   fi
   # Each id range is what maps container uids to unprivileged host ids, and
@@ -178,13 +213,21 @@ if ! id -u "$RUNNER" >/dev/null 2>&1; then
   log "creating system user $RUNNER"
   useradd --system --create-home --home-dir "$RUNNER_HOME" --shell /usr/sbin/nologin "$RUNNER"
 fi
-for u in "$RUNNER" "$worker_user"; do
-  if ! id -nG "$u" | tr ' ' '\n' | grep -x "$GROUP" >/dev/null; then
-    log "adding $u to $GROUP"
-    usermod -aG "$GROUP" "$u"
-    if [ "$u" = "$worker_user" ]; then
-      log "a RUNNING worker gets $GROUP only when it restarts"
-    fi
+# The runner needs automata-docker itself: the unit's ExecStartPost chgrp runs
+# as the runner, and its user manager only has the groups it started with.
+runner_joined=0
+if ! in_group "$RUNNER" "$GROUP"; then
+  log "adding $RUNNER to $GROUP"
+  usermod -aG "$GROUP" "$RUNNER"
+  runner_joined=1
+fi
+# The worker: automata-docker for the socket, the runner's primary group for
+# the run-dir hand-over (WORKER_CONTAINER_RUN_GID, --group-add 0).
+run_group="$(id -gn "$RUNNER")"
+for g in "$GROUP" "$run_group"; do
+  if ! in_group "$worker_user" "$g"; then
+    log "adding $worker_user to $g (a RUNNING worker gets it only when it restarts)"
+    usermod -aG "$g" "$worker_user"
   fi
 done
 # One range per file, placed after every existing range so no two accounts
@@ -210,15 +253,19 @@ systemd-tmpfiles --create "$tmpfiles"
 dropin_dir="/etc/systemd/system/user@$runner_uid.service.d"
 dropin="$dropin_dir/10-automata-delegate.conf"
 want_dropin="$(printf '[Service]\nDelegate=cpu cpuset io memory pids')"
+restart_manager="$runner_joined"
 if [ "$(cat "$dropin" 2>/dev/null || true)" != "$want_dropin" ]; then
   log "delegating cpu cpuset io memory pids to user@$runner_uid.service"
   mkdir -p "$dropin_dir"
   printf '%s\n' "$want_dropin" >"$dropin"
   systemctl daemon-reload
-  # The running user manager keeps its old delegation until it restarts.
-  if systemctl is-active --quiet "user@$runner_uid.service"; then
-    systemctl restart "user@$runner_uid.service"
-  fi
+  restart_manager=1
+fi
+# A running user manager keeps its old delegation and its old groups until it
+# restarts.
+if [ "$restart_manager" -eq 1 ] && systemctl is-active --quiet "user@$runner_uid.service"; then
+  log "restarting user@$runner_uid.service"
+  systemctl restart "user@$runner_uid.service"
 fi
 if [ "$(loginctl show-user "$RUNNER" --property=Linger --value 2>/dev/null || echo no)" != yes ]; then
   log "enabling linger for $RUNNER"
@@ -256,5 +303,11 @@ for _ in $(seq 1 100); do
   sleep 0.2
 done
 [ -S "$SOCK" ] || die "$SOCK did not appear (journalctl --user -M $RUNNER@ -u $UNIT)"
+# The unit's ExecStartPost sets the socket's group right after it appears;
+# give a restart the same bounded wait for it.
+for _ in $(seq 1 50); do
+  [ "$(stat -c %G "$SOCK" 2>/dev/null || true)" = "$GROUP" ] && break
+  sleep 0.2
+done
 
 verify
