@@ -243,6 +243,7 @@ export async function runReviewSweep(): Promise<void> {
           repoFullName: c.repoFullName,
           prNumber: c.prNumber,
         }),
+        threadId: c.id,
       });
       console.log("[review-sweep] backstopped a terminal review thread", {
         threadId: c.id,

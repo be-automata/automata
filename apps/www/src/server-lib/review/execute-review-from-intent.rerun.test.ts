@@ -96,6 +96,22 @@ describe("#107 — a failed run defers its notice to an automatic re-run", () =>
     expect(body).not.toContain("no JSON intent block");
   });
 
+  it("the notice names the failed run's thread id (#107: the forensic join key)", async () => {
+    const github = makeGithub();
+    await executeReviewFromIntent({
+      ...base(github),
+      threadId: "thread-123",
+      runFailure: { detail: null },
+      planRerun: planner({
+        defer: false,
+        attempts: 2,
+        decision: "exhausted",
+      }),
+    });
+    expect(github.comments).toHaveLength(1);
+    expect(github.comments[0]!.body).toContain("**Run:** `thread-123`");
+  });
+
   it("a planner that throws costs nothing: the notice posts (fail-open to today's behaviour)", async () => {
     const github = makeGithub();
     const res = await executeReviewFromIntent({

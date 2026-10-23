@@ -490,6 +490,8 @@ export async function handleReviewEffectAtFinish({
           repoFullName,
           prNumber,
         }),
+        // #107: the notice names this run, so a reader can join it to the logs.
+        threadId,
         logger: {
           info: (message, meta) =>
             console.log(`[review-single-writer] ${message}`, meta),
