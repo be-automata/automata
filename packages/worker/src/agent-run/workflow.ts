@@ -103,6 +103,7 @@ import {
   claimAbnormalEnd,
   newAbnormalEndState,
   postAbnormalEnd,
+  salvageWorkBranch,
   type AbnormalEndState,
 } from "./abnormal-end";
 import {
@@ -2014,7 +2015,41 @@ async function runAgentInner(
           : null;
       if (!abnormalExit) abnormal.claimed = true;
       if (end) {
-        await postAbnormalEnd(abnormal, end, { wwwOpts, log: step });
+        // #437 Part B: a timed-out run's work is committed and pushed to its
+        // work branch now — the agent is dead, the git broker still open —
+        // and the post names the branch. Silent for any other cause; never
+        // throws. On the host path the salvage git ran as the agent uid
+        // after the reap above, so anything it left behind (a filter driver
+        // the agent configured) is reaped again before the closes below.
+        let salvageRan = false;
+        const salvage = await salvageWorkBranch({
+          cause: end.cause,
+          workBranch: input.workBranch,
+          lockLost: boxLock?.lost === true,
+          enabled: config.timeoutSalvage !== "off",
+          containerRun: containerDaemon !== null,
+          broker,
+          repoFullName: input.repoFullName,
+          workdir,
+          agentUser: config.agentUser,
+          botLogin: config.botLogin,
+          egressProxyUrl: egressProxy?.url ?? null,
+          log: step,
+          run: (args) => {
+            salvageRan = true;
+            return runAsAgent(args);
+          },
+        });
+        if (salvageRan && !containerDaemon) {
+          await reapAgentUidEscapees({
+            agentUser: config.agentUser,
+            phase: "teardown",
+            threadId: input.threadId,
+            runNamespaceRoot: config.runNamespaceRoot,
+            log: admissionLog,
+          });
+        }
+        await postAbnormalEnd(abnormal, end, { wwwOpts, log: step, salvage });
       }
       // #66: close the egress proxy after the daemon is dead (no more child
       // traffic), then flush the last audit batch. Both are best-effort — an

@@ -164,6 +164,27 @@ describe("loadWorkerConfig", () => {
     });
   });
 
+  describe("timeoutSalvage (#437 Part B) — the salvage's one-env-var rollback", () => {
+    it("defaults to on, and only the exact string 'off' turns it off", () => {
+      // protects=the Rollback note: WORKER_TIMEOUT_SALVAGE=off disables the
+      // salvage, anything else keeps it on; fails_when=the default is off, a
+      // padded "off" is ignored, or a typo ("OFF", "false", "0") disables it;
+      // no_claim=the workflow honouring the value (workflow-cleanup tests).
+      expect(loadWorkerConfig({}).timeoutSalvage).toBe("on");
+      for (const value of ["off", " off "]) {
+        expect(
+          loadWorkerConfig({ WORKER_TIMEOUT_SALVAGE: value }).timeoutSalvage,
+        ).toBe("off");
+      }
+      for (const value of ["on", "OFF", "false", "0", "", undefined]) {
+        expect(
+          loadWorkerConfig({ WORKER_TIMEOUT_SALVAGE: value }).timeoutSalvage,
+          `WORKER_TIMEOUT_SALVAGE=${JSON.stringify(value)} must keep it on`,
+        ).toBe("on");
+      }
+    });
+  });
+
   it("honours WORKER_BOT_LOGIN override", () => {
     expect(
       loadWorkerConfig({ WORKER_BOT_LOGIN: "somnio-bot[bot]" }).botLogin,

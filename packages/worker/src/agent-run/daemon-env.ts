@@ -261,6 +261,25 @@ export function gitProxyAuthConfig(
     : [];
 }
 
+/**
+ * #81: the git config that points a run's git at its loopback git broker —
+ * github.com URLs rewritten onto the broker (`url.insteadOf`, which also
+ * catches an ad-hoc `git push https://github.com/…`) and authenticated with
+ * the per-run bearer git-broker.ts verifies. The ONE brokered git auth path:
+ * the agent's env (buildDaemonEnv) and the #437 timeout salvage both use it.
+ */
+export function brokeredGitAuthConfig(
+  broker: Pick<BrokerHandoff, "gitUrl" | "bearer">,
+): Array<[string, string]> {
+  return [
+    [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
+    [
+      `http.${broker.gitUrl}/.extraheader`,
+      `Authorization: Bearer ${broker.bearer}`,
+    ],
+  ];
+}
+
 /** GIT_CONFIG_* entries appended after whatever GIT_CONFIG_COUNT `env` carries — a new object; `env` is not mutated (nothing to add ⇒ `env` itself). */
 export function appendGitConfig(
   env: NodeJS.ProcessEnv,
@@ -565,13 +584,7 @@ export function buildDaemonEnv({
   env.GIT_COMMITTER_NAME = botLogin;
   env.GIT_COMMITTER_EMAIL = botEmail;
   const gitAuthConfig: Array<[string, string]> = broker
-    ? [
-        [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
-        [
-          `http.${broker.gitUrl}/.extraheader`,
-          `Authorization: Bearer ${broker.bearer}`,
-        ],
-      ]
+    ? brokeredGitAuthConfig(broker)
     : [
         [
           "http.https://github.com/.extraheader",

@@ -205,6 +205,13 @@ export interface WorkerConfig {
    */
   credentialBroker: "on" | "legacy-direct";
   /**
+   * #437 Part B: a task run cancelled at its execution limit commits and
+   * pushes its unfinished work to its work branch before the checkout is
+   * deleted. "on" (default); only the exact string "off" disables it — the
+   * one-env-var rollback for the salvage alone.
+   */
+  timeoutSalvage: "on" | "off";
+  /**
    * #380: the plane's seal key ring (`{"keys":[…]}`, see
    * payload-seal-keys.ts). Every run unseals its `sealedSecrets` with it.
    * Default /etc/automata/payload-seal.key. MANDATORY (strict, rollout step
@@ -786,6 +793,7 @@ export function loadWorkerConfig(
       env.WORKER_CREDENTIAL_BROKER?.trim() === "legacy-direct"
         ? "legacy-direct"
         : "on",
+    timeoutSalvage: env.WORKER_TIMEOUT_SALVAGE?.trim() === "off" ? "off" : "on",
     payloadSealKeyFile:
       env.WORKER_PAYLOAD_SEAL_KEY_FILE?.trim() || DEFAULT_PAYLOAD_SEAL_KEY_FILE,
 
