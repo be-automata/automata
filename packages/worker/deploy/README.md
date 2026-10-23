@@ -385,8 +385,8 @@ removes every run container a dead worker of this box left behind (label `automa
 | `WORKER_RUN_MEMORY_MAX`          | none (required when on)            | The slot tuple's ceiling, used as `--memory` and `--memory-swap`.                                  |
 | `WORKER_RUN_TASKS_MAX`           | 4096                               | `--pids-limit`.                                                                                    |
 | `WORKER_CONTAINER_CPUS`          | 2                                  | `--cpus`.                                                                                          |
-| `WORKER_CONTAINER_TMP_SIZE`      | 1G                                 | The `/tmp` tmpfs cap (counts against `--memory`).                                                  |
-| `WORKER_CONTAINER_SHM_SIZE`      | 512M                               | `--shm-size` (counts against `--memory`).                                                          |
+| `WORKER_CONTAINER_TMP_SIZE`      | 512M                               | The `/tmp` tmpfs cap (counts against `--memory`).                                                  |
+| `WORKER_CONTAINER_SHM_SIZE`      | 256M                               | `--shm-size` (counts against `--memory`).                                                          |
 | `WORKER_CONTAINER_RUN_GID`       | unset (no hand-over)               | The rootless daemon user's primary gid: the run dir is handed to it (setgid, group rw).            |
 
 The slot tuple (`WORKER_BOX_SLOTS=3`, `WORKER_GLOBAL_MAX_RUNS=3`, `WORKER_PER_ORG_MAX_RUNS=2`)

@@ -373,10 +373,11 @@ describe("settleDaemonTeardown (the workflow's teardown step)", () => {
 });
 
 describe("handOverRunDir (ADR-013 run-dir hand-over)", () => {
-  // card: protects=each bind-mounted dir is chgrp'd to the hand-over gid, made group-rw and setgid on dirs; fails_when=a step is skipped or applied to another path; no_claim=that the rootless mapping grants access (box P0 step)
-  it("chgrp -R, chmod -R g+rwX, setgid dirs", async () => {
+  // card: protects=the run dir gets group search only, and each bind-mounted dir is chgrp'd to the hand-over gid, made group-rw and setgid on dirs; fails_when=a step is skipped, the run dir is opened recursively or for read, or a step hits another path; no_claim=that the rootless mapping grants access (box P0 step)
+  it("run dir g=x only; bind dirs chgrp -R, chmod -R g+rwX, setgid dirs", async () => {
     const calls: string[] = [];
     await handOverRunDir({
+      runDir: "/runs/r",
       dirs: ["/runs/r/repo"],
       gid: 1001,
       exec: async (f, a) => {
@@ -384,6 +385,8 @@ describe("handOverRunDir (ADR-013 run-dir hand-over)", () => {
       },
     });
     expect(calls).toEqual([
+      "chgrp 1001 /runs/r",
+      "chmod g=x /runs/r",
       "chgrp -R 1001 /runs/r/repo",
       "chmod -R g+rwX /runs/r/repo",
       "find /runs/r/repo -type d -exec chmod g+s {} +",

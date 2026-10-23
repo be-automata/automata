@@ -228,6 +228,7 @@ export class ContainerDaemonProcess implements RunDaemon {
     await this.prepareSocketDir();
     if (this.cr.runGid !== null) {
       await handOverRunDir({
+        runDir: this.run.runDir,
         dirs: [this.run.repo, this.socketDir],
         gid: this.cr.runGid,
       });
@@ -577,13 +578,21 @@ export class ContainerDaemonProcess implements RunDaemon {
  * group read/write, setgid dirs so files the container creates keep the
  * group. The container runs with `--group-add 0`; the worker is a member of
  * the group. P0 measures this hand-over on the box.
+ *
+ * `runDir` itself is provisioned 0700 (#205), so the daemon could not reach
+ * the bind-mount sources beneath it (`stat …/repo: permission denied`). It
+ * gets the same group with search ONLY (`g=x`, not recursive): no read, so
+ * the group cannot list the run dir, and its HOME stays 0700 to the worker.
  */
 export async function handOverRunDir(opts: {
+  runDir: string;
   dirs: string[];
   gid: number;
   exec?: (file: string, args: string[]) => Promise<unknown>;
 }): Promise<void> {
   const exec = opts.exec ?? ((file, args) => execFileAsync(file, args));
+  await exec("chgrp", [String(opts.gid), opts.runDir]);
+  await exec("chmod", ["g=x", opts.runDir]);
   for (const dir of opts.dirs) {
     await exec("chgrp", ["-R", String(opts.gid), dir]);
     await exec("chmod", ["-R", "g+rwX", dir]);
