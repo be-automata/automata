@@ -207,10 +207,10 @@ export async function runAutomation({
         // message — so an accepted edit is live on the next run and in-flight
         // threads are untouched by construction.
         const { skillName, version, model } = automation.action.config;
-        // Review-mode sections (phase 6) are opt-in and github-ops only. A PR
-        // review (the same predicate dispatch's isReviewThread uses) renders
-        // the mode the Phase 4 resolver picks; anything else renders classic;
-        // every other skill gets its body verbatim. The render happens per
+        // Review-mode sections (phase 6): a PR review (the same predicate
+        // dispatch's isReviewThread uses) renders the mode the Phase 4
+        // resolver picks, whatever the skill; anything else renders classic.
+        // A body without sections is unchanged in every mode. The render happens per
         // thread creation (per push), so flipping a repo back to classic
         // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
         // Independent of the skill body, so resolved alongside it.
@@ -232,7 +232,6 @@ export async function runAutomation({
           }),
           resolveRenderedReviewPrompt({
             automation,
-            skillName,
             prNumber: options?.prNumber,
             trustContext: options?.trustContext ?? null,
           }),
@@ -377,24 +376,19 @@ export async function runAutomation({
 }
 
 /**
- * The review-prompt mode a skill_message thread renders: undefined for any
- * skill but github-ops (its body stays verbatim), the resolved mode for an
- * org's PR review, classic otherwise.
+ * The review-prompt mode a skill_message thread renders: the resolved mode for
+ * an org's PR review, classic otherwise. Any skill: only a body with
+ * review-mode sections is changed by it.
  */
 async function resolveRenderedReviewPrompt({
   automation,
-  skillName,
   prNumber,
   trustContext,
 }: {
   automation: Automation;
-  skillName: string;
   prNumber: number | undefined;
   trustContext: ThreadTrustContext | null;
-}): Promise<ReviewPromptMode | undefined> {
-  if (skillName !== "github-ops") {
-    return undefined;
-  }
+}): Promise<ReviewPromptMode> {
   if (
     automation.triggerType !== "pull_request" ||
     !automation.organizationId ||

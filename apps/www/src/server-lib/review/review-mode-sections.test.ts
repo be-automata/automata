@@ -180,9 +180,14 @@ describe("assertReviewSkillContract with review-mode sections", () => {
     expect(() => validateSkillBody("github-ops", body, "t")).not.toThrow();
   });
 
-  it("leaves non-github-ops validation unchanged", () => {
-    const body = "<!-- automata:if fancy -->\nX\n<!-- automata:endif -->";
-    expect(() => validateSkillBody("other-skill", body, "t")).not.toThrow();
+  it("refuses a malformed section in any skill, since every body is rendered (#492)", () => {
+    const bad = "<!-- automata:if fancy -->\nX\n<!-- automata:endif -->";
+    expect(() => validateSkillBody("other-skill", bad, "t")).toThrow(
+      /malformed review-mode section: line 1: unknown condition "fancy"/,
+    );
+    const good =
+      "<!-- automata:if orchestrated -->\nX\n<!-- automata:endif -->";
+    expect(() => validateSkillBody("other-skill", good, "t")).not.toThrow();
     expect(() => validateSkillBody("other-skill", "  ", "t")).toThrow(/empty/);
   });
 });
@@ -193,14 +198,13 @@ describe("renderSkillPlaceholders and review-mode sections", () => {
     "<!-- automata:if classic -->\nClassic {{baseBranch}}\n<!-- automata:endif -->\nEnd";
   const vars = { repoFullName: "acme/widgets", baseBranch: "develop" };
 
-  it("does NOT interpret sections when the caller does not opt in", () => {
+  it("renders the classic sections when the caller passes no prompt (#492)", () => {
     expect(renderSkillPlaceholders(body, vars)).toBe(
-      "Repo acme/widgets\n<!-- automata:if orchestrated -->\nLead on develop\n<!-- automata:endif -->\n" +
-        "<!-- automata:if classic -->\nClassic develop\n<!-- automata:endif -->\nEnd",
+      "Repo acme/widgets\nClassic develop\nEnd",
     );
   });
 
-  it("renders sections first, then placeholders, when opted in", () => {
+  it("renders sections first, then placeholders", () => {
     expect(
       renderSkillPlaceholders(body, { ...vars, reviewPrompt: ORCH_NO_TESTS }),
     ).toBe("Repo acme/widgets\nLead on develop\nEnd");

@@ -42,7 +42,7 @@ export function stripFrontmatter(md: string): string {
 }
 
 /**
- * Review-mode sections (phase 6): ONE github-ops body carries both the classic
+ * Review-mode sections (phase 6): ONE review-skill body carries both the classic
  * prompt and the orchestrated (lead reviewer + sub-agents) prompt, and the
  * render step keeps the text that matches the run's resolved review mode.
  *
@@ -716,6 +716,15 @@ export function validateSkillBody(
   body: string,
   sourceLabel: string,
 ): void {
+  // Every body's sections are rendered (#492), so a broken marker grammar is
+  // refused here, for every skill, instead of failing the run at render time.
+  const sectionError = findReviewModeSectionError(body);
+  if (sectionError) {
+    throw new Error(
+      `Skill '${skillName}' body from ${sourceLabel} has a malformed ` +
+        `review-mode section: ${sectionError}`,
+    );
+  }
   const validator = SKILL_VALIDATORS[skillName];
   if (validator) {
     validator(body, sourceLabel);
