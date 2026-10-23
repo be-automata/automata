@@ -21,6 +21,20 @@ export function resolveRunLane(
 }
 
 /**
+ * #437: does this run's abnormal end get a typed terminal from the worker?
+ * Only a task run, and not a self-heal run (which resolves to the task lane but
+ * whose outcome the fix check owns). Review and pr runs keep their own posts.
+ */
+export function ownsAbnormalTerminal(
+  input: Pick<
+    AgentRunInput,
+    "prKey" | "supersedePolicy" | "prNumber" | "selfHeal"
+  >,
+): boolean {
+  return resolveRunLane(input) === "task" && input.selfHeal === undefined;
+}
+
+/**
  * The run's first journal line: lane, PR number and repo, so a run can be matched
  * to its GitHub effect without correlating timestamps. Emitted BEFORE the clone,
  * so a run that dies cloning still says what it was. Ids only — never a token,

@@ -3,6 +3,7 @@ import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import {
   classifyAgentExit,
   classifyNextMessageError,
+  MemoryStarvationError,
   nonRetryablePreflight,
   ResourceLimitError,
   resourceLimitFailure,
@@ -99,6 +100,21 @@ describe("classifyAgentExit (#204)", () => {
         base.fallback,
       );
     }
+  });
+
+  it("resourceLimitFailure is a typed MemoryStarvationError that is still non-retryable (#437)", () => {
+    // protects=the abnormal-end classifier recognising an OOM by class, and
+    // the engine still routing it to onFailure; fails_when=the type is lost
+    // or it stops being a NonRetryableError; no_claim=the SDK's own check
+    // (it uses instanceof, worker-internal.js).
+    const e = resourceLimitFailure(5000 * 1024 ** 2, 13);
+    expect(e).toBeInstanceOf(MemoryStarvationError);
+    expect(e).toBeInstanceOf(NonRetryableError);
+    expect(e.memoryMaxBytes).toBe(5000 * 1024 ** 2);
+    expect(e.oomKills).toBe(13);
+    expect(e.message).toBe(
+      new ResourceLimitError(5000 * 1024 ** 2, 13).message,
+    );
   });
 
   it("names the ceiling and the kill count, so the report is actionable", () => {

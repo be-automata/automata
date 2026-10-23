@@ -75,14 +75,27 @@ export function formatMemoryMax(bytes: number): string {
   return `${bytes} bytes`;
 }
 
+/**
+ * The terminal error a memory-starved run fails with (#437). Typed so the
+ * abnormal-end classifier recognises an OOM by class, never by message text;
+ * still a NonRetryableError, so the engine routes it straight to onFailure.
+ */
+export class MemoryStarvationError extends NonRetryableError {
+  constructor(
+    readonly memoryMaxBytes: number,
+    readonly oomKills: number,
+  ) {
+    super(new ResourceLimitError(memoryMaxBytes, oomKills).message);
+    this.name = "MemoryStarvationError";
+  }
+}
+
 /** The terminal error a memory-starved run fails with. */
 export function resourceLimitFailure(
   memoryMaxBytes: number,
   oomKills: number,
-): NonRetryableError {
-  return new NonRetryableError(
-    new ResourceLimitError(memoryMaxBytes, oomKills).message,
-  );
+): MemoryStarvationError {
+  return new MemoryStarvationError(memoryMaxBytes, oomKills);
 }
 
 /**

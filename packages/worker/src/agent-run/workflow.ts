@@ -41,7 +41,11 @@ import {
   type TokenRevoker,
 } from "./revoke-installation-tokens";
 import { resolveRunSecrets, type AgentRunWireInput } from "./run-secrets";
-import { formatRunStartLine, resolveRunLane } from "./run-lane";
+import {
+  formatRunStartLine,
+  ownsAbnormalTerminal,
+  resolveRunLane,
+} from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
 import {
   batterySeedForRun,
@@ -95,6 +99,12 @@ import {
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
 import { guardRunTerminal } from "./run-terminal-ledger";
+import {
+  claimAbnormalEnd,
+  newAbnormalEndState,
+  postAbnormalEnd,
+  type AbnormalEndState,
+} from "./abnormal-end";
 import {
   ensureRunNamespace,
   ensureSlotNamespace,
@@ -309,6 +319,14 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 }
 
 /**
+ * #437: how long onFailure waits for a task run's own teardown (and its typed
+ * terminal) before posting the generic failure: AC1's 90 s plus margin.
+ */
+export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 120_000;
+/** onFailure's engine timeout: the wait above plus the post. */
+export const ON_FAILURE_EXECUTION_TIMEOUT = "3m";
+
+/**
  * Register one agent-run workflow from its pure definition with the real run
  * fn + onFailure handler.
  */
@@ -320,7 +338,12 @@ export function makeAgentRunWorkflow(
   const def = buildAgentRunDefinition(name, perPrStrategy, caps);
   const wf = hatchet.workflow<AgentRunWireInput>(def.workflow);
   wf.task({ ...def.task, fn: runAgent });
-  wf.onFailure({ fn: onAgentRunFailure });
+  // #437: above the default 60 s — a task run's onFailure may wait up to
+  // ON_FAILURE_TYPED_TERMINAL_WAIT_MS for the run's own teardown first.
+  wf.onFailure({
+    fn: onAgentRunFailure,
+    executionTimeout: ON_FAILURE_EXECUTION_TIMEOUT,
+  });
   return wf;
 }
 
@@ -475,19 +498,73 @@ async function runAgent(
   // (a worker crash mid-run, #152) has no entry and re-executes as before.
   // A refused run whose first attempt RETURNED completes as a no-op, so the
   // engine records COMPLETED and onFailure never re-posts a terminal to www.
-  return guardRunTerminal<AgentRunOutput>(
-    {
-      root: loadWorkerConfig().runTerminalRoot,
-      runId: ctx.workflowRunId?.() || "",
-      log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
-      onAlreadyReturned: () => ({
-        threadId: wire.threadId,
-        threadChatId: wire.threadChatId,
-        outcome: "already-terminal",
-      }),
-    },
-    () => runAgentAttempt(wire, ctx),
+  return trackLiveRun(ctx.workflowRunId?.() || "", () =>
+    guardRunTerminal<AgentRunOutput>(
+      {
+        root: loadWorkerConfig().runTerminalRoot,
+        runId: ctx.workflowRunId?.() || "",
+        log: (msg) => ctx.log(`[agent-run ${wire.threadId}] ${msg}`),
+        onAlreadyReturned: () => ({
+          threadId: wire.threadId,
+          threadChatId: wire.threadChatId,
+          outcome: "already-terminal",
+        }),
+      },
+      () => runAgentAttempt(wire, ctx),
+    ),
   );
+}
+
+/**
+ * #437: the run fns executing in THIS process, by workflow run id, each with
+ * the promise that settles when it ends. onFailure waits on it so a run's own
+ * teardown (and its typed terminal) finishes first; a run that never started
+ * here (a scheduleTimeout, another worker) is absent and is never waited for.
+ *
+ * Assumes ONE worker process per box, which is how every execution box runs
+ * today: if a run's onFailure lands on a different process (a second worker,
+ * or a restart between the cancel and onFailure) it does not wait, and the
+ * generic failure can win the first-terminal race as it did before #437.
+ */
+const LIVE_RUNS = new Map<string, Promise<void>>();
+
+async function trackLiveRun<T>(
+  runId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!runId) return run();
+  const pending = run();
+  const ended = pending.then(
+    () => undefined,
+    () => undefined,
+  );
+  LIVE_RUNS.set(runId, ended);
+  try {
+    return await pending;
+  } finally {
+    if (LIVE_RUNS.get(runId) === ended) LIVE_RUNS.delete(runId);
+  }
+}
+
+/** Test seam: drive trackLiveRun with a held run fn. */
+export const _trackLiveRunForTests = trackLiveRun;
+
+/** True iff the run ended (or was never live here) within `timeoutMs`. */
+async function waitForLiveRunEnd(
+  runId: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const ended = LIVE_RUNS.get(runId);
+  if (!ended) return true;
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    return await Promise.race([ended.then(() => true as const), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function runAgentAttempt(
@@ -552,6 +629,22 @@ async function runAgentResolved(
   // (Asked AGAIN after a #371 deferral wait, inside runAgentInner.)
   const skipped = await staleSkip(input, ctx, wwwOpts);
   if (skipped) return skipped;
+  // #437: a task run's abnormal end is posted once, typed — from the daemon
+  // teardown when the run got that far, else from the catch below.
+  const abnormal = newAbnormalEndState({
+    owns: ownsAbnormalTerminal(input),
+    runStartedAt,
+    runExecutionTimeoutMs: RUN_EXECUTION_TIMEOUT_MS,
+  });
+  // The cancel's own time, not the claim's: a slow teardown must not stretch
+  // the timeout tolerance.
+  ctx.abortController?.signal.addEventListener(
+    "abort",
+    () => {
+      abnormal.cancelledAt ??= Date.now();
+    },
+    { once: true },
+  );
   try {
     const output = await runAgentInner(
       input,
@@ -562,6 +655,7 @@ async function runAgentResolved(
       wwwOpts,
       runStartedAt,
       runKey,
+      abnormal,
     );
     if (output.outcome === "stopped") {
       // A user Stop put the thread in `stopping`. The daemon never observes
@@ -587,6 +681,22 @@ async function runAgentResolved(
       }
     }
     return output;
+  } catch (err) {
+    // A throw that never reached the daemon teardown (admission, clone,
+    // credential, brokers): nothing to salvage, so the post happens here,
+    // after abandon() already cleaned up. A no-op when the teardown settled.
+    const end = claimAbnormalEnd(abnormal, {
+      thrown: { error: err },
+      cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
+      starvation: null,
+    });
+    if (end) {
+      await postAbnormalEnd(abnormal, end, {
+        wwwOpts,
+        log: (line) => ctx.log(`[agent-run ${input.threadId}] ${line}`),
+      });
+    }
+    throw err;
   } finally {
     if (ctx.cancelled || ctx.abortController?.signal.aborted) {
       await postSuperseded(input, ctx, wwwOpts, runStartedAt);
@@ -1087,6 +1197,8 @@ async function runAgentInner(
   runStartedAt: number,
   /** #371: the workflow run's stable identity (reservation key); see runAgent. */
   runKey: string,
+  /** #437: shared with runAgentResolved so one abnormal terminal is posted. */
+  abnormal: AbnormalEndState,
 ): Promise<AgentRunOutput> {
   // Cancellation signal (Hatchet cancel: scheduleTimeout/executionTimeout). Used
   // to abort in-flight pulls/polls so the finally-block daemon teardown runs
@@ -1676,6 +1788,11 @@ async function runAgentInner(
   daemonForPoll = daemon;
   // Exactly one fix-check report per fix run: the check's, or "aborted".
   let fixReported = false;
+  // #437: what the daemon phase threw, and whether it RETURNED a normal end
+  // (completed / nothing-to-run / stopped): a cancel that lands after that is
+  // not what ended the run.
+  let runThrew: { error: unknown } | null = null;
+  let endedNormally = false;
   try {
     // Fail-closed identity precondition (ADR-002): confirm gh authenticates as the
     // bot (installation token + isolated config) in the workdir BEFORE spawning —
@@ -1702,6 +1819,7 @@ async function runAgentInner(
 
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
+    abnormal.daemonStarted = true;
     step(
       containerDaemon
         ? containerDaemon.spawnedLine()
@@ -1733,6 +1851,7 @@ async function runAgentInner(
         fixReported = true;
         step("self-heal fix-check: not reported (nothing to run)");
       }
+      endedNormally = true;
       return {
         threadId: input.threadId,
         threadChatId: input.threadChatId,
@@ -1818,12 +1937,16 @@ async function runAgentInner(
         signal,
       });
     }
+    endedNormally = result.outcome !== "cancelled";
     return {
       threadId: input.threadId,
       threadChatId: input.threadChatId,
       outcome: result.outcome,
       finalStatus: result.finalStatus,
     };
+  } catch (err) {
+    runThrew = { error: err };
+    throw err;
   } finally {
     // #380: the teardown sequence below is wrapped so a throw in any step can
     // never skip the token revoke, the credential wipe or the lock release.
@@ -1870,6 +1993,29 @@ async function runAgentInner(
           log: admissionLog,
         });
       }
+      // #437 Part A2: claim and post the typed terminal of an abnormal end
+      // once the agent is dead, BEFORE the brokers close and the checkout goes.
+      // A normal end, or a run this plane does not own, claims null. The OOM
+      // signal is read here, after the teardown: a container's `.State` was
+      // refreshed before its removal, and the host daemon caches the count it
+      // read before removing the cgroup.
+      const cancelled =
+        !endedNormally && (ctx.cancelled || signal?.aborted === true);
+      // A normal end is settled here too, so a later teardown throw cannot be
+      // claimed by the outer catch as `daemon-failed`.
+      const abnormalExit = runThrew !== null || cancelled;
+      const end =
+        abnormal.owns && abnormalExit
+          ? claimAbnormalEnd(abnormal, {
+              ...(runThrew ? { thrown: runThrew } : {}),
+              cancelled,
+              starvation: readMemoryStarvation(daemon),
+            })
+          : null;
+      if (!abnormalExit) abnormal.claimed = true;
+      if (end) {
+        await postAbnormalEnd(abnormal, end, { wwwOpts, log: step });
+      }
       // #66: close the egress proxy after the daemon is dead (no more child
       // traffic), then flush the last audit batch. Both are best-effort — an
       // audit/proxy teardown hiccup must never mask the run's real outcome.
@@ -1910,6 +2056,19 @@ async function runAgentInner(
         await boxLock?.release();
       }
     }
+  }
+}
+
+/**
+ * #437: the daemon's OOM signal (the error it would fail the run with), or
+ * null. Never throws: a failed read is "no signal", and a thrown
+ * MemoryStarvationError (when the poll loop raised it) still classifies.
+ */
+function readMemoryStarvation(daemon: RunDaemon): unknown {
+  try {
+    return daemon.memoryStarvation();
+  } catch {
+    return null;
   }
 }
 
@@ -1955,6 +2114,23 @@ async function onAgentRunFailure(
       `[agent-run ${wire.threadId}] onFailure: run secrets unavailable (${err instanceof Error ? err.message : String(err)}) — run-failed not posted; the control plane's sweep rule (iii) reconciles`,
     );
     return;
+  }
+  // #437: a task run posts its own typed terminal from its teardown. On an
+  // executionTimeout the SDK rejects the task's future at once, so this
+  // handler is scheduled while that teardown still runs, and www keeps the
+  // FIRST terminal — so wait (bounded) for a run still live in this process
+  // to end before the generic post, which is then absorbed as a no-op.
+  const runId = ctx.workflowRunId?.() || "";
+  if (runId && ownsAbnormalTerminal(input)) {
+    const ended = await waitForLiveRunEnd(
+      runId,
+      ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    );
+    if (!ended) {
+      console.error(
+        `[agent-run ${input.threadId}] onFailure: the run's teardown did not finish within ${ON_FAILURE_TYPED_TERMINAL_WAIT_MS / 1000}s — posting the generic failure`,
+      );
+    }
   }
   try {
     await postRunFailed(

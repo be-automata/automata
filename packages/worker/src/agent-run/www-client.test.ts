@@ -835,6 +835,87 @@ describe("postRunTerminal — superseded (#125 C1)", () => {
   });
 });
 
+describe("postRunTerminal — detail.info and a caller signal (#437)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    runExternalId: "run-1",
+  };
+
+  it("sends info under detail (beside policy when both are set) and passes the caller's signal to fetch", async () => {
+    // protects=the worker-authored line reaching www's detail.info, on the
+    // teardown's fresh signal; fails_when=info is dropped, policy is lost, or
+    // the fetch runs on no/the wrong signal; no_claim=www's 300-char cap.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    await postRunTerminal(
+      opts,
+      {
+        runExternalId: "run-1",
+        cause: "out-of-memory",
+        info: "Memory limit 5000M reached (13 process(es) killed).",
+      },
+      signal,
+    );
+    await postRunTerminal(opts, {
+      runExternalId: "run-1",
+      cause: "superseded",
+      policy: "newest-wins",
+      info: "x",
+    });
+    const [, first] = fetchMock.mock.calls[0]!;
+    expect(first.signal).toBe(signal);
+    expect(JSON.parse(first.body).detail).toEqual({
+      info: "Memory limit 5000M reached (13 process(es) killed).",
+    });
+    const [, second] = fetchMock.mock.calls[1]!;
+    expect(second.signal).toBeUndefined();
+    expect(JSON.parse(second.body).detail).toEqual({
+      policy: "newest-wins",
+      info: "x",
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("postRunTerminal — a 4xx is final (#437)", () => {
+  it("401/400 → 'refused'; 5xx, 408 and 429 stay 'error' (retryable)", async () => {
+    // protects=the retry loop telling a dead token from a www blip;
+    // fails_when=a 401 maps to 'error' (retried) or a 503/408/429 to
+    // 'refused' (a rate-limited post dropped after one attempt);
+    // no_claim=none beyond protects.
+    const opts = {
+      baseUrl: "https://www.example.com/",
+      daemonToken: "tok",
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+    };
+    for (const [status, want] of [
+      [401, "refused"],
+      [400, "refused"],
+      [503, "error"],
+      [408, "error"],
+      [429, "error"],
+    ] as const) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response("x", { status })),
+      );
+      await expect(
+        postRunTerminal(opts, { runExternalId: "r", cause: "timeout" }),
+      ).resolves.toBe(want);
+    }
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("postRunTerminal / checkRunStaleness (#125 C4)", () => {
   const opts = {
     baseUrl: "https://www.example.com/",

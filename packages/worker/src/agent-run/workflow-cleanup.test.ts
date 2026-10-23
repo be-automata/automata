@@ -278,6 +278,8 @@ vi.mock("./revoke-installation-tokens", () => ({
 }));
 
 let fakeRunCgroupDir: string | null = null;
+// #437: what the daemon's OOM signal reports (null = no kill).
+let fakeMemoryStarvation: unknown = null;
 const readMemoryAnon = vi.fn(
   (_opts: { cgroupDir: string }): number | null => null,
 );
@@ -305,6 +307,7 @@ vi.mock("./daemon-process", () => ({
     });
     // #371: a test sets fakeRunCgroupDir to stand in for the ceiling's cgroup.
     runCgroupDir = () => fakeRunCgroupDir;
+    memoryStarvation = () => fakeMemoryStarvation;
   },
 }));
 
@@ -3028,5 +3031,264 @@ Committed_AS:   12000000 kB
     const ctx = { cancelled: false, log: vi.fn() };
     await expect(runFn(INPUT, ctx)).rejects.toThrow(/clone failed: ECONNRESET/);
     expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * #437 Part A/A2: a TASK run's abnormal end posts ONE typed terminal from the
+ * teardown (or, before the daemon, from the outer catch); review runs are
+ * untouched (the #125 C1 describe above pins them).
+ */
+describe("#437: a task run's abnormal end posts one typed terminal", () => {
+  const LIMIT_MS = 30 * 60_000;
+
+  /** The file's ctx() with a run id, plus the engine cancel as one step. */
+  function taskCtx(runId = "run-ext-task") {
+    const c = { ...ctx(), workflowRunId: () => runId };
+    return {
+      ...c,
+      cancel() {
+        c.abortController.abort();
+        this.cancelled = true;
+      },
+    };
+  }
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal.mockReset();
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    releaseMock.mockClear();
+    fakeMemoryStarvation = null;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a cancel at the 30-minute limit posts `timeout` with its info, before the checkout goes and the slot is released (AC1)", async () => {
+    // protects=AC1: a timed-out task run ends typed `timeout`, not
+    // agent-generic-error; fails_when=nothing is posted, the cause is wrong,
+    // or the post lands after cleanup; no_claim=www's mapping to
+    // request-timeout (www route tests) and the engine's own timeout (the
+    // clock is advanced by stubbing Date.now).
+    const ctx = taskCtx();
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const order: string[] = [];
+    pollUntilTerminal.mockImplementation(async () => {
+      offset = LIMIT_MS;
+      ctx.cancel();
+      return { outcome: "cancelled" };
+    });
+    postRunTerminal.mockImplementation(async () => {
+      order.push("post");
+      return "applied";
+    });
+    cleanupWorkdir.mockImplementation(async () => {
+      order.push("cleanup");
+    });
+    releaseMock.mockImplementationOnce(async () => {
+      order.push("release");
+    });
+
+    const out = await runFn(INPUT, ctx);
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    const [opts, args, signal] = postRunTerminal.mock.calls[0]!;
+    expect(opts).toMatchObject({ runExternalId: "run-ext-task" });
+    expect(args).toEqual({
+      runExternalId: "run-ext-task",
+      cause: "timeout",
+      info: "The run reached its 30-minute limit.",
+    });
+    expect((signal as AbortSignal).aborted).toBe(false);
+    expect(order).toEqual(["post", "cleanup", "release"]);
+    expect(
+      ctx.log.mock.calls.some((c) =>
+        String(c[0]).includes("abnormal end → timeout terminal: applied"),
+      ),
+    ).toBe(true);
+  });
+
+  it("an OOM kill posts `out-of-memory` with readable info and rethrows the typed error (AC7)", async () => {
+    // protects=AC7: the user reads "Memory limit … reached", never JSON;
+    // fails_when=the cause is daemon-failed, the info is raw, or the error is
+    // swallowed (onFailure must still see it); no_claim=the kernel counter
+    // itself (daemon-process tests).
+    const { resourceLimitFailure, MemoryStarvationError } = await import(
+      "./retry-classification"
+    );
+    const ctx = taskCtx();
+    pollUntilTerminal.mockRejectedValue(
+      resourceLimitFailure(5000 * 1024 ** 2, 13),
+    );
+    const err = await runFn(INPUT, ctx).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MemoryStarvationError);
+    expect(err).toBeInstanceOf(NonRetryableError);
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-task",
+      cause: "out-of-memory",
+      info: "Memory limit 5000M reached (13 process(es) killed).",
+    });
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+  });
+
+  it("an OOM signal wins over a cancel in the same tick, and still carries its info (AC7)", async () => {
+    // protects=AC7 "even when a cancel arrives in the same tick", text
+    // included; fails_when=the run posts timeout/user-cancelled or drops the
+    // "Memory limit" line; no_claim=none beyond protects.
+    const { resourceLimitFailure } = await import("./retry-classification");
+    const ctx = taskCtx();
+    pollUntilTerminal.mockImplementation(async () => {
+      fakeMemoryStarvation = resourceLimitFailure(5000 * 1024 ** 2, 4);
+      ctx.cancel();
+      return { outcome: "cancelled" };
+    });
+    await runFn(INPUT, ctx);
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-task",
+      cause: "out-of-memory",
+      info: "Memory limit 5000M reached (4 process(es) killed).",
+    });
+  });
+
+  it("a cancel that lands after the run already ended normally posts nothing", async () => {
+    // protects=a completed / stopped / nothing-to-run run is never relabelled
+    // timeout or user-cancelled by a late engine cancel; fails_when=the
+    // teardown posts an abnormal terminal; no_claim=the user-Stop post itself
+    // (pinned by the #125 C1 describe).
+    for (const end of ["completed", "stopped"] as const) {
+      const ctx = taskCtx(`run-ext-late-${end}`); // #386: one run id per run
+      postRunTerminal.mockClear();
+      pollUntilTerminal.mockImplementationOnce(async () => {
+        ctx.cancel();
+        return {
+          outcome: end,
+          finalStatus: end === "stopped" ? "stopping" : "complete",
+        };
+      });
+      await runFn(INPUT, ctx);
+      const causes = postRunTerminal.mock.calls.map(
+        (c) => (c[1] as { cause: string }).cause,
+      );
+      expect(causes).toEqual(end === "stopped" ? ["user-cancelled"] : []);
+    }
+  });
+
+  it("an engine cancel before the limit posts nothing (a stale attempt must not close the thread)", async () => {
+    // protects=attempt n+1 of the same run id keeping its thread when a stale
+    // attempt is cancelled; fails_when=the cancelled attempt posts any
+    // terminal; no_claim=the C4 sweep that reconciles it.
+    const ctx = taskCtx("run-ext-early-cancel");
+    pollUntilTerminal.mockImplementation(async () => {
+      ctx.cancel();
+      return { outcome: "cancelled" };
+    });
+    const out = await runFn(INPUT, ctx);
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
+  it("a teardown throw after a normal end is not relabelled daemon-failed", async () => {
+    // protects=a completed run keeps its clean terminal; fails_when=the outer
+    // catch claims the cleanup throw and posts daemon-failed; no_claim=the
+    // cleanup throw itself still propagating (it does).
+    const ctx = taskCtx("run-ext-cleanup-throw");
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    cleanupWorkdir.mockRejectedValueOnce(new Error("rm failed"));
+    await expect(runFn(INPUT, ctx)).rejects.toThrow("rm failed");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
+  it("a throw before the daemon starts posts `run-failed-unreported` once (AC8)", async () => {
+    // protects=AC8; fails_when=it posts nothing, posts twice, or calls it
+    // daemon-failed; no_claim=which other pre-daemon steps throw (the same
+    // outer catch covers them).
+    const ctx = taskCtx();
+    provisionWorkdir.mockRejectedValue(new Error("clone failed"));
+    await expect(runFn(INPUT, ctx)).rejects.toThrow("clone failed");
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-task",
+      cause: "run-failed-unreported",
+    });
+  });
+
+  it("a daemon-phase crash posts `daemon-failed`; a normal end posts nothing", async () => {
+    // protects=the catch-all and the happy path; fails_when=a completed run
+    // gets a terminal post or a crash gets none; no_claim=none beyond protects.
+    const ctx = taskCtx();
+    pollUntilTerminal.mockRejectedValueOnce(new Error("socket reset"));
+    await expect(runFn(INPUT, ctx)).rejects.toThrow("socket reset");
+    expect(postRunTerminal.mock.calls.map((c) => c[1])).toEqual([
+      { runExternalId: "run-ext-task", cause: "daemon-failed" },
+    ]);
+
+    postRunTerminal.mockClear();
+    pollUntilTerminal.mockResolvedValueOnce({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    const out = await runFn(INPUT, taskCtx("run-ext-ok"));
+    expect(out.outcome).toBe("completed");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+  });
+
+  it("when every post attempt fails the teardown still finishes and the error still reaches onFailure (AC9)", async () => {
+    // protects=AC9: a dead www never strands the slot or swallows the run's
+    // error; fails_when=cleanup/release is skipped or the run resolves;
+    // no_claim=onFailure's own post (workflow.test.ts). Real 1 s + 2 s backoff.
+    const ctx = taskCtx();
+    postRunTerminal.mockResolvedValue("error");
+    pollUntilTerminal.mockRejectedValueOnce(new Error("socket reset"));
+    await expect(runFn(INPUT, ctx)).rejects.toThrow("socket reset");
+    expect(postRunTerminal).toHaveBeenCalledTimes(3);
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+    expect(
+      ctx.log.mock.calls.some((c) =>
+        String(c[0]).includes(
+          "terminal post failed after 3 attempts (daemon-failed)",
+        ),
+      ),
+    ).toBe(true);
+  }, 10_000);
+
+  it("a review-lane or self-heal run posts no abnormal terminal (AC10)", async () => {
+    // protects=AC10 for the two lanes the classifier must skip; fails_when=
+    // either posts a typed terminal; no_claim=the HATCHET_IT suites.
+    for (const extra of [
+      { prKey: "org-1/o/r/7", deliveryId: "gh-1" },
+      {
+        selfHeal: {
+          kind: "audit" as const,
+          checks: [],
+          checkToken: "CHECK_SENTINEL",
+        },
+      },
+    ]) {
+      postRunTerminal.mockClear();
+      pollUntilTerminal.mockRejectedValueOnce(new Error("socket reset"));
+      await expect(runFn({ ...INPUT, ...extra }, taskCtx())).rejects.toThrow();
+      expect(postRunTerminal).not.toHaveBeenCalled();
+    }
   });
 });
