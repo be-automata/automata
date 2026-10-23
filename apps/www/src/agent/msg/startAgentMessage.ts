@@ -128,30 +128,48 @@ export async function failQueuedDispatch({
       : error instanceof Error
         ? error.message
         : "Unknown error";
+  let ended = false;
   try {
-    const { didUpdateStatus } = await updateThreadChatStatusAtomic({
+    // Status and error in ONE compare-and-set: the chat is never `complete`
+    // without the error that explains it.
+    ({ didUpdateStatus: ended } = await updateThreadChatStatusAtomic({
       db,
       userId,
       threadId,
       threadChatId,
       fromStatus: "queued",
       toStatus: "complete",
-    });
-    if (!didUpdateStatus) return;
-    console.error("[dispatch] failed before boot; chat ended", {
-      threadId,
-      threadChatId,
-      errorType,
-      errorInfo,
-    });
+      error: { errorMessage: errorType, errorMessageInfo: errorInfo },
+    }));
+  } catch (writeError) {
+    console.error(
+      "[dispatch] failed before boot and the chat could not be ended; the stranded-queued sweep retires it",
+      {
+        threadId,
+        threadChatId,
+        errorType,
+        error:
+          writeError instanceof Error ? writeError.message : String(writeError),
+      },
+    );
+    return;
+  }
+  if (!ended) return;
+  console.error("[dispatch] failed before boot; chat ended", {
+    threadId,
+    threadChatId,
+    errorType,
+    errorInfo,
+  });
+  try {
+    // The chat-history error entry is best effort: the chat is already ended
+    // with its error, so a failure here only loses the message bubble.
     await updateThreadChat({
       db,
       userId,
       threadId,
       threadChatId,
       updates: {
-        errorMessage: errorType,
-        errorMessageInfo: errorInfo,
         appendMessages: [
           {
             type: "error",
@@ -164,7 +182,7 @@ export async function failQueuedDispatch({
     });
   } catch (writeError) {
     console.error(
-      "[dispatch] failed before boot and the chat could not be ended; the stranded-queued sweep retires it",
+      "[dispatch] chat ended, but its error message could not be appended",
       {
         threadId,
         threadChatId,

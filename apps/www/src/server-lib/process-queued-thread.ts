@@ -17,7 +17,6 @@ import {
   getStrandedQueuedThreadChats,
   getThreadMinimal,
   updateThread,
-  updateThreadChat,
   updateThreadChatStatusAtomic,
 } from "@terragon/shared/model/threads";
 import { ensureThreadChatHasUserMessage } from "@/server-lib/retry-thread";
@@ -185,23 +184,20 @@ async function postQueueRetiredReviewNotice({
     }
     const [owner, repo] = parseRepoFullName(repoFullName);
     const octokit = await getOctokitForApp({ owner, repo });
-    if (kind === "stranded") {
+    const { headSha, isClosed } = await getPrHeadState(
+      octokit,
+      repoFullName,
+      prNumber,
+    );
+    if (kind === "stranded" && isClosed) {
       // A stranded run is found late (it can sit for days); by then its PR
       // may have merged, and a "push to re-run" notice there helps nobody.
-      const { data } = await octokit.rest.issues.get({
-        owner,
-        repo,
-        issue_number: prNumber,
-      });
-      if (data.state === "closed") {
-        console.warn(
-          "[queue] retired review: PR already closed; notice withheld",
-          logContext,
-        );
-        return;
-      }
+      console.warn(
+        "[queue] retired review: PR already closed; notice withheld",
+        logContext,
+      );
+      return;
     }
-    const { headSha } = await getPrHeadState(octokit, repoFullName, prNumber);
     if (headSha !== sha) {
       console.warn("[queue] retired review: head moved on; notice withheld", {
         ...logContext,
@@ -259,6 +255,35 @@ async function postQueueRetiredReviewNotice({
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * The tail every queue retirement shares, once its status and error are
+ * written: archive, record the event, and for a review post the ADR-009
+ * notice (which never throws).
+ */
+async function finishQueueRetirement({
+  userId,
+  threadId,
+  threadChatId,
+  thread,
+  reason,
+  kind,
+}: {
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  thread: Parameters<typeof postQueueRetiredReviewNotice>[0]["thread"];
+  reason: string;
+  kind: QueueRetiredKind;
+}): Promise<void> {
+  await updateThread({ db, userId, threadId, updates: { archived: true } });
+  getPostHogServer().capture({
+    distinctId: userId,
+    event: "queued_thread_retired",
+    properties: { threadId, threadChatId, reason, kind },
+  });
+  await postQueueRetiredReviewNotice({ userId, threadId, thread, kind });
 }
 
 export async function getEligibleQueuedThreadChats({
@@ -377,13 +402,14 @@ export async function maybeStartQueuedThreadChat({
           errorMessageInfo: reason,
         },
       });
-      await updateThread({ db, userId, threadId, updates: { archived: true } });
-      getPostHogServer().capture({
-        distinctId: userId,
-        event: "queued_thread_retired",
-        properties: { threadId, threadChatId, reason, kind },
+      await finishQueueRetirement({
+        userId,
+        threadId,
+        threadChatId,
+        thread,
+        reason,
+        kind,
       });
-      await postQueueRetiredReviewNotice({ userId, threadId, thread, kind });
       continue; // retiring frees no slot — keep draining
     }
     try {
@@ -463,6 +489,8 @@ export async function retireStrandedQueuedThreads({
   let failed = 0;
   for (const { userId, threadId, threadChatId } of stranded) {
     try {
+      const reason = `stranded in queued > ${STRANDED_QUEUED_AGE_MS / 60000}m with no run`;
+      // Status and error in one compare-and-set from `queued`.
       const { didUpdateStatus } = await updateThreadChatStatusAtomic({
         db,
         userId,
@@ -470,37 +498,24 @@ export async function retireStrandedQueuedThreads({
         threadChatId,
         fromStatus: "queued",
         toStatus: "complete",
+        error: { errorMessage: "queue-retired", errorMessageInfo: reason },
       });
       if (!didUpdateStatus) continue;
-      const reason = `stranded in queued > ${STRANDED_QUEUED_AGE_MS / 60000}m with no run`;
       console.warn("[queue] RETIRING stranded queued thread (archived)", {
         threadId,
         threadChatId,
         reason,
       });
-      await updateThreadChat({
-        db,
+      const thread = await getThreadMinimal({ db, threadId, userId });
+      await finishQueueRetirement({
         userId,
         threadId,
         threadChatId,
-        updates: { errorMessage: "queue-retired", errorMessageInfo: reason },
+        thread: thread ?? {},
+        reason,
+        kind: "stranded",
       });
-      await updateThread({ db, userId, threadId, updates: { archived: true } });
       retired++;
-      getPostHogServer().capture({
-        distinctId: userId,
-        event: "queued_thread_retired",
-        properties: { threadId, threadChatId, reason, kind: "stranded" },
-      });
-      const thread = await getThreadMinimal({ db, threadId, userId });
-      if (thread) {
-        await postQueueRetiredReviewNotice({
-          userId,
-          threadId,
-          thread,
-          kind: "stranded",
-        });
-      }
     } catch (error) {
       failed++;
       console.error("[queue] stranded queued thread: retirement failed", {

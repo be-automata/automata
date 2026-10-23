@@ -170,10 +170,12 @@ export interface PrHeadState {
    * login: GitHub refuses a formal verdict from a PR's own author.
    */
   authorLogin: string | null;
+  /** GitHub reports a merged PR as closed. */
+  isClosed: boolean;
 }
 
 /**
- * HEAD sha (the idempotency + stale-intent key), draft state AND author of a
+ * HEAD sha (the idempotency + stale-intent key), draft state, open/closed AND author of a
  * PR in one call. The draft flag feeds the approve-floor draft cap (a draft PR
  * must never receive a formal `request_changes`) and the no-verdict rule (a
  * bare `comment` is a verdict only on a draft); the author decides whether the
@@ -195,6 +197,7 @@ export async function getPrHeadState(
     headSha: data.head.sha,
     isDraft: data.draft === true,
     authorLogin: data.user?.login ?? null,
+    isClosed: data.state === "closed",
   };
 }
 

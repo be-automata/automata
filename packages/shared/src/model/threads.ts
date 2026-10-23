@@ -38,6 +38,7 @@ import {
   ThreadInfo,
   ThreadChatInsertRaw,
   ThreadErrorMessage,
+  ThreadErrorType,
 } from "../db/types";
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
@@ -1371,6 +1372,7 @@ export async function updateThreadChatStatusAtomic({
   fromStatus,
   toStatus,
   reattemptQueueAt,
+  error,
 }: {
   db: DB;
   userId: string;
@@ -1379,8 +1381,21 @@ export async function updateThreadChatStatusAtomic({
   fromStatus: ThreadStatus;
   toStatus: ThreadStatus;
   reattemptQueueAt?: Date | null;
+  /**
+   * #471: the chat's error, written in the SAME compare-and-set as the status,
+   * so a terminal never lands without the error that explains it.
+   */
+  error?: {
+    errorMessage: ThreadErrorType;
+    errorMessageInfo: string | null;
+  };
 }): Promise<{ didUpdateStatus: boolean }> {
-  const otherUpdates: Partial<ThreadChatInsert> = {};
+  const otherUpdates: Partial<ThreadChatInsert> = error
+    ? {
+        errorMessage: error.errorMessage,
+        errorMessageInfo: error.errorMessageInfo,
+      }
+    : {};
   // Clear reattemptQueueAt when transitioning away from rate-limited status
   if (
     toStatus !== "queued-sandbox-creation-rate-limit" &&
@@ -2293,7 +2308,17 @@ export async function getUserIdsWithThreadsReadyToProcess({ db }: { db: DB }) {
  *    does not;
  *  - the thread has no `in_flight` engine run row. A run is only dispatched
  *    after the chat leaves `queued`, so this never matches a truly stranded
- *    row; it keeps the sweep off any thread an engine run may still own.
+ *    row; it keeps the sweep off any thread an engine run may still own;
+ *  - the thread is not a shadow thread. Shadow threads are created `queued`
+ *    and never dispatched on purpose (zero GitHub side effects), so they sit
+ *    in `queued` legitimately and must never be retired or noticed.
+ *
+ * Self-heal FIX threads stuck in `queued` are also reconciled by
+ * fix-dispatch-reconcile (its PRE_RUN_STATUSES), which owns their attempt
+ * ledger: it refunds the attempt and stops a dispatch Hatchet never saw, and
+ * its 10-minute grace runs out well before this 30-minute bound, so it
+ * normally acts first. If this sweep ends such a row first, the reconciler's
+ * terminal pass (RES-10) still closes the attempt.
  *
  * Status lives on the chat row for a chat-mode thread (its thread row keeps
  * its creation value, `queued`, forever) and on the thread row for a legacy
@@ -2316,7 +2341,14 @@ export async function getStrandedQueuedThreadChats({
       .where(
         and(
           eq(schema.thread.status, "queued"),
-          sql`not exists (select 1 from ${schema.threadChat} where ${schema.threadChat.threadId} = ${schema.thread.id})`,
+          // version 0 = legacy (chat state on the thread row). A chat-mode
+          // thread (version 1) keeps `queued` here forever; filtering it out
+          // first keeps the anti-join below off every chat-mode thread.
+          eq(schema.thread.version, 0),
+          eq(schema.thread.shadow, false),
+          // Defensive: never read a thread that has chat rows. Correlated on
+          // user_id too, so thread_chat_user_id_thread_id_index serves it.
+          sql`not exists (select 1 from ${schema.threadChat} where ${schema.threadChat.userId} = ${schema.thread.userId} and ${schema.threadChat.threadId} = ${schema.thread.id})`,
           or(
             lt(schema.thread.queuedAt, olderThan),
             and(
@@ -2344,6 +2376,7 @@ export async function getStrandedQueuedThreadChats({
       .where(
         and(
           eq(schema.threadChat.status, "queued"),
+          eq(schema.thread.shadow, false),
           or(
             lt(schema.threadChat.queuedAt, olderThan),
             and(

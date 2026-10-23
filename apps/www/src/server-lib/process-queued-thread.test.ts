@@ -105,8 +105,13 @@ function installFakeAppOctokit() {
         },
       },
       pulls: {
-        get: async () => ({
-          data: { head: { sha: gh.headSha }, draft: false, user: null },
+        get: async ({ pull_number }: { pull_number: number }) => ({
+          data: {
+            head: { sha: gh.headSha },
+            draft: false,
+            user: null,
+            state: gh.sources.get(pull_number)?.state ?? "open",
+          },
         }),
         listReviews: async () => ({ data: [...gh.reviews] }),
       },
@@ -1024,6 +1029,45 @@ describe("#471 stranded plain `queued` chats", () => {
     const chat = await chatRow(recentQueue.threadId, recentQueue.threadChatId);
     expect(chat.status).toBe("queued");
     expect(chat.archived).toBe(false);
+  });
+
+  // Card: protects=shadow threads (created `queued`, never dispatched on
+  // purpose) keep their zero-side-effect promise; fails_when=a shadow thread
+  // is retired, archived or noticed.
+  it("leaves old shadow threads alone, legacy and chat-mode, with no notice", async () => {
+    gh.headSha = SHA;
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: { triggerType: "pull_request" },
+    });
+    const shadowOverrides = {
+      shadow: true,
+      githubPRNumber: 721,
+      reviewedSha: SHA,
+      automationId: automation.id,
+    };
+    const legacy = await strandedLegacy({
+      createdAt: ago(3 * 60 * MIN),
+      queuedAt: null,
+      updatedAt: ago(3 * 60 * MIN),
+      overrides: shadowOverrides,
+    });
+    const chat = await strandedChat({
+      createdAt: ago(3 * 60 * MIN),
+      queuedAt: null,
+      updatedAt: ago(3 * 60 * MIN),
+      overrides: shadowOverrides,
+    });
+    await retireStrandedQueuedThreads();
+
+    const legacyAfter = await legacyRow(legacy);
+    expect(legacyAfter.status).toBe("queued");
+    expect(legacyAfter.archived).toBe(false);
+    const chatAfter = await chatRow(chat.threadId, chat.threadChatId);
+    expect(chatAfter.status).toBe("queued");
+    expect(chatAfter.archived).toBe(false);
+    expect(gh.comments).toHaveLength(0);
   });
 
   // Card: protects=the sweep never touches a thread an engine run may own;
