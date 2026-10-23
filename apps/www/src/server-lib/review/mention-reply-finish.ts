@@ -78,7 +78,7 @@ export const MENTION_REPLY_NOTICE =
 export function renderMentionProviderNotice(
   provider: ProviderUnavailable,
 ): string {
-  return `I could not start on this. ${describeProviderUnavailable(provider)} Nothing was changed; mention me again ${providerUnavailableRetryWhen(provider)}.`;
+  return `Nothing was changed: ${describeProviderUnavailable(provider)} Mention me again ${providerUnavailableRetryWhen(provider)}.`;
 }
 
 export { mentionReplyMarker };

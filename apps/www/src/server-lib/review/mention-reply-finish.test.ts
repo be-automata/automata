@@ -223,7 +223,7 @@ describe("executeMentionReply", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).not.toContain(MENTION_REPLY_NOTICE);
     expect(calls[0]).toContain(
-      "I could not start on this. Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. Nothing was changed; mention me again once an org admin reconnects the Claude credential.",
+      "Nothing was changed: Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. Mention me again once an org admin reconnects the Claude credential.",
     );
     expect(calls[0]).toContain(mentionReplyMarker(ISSUE_STAMP.commentId));
 
