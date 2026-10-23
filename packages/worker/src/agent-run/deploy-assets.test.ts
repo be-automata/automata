@@ -1136,6 +1136,66 @@ describe("#harness batteries: harness.json", () => {
     });
     expect(packById("gstack").mcpServers).toBeUndefined();
     expect(packById("gsd").mcpServers).toBeUndefined();
+    expect(packById("somnio-engineering").mcpServers).toBeUndefined();
+  });
+
+  it("derives ruflo's planner and refinement agents from the pinned closure", () => {
+    // dev-execution (somnio-engineering) spawns them by name; upstream's
+    // frontmatter hooks run unpinned `npx claude-flow@alpha`, so the installer
+    // drops them and the tree scan proves none is left.
+    const ruflo = packById("ruflo");
+    if (ruflo.kind !== "npm-lock") throw new Error("ruflo is npm-lock");
+    expect(ruflo.agentFiles).toEqual([
+      {
+        from: "node_modules/@claude-flow/cli/.claude/agents/core/planner.md",
+        sha256:
+          "3746140c2bdfb38b3a26827e6c13745dff0999a5cd54767aaa984372f2573f89",
+        name: "planner",
+      },
+      {
+        from: "node_modules/@claude-flow/cli/.claude/agents/sparc/refinement.md",
+        sha256:
+          "67ca9278c63971268226cc1096646459d78f6cad58274adfb6eda8d24a846862",
+        name: "refinement",
+      },
+    ]);
+  });
+
+  it("pins the Somnio engineering plugin by commit and tree, with no credential on the box", () => {
+    const somnio = packById("somnio-engineering");
+    if (somnio.kind !== "plugin-tarball") {
+      throw new Error("somnio-engineering is plugin-tarball");
+    }
+    expect(somnio.repo).toBe(
+      "https://github.com/somnio-software/somnio-engineering-ai",
+    );
+    expect(somnio.sha).toBe("510facec180a30205e9630956d76db344ba4d94b");
+    // The plugin's skills are links into the repo's top-level skills/ and
+    // templates/, so those subtrees ship with it.
+    expect(somnio.paths).toEqual([
+      {
+        path: "plugins/somnio-engineering-ai",
+        tree: "2e03d408d41b169144ad5d904b653410f51d4932",
+      },
+      { path: "skills", tree: "eb7ce2494313886e05e1a6fbf16ffde56b108ee9" },
+      { path: "templates", tree: "a1a6bd77fba3089de9d2b3c33340f04b95b67e2f" },
+    ]);
+    expect(somnio.pluginRoot).toBe("plugins/somnio-engineering-ai");
+    // The laptop bootstrap command installs tools: never offered on the box.
+    expect(somnio.discard).toEqual(["commands/install.md"]);
+    expect(somnio.env).toEqual({
+      CLAUDE_PLUGIN_ROOT: "{{packDir}}/src/plugins/somnio-engineering-ai",
+      YTCTL: "{{packDir}}/bin/ytctl",
+    });
+    // The agent holds YOUTRACK_AGENT_TOKEN (env-audience.ts); the control
+    // plane's YOUTRACK_TOKEN is stripped before a run starts.
+    expect(somnio.wrappers).toEqual([
+      {
+        path: "bin/ytctl",
+        exec: "src/skills/youtrack/scripts/ytctl",
+        aliasEnv: { YOUTRACK_TOKEN: "YOUTRACK_AGENT_TOKEN" },
+      },
+    ]);
   });
 
   it("pins the headless-safe skills and the hook-bearing skills", () => {
@@ -1146,6 +1206,13 @@ describe("#harness batteries: harness.json", () => {
       "gsd-code-review",
     ]);
     expect(packById("ruflo").headlessSafe).toEqual([]);
+    expect(packById("somnio-engineering").headlessSafe).toEqual([
+      "harness-audit",
+      "optimize-context-rules",
+      "dev-execution",
+      "youtrack",
+    ]);
+    expect(packById("somnio-engineering").frontmatterHookSkills).toEqual([]);
     // Every gstack skill at the pin whose frontmatter declares hooks; each
     // hook runs a script inside the pack. A pin bump that adds one fails the
     // tree check until it is reviewed and listed here.
@@ -4556,7 +4623,13 @@ describe("harness batteries: bun ships with the gstack pack (browse runtime)", (
   it("only gstack puts a dir on the agent's PATH", () => {
     expect(
       Object.fromEntries(harness.packs.map((p) => [p.id, p.pathDirs ?? []])),
-    ).toEqual({ gstack: ["{{packDir}}/bin"], gsd: [], ruflo: [] });
+    ).toEqual({
+      gstack: ["{{packDir}}/bin"],
+      gsd: [],
+      ruflo: [],
+      // The ytctl shim, never a runtime.
+      "somnio-engineering": ["{{packDir}}/bin"],
+    });
   });
 
   it("verify-as-agent drives the browse CLI with the pack's PATH, a local page and a stop", () => {
@@ -5264,7 +5337,7 @@ describe("harness batteries (PR5): acceptance script", () => {
         },
         { kind: "seed", lane },
       );
-    const BOOT = `[worker-boot] harness: hash=${PREFIX} node=24.21.0 ok=gstack,gsd,ruflo`;
+    const BOOT = `[worker-boot] harness: hash=${PREFIX} node=24.21.0 ok=gstack,gsd,ruflo,somnio-engineering`;
     // The worker's logger colours its lines; the parser must not care.
     const taskRun = (opts: { line?: string; oom?: string } = {}) =>
       [

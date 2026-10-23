@@ -104,7 +104,9 @@ import {
   newAbnormalEndState,
   postAbnormalEnd,
   salvageWorkBranch,
+  type AbnormalEnd,
   type AbnormalEndState,
+  type SalvageOutcome,
 } from "./abnormal-end";
 import {
   ensureRunNamespace,
@@ -277,19 +279,46 @@ const EGRESS_BATCH_FLUSH_MS = 2_000;
  * /api/daemon/egress-event every 2s or 20 events, with a final flush on
  * close(). postEgressEvents never throws (and neither does add()), so audit
  * delivery can NEVER fail the run — lost audit rows are logged, not fatal.
+ *
+ * #473: flush() resolves only once every post started so far has settled, so
+ * the run can deliver its audit trail before the terminal status read revokes
+ * the daemon token (pollUntilTerminal's beforeStatusRead). Given a signal, it
+ * stops waiting when that aborts; the posts themselves carry on, and close()
+ * still awaits them.
  */
 export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   add: (event: EgressDecisionEvent) => void;
+  flush: (signal?: AbortSignal) => Promise<void>;
   close: () => Promise<void>;
 } {
   let buffer: EgressEventWire[] = [];
-  const flush = (): Promise<void> => {
-    if (buffer.length === 0) {
-      return Promise.resolve();
+  const inFlight = new Set<Promise<void>>();
+  const flush = async (signal?: AbortSignal): Promise<void> => {
+    if (buffer.length > 0) {
+      const events = buffer;
+      buffer = [];
+      const post = postEgressEvents(wwwOpts, events);
+      inFlight.add(post);
+      void post.finally(() => inFlight.delete(post));
     }
-    const events = buffer;
-    buffer = [];
-    return postEgressEvents(wwwOpts, events);
+    const settled = Promise.all(inFlight);
+    if (!signal) {
+      await settled;
+      return;
+    }
+    if (signal.aborted) {
+      return;
+    }
+    let onAbort = (): void => {};
+    const aborted = new Promise<void>((resolve) => {
+      onAbort = resolve;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      await Promise.race([settled, aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   };
   const timer = setInterval(() => void flush(), EGRESS_BATCH_FLUSH_MS);
   // Never hold the worker process open for an audit flush tick.
@@ -312,6 +341,7 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
         void flush();
       }
     },
+    flush,
     async close() {
       clearInterval(timer);
       await flush();
@@ -1227,6 +1257,11 @@ async function runAgentInner(
     // Any OOM kill in the run's cgroup fails the run, even when only a child
     // died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
+    // #473: the terminal read revokes the daemon token, so the egress audit
+    // batch goes out before every read — the final one included.
+    beforeStatusRead: async (signal?: AbortSignal) => {
+      await egressEvents?.flush(signal);
+    },
   };
   let daemonForPoll: RunDaemon | null = null;
   // #371: this run's headroom reservation (set under the slot, below).
@@ -1652,7 +1687,9 @@ async function runAgentInner(
   const egressMode: "enforce" | "observe" = input.egressPolicy
     ? "enforce"
     : "observe";
-  if (input.egressPolicy || config.agentUser) {
+  // ADR-013 C3: a `--network none` container's only route out is this proxy,
+  // so a container run always gets one (observe when the repo has no policy).
+  if (input.egressPolicy || config.agentUser || config.containerRuns) {
     try {
       const batcher = createEgressEventBatcher(wwwOpts);
       egressEvents = batcher;
@@ -1772,6 +1809,10 @@ async function runAgentInner(
             ? { repoEnv: secrets.repoEnv }
             : {}),
         },
+        // C3 (#430): the same proxy and brokers as the host path, reached
+        // through forwarded sockets; a review lane gets no broker socket.
+        egressProxyUrl: egressProxy?.url ?? null,
+        broker,
         // The bot-identity precondition runs on the host against the
         // brokers, exactly as on the host path, then its scratch is removed.
         hostPreflight: async () => {
@@ -1952,6 +1993,61 @@ async function runAgentInner(
     // #380: the teardown sequence below is wrapped so a throw in any step can
     // never skip the token revoke, the credential wipe or the lock release.
     try {
+      // #437 Part A2: claim the typed terminal of an abnormal end (posted
+      // below, BEFORE the brokers close and the checkout goes). A normal end,
+      // or a run this plane does not own, claims null. A normal end is
+      // settled too, so a later teardown throw cannot be claimed by the
+      // outer catch as `daemon-failed`.
+      const claimEnd = (): AbnormalEnd | null => {
+        const cancelled =
+          !endedNormally && (ctx.cancelled || signal?.aborted === true);
+        const abnormalExit = runThrew !== null || cancelled;
+        if (!abnormalExit) {
+          abnormal.claimed = true;
+          return null;
+        }
+        return abnormal.owns
+          ? claimAbnormalEnd(abnormal, {
+              ...(runThrew ? { thrown: runThrew } : {}),
+              cancelled,
+              starvation: readMemoryStarvation(daemon),
+            })
+          : null;
+      };
+      // #437 Part B: a timeout's work is pushed while the broker is open, and
+      // the post names the branch.
+      const salvageEnd = (claimed: AbnormalEnd): Promise<SalvageOutcome> =>
+        salvageWorkBranch({
+          cause: claimed.cause,
+          workBranch: input.workBranch,
+          lockLost: boxLock?.lost === true,
+          enabled: config.timeoutSalvage !== "off",
+          container: containerDaemon,
+          broker,
+          repoFullName: input.repoFullName,
+          workdir,
+          agentUser: config.agentUser,
+          botLogin: config.botLogin,
+          egressProxyUrl: egressProxy?.url ?? null,
+          runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
+          log: step,
+        });
+      let end: AbnormalEnd | null = null;
+      let salvage: SalvageOutcome | null = null;
+      let endSettled = false;
+      if (containerDaemon) {
+        // ADR-013: a container run's salvage runs git INSIDE its container
+        // (never host git on the container-written .git), so its end is
+        // claimed and a timeout salvaged BEFORE the removal below. The
+        // salvage first freezes the container's whole tree (SIGSTOP, init
+        // aside: prepareSalvage), so the agent is stopped, not dead, until
+        // the removal kills it. The OOM flag is re-read first, as the
+        // removal would have.
+        await containerDaemon.refresh();
+        end = claimEnd();
+        endSettled = true;
+        if (end) salvage = await salvageEnd(end);
+      }
       // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
       // group so no orphan survives, then remove the workdir. Runs on normal return,
       // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
@@ -1996,50 +2092,23 @@ async function runAgentInner(
       // ADR-013: a container's removal above replaced the uid-wide scan:
       // every process of the run lived in the container's pid namespace.
       if (!containerDaemon) await reapTeardownEscapees();
-      // #437 Part A2: claim and post the typed terminal of an abnormal end
-      // once the agent is dead, BEFORE the brokers close and the checkout goes.
-      // A normal end, or a run this plane does not own, claims null. The OOM
-      // signal is read here, after the teardown: a container's `.State` was
-      // refreshed before its removal, and the host daemon caches the count it
-      // read before removing the cgroup.
-      const cancelled =
-        !endedNormally && (ctx.cancelled || signal?.aborted === true);
-      // A normal end is settled here too, so a later teardown throw cannot be
-      // claimed by the outer catch as `daemon-failed`.
-      const abnormalExit = runThrew !== null || cancelled;
-      const end =
-        abnormal.owns && abnormalExit
-          ? claimAbnormalEnd(abnormal, {
-              ...(runThrew ? { thrown: runThrew } : {}),
-              cancelled,
-              starvation: readMemoryStarvation(daemon),
-            })
-          : null;
-      if (!abnormalExit) abnormal.claimed = true;
+      if (!endSettled) {
+        // A host run claims once the agent is dead and reaped. The OOM
+        // signal is read here, after the teardown: the host daemon caches
+        // the count it read before removing the cgroup.
+        end = claimEnd();
+        if (end) {
+          // Agent dead, broker open; then the salvage's own agent-uid git
+          // is reaped (same lost-lock rule) before the closes.
+          salvage = await salvageEnd(end);
+          if (salvage.spawned) await reapTeardownEscapees();
+        }
+      }
       if (end) {
-        // #437 Part B: a timeout's work is pushed now (agent dead, broker
-        // open) and the post names the branch; then the salvage's own
-        // agent-uid git is reaped (same lost-lock rule) before the closes.
-        const salvage = await salvageWorkBranch({
-          cause: end.cause,
-          workBranch: input.workBranch,
-          lockLost: boxLock?.lost === true,
-          enabled: config.timeoutSalvage !== "off",
-          containerRun: containerDaemon !== null,
-          broker,
-          repoFullName: input.repoFullName,
-          workdir,
-          agentUser: config.agentUser,
-          botLogin: config.botLogin,
-          egressProxyUrl: egressProxy?.url ?? null,
-          runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
-          log: step,
-        });
-        if (salvage.spawned && !containerDaemon) await reapTeardownEscapees();
         await postAbnormalEnd(abnormal, end, {
           wwwOpts,
           log: step,
-          salvage: salvage.result,
+          salvage: salvage?.result ?? null,
         });
       }
       // #66: close the egress proxy after the daemon is dead (no more child

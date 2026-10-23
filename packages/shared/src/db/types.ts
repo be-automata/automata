@@ -154,6 +154,11 @@ export type ThreadSourceMetadata =
       // The PR companion lane: set ONLY on threads a companion automation
       // started. The finish hook posts (or edits) its one PR comment.
       companion?: CompanionLaneStamp;
+      // PR-event runs: the PR's base ref when the run was dispatched (raw,
+      // untrusted text). The review single writer keys same-review
+      // idempotency on it, so a retarget at an unchanged head is a new
+      // review, not a replay. Absent on threads written before it existed.
+      reviewBase?: string;
     };
 
 /**

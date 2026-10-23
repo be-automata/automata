@@ -199,3 +199,30 @@ describe("parseReviewIntent — orchestrated tagged block (phase 6)", () => {
     }
   });
 });
+
+describe("parseReviewIntent — why a tagged-prompt thread must be stamped (#492)", () => {
+  // The shape a Flutter review produced when its marker-bearing body reached
+  // the agent unrendered and the thread went unstamped: one tagged block whose
+  // verdict carries findings. The classic rule cannot see the tagged opener and
+  // slices last-`{`-to-last-`}`, which starts inside the findings array.
+  const withFindings = {
+    ...lead,
+    findings: [
+      { severity: "warning", path: "lib/a.dart", line: 4, body: "first" },
+      { severity: "info", path: "lib/b.dart", line: 9, body: "second" },
+    ],
+  };
+  const text = `Lenses: correctness, tests.${tagged(withFindings)}`;
+
+  it("the classic rule loses the verdict", () => {
+    const res = parseReviewIntent(text);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toMatch(/^intent JSON parse failed/);
+  });
+
+  it("the stamped (tagged) rule reads it", () => {
+    const res = parseReviewIntent(text, OPT);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.intent.findings).toHaveLength(2);
+  });
+});

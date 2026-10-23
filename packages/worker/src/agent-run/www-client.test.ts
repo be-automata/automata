@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pollThreadStatus,
   postEgressEvents,
+  EGRESS_POST_TIMEOUT_MS,
   postRunCredentialSource,
   pollUntilTerminal,
   postRunFailed,
@@ -144,6 +145,22 @@ describe("postEgressEvents (#66 audit sink, worker half)", () => {
     vi.stubGlobal("fetch", fetchMock);
     await postEgressEvents(opts, [event], async () => {});
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("#473: a hung POST is cut at EGRESS_POST_TIMEOUT_MS and swallowed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn(async (_u: unknown, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      throw new DOMException("timed out", "TimeoutError");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      postEgressEvents(opts, [event], async () => {}),
+    ).resolves.toBeUndefined();
+    expect(timeoutSpy.mock.calls.map((c) => c[0])).toEqual([
+      EGRESS_POST_TIMEOUT_MS,
+    ]);
   });
 
   it("gives up quietly once the refusal repeats on every attempt", async () => {
@@ -1223,6 +1240,62 @@ describe("pollUntilTerminal: the run was memory-starved", () => {
       noSleep,
     );
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
+  });
+
+  it("#473: beforeStatusRead is awaited before every read, the terminal one included", async () => {
+    const order: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          order.push("read");
+          return jsonResponse(200, { status: "working", terminal: false });
+        })
+        .mockImplementationOnce(async () => {
+          order.push("read");
+          return jsonResponse(200, { status: "complete", terminal: true });
+        }),
+    );
+    const result = await pollUntilTerminal(
+      {
+        cancelled: false,
+        log: () => {},
+        beforeStatusRead: async () => {
+          await Promise.resolve();
+          order.push("flush");
+        },
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result.outcome).toBe("completed");
+    expect(order).toEqual(["flush", "read", "flush", "read"]);
+  });
+
+  it("#473: a cancel during beforeStatusRead ends the loop without a read", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    let hookSignal: AbortSignal | undefined;
+    const result = await pollUntilTerminal(
+      {
+        cancelled: false,
+        signal: controller.signal,
+        log: () => {},
+        beforeStatusRead: async (signal) => {
+          hookSignal = signal;
+          controller.abort();
+        },
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(hookSignal).toBe(controller.signal);
+    expect(result.outcome).toBe("cancelled");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("a cancellation still wins — a superseded run is not re-labelled OOM", async () => {

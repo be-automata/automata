@@ -26,7 +26,7 @@ import type { RunLane } from "./run-lane";
 
 /** Where the run's clone is mounted (the agent's cwd). */
 export const CONTAINER_WORKSPACE = "/workspace";
-/** Where the run's socket dir is mounted (daemon socket; C3 adds the bridges). */
+/** Where the run's socket dir is mounted (daemon socket + the C3 forwards). */
 export const CONTAINER_SOCKET_DIR = "/run/automata";
 /** The daemon socket inside the container. */
 export const CONTAINER_DAEMON_SOCKET = `${CONTAINER_SOCKET_DIR}/daemon.sock`;

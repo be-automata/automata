@@ -859,6 +859,36 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     }
   });
 
+  it("repoEnv can never set the somnio-engineering pack's YTCTL or CLAUDE_PLUGIN_ROOT (any case)", () => {
+    // A repo value would swap the tracker CLI, or the dir the plugin's
+    // skills run their scripts from.
+    const SOMNIO =
+      "/usr/local/lib/automata-batteries/somnio-engineering@510facec";
+    const somnioEnv = {
+      CLAUDE_PLUGIN_ROOT: `${SOMNIO}/src/plugins/somnio-engineering-ai`,
+      YTCTL: `${SOMNIO}/bin/ytctl`,
+    };
+    const repoEnv = {
+      YTCTL: "/tmp/evil-ytctl",
+      ytctl: "/tmp/evil-ytctl",
+      CLAUDE_PLUGIN_ROOT: "/tmp/evil-plugin",
+      claude_plugin_root: "/tmp/evil-plugin",
+    };
+    const withPack = buildDaemonEnv({
+      ...base,
+      repoEnv,
+      batteryEnv: somnioEnv,
+    });
+    expect(withPack.YTCTL).toBe(somnioEnv.YTCTL);
+    expect(withPack.CLAUDE_PLUGIN_ROOT).toBe(somnioEnv.CLAUDE_PLUGIN_ROOT);
+    expect(withPack.ytctl).toBeUndefined();
+    expect(withPack.claude_plugin_root).toBeUndefined();
+    const without = buildDaemonEnv({ ...base, repoEnv });
+    for (const key of Object.keys(repoEnv)) {
+      expect(without[key]).toBeUndefined();
+    }
+  });
+
   it("only battery-prefixed keys apply (defense in depth past the manifest guard)", () => {
     const env = buildDaemonEnv({
       ...base,

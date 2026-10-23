@@ -1,5 +1,6 @@
 import {
   CONTAINER_HOME,
+  CONTAINER_SOCKET_DIR,
   CONTAINER_WORKSPACE,
   type ContainerLanePolicy,
 } from "./container-argv";
@@ -7,6 +8,7 @@ import {
   botGitIdentity,
   brokeredGitAuthConfig,
   buildRunProxyEnv,
+  gitProxyAuthConfig,
   isReservedRepoEnvKey,
 } from "./daemon-env";
 import { mergeForegroundOnlySettings } from "./foreground-only-hook";
@@ -21,12 +23,18 @@ import { mergeForegroundOnlySettings } from "./foreground-only-hook";
 /** The env file's one line format: `export NAME='value'` (single-quoted, `'` escaped). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** gh's isolated config dir inside the container (C3 writes its broker socket there). */
+/** gh's isolated config dir inside the container (its config.yml names the broker socket). */
 export const CONTAINER_GH_CONFIG_DIR = `${CONTAINER_HOME}/.config/gh`;
 
 /**
- * The git broker handoff C3 will pass (a unix socket bridged to loopback
- * inside the container). Absent in C2.
+ * The gh broker's socket inside the container (C3, #430). gh speaks HTTP over
+ * a unix socket itself (`http_unix_socket`), so it needs no TCP bridge.
+ */
+export const CONTAINER_GH_BROKER_SOCKET = `${CONTAINER_SOCKET_DIR}/gh-broker.sock`;
+
+/**
+ * The git broker handoff (C3, #430): a unix socket bridged to loopback inside
+ * the container. Non-review lanes only.
  */
 export interface ContainerBrokerEnv {
   /** The loopback URL the entry's socat bridge serves, e.g. `http://127.0.0.1:3129`. */
@@ -45,9 +53,9 @@ export interface ContainerRunEnvOpts {
   credentialEnv: Record<string, string>;
   /** The owner's repo env + the box's test-service env (reserved keys dropped). */
   repoEnv: Record<string, string>;
-  /** C3 seam: the in-container proxy URL (`http://127.0.0.1:3128`), or null. */
+  /** The in-container proxy URL (`http://[cred@]127.0.0.1:3128`), or null. */
   egressProxyUrl?: string | null;
-  /** C3 seam: the brokered GitHub handoff, or null. Refused on a review. */
+  /** The brokered GitHub handoff, or null. Refused on a review. */
   broker?: ContainerBrokerEnv | null;
 }
 
@@ -122,6 +130,9 @@ export function buildContainerRunEnv(
   Object.assign(env, identity.env);
   const gitConfig: Array<[string, string]> = [
     ...(broker ? brokeredGitAuthConfig(broker) : []),
+    // A credentialed proxy (N > 1): Basic up front, or every git call over it
+    // is a 407 the proxy audits as a deny (box-proven: "Proxy CONNECT aborted").
+    ...gitProxyAuthConfig(opts.egressProxyUrl),
     ["credential.helper", ""],
     ...identity.config,
     // The clone is owned by the worker's uid on the host, never the

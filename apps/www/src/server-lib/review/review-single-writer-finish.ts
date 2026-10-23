@@ -164,6 +164,20 @@ export function extractTerminalAgentText(messages: DBMessage[] | null): string {
 }
 
 /**
+ * The PR base ref a review thread was dispatched against (its automation-skill
+ * `reviewBase` stamp), or null for a thread written before the stamp existed.
+ * Read by BOTH the finish hook and the sweep, like the selector below.
+ */
+export function reviewBaseOfThread(
+  thread: { sourceMetadata?: ThreadSourceMetadata | null } | null | undefined,
+): string | null {
+  const metadata = thread?.sourceMetadata;
+  return metadata?.type === "automation-skill" && metadata.reviewBase
+    ? metadata.reviewBase
+    : null;
+}
+
+/**
  * THE terminal-text decision for a review thread — one pure function used by
  * BOTH the finish hook and the hourly sweep, so the two paths cannot diverge
  * (the #213/#221/#224 lesson).
@@ -430,6 +444,7 @@ export async function handleReviewEffectAtFinish({
         headSha: currentHeadSha,
         isDraft,
         authorLogin,
+        baseRef: liveBase,
       } = await getPrHeadState(octokit, repoFullName, prNumber);
       const botLogin = resolveBotLogin();
       // One selector for hook and sweep (phase 6): orchestrated-prompt threads
@@ -476,6 +491,10 @@ export async function handleReviewEffectAtFinish({
         // dispatched against, nor speak at all if it was abandoned before it
         // could. Neither gate can withhold a parsed verdict.
         reviewedSha: thread?.reviewedSha ?? null,
+        // The base this run diffed against: a retarget at an unchanged head
+        // is a new review, not a replay of the one already at HEAD.
+        reviewBase: reviewBaseOfThread(thread),
+        liveBase: liveBase ?? null,
         runAbandoned: isAbandonedTerminalCause(thread?.terminalCause ?? null),
         // #441: a run the provider refused names that cause on the PR.
         providerUnavailable: providerUnavailableOfChat(threadChat),

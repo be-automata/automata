@@ -249,8 +249,8 @@ function runPrompt(argv: string[]): void {
     toleranceDirective: buildReviewToleranceDirective(
       toleranceToPolicy(tolerance),
     ),
-    // No review mode: production renders sections only for `github-ops`, and
-    // a ported review skill (the only kind replayed) is rendered verbatim.
+    // No review mode, so sections render classic (as production does for a
+    // run with no resolved mode).
     renderPlaceholders: (body, vars) => renderSkillPlaceholders(body, vars),
     substituteContext: (body, context) =>
       findReviewContextDirective(body) === null

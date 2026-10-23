@@ -196,7 +196,63 @@
       "smoke": [
         ["node", "{{packDir}}/node_modules/ruflo/bin/ruflo.js", "--version"]
       ],
+      "agentFiles": [
+        {
+          "from": "node_modules/@claude-flow/cli/.claude/agents/core/planner.md",
+          "sha256": "3746140c2bdfb38b3a26827e6c13745dff0999a5cd54767aaa984372f2573f89",
+          "name": "planner"
+        },
+        {
+          "from": "node_modules/@claude-flow/cli/.claude/agents/sparc/refinement.md",
+          "sha256": "67ca9278c63971268226cc1096646459d78f6cad58274adfb6eda8d24a846862",
+          "name": "refinement"
+        }
+      ],
       "headlessSafe": [],
+      "frontmatterHookSkills": []
+    },
+    {
+      "id": "somnio-engineering",
+      "class": "harness",
+      "kind": "plugin-tarball",
+      "repo": "https://github.com/somnio-software/somnio-engineering-ai",
+      "sha": "510facec180a30205e9630956d76db344ba4d94b",
+      "license": "proprietary (Somnio Software; private repository, staged on the box, never redistributed)",
+      "paths": [
+        {
+          "path": "plugins/somnio-engineering-ai",
+          "tree": "2e03d408d41b169144ad5d904b653410f51d4932"
+        },
+        {
+          "path": "skills",
+          "tree": "eb7ce2494313886e05e1a6fbf16ffde56b108ee9"
+        },
+        {
+          "path": "templates",
+          "tree": "a1a6bd77fba3089de9d2b3c33340f04b95b67e2f"
+        }
+      ],
+      "pluginRoot": "plugins/somnio-engineering-ai",
+      "discard": ["commands/install.md"],
+      "nodeMajor": 24,
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "{{packDir}}/src/plugins/somnio-engineering-ai",
+        "YTCTL": "{{packDir}}/bin/ytctl"
+      },
+      "pathDirs": ["{{packDir}}/bin"],
+      "wrappers": [
+        {
+          "path": "bin/ytctl",
+          "exec": "src/skills/youtrack/scripts/ytctl",
+          "aliasEnv": { "YOUTRACK_TOKEN": "YOUTRACK_AGENT_TOKEN" }
+        }
+      ],
+      "headlessSafe": [
+        "harness-audit",
+        "optimize-context-rules",
+        "dev-execution",
+        "youtrack"
+      ],
       "frontmatterHookSkills": []
     }
   ]

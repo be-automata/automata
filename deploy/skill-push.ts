@@ -31,15 +31,21 @@
  * is written. `--dry-run` prints the flattened body's contentSha and byte
  * length and writes nothing to the DB; `--out <file>` writes the flattened
  * body to a file (with or without --dry-run). Unknown flags are a hard error.
+ * A live push of a skill other than github-ops whose body carries review-mode
+ * sections is refused unless `--allow-review-mode-sections` is passed: until
+ * #493 is deployed, www renders those sections for github-ops only.
  *
  * The body is validated LOCALLY with the SAME per-skill registry the resolver
  * applies at dispatch (github-ops / flutter-pr-review: fenced-json verdict
  * contract; github-pr-merged: fenced-json audit-intent contract + hard rules;
  * others: non-empty) AFTER flattening and BEFORE any write — a push that would
  * only be rejected or fallen-back-from at run time must fail here, loudly,
- * instead. Frontmatter is stripped exactly like the seed loader
- * (deploy/lib/review-skill-file) so a SKILL.md pushes the same text the seed
- * would inline. The body is NEVER logged — only its sha (it can be multi-KB
+ * instead. The save-time-only rules run too (`validateSkillBodyForSave`,
+ * skill-save-checks.ts: a PR-diffing skill names its diff base as
+ * `origin/{{baseBranch}}`, never `origin/main` or a prose `<base>`); the
+ * resolver never applies those to a stored version. Frontmatter is stripped
+ * exactly like the seed loader (deploy/lib/review-skill-file) so a SKILL.md
+ * pushes the same text the seed would inline. The body is NEVER logged — only its sha (it can be multi-KB
  * and shas are the traceability currency).
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -49,9 +55,11 @@ import { getOrganizationBySlug } from "../packages/shared/src/model/organization
 import { createRepoSkillVersion } from "../packages/shared/src/model/repo-skills";
 import type { RepoSkillVersionSource } from "../packages/shared/src/db/types";
 import {
+  hasReviewModeSections,
+  skillNameIs,
   stripFrontmatter,
-  validateSkillBody,
 } from "../apps/www/src/server-lib/review/review-skill";
+import { validateSkillBodyForSave } from "../apps/www/src/server-lib/review/skill-save-checks";
 import { fetchGitPackBody, parseGitPackRef } from "./lib/git-pack-ref";
 import {
   prepareSkillBody,
@@ -61,8 +69,8 @@ import {
 
 const USAGE =
   "Usage:\n" +
-  "  local: pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> <path-to-md> [--dry-run] [--out <file>]\n" +
-  "  git:   pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> --from-git <src-owner/src-repo>@<40-hex-sha>:<src-path> [--dry-run] [--out <file>]";
+  "  local: pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> <path-to-md> [--dry-run] [--out <file>] [--allow-review-mode-sections]\n" +
+  "  git:   pnpm exec tsx deploy/skill-push.ts <orgSlug> <owner/repo> <skillName> --from-git <src-owner/src-repo>@<40-hex-sha>:<src-path> [--dry-run] [--out <file>] [--allow-review-mode-sections]";
 
 /** Pinned-file fetch budget: a hung CDN must fail the push, not stall it. */
 const PINNED_FETCH_TIMEOUT_MS = 30_000;
@@ -76,10 +84,12 @@ function fail(message: string): never {
 // Unknown --flags are a HARD ERROR, never silently dropped: a typo like
 // `--dryrun` must abort, not fall through to a live production write.
 const VALUE_FLAGS = new Set(["--from-git", "--out"]);
-const BOOLEAN_FLAGS = new Set(["--dry-run"]);
+const ALLOW_SECTIONS_FLAG = "--allow-review-mode-sections";
+const BOOLEAN_FLAGS = new Set(["--dry-run", ALLOW_SECTIONS_FLAG]);
 const positional: string[] = [];
 const flagValues = new Map<string, string>();
 let dryRun = false;
+let allowReviewModeSections = false;
 {
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
@@ -89,7 +99,8 @@ let dryRun = false;
       continue;
     }
     if (BOOLEAN_FLAGS.has(arg)) {
-      dryRun = true;
+      if (arg === ALLOW_SECTIONS_FLAG) allowReviewModeSections = true;
+      else dryRun = true;
       continue;
     }
     if (VALUE_FLAGS.has(arg)) {
@@ -200,7 +211,7 @@ async function main() {
         fetchText: fetchPinnedText,
         stripFrontmatter,
       },
-      validate: validateSkillBody,
+      validate: validateSkillBodyForSave,
       writeOut: outPath
         ? (body) => writeFileSync(outPath, body, "utf8")
         : undefined,
@@ -212,13 +223,32 @@ async function main() {
     console.log(`Wrote the flattened body to ${outPath}.`);
   }
 
+  // Deploy-order fence (#493): until www renders review-mode sections for every
+  // skill, it renders them ONLY for github-ops. Any other marker-bearing body
+  // reaches the agent RAW, the agent emits a tagged block the classic parser
+  // cannot read, and every run of that lane posts a no-verdict notice. Refuse
+  // the live write unless the operator states #493 is deployed.
+  const sectionsFenced =
+    hasReviewModeSections(prepared.body) &&
+    !skillNameIs(skillName!, "github-ops") &&
+    !allowReviewModeSections;
+  const sectionsMessage =
+    `'${skillName}' carries review-mode sections (<!-- automata:if … -->), ` +
+    `which www renders only for github-ops until #493 is deployed. Pushed ` +
+    `before then, the agent reads them raw and every run posts a no-verdict ` +
+    `notice. Pass ${ALLOW_SECTIONS_FLAG} only once #493 is live.`;
+
   if (dryRun) {
+    if (sectionsFenced) console.warn(`[dry-run] WARNING: ${sectionsMessage}`);
     console.log(
       `[dry-run] '${skillName}' for ${repoFullName} (org '${orgSlug}') from ` +
         `${src.label}: contentSha ${prepared.sha}, ${prepared.bytes} bytes. ` +
         `Nothing was written to the database.`,
     );
     process.exit(0);
+  }
+  if (sectionsFenced) {
+    fail(`Skill push aborted, nothing written: ${sectionsMessage}`);
   }
 
   const db = createDb(databaseUrl!);

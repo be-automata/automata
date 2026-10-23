@@ -49,6 +49,90 @@ describe("ContainerRuntime: the CLI against ONE configured socket", () => {
   });
 
   // card: protects=removal is idempotent (an absent container is success) but any other failure throws, so a slot is never released over a container the daemon refused to remove; fails_when=`No such container` throws or a daemon error is swallowed; no_claim=daemon semantics of rm -f
+  // card: protects=exec runs `docker exec <id> <argv>` on the configured socket as the container's own user (no --user override) and returns a failure instead of throwing; fails_when=exec targets another socket, adds a user/privilege flag, or throws on a non-zero exit; no_claim=what the command does inside the container
+  it("exec: docker exec on the socket, container's own user, result returned", async () => {
+    const { exec, calls } = fakeExec(() => ({ code: 1, stderr: "nope" }));
+    const rt = new ContainerRuntime({ socketPath: SOCK, exec });
+    const r = await rt.exec(
+      "c1",
+      ["chmod", "-R", "g+rwX", "/workspace"],
+      5_000,
+    );
+    expect(r.code).toBe(1);
+    expect(calls[0]).toEqual([
+      "-H",
+      `unix://${SOCK}`,
+      "exec",
+      "c1",
+      "chmod",
+      "-R",
+      "g+rwX",
+      "/workspace",
+    ]);
+  });
+
+  // card: protects=#437 Part B in a container: spawnExec's env crosses as bare `-e NAME` (the value rides the CLI's own env, never its argv, which `ps` shows to every account), PATH/HOME cross literally so the CLI keeps its own, and the exec runs in the given workdir as the container's own user; fails_when=a secret value appears in the argv, the CLI runs with the container's HOME, a --user flag appears, or a non-identifier name is accepted; no_claim=docker's own `-e NAME` lookup (box/IT proof)
+  it("spawnExec: env by name only, values in the CLI's env, never in its argv", () => {
+    const spawned: Array<{
+      file: string;
+      args: readonly string[];
+      env: NodeJS.ProcessEnv;
+      stdio: unknown;
+    }> = [];
+    const spawnFn = vi.fn((file: string, args: readonly string[], o) => {
+      spawned.push({ file, args, env: o.env, stdio: o.stdio });
+      return {} as never;
+    });
+    const rt = new ContainerRuntime({
+      socketPath: SOCK,
+      dockerBin: "/usr/bin/docker",
+      exec: fakeExec(() => ({})).exec,
+      spawnFn: spawnFn as never,
+    });
+    const header = "Authorization: Bearer SECRET_BEARER_1";
+    rt.spawnExec("c1", ["/bin/sh", "-c", "exec git add -A", "sh"], {
+      workdir: "/workspace",
+      env: {
+        HOME: "/dev/null",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.http://127.0.0.1:3139/.extraheader",
+        GIT_CONFIG_VALUE_0: header,
+      },
+    });
+    const s = spawned[0]!;
+    expect(s.file).toBe("/usr/bin/docker");
+    expect(s.args).toEqual([
+      "-H",
+      `unix://${SOCK}`,
+      "exec",
+      "-w",
+      "/workspace",
+      "-e",
+      "HOME=/dev/null",
+      "-e",
+      "GIT_CONFIG_COUNT",
+      "-e",
+      "GIT_CONFIG_KEY_0",
+      "-e",
+      "GIT_CONFIG_VALUE_0",
+      "c1",
+      "/bin/sh",
+      "-c",
+      "exec git add -A",
+      "sh",
+    ]);
+    expect(s.args.join(" ")).not.toContain("SECRET_BEARER_1");
+    expect(s.env.GIT_CONFIG_VALUE_0).toBe(header);
+    expect(s.env.HOME).toBe(process.env.HOME);
+    expect(s.stdio).toEqual(["ignore", "pipe", "ignore"]);
+    expect(() =>
+      rt.spawnExec("c1", ["true"], {
+        workdir: "/workspace",
+        env: { "BAD NAME": "x" },
+      }),
+    ).toThrow(ContainerRuntimeError);
+  });
+
   it("remove: absent is fine, any other failure throws", async () => {
     const absent = new ContainerRuntime({
       socketPath: SOCK,

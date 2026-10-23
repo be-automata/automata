@@ -325,12 +325,18 @@ vi.mock("./agent-command", async (importOriginal) => {
   };
 });
 
+/** Constructor args of every stand-in container daemon (C3 wiring checks). */
+const containerCtorArgs: unknown[][] = [];
+
 // ADR-013 (dev-only) container path: a stand-in container daemon, so the
 // workflow's container branch runs without Docker. Its teardown is the
 // container removal (a promise the workflow awaits).
 vi.mock("./container-daemon-process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./container-daemon-process")>()),
   ContainerDaemonProcess: class {
+    constructor(...args: unknown[]) {
+      containerCtorArgs.push(args);
+    }
     pid = 4242;
     preflightGhAuth = vi.fn(async () => {});
     start = vi.fn(async () => {});
@@ -342,6 +348,21 @@ vi.mock("./container-daemon-process", async (importOriginal) => ({
     });
     agentFailure = () => null;
     memoryStarvation = () => null;
+    refresh = vi.fn(async () => {
+      finallyOrder.push("container-refresh");
+    });
+    // #437 Part B: the container's salvage hooks. The prepare stands in for
+    // the in-container freeze-and-bridge; each step goes to the same
+    // scripted git as the host path (agentCommandFake).
+    salvageWorkdir = "/workspace";
+    prepareSalvage = vi.fn(async () => {
+      finallyOrder.push("container-salvage-prepare");
+      return "http://127.0.0.1:3139";
+    });
+    runInContainer = (a: Parameters<RunAsAgent>[0]) => {
+      if (!agentCommandFake) throw new Error("no scripted container git");
+      return agentCommandFake(a);
+    };
   },
 }));
 
@@ -1071,6 +1092,59 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     expect(postEgressEvents).toHaveBeenCalledTimes(1);
   });
 
+  it("#473: flush() posts the buffer and waits for a timer post still in flight", async () => {
+    let settleTimerPost: () => void = () => {};
+    postEgressEvents.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settleTimerPost = resolve;
+        }),
+    );
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    vi.advanceTimersByTime(2_000); // the tick's post is now in flight
+    batcher.add(event(2));
+
+    let flushed = false;
+    const flushing = batcher.flush().then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // The fresh batch went out at once; the tick's post is still pending.
+    expect(postEgressEvents).toHaveBeenCalledTimes(2);
+    expect(flushed).toBe(false);
+
+    settleTimerPost();
+    await flushing;
+    expect(flushed).toBe(true);
+    await batcher.close();
+  });
+
+  it("#473: flush(signal) stops waiting when the signal aborts", async () => {
+    let settlePost: () => void = () => {};
+    postEgressEvents.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settlePost = resolve;
+        }),
+    );
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    const controller = new AbortController();
+    let flushed = false;
+    const flushing = batcher.flush(controller.signal).then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(flushed).toBe(false);
+
+    controller.abort();
+    await flushing;
+    expect(flushed).toBe(true);
+    settlePost();
+    await batcher.close();
+  });
+
   it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({
@@ -1506,6 +1580,67 @@ describe("agent-run run task — the terminal poll is journaled per run", () => 
     expect(poll, lines.join("\n")).toBe(
       `[agent-run ${INPUT.threadId}] thread-status: complete (terminal=true)`,
     );
+  });
+});
+
+describe("#473: no egress audit batch is dropped at run end", () => {
+  it("the batch buffered during the run is posted BEFORE the terminal status read that revokes the token", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => 0,
+      close: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    const order: string[] = [];
+    postEgressEvents.mockImplementation(async (..._args: unknown[]) => {
+      order.push("egress-post");
+    });
+    pollUntilTerminal
+      .mockReset()
+      .mockImplementation(
+        async (pollCtx: { beforeStatusRead?: () => Promise<void> }) => {
+          // The agent's last request lands in the batch (under the 20 cap,
+          // inside the 2 s tick), then the read that is served terminal=true.
+          const [proxyOpts] = startEgressProxy.mock.calls[0] as [
+            { onEvent: (e: unknown) => void },
+          ];
+          proxyOpts.onEvent({
+            destinationHost: "api.example.com",
+            destinationPort: 443,
+            action: "allow",
+            policyLevel: "domain",
+            mode: "enforce",
+          });
+          await pollCtx.beforeStatusRead?.();
+          order.push("terminal-read");
+          return { outcome: "completed", finalStatus: "complete" };
+        },
+      );
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+
+    await runFn(EGRESS_INPUT, ctx());
+
+    // Exactly one post, and it preceded the revoking read: the teardown's
+    // final flush found nothing left to send with a dead token.
+    expect(order).toEqual(["egress-post", "terminal-read"]);
+    const [, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(events).toEqual([
+      expect.objectContaining({ destinationHost: "api.example.com" }),
+    ]);
   });
 });
 
@@ -3619,32 +3754,55 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     }
   });
 
-  it("the container path (ADR-013, dev-only) logs `salvage: skipped (container run)` and still posts `timeout`", async () => {
-    // protects=the operator's container-path fallback: no container route to
-    // the git broker exists until C3 (#430), and host-side git on the
-    // container-written checkout would run its .git/config as the worker;
-    // fails_when=any git runs, the line differs, the timeout is not posted, or
-    // the container is not removed before the post; no_claim=a live
-    // container (ContainerDaemonProcess is a stand-in here).
+  // card: protects=the ADR-013 ordering: a container run's end is claimed (after an OOM-flag refresh) and its timeout salvaged INSIDE the container — prepare (freeze + bridge), then every git step through the container's runner in /workspace against the prepare's broker URL — all BEFORE the container's removal; then the post names the branch, then the broker closes, the token is revoked, the workdir cleaned and the lock released; no host uid reap runs; fails_when=git runs on the host or after the removal, the push uses the host broker URL or the host checkout, the post carries the plain limit line, or any step moves; no_claim=a live container (ContainerDaemonProcess is a stand-in; container-daemon-process tests and the PR's drill cover the real one)
+  it("the container path (ADR-013) salvages inside the container before its removal, then posts the branch", async () => {
     process.env.WORKER_DEV_CONTAINER_RUNS = "1";
     process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
     process.env.WORKER_RUN_MEMORY_MAX = "3G";
+    // C3: a container run always gets an egress proxy (its only route out).
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => 0,
+      close: vi.fn(async () => {}),
+    });
     const c = timeoutCtx("run-ext-salvage-container");
 
     const out = await runFn(TASK_INPUT, c);
 
     expect(out.outcome).toBe("cancelled");
-    expect(salvageCalls).toEqual([]);
     expect(logLines(c)).toContain(
-      "[agent-run thr_leak_1] salvage: skipped (container run)",
+      `[agent-run thr_leak_1] salvage: pushed c0ffee00 to ${WORK_BRANCH}`,
     );
-    expect(postRunTerminal.mock.calls[0]![1]).toEqual(
-      limitPost("run-ext-salvage-container"),
-    );
-    const order = finallyOrder.slice(
-      finallyOrder.indexOf("container-teardown"),
-    );
+    // C3 (#430): the container gets this run's proxy (and the broker handoff
+    // the workflow built), never a fresh route of its own.
+    const deps = containerCtorArgs.at(-1)?.[5] as {
+      egressProxyUrl?: string | null;
+      broker?: unknown;
+    };
+    expect(deps.egressProxyUrl).toBe("http://127.0.0.1:41234");
+    expect(deps).toHaveProperty("broker");
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-salvage-container",
+      cause: "timeout",
+      info: `Unfinished work was saved to branch ${WORK_BRANCH} (commit c0ffee00).`,
+    });
+    const order = finallyOrder.slice(finallyOrder.indexOf("container-refresh"));
     expect(order).toEqual([
+      "container-refresh",
+      "container-salvage-prepare",
+      "salvage:guard",
+      "salvage:check-ref-format",
+      "salvage:head-state",
+      "salvage:submodules",
+      "salvage:stale-locks",
+      "salvage:add",
+      "salvage:diff",
+      "salvage:commit",
+      "salvage:rev-list",
+      "salvage:log",
+      "salvage:push",
       "container-teardown",
       "post",
       "git-broker-close",
@@ -3652,5 +3810,42 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "cleanupWorkdir",
       "release",
     ]);
+    // Every step in the container's checkout, through the prepare's bridge,
+    // with the run's bearer and never the host broker URL or the raw token.
+    for (const a of salvageCalls) {
+      expect(a.cwd).toBe("/workspace");
+      const env = JSON.stringify(a.env);
+      expect(env).toContain("url.http://127.0.0.1:3139/.insteadOf");
+      expect(env).not.toContain("41999");
+      expect(env).not.toContain("inst-secret");
+      expect(a.env.PATH).toBeUndefined();
+    }
+  });
+
+  // card: protects=a container run that ends normally (or whose lane owns no abnormal terminal) never freezes its container or runs any salvage git, and its removal still comes first in the teardown; fails_when=a normal end prepares a salvage or runs git; no_claim=the review lane's container (same rule: abnormal.owns is false)
+  it("a container run that ends normally never prepares a salvage", async () => {
+    process.env.WORKER_DEV_CONTAINER_RUNS = "1";
+    process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
+    process.env.WORKER_RUN_MEMORY_MAX = "3G";
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => 0,
+      close: vi.fn(async () => {}),
+    });
+    pollUntilTerminal.mockResolvedValue({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    const c = { ...ctx(), workflowRunId: () => "run-ext-container-ok" };
+
+    const out = await runFn(TASK_INPUT, c);
+
+    expect(out.outcome).toBe("completed");
+    expect(salvageCalls).toEqual([]);
+    expect(finallyOrder).not.toContain("container-salvage-prepare");
+    expect(finallyOrder).toContain("container-teardown");
+    expect(postRunTerminal).not.toHaveBeenCalled();
+    expect(logLines(c).some((l) => l.includes("salvage:"))).toBe(false);
   });
 });

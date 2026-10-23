@@ -53,6 +53,7 @@ export class ContainerRuntimeError extends Error {
 }
 
 const NO_SUCH = /no such (container|object)/i;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 export interface ContainerRuntimeOptions {
@@ -205,6 +206,52 @@ export class ContainerRuntime {
       [...this.hostArgs(), "start", "--attach", id],
       { env: cliEnv(), stdio: ["ignore", "pipe", "pipe"] },
     );
+  }
+
+  /**
+   * `docker exec -w <workdir> <id> <argv>` as the container's configured
+   * user, as a child the caller drives (stdout piped; stdin and stderr
+   * closed): the shape `runAsAgent` spawns. Each `env` entry crosses as a
+   * bare `-e NAME`, its value riding the CLI's own environment and never its
+   * argv (`ps` shows argv to every account on the box). PATH and HOME, which
+   * the CLI itself needs, cross as `-e NAME=value` (never secret). Killing
+   * the child ends the CLI only: what the exec still runs dies with the
+   * container's removal.
+   */
+  spawnExec(
+    id: string,
+    argv: readonly string[],
+    opts: { workdir: string; env: Record<string, string> },
+  ): ChildProcess {
+    const own = cliEnv();
+    const envArgs: string[] = [];
+    const cli: NodeJS.ProcessEnv = { ...opts.env };
+    for (const [name, value] of Object.entries(opts.env)) {
+      if (!ENV_NAME.test(name)) {
+        throw new ContainerRuntimeError(
+          `exec env name ${JSON.stringify(name)} is not an identifier`,
+        );
+      }
+      envArgs.push("-e", name in own ? `${name}=${value}` : name);
+    }
+    Object.assign(cli, own);
+    return this.spawnFn(
+      this.dockerBin,
+      [...this.hostArgs(), "exec", "-w", opts.workdir, ...envArgs, id, ...argv],
+      { env: cli, stdio: ["ignore", "pipe", "ignore"] },
+    );
+  }
+
+  /**
+   * `docker exec <id> <argv>` as the container's configured user, bounded.
+   * Returns the result; the caller decides what a non-zero exit means.
+   */
+  async exec(
+    id: string,
+    argv: readonly string[],
+    timeoutMs: number,
+  ): Promise<ExecResult> {
+    return this.run(["exec", id, ...argv], timeoutMs);
   }
 
   /** The container's state, or null when it does not exist. */

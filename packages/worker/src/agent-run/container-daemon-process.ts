@@ -6,6 +6,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { redactSecrets } from "@terragon/utils/redact";
 
+import type { ContainerSalvageTarget } from "./abnormal-end";
+import { runAsAgent, type RunAsAgent } from "./agent-command";
 import {
   readBoxTestServicesEnv,
   receivesBoxTestServices,
@@ -15,19 +17,30 @@ import {
   CONTAINER_DAEMON_BUNDLE,
   CONTAINER_DAEMON_SOCKET,
   CONTAINER_HOME,
+  CONTAINER_SOCKET_DIR,
+  CONTAINER_USER,
+  CONTAINER_WORKSPACE,
   containerLanePolicy,
   containerNameForSlot,
   type ContainerLanePolicy,
 } from "./container-argv";
 import type { ContainerRunsConfig } from "./container-config";
-import { buildEntryScript, detectSomnioStacks } from "./container-entry";
+import {
+  buildEntryScript,
+  CONTAINER_BRIDGES,
+  detectSomnioStacks,
+} from "./container-entry";
 import {
   buildContainerRunEnv,
   composeContainerSettings,
+  CONTAINER_GH_BROKER_SOCKET,
+  type ContainerBrokerEnv,
   serializeRunEnvFile,
 } from "./container-policy";
 import { ContainerRuntime, type ContainerState } from "./container-runtime";
 import { writeDaemonMessage } from "./daemon-process";
+import type { BrokerHandoff } from "./daemon-env";
+import { ghBrokerConfigYaml } from "./gh-broker";
 import {
   classifyAgentExit,
   resourceLimitFailure,
@@ -36,6 +49,11 @@ import type { WorkerConfig } from "./config";
 import type { RunLane } from "./run-lane";
 import type { RunPaths } from "./run-owned-paths";
 import { getProcessWorkerId } from "./run-namespace";
+import {
+  type ForwardTarget,
+  type SocketForward,
+  startSocketForward,
+} from "./socket-forward";
 import type { AgentRunInput, PulledDaemonMessage } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -118,6 +136,18 @@ export interface ContainerDaemonDeps {
   probeSocket?: (socketPath: string) => Promise<void>;
   /** Override for the box test-services env file (tests). */
   boxTestServicesEnvPath?: string;
+  /**
+   * C3 (#430): the run's host egress proxy URL (`http://[cred@]127.0.0.1:<port>`),
+   * reached from the container through `egress-proxy.sock`. null = no proxy
+   * (then the container has no route out at all).
+   */
+  egressProxyUrl?: string | null;
+  /**
+   * C3 (#430): the run's credential brokers. Forwarded into the container for
+   * the lanes that may hold a GitHub credential only; a review gets no broker
+   * socket, so `git push` and `gh` have nothing to authenticate with.
+   */
+  broker?: BrokerHandoff | null;
   log?: (line: string) => void;
   /** Socket wait budget (tests shorten it). */
   socketTimeoutMs?: number;
@@ -126,6 +156,49 @@ export interface ContainerDaemonDeps {
   /** First backoff between removal attempts, doubled each time (default 2 s; tests shorten it). */
   retryDelayMs?: number;
 }
+
+/**
+ * #437 Part B in a container: the loopback ports the salvage's own git
+ * broker bridge may take, first free one wins. Apart from the entry's
+ * bridges (CONTAINER_BRIDGES), whose frozen socat keeps its port.
+ */
+export const SALVAGE_BRIDGE_PORTS = [3139, 3140, 3141, 3142] as const;
+const EXIT_NO_BROKER_SOCKET = 20;
+const EXIT_NO_BRIDGE_PORT = 21;
+
+/**
+ * Run by bash INSIDE the container as its user: $1 = the forwarded git
+ * broker socket, $2.. = candidate ports. kill(-1) signals every process the
+ * caller may signal except init and the caller itself, so one SIGSTOP freezes
+ * the agent, every escapee, the daemon and the entry's bridges where they
+ * stand; the second catches a child forked across the first. With the tree
+ * frozen nothing else can bind a port, so a port no socket listens on before
+ * the bridge starts and that listens after is the bridge's own. The bridge
+ * stays up (stdio closed, so the exec returns) until the container goes.
+ * Prints the port. A constant: run-derived values travel as arguments only.
+ */
+export const SALVAGE_PREPARE_SCRIPT = [
+  "sock=$1; shift",
+  `[ -S "$sock" ] || exit ${EXIT_NO_BROKER_SOCKET}`,
+  "kill -s STOP -1 2>/dev/null; kill -s STOP -1 2>/dev/null",
+  // Any local address, v4 or v6, in LISTEN (0A); the port is upper-case hex.
+  'listening() { grep -Eq "^ *[0-9]+: [0-9A-F]+:$(printf \'%04X\' "$1") [0-9A-F]+:[0-9A-F]+ 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; }',
+  'for port in "$@"; do',
+  '  if listening "$port"; then continue; fi',
+  '  socat "TCP-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:${sock}" </dev/null >/dev/null 2>&1 &',
+  "  pid=$!",
+  "  for _ in $(seq 50); do",
+  '    if listening "$port"; then echo "$port"; exit 0; fi',
+  '    kill -0 "$pid" 2>/dev/null || break',
+  "    sleep 0.1",
+  "  done",
+  '  kill -s KILL "$pid" 2>/dev/null',
+  "done",
+  `exit ${EXIT_NO_BRIDGE_PORT}`,
+].join("\n");
+
+/** Bound on the workspace hand-back exec at teardown (a hung exec must not hold the slot). */
+export const WORKSPACE_HAND_BACK_TIMEOUT_MS = 30_000;
 
 const DEFAULT_REMOVE_ATTEMPTS = 4;
 const DEFAULT_REMOVE_RETRY_MS = 2_000;
@@ -147,7 +220,9 @@ const DEFAULT_REMOVE_RETRY_MS = 2_000;
  * the run lives in the container's pid namespace under `--init`, so a
  * `setsid` escapee dies with it.
  */
-export class ContainerDaemonProcess implements RunDaemon {
+export class ContainerDaemonProcess
+  implements RunDaemon, ContainerSalvageTarget
+{
   private readonly cr: ContainerRunsConfig;
   private readonly runtime: ContainerRuntime;
   private readonly policy: ContainerLanePolicy;
@@ -166,6 +241,13 @@ export class ContainerDaemonProcess implements RunDaemon {
   private refreshing: Promise<void> | null = null;
   private teardownPromise: Promise<void> | null = null;
   private startedAt = 0;
+  private forwards: SocketForward[] = [];
+  /** What the container env points at once the forwards are up (C3). */
+  private routed: {
+    egressProxyUrl: string | null;
+    broker: ContainerBrokerEnv | null;
+    testEnv: Record<string, string>;
+  } = { egressProxyUrl: null, broker: null, testEnv: {} };
 
   constructor(
     private readonly config: WorkerConfig,
@@ -233,6 +315,7 @@ export class ContainerDaemonProcess implements RunDaemon {
         gid: this.cr.runGid,
       });
     }
+    await this.openForwards();
     const stacks = detectSomnioStacks(this.run.repo);
     // Admission backstop (ADR-013 Run path 1): a crash-redelivered run must
     // never meet its predecessor holding this slot's name.
@@ -306,6 +389,92 @@ export class ContainerDaemonProcess implements RunDaemon {
     );
   }
 
+  /**
+   * C3 (#430): one forwarder per exit the run is entitled to, in its `sock/`
+   * dir, before the container exists (the entry bridges only the sockets
+   * present at start). Each container-side value is the entry's loopback
+   * port (or the mounted socket for gh), never a host address.
+   */
+  private async openForwards(): Promise<void> {
+    const open = async (
+      socket: string,
+      target: ForwardTarget,
+    ): Promise<void> => {
+      this.forwards.push(
+        await startSocketForward({
+          socketPath: path.join(this.socketDir, socket),
+          target,
+          gid: this.cr.runGid,
+        }),
+      );
+    };
+    const bridgePort = (socket: string): number => {
+      const bridge = CONTAINER_BRIDGES.find((b) => b.socket === socket);
+      if (!bridge) throw new Error(`no container bridge for ${socket}`);
+      return bridge.port;
+    };
+    const routed: typeof this.routed = {
+      egressProxyUrl: null,
+      broker: null,
+      testEnv: {},
+    };
+    if (this.deps.egressProxyUrl) {
+      const host = new URL(this.deps.egressProxyUrl);
+      await open("egress-proxy.sock", {
+        host: host.hostname,
+        port: Number(host.port),
+      });
+      const inside = new URL(this.deps.egressProxyUrl);
+      inside.hostname = "127.0.0.1";
+      inside.port = String(bridgePort("egress-proxy.sock"));
+      routed.egressProxyUrl = inside.toString().replace(/\/$/, "");
+    }
+    const broker = this.deps.broker ?? null;
+    if (broker && this.policy.githubCredential) {
+      const git = new URL(broker.gitUrl);
+      await open("git-broker.sock", {
+        host: git.hostname,
+        port: Number(git.port),
+      });
+      await open(path.basename(CONTAINER_GH_BROKER_SOCKET), {
+        path: broker.ghSocketPath,
+      });
+      routed.broker = {
+        gitUrl: `http://127.0.0.1:${bridgePort("git-broker.sock")}`,
+        bearer: broker.bearer,
+        repoFullName: broker.repoFullName,
+      };
+    }
+    const testEnv = receivesBoxTestServices(this.input, this.lane)
+      ? readBoxTestServicesEnv(
+          this.input.repoFullName,
+          this.deps.boxTestServicesEnvPath,
+        )
+      : {};
+    const adminUrl = testEnv.TEST_DATABASE_ADMIN_URL;
+    if (adminUrl) {
+      const db = new URL(adminUrl);
+      await open("test-postgres.sock", {
+        host: db.hostname,
+        port: Number(db.port || 5432),
+      });
+      db.hostname = "127.0.0.1";
+      db.port = String(bridgePort("test-postgres.sock"));
+      testEnv.TEST_DATABASE_ADMIN_URL = db.toString();
+    }
+    routed.testEnv = testEnv;
+    this.routed = routed;
+    this.log(
+      `container.forwards ${JSON.stringify({ thread: this.input.threadId, sockets: this.forwards.map((f) => path.basename(f.socketPath)) })}`,
+    );
+  }
+
+  private async closeForwards(): Promise<void> {
+    const forwards = this.forwards;
+    this.forwards = [];
+    await Promise.all(forwards.map((f) => f.close()));
+  }
+
   /** Fresh socket dir every attempt (a retry must not inherit a stale socket). */
   private async prepareSocketDir(): Promise<void> {
     await fs.promises.rm(this.socketDir, { recursive: true, force: true });
@@ -355,27 +524,28 @@ export class ContainerDaemonProcess implements RunDaemon {
       JSON.stringify(composeContainerSettings(this.policy, batteries), null, 2),
       { mode: 0o600 },
     );
-    await fs.promises.mkdir(path.join(home, ".config", "gh"), {
-      recursive: true,
-      mode: 0o700,
-    });
-    const boxTestEnv = receivesBoxTestServices(this.input, this.lane)
-      ? readBoxTestServicesEnv(
-          this.input.repoFullName,
-          this.deps.boxTestServicesEnvPath,
-        )
-      : {};
+    const ghConfigDir = path.join(home, ".config", "gh");
+    await fs.promises.mkdir(ghConfigDir, { recursive: true, mode: 0o700 });
+    if (this.routed.broker) {
+      // `http_unix_socket` has no env equivalent: gh reads it from config.yml.
+      await fs.promises.writeFile(
+        path.join(ghConfigDir, "config.yml"),
+        ghBrokerConfigYaml(CONTAINER_GH_BROKER_SOCKET),
+        { mode: 0o600 },
+      );
+    }
     const runEnv = buildContainerRunEnv({
       policy: this.policy,
       botLogin: this.config.botLogin,
       anthropicApiKey: this.config.anthropicApiKey,
       credentialDelivered: this.credentials.delivered,
       credentialEnv: this.credentials.env,
-      repoEnv: { ...boxTestEnv, ...(this.deps.secrets.repoEnv ?? {}) },
-      // C3 (#430) wires the proxy and broker sockets; until then a container
-      // gets neither, so it has no route out and no GitHub credential.
-      egressProxyUrl: null,
-      broker: null,
+      repoEnv: {
+        ...this.routed.testEnv,
+        ...(this.deps.secrets.repoEnv ?? {}),
+      },
+      egressProxyUrl: this.routed.egressProxyUrl,
+      broker: this.routed.broker,
     });
     const envDir = path.join(home, ".automata-run");
     const envFile = path.join(envDir, "run.env");
@@ -499,6 +669,97 @@ export class ContainerDaemonProcess implements RunDaemon {
     await this.refreshState();
   }
 
+  /** #437 Part B: the checkout as the salvage's git sees it. */
+  readonly salvageWorkdir = CONTAINER_WORKSPACE;
+
+  /**
+   * #437 Part B (ContainerSalvageTarget): freeze the container's tree and
+   * bridge its git broker socket on a port of the salvage's own
+   * (SALVAGE_PREPARE_SCRIPT). Null when there is no container, no broker
+   * socket (a review), or the exec failed; logs one
+   * `container.salvage_prepare` line. Never throws.
+   */
+  async prepareSalvage(timeoutMs: number): Promise<string | null> {
+    const id = this.containerId;
+    const line = (fields: Record<string, unknown>) =>
+      this.log(
+        `container.salvage_prepare ${JSON.stringify({ thread: this.input.threadId, ...fields })}`,
+      );
+    if (!id || this.teardownPromise) {
+      line({ skipped: "no container" });
+      return null;
+    }
+    if (!this.routed.broker) {
+      line({ skipped: "no git broker socket" });
+      return null;
+    }
+    try {
+      const r = await this.runtime.exec(
+        id,
+        [
+          "/bin/bash",
+          "-c",
+          SALVAGE_PREPARE_SCRIPT,
+          "bash",
+          `${CONTAINER_SOCKET_DIR}/git-broker.sock`,
+          ...SALVAGE_BRIDGE_PORTS.map(String),
+        ],
+        timeoutMs,
+      );
+      const port = Number(r.stdout.trim());
+      if (
+        r.code !== 0 ||
+        !(SALVAGE_BRIDGE_PORTS as readonly number[]).includes(port)
+      ) {
+        line({
+          code: r.code,
+          ...(r.stderr.trim()
+            ? { stderr: redactSecrets(r.stderr.trim().slice(0, 200)) }
+            : {}),
+        });
+        return null;
+      }
+      line({ code: 0, port });
+      return `http://127.0.0.1:${port}`;
+    } catch (err) {
+      line({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * #437 Part B (ContainerSalvageTarget): one salvage step through
+   * `docker exec` as the container's user, with runAsAgent's bounds (stdout
+   * cap, timeout, abort) on the docker CLI child. The step's env crosses by
+   * name only (ContainerRuntime.spawnExec): the bearer never rides an argv.
+   */
+  readonly runInContainer: RunAsAgent = (args) => {
+    const id = this.containerId;
+    if (!id) {
+      return Promise.resolve({
+        exitCode: null,
+        stdout: "",
+        timedOut: false,
+        truncated: false,
+      });
+    }
+    return runAsAgent({
+      ...args,
+      // The container's own user runs it; no sudo on this side.
+      agentUser: "",
+      spawn: (file, argv, opts) => {
+        const env: Record<string, string> = {};
+        for (const [key, value] of Object.entries(opts.env)) {
+          if (value !== undefined) env[key] = value;
+        }
+        return this.runtime.spawnExec(id, [file, ...argv], {
+          workdir: args.cwd,
+          env,
+        });
+      },
+    });
+  };
+
   /**
    * Remove the container: OOM flag first (it dies with the container), then
    * `docker rm -f -v`, then confirm it is gone, retried with backoff while the
@@ -518,6 +779,7 @@ export class ContainerDaemonProcess implements RunDaemon {
     // after the daemon made the container. The slot's name finds it.
     const target = this.containerId ?? (this.startedAt ? this.name : null);
     try {
+      if (this.containerId) await this.handBackWorkspace(this.containerId);
       if (target) await this.removeConfirmed(target);
     } finally {
       try {
@@ -526,9 +788,53 @@ export class ContainerDaemonProcess implements RunDaemon {
         // the attach child is already gone with the container
       }
       this.child = null;
+      await this.closeForwards();
       await fs.promises
         .rm(this.socketDir, { recursive: true, force: true })
         .catch(() => {});
+    }
+  }
+
+  /**
+   * Files the agent creates in the bind-mounted checkout belong to the
+   * container's mapped uid; one made 0700 (gstack's `.gstack/`, box-proven)
+   * leaves the worker unable to remove the run dir. Before removal, while the
+   * container still runs, its own user (the owner, no capability needed)
+   * opens the tree to the hand-over group the worker belongs to. Best-effort:
+   * a stopped container cannot exec, and cleanupWorkdir then logs whatever
+   * it could not remove.
+   */
+  private async handBackWorkspace(id: string): Promise<void> {
+    try {
+      const state = await this.runtime.inspectState(id);
+      if (!state?.running) {
+        this.log(
+          `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, skipped: state ? "not running" : "gone" })}`,
+        );
+        return;
+      }
+      const r = await this.runtime.exec(
+        id,
+        [
+          "find",
+          CONTAINER_WORKSPACE,
+          "-user",
+          CONTAINER_USER.split(":")[0] ?? "",
+          "-exec",
+          "chmod",
+          "g+rwX",
+          "{}",
+          "+",
+        ],
+        WORKSPACE_HAND_BACK_TIMEOUT_MS,
+      );
+      this.log(
+        `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, code: r.code, ...(r.code === 0 ? {} : { stderr: redactSecrets(r.stderr.trim().slice(0, 200)) }) })}`,
+      );
+    } catch (err) {
+      this.log(
+        `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, error: err instanceof Error ? err.message : String(err) })}`,
+      );
     }
   }
 

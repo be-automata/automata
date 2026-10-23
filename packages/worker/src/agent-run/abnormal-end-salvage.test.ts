@@ -17,6 +17,7 @@ import {
   abnormalEndInfo,
   salvageCommitMessage,
   salvageWorkBranch,
+  type ContainerSalvageTarget,
   type SalvageWorkBranchArgs,
 } from "./abnormal-end";
 import {
@@ -106,7 +107,7 @@ function args(
     workBranch: WORK_BRANCH,
     lockLost: false,
     enabled: true,
-    containerRun: false,
+    container: null,
     broker: { gitUrl: `file://${remotes}`, bearer: BEARER },
     repoFullName: "o/r",
     workdir: work,
@@ -398,17 +399,16 @@ describe("salvageWorkBranch gating (#437 Part B)", () => {
     [{ workBranch: undefined }, "salvage: skipped (no work branch)"],
     // AC6: another run may own the box once the lock is lost.
     [{ lockLost: true }, "salvage: skipped (lock lost)"],
-    [{ containerRun: true }, "salvage: skipped (container run)"],
     [{ broker: null }, "salvage: skipped (no git broker)"],
   ] as const)(
     "%j logs one skip line, runs no git and leaves the tree as it was",
     async (over, line) => {
       // protects=WORKER_TIMEOUT_SALVAGE=off, a run with no work branch, a
-      // lost box lock (AC6), the container path (no broker route until C3)
-      // and a legacy-direct box (no second auth path) each skip with their
-      // reason; fails_when=git runs, anything is committed or pushed, or the
-      // line differs; no_claim=the workflow passing these values
-      // (workflow-cleanup tests).
+      // lost box lock (AC6) and a legacy-direct box (no second auth path)
+      // each skip with their reason; fails_when=git runs, anything is
+      // committed or pushed, or the line differs; no_claim=the workflow
+      // passing these values (workflow-cleanup tests); the container path's
+      // skips (see the ADR-013 describe).
       fs.writeFileSync(path.join(work, "f.ts"), "export const f = 6;\n");
       const run = vi.fn(runAsAgent);
 
@@ -442,6 +442,164 @@ describe("salvageWorkBranch gating (#437 Part B)", () => {
     expect(run).not.toHaveBeenCalled();
     expect(logs).toEqual([]);
   });
+});
+
+/**
+ * ADR-013: a container run's salvage goes through its ContainerSalvageTarget.
+ * The stand-in runs each step with the real runAsAgent on the real checkout
+ * (as the container's exec would on /workspace) and hands the image's PATH
+ * back, so everything but `docker exec` itself is the real salvage.
+ */
+describe("salvageWorkBranch in an ADR-013 container (#437 Part B)", () => {
+  const HOST_WORKDIR = "/nonexistent/host-checkout";
+
+  function fakeContainer(
+    prepare: () => Promise<string | null> = async () => `file://${remotes}`,
+  ) {
+    const order: string[] = [];
+    const steps: Array<Parameters<RunAsAgent>[0]> = [];
+    const prepareSalvage = vi.fn(async (_timeoutMs: number) => {
+      order.push("prepare");
+      return prepare();
+    });
+    const target: ContainerSalvageTarget = {
+      salvageWorkdir: work,
+      prepareSalvage,
+      runInContainer: (a) => {
+        order.push("step");
+        steps.push(a);
+        return runAsAgent({ ...a, env: { ...a.env, PATH: process.env.PATH } });
+      },
+    };
+    return { target, order, steps, prepareSalvage };
+  }
+
+  // card: protects=a container run's timeout salvage commits and pushes from INSIDE the container: the freeze-and-bridge prepare runs once before any git, every step goes through the container's runner (never the host runner) in the container's checkout, and the push reaches the broker at the URL the prepare returned with the run's bearer; fails_when=a step runs on the host or in the host workdir, git runs before the prepare, the host broker URL is used, or the push does not land; no_claim=docker exec and the in-container script (container-daemon-process and container-runtime tests, the PR's manual drill, box proof)
+  it("a dirty tree is committed and pushed through the container's runner after its prepare", async () => {
+    fs.writeFileSync(path.join(work, "new.ts"), "export {};\n");
+    const c = fakeContainer();
+    const hostRun = vi.fn(runAsAgent);
+
+    const outcome = await salvageWorkBranch(
+      args({
+        container: c.target,
+        run: hostRun,
+        workdir: HOST_WORKDIR,
+        // The host broker URL: the container never uses it.
+        broker: { gitUrl: "http://127.0.0.1:1", bearer: BEARER },
+      }),
+    );
+
+    const head = git(work, "rev-parse", "HEAD");
+    expect(outcome).toEqual({
+      result: { branch: WORK_BRANCH, sha: head },
+      spawned: true,
+    });
+    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(head);
+    expect(git(bare, "log", "-1", "--format=%s|%an", head)).toBe(
+      `${SALVAGE_MESSAGE}|${BOT}`,
+    );
+    expect(hostRun).not.toHaveBeenCalled();
+    expect(c.prepareSalvage).toHaveBeenCalledTimes(1);
+    expect(c.order[0]).toBe("prepare");
+    expect(c.order.filter((o) => o === "prepare")).toHaveLength(1);
+    expect(c.steps.length).toBeGreaterThan(5);
+    expect(c.steps.every((s) => s.cwd === work)).toBe(true);
+    expect(logs).toEqual([
+      `salvage: pushed ${head.slice(0, 8)} to ${WORK_BRANCH}`,
+    ]);
+  });
+
+  // card: protects=the in-container git env: the broker is the prepare's loopback URL with the run's bearer, safe.directory names the container's checkout, the bot identity and hardening hold, and nothing of the host leaks in (no host PATH or locale, no egress proxy even when the run has one); fails_when=the env carries the host PATH, a proxy, the host broker URL or the host workdir, or loses the bearer or the hardening; no_claim=how docker carries the env (spawnExec test)
+  it("its env: the prepare's broker URL, the container's checkout, no host PATH and no proxy", async () => {
+    fs.writeFileSync(path.join(work, "e.ts"), "export {};\n");
+    const c = fakeContainer();
+
+    await salvageWorkBranch(
+      args({
+        container: c.target,
+        workdir: HOST_WORKDIR,
+        egressProxyUrl: "http://run:cred@127.0.0.1:3128",
+      }),
+    );
+
+    const env = c.steps[0]?.env ?? {};
+    const config = new Map<string, string>();
+    for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i++) {
+      config.set(
+        env[`GIT_CONFIG_KEY_${i}`] ?? "",
+        env[`GIT_CONFIG_VALUE_${i}`] ?? "",
+      );
+    }
+    expect(config.get(`url.file://${remotes}/.insteadOf`)).toBe(
+      "https://github.com/",
+    );
+    expect(config.get(`http.file://${remotes}/.extraheader`)).toBe(
+      `Authorization: Bearer ${BEARER}`,
+    );
+    expect(config.get("safe.directory")).toBe(work);
+    expect(config.get("core.hooksPath")).toBe("/dev/null");
+    expect(config.has("http.proxyAuthMethod")).toBe(false);
+    expect(env.GIT_AUTHOR_NAME).toBe(BOT);
+    expect(env.HOME).toBe("/dev/null");
+    for (const key of ["PATH", "LANG", "HTTPS_PROXY", "https_proxy"]) {
+      expect(env[key]).toBeUndefined();
+    }
+    expect(JSON.stringify(env)).not.toContain(HOST_WORKDIR);
+  });
+
+  // card: protects=a prepare that cannot freeze and bridge (no container, no broker socket, a failed exec) ends the salvage as one constant failure line: no git runs, nothing is committed or pushed, never thrown; spawned=true (it did exec); fails_when=git runs without the frozen tree or the bridge, the salvage throws, or the line differs; no_claim=why the prepare failed (logged by ContainerDaemonProcess)
+  it("a failed prepare runs no git: one failure line, nothing committed or pushed", async () => {
+    fs.writeFileSync(path.join(work, "f.ts"), "export const f = 6;\n");
+    const c = fakeContainer(async () => null);
+
+    expect(await salvageWorkBranch(args({ container: c.target }))).toEqual({
+      result: null,
+      spawned: true,
+    });
+
+    expect(c.steps).toEqual([]);
+    expect(logs).toEqual(["salvage: failed (container prepare failed)"]);
+    expect(git(work, "status", "--porcelain")).toBe("?? f.ts");
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+  });
+
+  // card: protects=the hard budget covers the container's prepare too: a prepare that never settles (a hung docker exec) cannot hold the teardown, and with it the container's removal and the box lock; fails_when=the salvage waits on the prepare, throws or runs git; no_claim=the 60 s value (100 ms stands in)
+  it("a prepare that never settles ends at the budget", async () => {
+    const c = fakeContainer(() => new Promise<string | null>(() => {}));
+    const t0 = Date.now();
+
+    expect(
+      await salvageWorkBranch(args({ container: c.target, budgetMs: 100 })),
+    ).toEqual({ result: null, spawned: true });
+
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(c.steps).toEqual([]);
+    expect(logs).toEqual(["salvage: failed (budget exceeded)"]);
+  }, 5_000);
+
+  // card: protects=every host-path skip reason holds for a container run and none of them freezes the container or runs git (the review lane never salvages); fails_when=a skipped container run prepares, runs a step, or logs another line; no_claim=the workflow passing these values
+  it.each([
+    [{ enabled: false }, "salvage: skipped (disabled)"],
+    [{ workBranch: undefined }, "salvage: skipped (no work branch)"],
+    [{ lockLost: true }, "salvage: skipped (lock lost)"],
+    // A review container: no broker handoff, so no broker socket either.
+    [{ broker: null }, "salvage: skipped (no git broker)"],
+    [{ repoFullName: "o/r;x" }, "salvage: skipped (invalid repository name)"],
+  ] as const)(
+    "%j skips a container run before any prepare",
+    async (over, line) => {
+      const c = fakeContainer();
+
+      expect(
+        await salvageWorkBranch(args({ ...over, container: c.target })),
+      ).toEqual({ result: null, spawned: false });
+
+      expect(c.prepareSalvage).not.toHaveBeenCalled();
+      expect(c.steps).toEqual([]);
+      expect(logs).toEqual([line]);
+    },
+  );
 });
 
 describe("abnormalEndInfo with a salvage (#437 Part B)", () => {

@@ -13,11 +13,13 @@
  * automation text; the #54 C3 cutover will make it write seed versions too).
  */
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertReviewSkillContract,
   stripFrontmatter,
 } from "../../apps/www/src/server-lib/review/review-skill";
+import { flattenSkillBody } from "./flatten-skill";
 
 /**
  * Absolute path to the tracked skill — the ONLY authoritative in-repo copy,
@@ -30,14 +32,20 @@ export const TRACKED_REVIEW_SKILL_PATH = fileURLToPath(
 );
 
 /**
- * The review methodology body, ready to push as a skill version. Throws rather
- * than returning a partial instruction: a review agent running without its
- * methodology silently degrades every review, so failing the seed/push is
- * correct.
+ * The review methodology body, ready to push as a skill version: frontmatter
+ * stripped and every `<!-- include: <name> -->` line inlined from
+ * `<skill dir>/../_shared/<name>.md` — the same text `deploy/skill-push.ts`
+ * stores. Throws rather than returning a partial instruction: a review agent
+ * running without its methodology silently degrades every review, so failing
+ * the seed/push is correct.
+ *
+ * `include-pinned` lines are refused here: the tracked github-ops skill has
+ * none, and the seed must not reach the network. Push such a skill with
+ * skill-push.ts instead.
  */
-export function loadReviewSkillBody(
+export async function loadReviewSkillBody(
   skillPath: string = TRACKED_REVIEW_SKILL_PATH,
-): string {
+): Promise<string> {
   let raw: string;
   try {
     raw = readFileSync(skillPath, "utf8");
@@ -47,7 +55,22 @@ export function loadReviewSkillBody(
         `It is tracked in-repo; a missing file means the checkout is incomplete.`,
     );
   }
-  const body = stripFrontmatter(raw);
+  const sharedDir = path.resolve(path.dirname(skillPath), "..", "_shared");
+  const body = await flattenSkillBody(
+    stripFrontmatter(raw),
+    {
+      readPartial: (name) =>
+        readFileSync(path.join(sharedDir, `${name}.md`), "utf8"),
+      fetchText: () => {
+        throw new Error(
+          "the seed loader never fetches; push a skill with include-pinned " +
+            "lines through deploy/skill-push.ts",
+        );
+      },
+      stripFrontmatter,
+    },
+    skillPath,
+  );
   assertReviewSkillContract(body, skillPath);
   return body;
 }

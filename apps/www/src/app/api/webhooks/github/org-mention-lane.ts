@@ -11,6 +11,7 @@ import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { isCrossRepoPull, runAutomation } from "@/server-lib/automations";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { renderPrDiffContext } from "@/server-lib/review/pr-diff-context";
 import { replyToMention } from "@/server-lib/review/mention-target-reply";
 import { addEyesReactionToComment } from "./utils";
 import { requireAppAccess } from "./webhook-skip";
@@ -383,6 +384,8 @@ export async function handleOrgLaneMention(
   // it and let the delivery fail, so a redelivery can retry the mention.
   let branchName: string;
   let prBaseBranchName: string | undefined;
+  // PR mentions only: the base/head facts every PR-event prompt carries.
+  let prContext: string | undefined;
   try {
     if (input.isPullRequest) {
       const { data: pr } = await octokit.rest.pulls.get({
@@ -398,6 +401,13 @@ export async function handleOrgLaneMention(
       }
       branchName = pr.head.ref;
       prBaseBranchName = pr.base.ref;
+      prContext = renderPrDiffContext({
+        prNumber: input.issueOrPrNumber,
+        baseRef: pr.base.ref,
+        baseSha: pr.base.sha,
+        headRef: pr.head.ref,
+        headSha: pr.head.sha,
+      });
     } else {
       const { data } = await octokit.rest.repos.get({ owner, repo });
       branchName = data.default_branch;
@@ -433,7 +443,10 @@ export async function handleOrgLaneMention(
           ? { prNumber: input.issueOrPrNumber }
           : { issueNumber: input.issueOrPrNumber }),
         transformMessage: (message) =>
-          appendMentionBlock(message, mentionBlock),
+          appendMentionBlock(
+            prContext ? prependPrContext(message, prContext) : message,
+            mentionBlock,
+          ),
         stampExtra: { mention: stamp },
       },
     });
@@ -481,6 +494,21 @@ export function buildMentionStamp(input: OrgMentionInput): MentionLaneStamp {
           ...(comment.inReplyToId ? { inReplyToId: comment.inReplyToId } : {}),
         }
       : {}),
+  };
+}
+
+/**
+ * Lead a PR mention's prompt with the control-plane PR facts (base, head, diff
+ * command), the same paragraph a PR-event review carries: the skill body may
+ * not name the base, and on a stacked PR the default branch is the wrong one.
+ */
+export function prependPrContext(
+  message: DBUserMessage,
+  prContext: string,
+): DBUserMessage {
+  return {
+    ...message,
+    parts: [{ type: "text", text: prContext }, ...message.parts],
   };
 }
 

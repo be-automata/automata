@@ -3,7 +3,7 @@ import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../db";
 import { nanoid } from "nanoid";
 import { createOrganization } from "./organizations";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { repoReviewSettings } from "../db/schema";
 import {
   ORG_DEFAULT_REPO_SENTINEL,
@@ -1289,5 +1289,110 @@ describe("self-heal family (phase 8)", () => {
     for (const field of SELF_HEAL_FIELDS) {
       expect(row?.[field]).toBeNull();
     }
+  });
+});
+
+// A stamp written by raw SQL (`updated_at = now()`) carries microseconds; the
+// settings page reads it back through a JS Date (milliseconds) and sends that
+// as the fence. An exact-equality fence never matched again and every save
+// 409ed forever. The fence compares at millisecond precision.
+describe("optimistic-concurrency fence at millisecond precision", () => {
+  let orgId: string;
+  const repo = "acme/precise";
+  const MICROS_STAMP = "2026-10-23 18:28:39.410605";
+  const MS_TRUNCATED = new Date("2026-10-23T18:28:39.410Z");
+
+  beforeEach(async () => {
+    orgId = await makeOrg("precise");
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      blockTolerance: "error",
+    });
+  });
+
+  async function stampRawSql(literal: string | null): Promise<void> {
+    const value = literal === null ? sql`now()` : sql`${literal}::timestamp`;
+    await db.execute(
+      sql`UPDATE repo_review_settings SET updated_at = ${value}
+          WHERE organization_id = ${orgId} AND repo_full_name = ${repo}`,
+    );
+  }
+
+  const read = () =>
+    getRepoReviewSetting({ db, organizationId: orgId, repoFullName: repo });
+
+  it("a raw-SQL stamp reads back truncated to the millisecond", async () => {
+    await stampRawSql(MICROS_STAMP);
+    expect((await read())?.updatedAt.toISOString()).toBe(
+      MS_TRUNCATED.toISOString(),
+    );
+  });
+
+  it("upsert: the ms-truncated stamp the page read is accepted", async () => {
+    await stampRawSql(MICROS_STAMP);
+    const row = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "warning" },
+      expectedUpdatedAt: MS_TRUNCATED,
+    });
+    expect(row.blockTolerance).toBe("warning");
+  });
+
+  it("upsert: a now() stamp round-tripped through the read is accepted", async () => {
+    await stampRawSql(null);
+    const seen = await read();
+    if (!seen) throw new Error("expected the seeded row");
+    const row = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      patch: { blockTolerance: "warning" },
+      expectedUpdatedAt: new Date(seen.updatedAt.toISOString()),
+    });
+    expect(row.blockTolerance).toBe("warning");
+  });
+
+  it("upsert: a stamp one millisecond off either way still conflicts", async () => {
+    await stampRawSql(MICROS_STAMP);
+    for (const offset of [-1, 1]) {
+      await expect(
+        upsertRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName: repo,
+          patch: { blockTolerance: "warning" },
+          expectedUpdatedAt: new Date(MS_TRUNCATED.getTime() + offset),
+        }),
+      ).rejects.toBeInstanceOf(RepoReviewSettingConflictError);
+    }
+    expect((await read())?.blockTolerance).toBe("error");
+  });
+
+  it("reset: the ms-truncated stamp the page read is accepted", async () => {
+    await stampRawSql(MICROS_STAMP);
+    const result = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      expectedUpdatedAt: MS_TRUNCATED,
+    });
+    expect(result).toEqual({ removed: true, conflict: false });
+    expect(await read()).toBeUndefined();
+  });
+
+  it("reset: a stamp one millisecond off still conflicts and changes nothing", async () => {
+    await stampRawSql(MICROS_STAMP);
+    const result = await removeRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      expectedUpdatedAt: new Date(MS_TRUNCATED.getTime() + 1),
+    });
+    expect(result).toEqual({ removed: false, conflict: true });
+    expect((await read())?.blockTolerance).toBe("error");
   });
 });

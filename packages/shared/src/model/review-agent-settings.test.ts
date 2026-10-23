@@ -133,8 +133,13 @@ describe("BATTERY_PACK_IDS (phase 7)", () => {
 });
 
 describe("harness packs", () => {
-  it("lists the three upstream suites", () => {
-    expect(HARNESS_PACK_IDS).toEqual(["gstack", "gsd", "ruflo"]);
+  it("lists the upstream suites and the Somnio engineering plugin", () => {
+    expect(HARNESS_PACK_IDS).toEqual([
+      "gstack",
+      "gsd",
+      "ruflo",
+      "somnio-engineering",
+    ]);
   });
 
   it("keeps BATTERY_PACK_IDS the manifest packs only", () => {

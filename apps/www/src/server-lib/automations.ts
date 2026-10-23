@@ -60,6 +60,10 @@ import { FINDING_LABELS, normalizeLabel } from "./audit/render-issue";
 import { buildRepoOverrideFetcher } from "./review/repo-skill-override";
 import { resolveReviewPromptMode } from "./review/resolve-review-prompt-mode";
 import {
+  renderPrDiffContext,
+  renderPrEventLine,
+} from "./review/pr-diff-context";
+import {
   isAuditFixAction,
   CLASSIC_REVIEW_PROMPT,
   findReviewContextDirective,
@@ -150,6 +154,12 @@ export async function runAutomation({
        * pushes or opens a pull request.
        */
       companion?: CompanionLaneStamp;
+      /**
+       * PR-event runs: the base ref the run was dispatched against. The
+       * single writer keys "is this the same review?" on it, so a retarget
+       * at an unchanged head is not read as a replay of the earlier review.
+       */
+      reviewBase?: string;
     };
   };
   source: "automated" | "manual";
@@ -207,11 +217,11 @@ export async function runAutomation({
         // message — so an accepted edit is live on the next run and in-flight
         // threads are untouched by construction.
         const { skillName, version, model } = automation.action.config;
-        // Review-mode sections (phase 6) are opt-in and github-ops only. A PR
-        // review (the same predicate dispatch's isReviewThread uses) renders
-        // the mode the Phase 4 resolver picks; anything else renders classic;
-        // every other skill gets its body verbatim. The render happens per
-        // thread creation (per push), so flipping a repo back to classic
+        // Review-mode sections (phase 6): a PR review (the same predicate
+        // dispatch's isReviewThread uses) renders the mode the Phase 4
+        // resolver picks, whatever the skill; anything else renders classic.
+        // A body without sections is unchanged in every mode. The render
+        // happens per thread creation (per push), so flipping a repo back to classic
         // restores today's prompt on the next push (ROADMAP Phase 6 SC3).
         // Independent of the skill body, so resolved alongside it.
         const [resolved, reviewPrompt] = await Promise.all([
@@ -232,7 +242,6 @@ export async function runAutomation({
           }),
           resolveRenderedReviewPrompt({
             automation,
-            skillName,
             prNumber: options?.prNumber,
             trustContext: options?.trustContext ?? null,
           }),
@@ -254,7 +263,7 @@ export async function runAutomation({
         const reviewDiffBase =
           options?.prBaseBranchName ?? automation.branchName;
         const orchestratedApplied =
-          reviewPrompt?.mode === "orchestrated" &&
+          reviewPrompt.mode === "orchestrated" &&
           hasReviewModeSections(resolved.body);
         const renderedBody = renderSkillPlaceholders(resolved.body, {
           repoFullName: automation.repoFullName,
@@ -320,6 +329,9 @@ export async function runAutomation({
             ...(options?.stampExtra?.companion
               ? { companion: options.stampExtra.companion }
               : {}),
+            ...(options?.stampExtra?.reviewBase
+              ? { reviewBase: options.stampExtra.reviewBase }
+              : {}),
           },
           automation: automation,
           trustContext: options?.trustContext,
@@ -377,26 +389,23 @@ export async function runAutomation({
 }
 
 /**
- * The review-prompt mode a skill_message thread renders: undefined for any
- * skill but github-ops (its body stays verbatim), the resolved mode for an
- * org's PR review, classic otherwise.
+ * The review-prompt mode a skill_message thread renders, whatever the skill:
+ * the resolved mode for an org's PR review, classic otherwise. Only a body
+ * with review-mode sections is changed by it. A companion is not a review
+ * (the worker never runs it orchestrated), so it always renders classic.
  */
 async function resolveRenderedReviewPrompt({
   automation,
-  skillName,
   prNumber,
   trustContext,
 }: {
   automation: Automation;
-  skillName: string;
   prNumber: number | undefined;
   trustContext: ThreadTrustContext | null;
-}): Promise<ReviewPromptMode | undefined> {
-  if (skillName !== "github-ops") {
-    return undefined;
-  }
+}): Promise<ReviewPromptMode> {
   if (
     automation.triggerType !== "pull_request" ||
+    isCompanionAutomation(automation) ||
     !automation.organizationId ||
     prNumber === undefined
   ) {
@@ -690,6 +699,7 @@ export async function runPullRequestAutomation({
   source,
   deliveryId,
   expectedHeadSha,
+  baseChangedFrom,
 }: {
   userId: string;
   automationId: string;
@@ -705,6 +715,12 @@ export async function runPullRequestAutomation({
    * this sha, read from the same pulls.get the run derives everything from.
    */
   expectedHeadSha?: string;
+  /**
+   * A retarget (`pull_request.edited` with `changes.base`): the base ref
+   * before the change. Only named in the prompt; the run itself always
+   * diffs against the base it reads from pulls.get below.
+   */
+  baseChangedFrom?: string | null;
 }): Promise<boolean> {
   const { automation, canRun } = await validateCanRunAutomation({
     userId,
@@ -844,14 +860,31 @@ export async function runPullRequestAutomation({
         // read instead of fetching the same PR again.
         pullRequest: pr,
         trustContext,
-        ...(companion ? { stampExtra: { companion } } : {}),
+        stampExtra: {
+          ...(companion ? { companion } : {}),
+          ...(pr.base?.ref ? { reviewBase: pr.base.ref } : {}),
+        },
+        // The control plane names the base in EVERY PR-event prompt, whatever
+        // the skill body says: a skill without {{baseBranch}} left the agent
+        // to guess the default branch, which is wrong on a stacked PR. Branch
+        // names are untrusted and rendered through safeGitRef.
         transformMessage: (message: DBUserMessage) => {
           return {
             ...message,
             parts: [
               {
                 type: "text" as const,
-                text: `The "pull_request.${prEventAction}" event was triggered for PR #${prNumber}.`,
+                text: `${renderPrEventLine({
+                  action: prEventAction,
+                  prNumber,
+                  ...(baseChangedFrom !== undefined ? { baseChangedFrom } : {}),
+                })}\n${renderPrDiffContext({
+                  prNumber,
+                  baseRef: pr.base?.ref,
+                  baseSha: pr.base?.sha,
+                  headRef: branchName,
+                  headSha,
+                })}`,
               },
               ...message.parts,
             ],
