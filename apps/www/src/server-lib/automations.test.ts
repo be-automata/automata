@@ -460,15 +460,20 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
   async function makeAutomation({
     triggerType = "pull_request",
     skillName = "github-ops",
+    triggerConfig,
   }: {
     triggerType?: "pull_request" | "schedule";
     skillName?: string;
+    triggerConfig?: NonNullable<
+      Parameters<typeof createTestAutomation>[0]["values"]
+    >["triggerConfig"];
   } = {}) {
     const automation = await createTestAutomation({
       db,
       userId: user.id,
       values: {
         triggerType,
+        ...(triggerConfig ? { triggerConfig } : {}),
         action: {
           type: "skill_message",
           config: { skillName, version: "latest" },
@@ -675,16 +680,13 @@ describe("runAutomation — review prompt mode (phase 6)", () => {
   });
 
   it("a companion in an orchestrated repo renders classic, no stamp, no resolver call", async () => {
-    const automation = await makeAutomation({ skillName: "custom-skill" });
-    await db
-      .update(automationsTable)
-      .set({
-        triggerConfig: {
-          on: { open: true, update: true },
-          filter: { includeAllAuthors: true, companion: true },
-        },
-      })
-      .where(eq(automationsTable.id, automation.id));
+    const automation = await makeAutomation({
+      skillName: "custom-skill",
+      triggerConfig: {
+        on: { open: true, update: true },
+        filter: { includeAllAuthors: true, companion: true },
+      },
+    });
     await storeBody("custom-skill", MARKER_BODY, automation.repoFullName);
     await setRepoMode(automation.repoFullName, "orchestrated");
 

@@ -310,6 +310,25 @@ export function renderReviewModeSections(
   return kept.join("\n");
 }
 
+/** Throws `<subject> has a malformed review-mode section: …` on a bad grammar. */
+function assertSectionGrammar(body: string, subject: string): void {
+  const sectionError = findReviewModeSectionError(body);
+  if (sectionError !== undefined) {
+    throw new Error(
+      `${subject} has a malformed review-mode section: ${sectionError}`,
+    );
+  }
+}
+
+/** Every distinct text a body can render to: itself when it has no markers. */
+function everyRender(body: string): string[] {
+  return body.includes(MARKER_PREFIX)
+    ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
+        renderReviewModeSections(body, prompt),
+      )
+    : [body];
+}
+
 const REVIEW_CONTRACT_RENDERS: readonly ReviewPromptMode[] = [
   CLASSIC_REVIEW_PROMPT,
   { mode: "orchestrated", runTests: true },
@@ -334,19 +353,9 @@ export function assertReviewSkillContract(
   body: string,
   sourceLabel: string,
 ): void {
-  const sectionError = findReviewModeSectionError(body);
-  if (sectionError !== undefined) {
-    throw new Error(
-      `Review skill from ${sourceLabel} has a malformed review-mode section: ${sectionError}`,
-    );
-  }
+  assertSectionGrammar(body, `Review skill from ${sourceLabel}`);
   const contract = /```json[\s\S]*"verdict"[\s\S]*```/;
-  const renders = body.includes(MARKER_PREFIX)
-    ? REVIEW_CONTRACT_RENDERS.map((prompt) =>
-        renderReviewModeSections(body, prompt),
-      )
-    : [body];
-  if (!renders.every((render) => contract.test(render))) {
+  if (!everyRender(body).every((render) => contract.test(render))) {
     throw new Error(
       `Review skill from ${sourceLabel} has no fenced-json verdict contract — ` +
         `wrong content or a truncated skill. Refusing to dispatch a review ` +
@@ -697,18 +706,29 @@ export function isCompanionLaneStamp(
  */
 export const FLUTTER_REVIEW_SKILL_NAME = "flutter-pr-review";
 
-const SKILL_VALIDATORS: Record<
-  string,
-  (body: string, sourceLabel: string) => void
-> = {
+type SkillValidator = (body: string, sourceLabel: string) => void;
+
+/**
+ * A lane that never resolves a review mode (mention, companion, audit) gets
+ * the classic render (#492), so its contract is checked on that text.
+ */
+function onClassicRender(validate: SkillValidator): SkillValidator {
+  return (body, sourceLabel) =>
+    validate(renderReviewModeSections(body), sourceLabel);
+}
+
+const SKILL_VALIDATORS: Record<string, SkillValidator> = {
+  // Review skills resolve a mode: their contract must survive every render.
   "github-ops": assertReviewSkillContract,
   [FLUTTER_REVIEW_SKILL_NAME]: assertReviewSkillContract,
-  [PR_MERGED_SKILL_NAME]: assertMergeAuditSkillContract,
-  [AUDIT_FINDINGS_SKILL_NAME]: assertAuditFindingsSkillContract,
-  [AUDIT_FIX_SKILL_NAME]: assertAuditFixSkillContract,
-  [MENTION_SKILL_NAME]: assertMentionSkillContract,
-  [FLUTTER_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
-  [REACT_COMPANION_SKILL_NAME]: assertCompanionSkillContract,
+  [PR_MERGED_SKILL_NAME]: onClassicRender(assertMergeAuditSkillContract),
+  [AUDIT_FINDINGS_SKILL_NAME]: onClassicRender(
+    assertAuditFindingsSkillContract,
+  ),
+  [AUDIT_FIX_SKILL_NAME]: onClassicRender(assertAuditFixSkillContract),
+  [MENTION_SKILL_NAME]: onClassicRender(assertMentionSkillContract),
+  [FLUTTER_COMPANION_SKILL_NAME]: onClassicRender(assertCompanionSkillContract),
+  [REACT_COMPANION_SKILL_NAME]: onClassicRender(assertCompanionSkillContract),
 };
 
 export function validateSkillBody(
@@ -716,29 +736,16 @@ export function validateSkillBody(
   body: string,
   sourceLabel: string,
 ): void {
+  // Every body's sections are rendered (#492), so a broken grammar is refused
+  // here instead of failing the run at render time.
+  assertSectionGrammar(body, `Skill '${skillName}' body from ${sourceLabel}`);
   const validator = SKILL_VALIDATORS[skillName];
-  // A review skill's validator checks the grammar and every render itself.
-  if (validator === assertReviewSkillContract) {
+  if (validator) {
     validator(body, sourceLabel);
     return;
   }
-  // Every other skill's sections are rendered too (#492). Its contract
-  // (mention, companion, audit lanes) renders classic, as those lanes never
-  // resolve a review mode, so it is checked on that text. A broken grammar is
-  // refused here instead of failing the run at render time.
-  const sectionError = findReviewModeSectionError(body);
-  if (sectionError) {
-    throw new Error(
-      `Skill '${skillName}' body from ${sourceLabel} has a malformed ` +
-        `review-mode section: ${sectionError}`,
-    );
-  }
-  const rendered = renderReviewModeSections(body);
-  if (validator) {
-    validator(rendered, sourceLabel);
-    return;
-  }
-  if (rendered.trim().length === 0) {
+  // An unregistered skill may run as a PR review in any mode.
+  if (everyRender(body).some((render) => render.trim().length === 0)) {
     throw new Error(
       `Skill '${skillName}' body from ${sourceLabel} is empty — refusing to ` +
         `dispatch an automation run with no instruction.`,

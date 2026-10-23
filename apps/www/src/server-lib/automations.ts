@@ -376,10 +376,10 @@ export async function runAutomation({
 }
 
 /**
- * The review-prompt mode a skill_message thread renders: the resolved mode for
- * an org's PR review, classic otherwise. Any review skill: only a body with
- * review-mode sections is changed by it. A companion is not a review (the
- * worker never runs it orchestrated), so it always renders classic.
+ * The review-prompt mode a skill_message thread renders, whatever the skill:
+ * the resolved mode for an org's PR review, classic otherwise. Only a body
+ * with review-mode sections is changed by it. A companion is not a review
+ * (the worker never runs it orchestrated), so it always renders classic.
  */
 async function resolveRenderedReviewPrompt({
   automation,

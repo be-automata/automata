@@ -189,6 +189,12 @@ describe("assertReviewSkillContract with review-mode sections", () => {
       "Intro\n<!-- automata:if orchestrated -->\nX\n<!-- automata:endif -->";
     expect(() => validateSkillBody("other-skill", good, "t")).not.toThrow();
     expect(() => validateSkillBody("other-skill", "  ", "t")).toThrow(/empty/);
+    // An unregistered skill can run as a review in any mode: none may be empty.
+    const classicOnly =
+      "<!-- automata:if classic -->\nX\n<!-- automata:endif -->";
+    expect(() => validateSkillBody("other-skill", classicOnly, "t")).toThrow(
+      /empty/,
+    );
   });
 });
 

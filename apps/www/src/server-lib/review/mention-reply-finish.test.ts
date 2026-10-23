@@ -535,14 +535,15 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
 });
 
 describe("github-mention skill validator", () => {
+  const tracked = readFileSync(
+    new URL(
+      "../../../../../deploy/skills/github-mention/SKILL.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
   it("accepts the tracked skill and rejects a body without the block", () => {
-    const tracked = readFileSync(
-      new URL(
-        "../../../../../deploy/skills/github-mention/SKILL.md",
-        import.meta.url,
-      ),
-      "utf8",
-    );
     expect(() =>
       validateSkillBody(MENTION_SKILL_NAME, tracked, "tracked"),
     ).not.toThrow();
@@ -562,13 +563,6 @@ describe("github-mention skill validator", () => {
   });
 
   it("checks the contract on the classic render the lane receives (#492)", () => {
-    const tracked = readFileSync(
-      new URL(
-        "../../../../../deploy/skills/github-mention/SKILL.md",
-        import.meta.url,
-      ),
-      "utf8",
-    );
     const wrap = (condition: string) =>
       `Intro.\n<!-- automata:if ${condition} -->\n${tracked}\n<!-- automata:endif -->`;
     expect(() =>
