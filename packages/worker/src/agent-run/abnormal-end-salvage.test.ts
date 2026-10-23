@@ -286,8 +286,7 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
           }),
         );
       }
-      if (a.script.includes("diff --cached --name-only"))
-        return ok("src/a.ts\0");
+      if (a.script.includes("git log --format=")) return ok("src/a.ts\0");
       if (a.script.includes("diff --cached")) return ok("", 1);
       if (a.script.includes("rev-list")) return ok(`${"a".repeat(40)}\n`);
       return ok();
@@ -582,26 +581,42 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
     ".env.local",
     "keys/id_ed25519",
   ])(
-    "an untracked %s is refused before any commit, and nothing reaches the remote",
+    "an untracked %s is refused before the push, and nothing reaches the remote",
     async (file) => {
       // protects=finding 1: `git add -A` never publishes a secret file the
       // agent wrote (e.g. a .env from injected repo/org env vars), and the
       // path never reaches the journal; fails_when=the remote gains the work
-      // branch, a salvage commit is made, or the log names the file;
+      // branch or the log names the file;
       // no_claim=secrets inside ordinarily named files (out of scope: a name
       // denylist, mirroring .claude/settings.json).
       fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true });
       fs.writeFileSync(path.join(work, file), "SECRET=1\n");
       fs.writeFileSync(path.join(work, "ok.ts"), "export {};\n");
-      const before = git(work, "rev-parse", "HEAD");
 
       expect(await salvage()).toBeNull();
 
       expect(logs).toEqual(["salvage: skipped (possible secret file)"]);
-      expect(git(work, "rev-parse", "HEAD")).toBe(before);
+      // The range is scanned after the salvage's own commit: that commit
+      // stays local (the workdir is wiped), and nothing reaches the remote.
+      expect(git(work, "log", "-1", "--format=%s")).toBe(SALVAGE_MESSAGE);
       expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
     },
   );
+
+  it("a .env the agent committed itself, on a clean tree, is refused and never pushed (job 800)", async () => {
+    // protects=finding 1 for the agent's OWN unpushed commits: the push would
+    // send them, so they are scanned too; fails_when=the salvage pushes a
+    // commit holding a secret file because its tree was clean;
+    // no_claim=secrets in ordinarily named files (a name denylist).
+    agentCommit(".env", "agent: config");
+    agentCommit("later.ts", "agent: later");
+    expect(git(work, "status", "--porcelain")).toBe("");
+
+    expect(await salvage()).toBeNull();
+
+    expect(logs).toEqual(["salvage: skipped (possible secret file)"]);
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+  });
 
   it("near-miss names (.envrc, environment.ts, env.ts, .env.example, .env.sample) are salvaged", async () => {
     // protects=the denylist matches names, not substrings: ordinary files,

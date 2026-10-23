@@ -334,9 +334,11 @@ const HEAD_STATE_SCRIPT =
   `[ ! -e "$(git rev-parse --git-path "$p")" ] || exit ${EXIT_OPERATION_IN_PROGRESS}; ` +
   "done";
 const ADD_SCRIPT = "exec git add -A";
-// The staged paths that would be published (deletions publish nothing).
-const STAGED_NAMES_SCRIPT =
-  "exec git diff --cached --name-only --no-renames -z --diff-filter=d --ignore-submodules=all";
+// Every path the push would publish: each commit HEAD holds that no origin/*
+// ref does — the salvage commit AND the agent's own unpushed commits —
+// listed per commit (deletions publish nothing).
+const UNPUSHED_NAMES_SCRIPT =
+  "exec git log --format= --name-only -z --no-renames --diff-filter=d --ignore-submodules=all HEAD --not --remotes=origin";
 // Exit 1 = something is staged. --ignore-submodules=all: a submodule is never
 // entered, so git never runs under ITS local config, which no guard read.
 const STAGED_SCRIPT = "exec git diff --cached --quiet --ignore-submodules=all";
@@ -546,15 +548,6 @@ export async function salvageWorkBranch(
     await ok("add", ADD_SCRIPT);
     const staged = await git(STAGED_SCRIPT);
     if (staged.exitCode === 1) {
-      // Checked before the commit, so a refused salvage commits nothing (the
-      // index change dies with the workdir). Never logs the path.
-      const names = await ok("staged list", STAGED_NAMES_SCRIPT);
-      if (names.truncated) {
-        throw new SalvageStepFailed("staged list unreadable");
-      }
-      if (names.stdout.split("\0").some(isPossibleSecretFile)) {
-        return skipped("possible secret file");
-      }
       await ok("commit", COMMIT_SCRIPT, [
         salvageCommitMessage(args.runExecutionTimeoutMs),
       ]);
@@ -567,6 +560,16 @@ export async function salvageWorkBranch(
     if (sha === "") return done("nothing to save");
     if (!SHA1_HEX.test(sha)) {
       throw new SalvageStepFailed("rev-list output unreadable");
+    }
+    // The whole range the push would send, after the salvage's own commit: a
+    // refused salvage leaves that commit local, and the workdir is wiped.
+    // Never logs the path.
+    const names = await ok("unpushed list", UNPUSHED_NAMES_SCRIPT);
+    if (names.truncated) {
+      throw new SalvageStepFailed("unpushed list unreadable");
+    }
+    if (names.stdout.split("\0").some(isPossibleSecretFile)) {
+      return skipped("possible secret file");
     }
     // The run's own repository, by URL: the broker's insteadOf rewrite
     // carries it to GitHub, so whatever the agent set remote.origin.url to
