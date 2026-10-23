@@ -327,6 +327,15 @@ async function getAdminUserOrNull(): Promise<User | null> {
   return user;
 }
 
+/**
+ * True when the session user holds the PLATFORM role (`user.role === "admin"`,
+ * Terragon staff across every org). Not the same as `isOrgAdmin`, which checks
+ * the caller's owner/admin membership in one organization.
+ */
+export async function isPlatformAdmin(): Promise<boolean> {
+  return (await getAdminUserOrNull()) !== null;
+}
+
 export async function getAdminUserOrThrow(): Promise<User> {
   const user = await getAdminUserOrNull();
   if (!user) {

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   RUN_TERMINAL_TTL_MS,
+  runTerminalRootBootLines,
   RunAlreadyTerminalError,
   guardRunTerminal,
   readRunTerminal,
@@ -68,6 +69,20 @@ describe("recordRunTerminal / readRunTerminal", () => {
     expect(readRunTerminal(root, old)).toBeNull();
     expect(readRunTerminal(root, RUN_ID)).not.toBeNull();
   });
+
+  it("prunes a .tmp left by a crash mid-write once it is older than the TTL", () => {
+    recordRunTerminal(root, RUN_ID, { outcome: "returned" }, 0);
+    const dir = path.join(root, "run-terminals");
+    const stale = path.join(dir, `${RUN_ID}.4242.tmp`);
+    const fresh = path.join(dir, `${RUN_ID}.4343.tmp`);
+    fs.writeFileSync(stale, "{");
+    fs.writeFileSync(fresh, "{");
+    const now = Date.now();
+    fs.utimesSync(stale, new Date(0), new Date(0));
+    recordRunTerminal(root, RUN_ID, { outcome: "returned" }, now);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
+  });
 });
 
 describe("guardRunTerminal", () => {
@@ -106,10 +121,53 @@ describe("guardRunTerminal", () => {
       ),
     ).resolves.toBe("noop:returned");
     expect(rerun).not.toHaveBeenCalled();
-    expect(log).toHaveBeenLastCalledWith(
+    expect(log).toHaveBeenCalledWith(
       expect.stringMatching(
-        /already finished on this box .*redelivered attempt refused, not re-executed/,
+        /already finished on this box .*redelivered attempt completed as a no-op, not re-executed/,
       ),
+    );
+  });
+
+  it("logs one structured run.redelivery_refused line per caught redelivery, naming the action", async () => {
+    const lines: string[] = [];
+    const capture = (msg: string) => lines.push(msg);
+    const parse = (prefix: string) => {
+      const line = lines.find((l) => l.startsWith(prefix));
+      expect(line, lines.join("\n")).toBeTruthy();
+      return JSON.parse(line!.slice(prefix.length)) as Record<string, unknown>;
+    };
+    const event = "run.redelivery_refused ";
+
+    await guardRunTerminal({ root, runId: RUN_ID, log }, async () => "done");
+    await guardRunTerminal(
+      { root, runId: RUN_ID, log: capture, onAlreadyReturned: () => "noop" },
+      async () => "ran again",
+    );
+    expect(parse(event)).toMatchObject({
+      runId: RUN_ID,
+      prior: "returned",
+      action: "noop",
+    });
+    expect(lines.filter((l) => l.startsWith(event))).toHaveLength(1);
+
+    lines.length = 0;
+    const failed = "22222222-2222-2222-2222-222222222222";
+    await guardRunTerminal({ root, runId: failed, log }, async () => {
+      throw new Error("boom");
+    }).catch(() => undefined);
+    await guardRunTerminal(
+      { root, runId: failed, log: capture, onAlreadyReturned: () => "noop" },
+      async () => "ran again",
+    ).catch(() => undefined);
+    const refused = parse(event);
+    expect(refused).toMatchObject({
+      runId: failed,
+      prior: "failed",
+      action: "refused",
+    });
+    expect(typeof refused.gapMs).toBe("number");
+    expect(lines).toContainEqual(
+      expect.stringMatching(/redelivered attempt refused, not re-executed/),
     );
   });
 
@@ -149,5 +207,23 @@ describe("guardRunTerminal", () => {
     await guardRunTerminal({ root, runId: "", log }, run);
     await guardRunTerminal({ root, runId: "", log }, run);
     expect(run).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runTerminalRootBootLines", () => {
+  it("names the root, and warns only for a Linux root under /tmp (wiped at boot)", () => {
+    expect(
+      runTerminalRootBootLines("/usr/local/automata/state", "linux"),
+    ).toEqual({
+      line: "run-terminal ledger root=/usr/local/automata/state",
+      warning: null,
+    });
+    expect(
+      runTerminalRootBootLines("/tmp/automata-agent-run", "linux").warning,
+    ).toMatch(/under \/tmp, which is wiped at boot/);
+    expect(
+      runTerminalRootBootLines("/tmp/automata-agent-run", "darwin").warning,
+    ).toBeNull();
+    expect(runTerminalRootBootLines("/tmpfs/x", "linux").warning).toBeNull();
   });
 });
