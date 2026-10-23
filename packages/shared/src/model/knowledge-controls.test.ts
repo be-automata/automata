@@ -530,7 +530,7 @@ describe("knowledge controls fence at millisecond precision", () => {
   it("accepts the ms-truncated stamp of a microsecond raw-SQL write, rejects a different millisecond", async () => {
     const db = createDb(process.env.DATABASE_URL!);
     const { user } = await createTestUser({ db });
-    const orgId = await createTestOrg({ db, name: "Precise" });
+    const orgId = await createTestOrg({ db, name: "initech" });
     await db.delete(schema.knowledgePlatformSettings);
     const update = (expectedUpdatedAt: Date) =>
       updateKnowledgeControls({
