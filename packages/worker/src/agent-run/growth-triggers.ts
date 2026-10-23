@@ -189,8 +189,8 @@ function parseLane(value: unknown): RunDisplayLane | null {
  * What one raw engine row is:
  *  - `run`: a run task placed in time;
  *  - `skip`: a recognisable task row that is not a run task (`:on-failure-task`, …);
- *  - `malformed_run`: a run task (`actionId` ends `:run`) that cannot be placed in time;
- *  - `unrecognized`: not an object, or no string `actionId` — not the engine's row shape.
+ *  - `malformed_run`: a run task whose fields cannot be trusted (see classifyRunRow);
+ *  - `unrecognized`: not an object, or nothing marks it as a task row at all.
  * The reader turns the last two into `unreadable` (see readRunWindow): dropping them
  * silently would understate every run signal and could clear a firing trigger.
  */
@@ -200,29 +200,51 @@ export type RunRowClass =
   | { kind: "malformed_run" }
   | { kind: "unrecognized" };
 
+/** Engine task statuses that mean the run ended: it must carry a `finishedAt`. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+/**
+ * Engine task statuses that mean the run started: it must carry a `startedAt`.
+ * CANCELLED is not one: a run can be cancelled while still queued, ending without
+ * starting. QUEUED is in neither set.
+ */
+const STARTED_STATUSES: ReadonlySet<string> = new Set([
+  "RUNNING",
+  "COMPLETED",
+  "FAILED",
+]);
+
 /**
  * Raw engine row → its RunRowClass.
  *
  * Only `actionId`s ending `:run` are run tasks (`agent-run:run`, `agent-run-newest:run`,
- * …); `:on-failure-task` rows and anything else are skipped — counting them would double
- * the time of every failed run. A run task without a parseable `createdAt` cannot be
- * assigned to a UTC day: it is `malformed_run`, never a silent drop. `additionalMetadata`
- * values are strings as written by www (`prNumber: "42"`); a missing or malformed field
+ * …); `:on-failure-task` rows and anything else with a string `actionId` are skipped —
+ * counting them would double the time of every failed run. `additionalMetadata` values
+ * are strings as written by www (`prNumber: "42"`); a missing or malformed metadata field
  * becomes null, never a throw — rows dispatched before OD-0 have no `orgId` and are the
  * `unattributed` bucket.
+ *
+ * MALFORMED, NEVER SKIPPED. A row is `malformed_run` (the whole read is then unreadable,
+ * never `under`) when:
+ *  1. it has no string `actionId` but carries a task id (`taskExternalId` or
+ *     `metadata.id`) and a `createdAt` (parseable or not) — the SDK marks `actionId` optional, so
+ *     such a row may be a run task and cannot be skipped as a non-run;
+ *  2. it is a `:run` row without a parseable `createdAt` — it cannot be given a UTC day;
+ *  3. it is a `:run` row whose `status` is missing or not a string;
+ *  4. its status is terminal (COMPLETED, FAILED, CANCELLED) and `finishedAt` is missing
+ *     or unparseable — its run time is unknown;
+ *  5. its status says it started (RUNNING, COMPLETED, FAILED) and `startedAt` is missing
+ *     or unparseable — its wait and run time are unknown.
+ * Still valid: a QUEUED row without `startedAt`/`finishedAt`, and a CANCELLED row without
+ * `startedAt` (it ended without starting). Any other status string is taken as is.
  */
 export function classifyRunRow(raw: unknown): RunRowClass {
   if (typeof raw !== "object" || raw === null) return { kind: "unrecognized" };
   const r = raw as Record<string, unknown>;
-  if (typeof r.actionId !== "string") return { kind: "unrecognized" };
-  if (!r.actionId.endsWith(":run")) return { kind: "skip" };
-  const createdAtMs = parseTimestampMs(r.createdAt);
-  if (createdAtMs === null) return { kind: "malformed_run" };
-  const metaRaw = r.additionalMetadata;
-  const meta =
-    typeof metaRaw === "object" && metaRaw !== null && !Array.isArray(metaRaw)
-      ? (metaRaw as Record<string, unknown>)
-      : {};
   const engineMetaRaw = r.metadata;
   const engineMeta =
     typeof engineMetaRaw === "object" &&
@@ -230,14 +252,39 @@ export function classifyRunRow(raw: unknown): RunRowClass {
     !Array.isArray(engineMetaRaw)
       ? (engineMetaRaw as Record<string, unknown>)
       : {};
+  const id = nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId);
+  const createdAtMs = parseTimestampMs(r.createdAt);
+  if (typeof r.actionId !== "string") {
+    const hasCreatedAt = r.createdAt !== undefined && r.createdAt !== null;
+    return id !== null && hasCreatedAt
+      ? { kind: "malformed_run" }
+      : { kind: "unrecognized" };
+  }
+  if (!r.actionId.endsWith(":run")) return { kind: "skip" };
+  if (createdAtMs === null) return { kind: "malformed_run" };
+  if (typeof r.status !== "string") return { kind: "malformed_run" };
+  const status = r.status;
+  const startedAtMs = parseTimestampMs(r.startedAt);
+  const finishedAtMs = parseTimestampMs(r.finishedAt);
+  if (TERMINAL_STATUSES.has(status) && finishedAtMs === null) {
+    return { kind: "malformed_run" };
+  }
+  if (STARTED_STATUSES.has(status) && startedAtMs === null) {
+    return { kind: "malformed_run" };
+  }
+  const metaRaw = r.additionalMetadata;
+  const meta =
+    typeof metaRaw === "object" && metaRaw !== null && !Array.isArray(metaRaw)
+      ? (metaRaw as Record<string, unknown>)
+      : {};
   return {
     kind: "run",
     row: {
-      id: nonEmptyString(engineMeta.id) ?? nonEmptyString(r.taskExternalId),
-      status: typeof r.status === "string" ? r.status : "",
+      id,
+      status,
       createdAtMs,
-      startedAtMs: parseTimestampMs(r.startedAt),
-      finishedAtMs: parseTimestampMs(r.finishedAt),
+      startedAtMs,
+      finishedAtMs,
       orgId: nonEmptyString(meta.orgId),
       repoFullName: nonEmptyString(meta.repoFullName),
       prNumber: parsePrNumber(meta.prNumber),
@@ -684,7 +731,10 @@ export interface MemSample {
   atMs: number;
   memTotal: number;
   memAvailable: number;
-  /** Null when /proc/vmstat had no `pswpin`; a null sample breaks the swap streak. */
+  /**
+   * Null when /proc/vmstat was unreadable or had no `pswpin`. A null sample inside the
+   * swap window leaves the swap arm unjudgeable (see evaluateRamSwap).
+   */
   pswpin: number | null;
 }
 
@@ -765,6 +815,12 @@ interface RamSwapInput {
  * Samples are contiguous in the list; a tick with no sample (a failed read) does not
  * break a streak, it only makes that tick `unknown`.
  *
+ * SWAP COUNTER UNREADABLE. When the walk back over the swap window reaches a sample
+ * whose `pswpin` is null (a failed /proc/vmstat read) before the streak is broken by a
+ * non-increase, the swap arm cannot be judged: the verdict is `unknown` ("swap counter
+ * unreadable") unless the RAM arm alone is over, in which case it is `over`. Calling it
+ * `under` would clear a firing `ram_swap` on a vmstat read failure.
+ *
  * WARMING UP. Until some retained sample is at least `sustainMs` old the samples cannot
  * span the window, so neither "sustained over" nor "not sustained" is knowable: the
  * verdict is `unknown` ("warming up"). Calling it `under` would clear a `ram_swap` that a
@@ -803,11 +859,15 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
   // must be sustained, and pruneMemSamples keeps exactly that sample, so the verdict does
   // not depend on how much older history happens to be retained.
   let swapWindowBase: MemSample | null = null;
+  let swapCounterUnreadable = false;
   for (let i = sorted.length - 1; i >= 1; i--) {
     const cur = sorted[i];
     const prev = sorted[i - 1];
     if (cur === undefined || prev === undefined) break;
-    if (cur.pswpin === null || prev.pswpin === null) break;
+    if (cur.pswpin === null || prev.pswpin === null) {
+      swapCounterUnreadable = true;
+      break;
+    }
     if (cur.pswpin <= prev.pswpin) break;
     if (prev.atMs <= cutoff) {
       swapWindowBase = prev;
@@ -818,6 +878,14 @@ export function evaluateRamSwap(input: RamSwapInput): TriggerEvaluation {
     swapWindowBase !== null &&
     swapInRate(swapWindowBase, latest) >= SWAP_IN_MIN_PAGES_PER_S;
 
+  if (!ramSustained && swapCounterUnreadable) {
+    // A FIXED phrase: the reason keys the once-per-streak unknown log.
+    return unknownEvaluation(
+      "ram_swap",
+      input.ramFraction,
+      "swap counter unreadable",
+    );
+  }
   const util = round(ramUtilisation(latest));
   const sustainS = Math.round(input.sustainMs / 1000);
   return {

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   armGrowthTriggers,
+  EMPTY_PAGE_WITH_MORE,
   GROWTH_ENGINE_REFRESH_MS,
   GROWTH_ENGINE_REQUEST_TIMEOUT_CAP_MS,
   GROWTH_RUNS_MAX_PAGES,
@@ -260,8 +261,13 @@ describe("readRunWindow", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("an empty page ends the read: an empty window (num_pages 0), or one that shrank", async () => {
-    for (const body of [page([], 1, 0), page([], 2, 5)]) {
+  it("an empty page with no more pages ends the read: num_pages 0, current >= num_pages, or no pagination", async () => {
+    for (const body of [
+      page([], 1, 0),
+      page([], 5, 5),
+      page([], 6, 5),
+      { rows: [] },
+    ]) {
       const fetchImpl = engineFetch(() => jsonResponse(body));
       const r = await readRunWindow({
         ...base,
@@ -270,6 +276,30 @@ describe("readRunWindow", () => {
       expect(r).toEqual({ kind: "rows", rows: [] });
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it("an empty page while current_page < num_pages is unreadable, never the rows read so far (B)", async () => {
+    const full = Array.from({ length: GROWTH_RUNS_PAGE_LIMIT }, () => rawRow());
+    const fetchImpl = engineFetch((offset) =>
+      offset === 0
+        ? jsonResponse(page(full, 1, 5))
+        : jsonResponse(page([], 2, 5)),
+    );
+    expect(
+      await readRunWindow({
+        ...base,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).toEqual({ kind: "unreadable", reason: EMPTY_PAGE_WITH_MORE });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // On the first page too.
+    const first = engineFetch(() => jsonResponse(page([], 1, 2)));
+    expect(
+      await readRunWindow({
+        ...base,
+        fetchImpl: first as unknown as typeof fetch,
+      }),
+    ).toEqual({ kind: "unreadable", reason: EMPTY_PAGE_WITH_MORE });
   });
 
   it("hits the page cap → unreadable 'page cap'", async () => {
@@ -1763,23 +1793,58 @@ describe("armGrowthTriggers (adversarial review N1/N2/N6)", () => {
     return handle?.tick();
   };
 
-  it.each([
-    ["an all-unrecognizable page", [{ foo: 1 }, { bar: 2 }], UNRECOGNIZED_PAGE],
+  const malformed = (fields: Record<string, unknown>): unknown[] => [
+    ...CLEAN,
+    { ...rawRow({ id: "bad" }), ...fields },
+  ];
+  it.each<[string, unknown[], string, number]>([
+    [
+      "an all-unrecognizable page",
+      [{ foo: 1 }, { bar: 2 }],
+      UNRECOGNIZED_PAGE,
+      1,
+    ],
     [
       "one malformed :run row",
-      [...CLEAN, { ...rawRow(), createdAt: "garbage" }],
+      malformed({ createdAt: "garbage" }),
       MALFORMED_RUN_ROW,
+      1,
     ],
+    [
+      "a :run row with no status (A1)",
+      malformed({ status: undefined }),
+      MALFORMED_RUN_ROW,
+      1,
+    ],
+    [
+      "a terminal :run row with no finishedAt (A2)",
+      malformed({ status: "CANCELLED", finishedAt: undefined }),
+      MALFORMED_RUN_ROW,
+      1,
+    ],
+    [
+      "a started :run row with an unparseable startedAt (A3)",
+      malformed({ status: "RUNNING", startedAt: "garbage" }),
+      MALFORMED_RUN_ROW,
+      1,
+    ],
+    [
+      "a task row with an id and a createdAt but no actionId (A4)",
+      malformed({ actionId: undefined }),
+      MALFORMED_RUN_ROW,
+      1,
+    ],
+    ["an empty page before the last (B)", [], EMPTY_PAGE_WITH_MORE, 2],
   ])(
     "%s reads unknown and never clears a firing trigger (N1)",
-    async (_name, rows, reason) => {
+    async (_name, rows, reason, numPages) => {
       const h = harness();
       h.deps.engineRefreshMs = 0;
       const handle = armGrowthTriggers(ENV_ON, h.deps);
       await handle?.firstTick;
       expect(h.posts.map((p) => p.state)).toEqual(["fired"]);
 
-      h.setEngine(() => jsonResponse(page(rows, 1, 1)));
+      h.setEngine(() => jsonResponse(page(rows, 1, numPages)));
       const r = await tickAt(h, handle, 1);
       expect(h.posts.map((p) => p.state)).toEqual(["fired"]);
       expect(r?.snapshot?.triggers.supersede_waste).toMatchObject({

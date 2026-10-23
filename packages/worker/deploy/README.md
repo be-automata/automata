@@ -421,15 +421,16 @@ journal lines alongside both triggers before concluding the box has room.
 | Knob                                   | Default | Notes                                                 |
 | :------------------------------------- | :------ | :---------------------------------------------------- |
 | `WORKER_ALERT_WEBHOOK_URL`             | unset   | Unset = OFF, silent, nothing else is read. See below. |
-| `WORKER_GROWTH_TRIGGER_INTERVAL_S`     | 300     | Floor 30, ceiling 86400 (one day).                    |
+| `WORKER_GROWTH_TRIGGER_INTERVAL_S`     | 300     | Floor 30, ceiling 43200 (half the sustain ceiling).   |
 | `WORKER_GROWTH_TRIGGER_SUSTAIN_S`      | 900     | Floor 60, ceiling 86400; must be ≥ 2 × interval.      |
 | `WORKER_GROWTH_TRIGGER_RAM_FRACTION`   | 0.70    | 0 < x < 1.                                            |
 | `WORKER_ENTERPRISE_QUESTIONNAIRE`      | unset   | `1` turns on the composite's manual arm.              |
 | `WORKER_GROWTH_TRIGGER_TENANT_SIGNALS` | `on`    | `on` or `off`; anything else refuses boot. See below. |
 
-The sustain ceiling is the 24 h dedupe window, like the interval's: a window longer than a
-day could not be announced inside the window that holds its re-fire. With both capped, the
-2 × rule makes 43200 the largest usable interval.
+The sustain ceiling is the 24 h dedupe window: a window longer than a day could not be
+announced inside the window that holds its re-fire. The interval ceiling is derived from
+it: sustain must be ≥ 2 × the interval and is capped at 86400, so 43200 is the largest
+interval that can boot, and a larger one is refused with that reason.
 
 `WORKER_ALERT_WEBHOOK_URL` must be `https:`. Plain `http:` is accepted only when the
 host is a loopback literal (`127.0.0.0/8`, `::1`) or a private IPv4 literal

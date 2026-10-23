@@ -21,16 +21,22 @@ import { formatHours, GROWTH_REFIRE_MS } from "./growth-triggers";
 
 export const GROWTH_TRIGGER_INTERVAL_DEFAULT_S = 300;
 const GROWTH_TRIGGER_INTERVAL_FLOOR_S = 30;
-/** The dedupe window itself (GROWTH_REFIRE_MS): a slower tick could not hold the window it serves. */
-export const GROWTH_TRIGGER_INTERVAL_CEILING_S = GROWTH_REFIRE_MS / 1000;
 export const GROWTH_TRIGGER_SUSTAIN_DEFAULT_S = 900;
 const GROWTH_TRIGGER_SUSTAIN_FLOOR_S = 60;
 /**
- * The dedupe window again: a "sustained" condition that must last longer than a day would
- * be announced after the window that holds its re-fire has already turned over, and the
- * /proc sample buffer (sustain ÷ interval samples) would grow without a bound worth having.
+ * The dedupe window (GROWTH_REFIRE_MS): a "sustained" condition that must last longer than
+ * a day would be announced after the window that holds its re-fire has already turned
+ * over, and the /proc sample buffer (sustain ÷ interval samples) would grow without a
+ * bound worth having.
  */
 export const GROWTH_TRIGGER_SUSTAIN_CEILING_S = GROWTH_REFIRE_MS / 1000;
+/**
+ * Half the sustain ceiling, derived: sustain must be ≥ 2 × the interval and is capped at
+ * GROWTH_TRIGGER_SUSTAIN_CEILING_S, so no larger interval could ever boot. Refusing it
+ * here names the real reason instead of a 2 × refusal the operator cannot satisfy.
+ */
+export const GROWTH_TRIGGER_INTERVAL_CEILING_S =
+  GROWTH_TRIGGER_SUSTAIN_CEILING_S / 2;
 export const GROWTH_TRIGGER_RAM_FRACTION_DEFAULT = 0.7;
 
 interface GrowthTriggerConfig {
@@ -174,7 +180,9 @@ export function loadGrowthTriggerConfig(
     floor: GROWTH_TRIGGER_INTERVAL_FLOOR_S,
     ceiling: {
       value: GROWTH_TRIGGER_INTERVAL_CEILING_S,
-      hint: `a slower tick could not hold the ${formatHours(GROWTH_REFIRE_MS)} dedupe window it serves`,
+      hint:
+        `WORKER_GROWTH_TRIGGER_SUSTAIN_S must be at least twice the interval and is capped ` +
+        `at ${GROWTH_TRIGGER_SUSTAIN_CEILING_S} s, one day (the ${formatHours(GROWTH_REFIRE_MS)} dedupe window)`,
     },
     floorHint:
       "WORKER_GROWTH_TRIGGER_SUSTAIN_S must also be ≥ 2 × the interval",

@@ -148,7 +148,6 @@ describe("parseRunRow", () => {
     expect(
       parseRunRow({ ...base, actionId: "agent-run:on-failure-task" }),
     ).toBeNull();
-    expect(parseRunRow({ ...base, actionId: undefined })).toBeNull();
     expect(parseRunRow(null)).toBeNull();
     expect(parseRunRow("row")).toBeNull();
   });
@@ -173,21 +172,115 @@ describe("parseRunRow", () => {
         createdAt: "garbage",
       }),
     ).toEqual({ kind: "skip" });
-    for (const raw of [null, "row", 7, { ...base, actionId: undefined }]) {
+    for (const raw of [
+      null,
+      "row",
+      7,
+      { foo: 1 },
+      { actionId: 7 },
+      // No actionId and no task id, or no createdAt: nothing marks it as a task row.
+      {
+        ...base,
+        actionId: undefined,
+        metadata: undefined,
+        taskExternalId: undefined,
+      },
+      { ...base, actionId: undefined, createdAt: undefined },
+    ]) {
       expect(classifyRunRow(raw)).toEqual({ kind: "unrecognized" });
     }
+  });
+
+  describe("malformed :run fields are malformed_run, never a skip or a row (A)", () => {
+    const MALFORMED: Array<[string, Record<string, unknown>]> = [
+      ["status missing", { ...base, status: undefined }],
+      ["status not a string", { ...base, status: 3 }],
+      ["COMPLETED without finishedAt", { ...base, finishedAt: undefined }],
+      [
+        "FAILED with an unparseable finishedAt",
+        { ...base, status: "FAILED", finishedAt: "garbage" },
+      ],
+      [
+        "CANCELLED without finishedAt",
+        { ...base, status: "CANCELLED", finishedAt: undefined },
+      ],
+      [
+        "RUNNING without startedAt",
+        {
+          ...base,
+          status: "RUNNING",
+          startedAt: undefined,
+          finishedAt: undefined,
+        },
+      ],
+      ["COMPLETED without startedAt", { ...base, startedAt: undefined }],
+      [
+        "FAILED with the Go zero startedAt",
+        { ...base, status: "FAILED", startedAt: "0001-01-01T00:00:00Z" },
+      ],
+      [
+        "no actionId but a metadata.id and a createdAt",
+        { ...base, actionId: undefined, taskExternalId: undefined },
+      ],
+      [
+        "no actionId but a taskExternalId and a createdAt",
+        { ...base, actionId: undefined, metadata: undefined },
+      ],
+      [
+        "a non-string actionId with a task id and a createdAt",
+        { ...base, actionId: 7 },
+      ],
+    ];
+    it.each(MALFORMED)("%s", (_name, raw) => {
+      expect(classifyRunRow(raw)).toEqual({ kind: "malformed_run" });
+      expect(parseRunRow(raw)).toBeNull();
+    });
+
+    it("QUEUED without startedAt, and CANCELLED without startedAt, stay rows", () => {
+      expect(
+        parseRunRow({
+          ...base,
+          status: "QUEUED",
+          startedAt: undefined,
+          finishedAt: undefined,
+        }),
+      ).toMatchObject({
+        status: "QUEUED",
+        startedAtMs: null,
+        finishedAtMs: null,
+      });
+      expect(
+        parseRunRow({ ...base, status: "CANCELLED", startedAt: undefined }),
+      ).toMatchObject({ status: "CANCELLED", startedAtMs: null });
+      expect(
+        parseRunRow({ ...base, status: "RUNNING", finishedAt: undefined }),
+      ).toMatchObject({ status: "RUNNING", finishedAtMs: null });
+    });
+
+    it("a non-:run row with a string actionId is still skipped, whatever its fields", () => {
+      expect(
+        classifyRunRow({
+          ...base,
+          actionId: "agent-run:on-failure-task",
+          status: undefined,
+          startedAt: undefined,
+          finishedAt: undefined,
+        }),
+      ).toEqual({ kind: "skip" });
+    });
   });
 
   it("tolerates missing or invalid optional fields", () => {
     const r = parseRunRow({
       actionId: "agent-run:run",
+      status: "QUEUED",
       createdAt: "2026-10-15T10:00:00Z",
       startedAt: "0001-01-01T00:00:00Z",
       finishedAt: 12,
       additionalMetadata: { orgId: "  ", prNumber: "4x2", repoFullName: 7 },
     });
     expect(r).toMatchObject({
-      status: "",
+      status: "QUEUED",
       startedAtMs: null,
       finishedAtMs: null,
       orgId: null,
@@ -206,6 +299,7 @@ describe("parseRunRow", () => {
 describe("parseRunRow: numeric prNumber", () => {
   const raw = (prNumber: unknown) => ({
     actionId: "agent-run:run",
+    status: "QUEUED",
     createdAt: "2026-10-15T10:00:00Z",
     additionalMetadata: { repoFullName: "acme/app", prNumber },
   });
@@ -984,7 +1078,7 @@ describe("RAM / swap", () => {
     expect(evalRam(pruneMemSamples(heavy, NOW, SUSTAIN)).verdict).toBe("over");
   });
 
-  it("a flat pswpin step, a too-short streak, or a null counter breaks the swap arm", () => {
+  it("a flat pswpin step or a too-short streak breaks the swap arm", () => {
     expect(
       evalRam([
         sample(15, 0.2, 100),
@@ -1000,13 +1094,65 @@ describe("RAM / swap", () => {
         sample(0, 0.2, 20_000),
       ]).verdict,
     ).toBe("under");
+  });
+
+  it("RAM under + a null pswpin in the swap window → unknown, never under (E)", () => {
     expect(
       evalRam([
         sample(15, 0.2, 100),
         sample(10, 0.2, null),
         sample(0, 0.2, 20_000),
+      ]),
+    ).toMatchObject({
+      verdict: "unknown",
+      value: null,
+      reason: "swap counter unreadable",
+    });
+    // The newest sample's counter unreadable is the same.
+    expect(
+      evalRam([sample(15, 0.2, 100), sample(5, 0.2, 200), sample(0, 0.2, null)])
+        .reason,
+    ).toBe("swap counter unreadable");
+    // A null OLDER than the window base does not matter: the window is judged.
+    expect(
+      evalRam([
+        sample(20, 0.2, null),
+        sample(15, 0.2, 100),
+        sample(10, 0.2, 101),
+        sample(0, 0.2, 102),
       ]).verdict,
     ).toBe("under");
+    // A non-increase newer than the null already decides the arm: under.
+    expect(
+      evalRam([
+        sample(15, 0.2, 100),
+        sample(10, 0.2, null),
+        sample(5, 0.2, 500),
+        sample(0, 0.2, 500),
+      ]).verdict,
+    ).toBe("under");
+  });
+
+  it("RAM over + a null pswpin in the swap window → over (E)", () => {
+    expect(
+      evalRam([
+        sample(15, 0.9, 100),
+        sample(10, 0.9, null),
+        sample(0, 0.9, 20_000),
+      ]).verdict,
+    ).toBe("over");
+  });
+
+  it("a firing ram_swap is not cleared by a vmstat read failure (E)", () => {
+    const firing = { firing: true, lastFiredAtMs: NOW - 60 * MIN };
+    const e = evalRam([
+      sample(15, 0.2, 100),
+      sample(10, 0.2, null),
+      sample(0, 0.2, 20_000),
+    ]);
+    const t = decideTransition(firing, e.verdict, NOW);
+    expect(t.action).toBe("none");
+    expect(commitTransition(firing, t, true).firing).toBe(true);
   });
 
   it("is unknown when this tick's read failed or there are no samples", () => {

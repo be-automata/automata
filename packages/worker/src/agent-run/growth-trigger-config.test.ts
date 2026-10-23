@@ -152,7 +152,7 @@ describe("loadGrowthTriggerConfig", () => {
       /WORKER_GROWTH_TRIGGER_INTERVAL_S=29 is below the floor of 30 s/,
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "30.5" })).toThrow(
-      'WORKER_GROWTH_TRIGGER_INTERVAL_S must be an integer >= 30 and <= 86400, got "30.5"',
+      'WORKER_GROWTH_TRIGGER_INTERVAL_S must be an integer >= 30 and <= 43200, got "30.5"',
     );
     expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "abc" })).toThrow(
       /WORKER_GROWTH_TRIGGER_INTERVAL_S/,
@@ -170,23 +170,37 @@ describe("loadGrowthTriggerConfig", () => {
     );
   });
 
-  it("caps the interval at one day, naming the knob and the bound", () => {
-    expect(GROWTH_TRIGGER_INTERVAL_CEILING_S).toBe(86_400);
-    // With sustain capped at one day too, the 2 × rule bounds the usable interval at half a day.
+  it("caps the interval at half the sustain ceiling (G), saying why", () => {
+    expect(GROWTH_TRIGGER_INTERVAL_CEILING_S).toBe(
+      GROWTH_TRIGGER_SUSTAIN_CEILING_S / 2,
+    );
+    expect(GROWTH_TRIGGER_INTERVAL_CEILING_S).toBe(43_200);
+    // The ceiling itself boots, with sustain at its own ceiling.
     expect(
       load({
         WORKER_GROWTH_TRIGGER_INTERVAL_S: "43200",
         WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86400",
       })?.intervalS,
     ).toBe(43_200);
+    const ceilingError =
+      "WORKER_GROWTH_TRIGGER_INTERVAL_S=43201 is above the ceiling of 43200 s " +
+      "(WORKER_GROWTH_TRIGGER_SUSTAIN_S must be at least twice the interval and is " +
+      "capped at 86400 s, one day (the 24 h dedupe window))";
+    // Above it, the interval's own refusal — never the 2 × refusal no sustain can satisfy.
     expect(() =>
       load({
-        WORKER_GROWTH_TRIGGER_INTERVAL_S: "86401",
-        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "172802",
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "43201",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86400",
       }),
-    ).toThrow(
-      "WORKER_GROWTH_TRIGGER_INTERVAL_S=86401 is above the ceiling of 86400 s " +
-        "(a slower tick could not hold the 24 h dedupe window it serves)",
+    ).toThrow(ceilingError);
+    expect(() =>
+      load({
+        WORKER_GROWTH_TRIGGER_INTERVAL_S: "86400",
+        WORKER_GROWTH_TRIGGER_SUSTAIN_S: "86400",
+      }),
+    ).toThrow(/INTERVAL_S=86400 is above the ceiling of 43200 s/);
+    expect(() => load({ WORKER_GROWTH_TRIGGER_INTERVAL_S: "43201" })).toThrow(
+      ceilingError,
     );
   });
 

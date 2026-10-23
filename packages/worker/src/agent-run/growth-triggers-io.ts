@@ -94,6 +94,8 @@ const DEADLINE_EXCEEDED = "tick deadline exceeded";
 export const MALFORMED_RUN_ROW = "engine read: malformed run row";
 /** N1: a non-empty page with no row in the engine's row shape. */
 export const UNRECOGNIZED_PAGE = "engine read: no recognizable row on a page";
+/** An empty page whose pagination says more pages remain: the window is incomplete. */
+export const EMPTY_PAGE_WITH_MORE = "engine read: empty page before the last";
 /** N6: the reason the run triggers read `unknown` on a box with tenant signals off. */
 export const TENANT_SIGNALS_OFF = "tenant signals off on this box";
 /** N2: the longest a timed-out POST's retry is backed off. */
@@ -269,7 +271,11 @@ async function fetchRunsPage(
  * the read goes on while `current_page < num_pages`, whatever the page size — an engine
  * that caps `limit` below GROWTH_RUNS_PAGE_LIMIT returns short pages that are NOT the
  * end. Only without pagination does a short page end the read. A page with no rows ends
- * the read (an empty window, or a collection that shrank between pages). More than
+ * the read when nothing says more remain (an empty window reports `num_pages: 0`, or
+ * `current_page >= num_pages`, or there is no pagination). An empty page while
+ * `current_page < num_pages` is `unreadable` (EMPTY_PAGE_WITH_MORE): the collection
+ * shrank between pages or the engine misreported, and the rows read so far are not the
+ * whole window — handing them on would understate every run signal. More than
  * GROWTH_RUNS_MAX_PAGES pages → `unreadable` "page cap": a partial window would silently
  * understate every run signal.
  *
@@ -345,6 +351,9 @@ export async function readRunWindow(
     if (parsed.rows.length > 0 && recognized === 0) {
       return { kind: "unreadable", reason: UNRECOGNIZED_PAGE };
     }
+    if (parsed.rows.length === 0 && parsed.hasMore === true) {
+      return { kind: "unreadable", reason: EMPTY_PAGE_WITH_MORE };
+    }
 
     const more =
       parsed.rows.length > 0 &&
@@ -370,8 +379,9 @@ type ReadText = (filePath: string) => Promise<string>;
 /**
  * One RAM/swap sample. An unreadable or malformed `/proc/meminfo` is `unreadable` (the
  * RAM trigger reads `unknown` this tick). An unreadable `/proc/vmstat` is NOT: the RAM
- * arm is still honest, so the sample carries `pswpin: null`, which breaks the swap
- * streak instead of inventing one.
+ * arm is still honest, so the sample carries `pswpin: null`: the swap arm is then
+ * unjudgeable over any window that holds it (`unknown` unless the RAM arm is over),
+ * never invented and never `under`.
  */
 export async function readMemSample(
   readText: ReadText,
