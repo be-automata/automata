@@ -24,53 +24,25 @@ import {
 } from "../../../../../deploy/lib/review-skill-file";
 
 /**
- * Anti-drift guard (ADR-036 rider): the emit-skill's fenced-JSON EXAMPLE must parse
- * against the SAME schema the control-plane parser uses. If the SKILL.md contract and
- * emittedReviewIntentSchema drift (a renamed field, a changed verdict enum), the agent
- * would emit an intent the parser rejects → a degraded COMMENT on every review run.
- * This fails CI the instant the doc example stops parsing.
+ * Anti-drift guard (ADR-036 rider, ADR-009): the emit-skill's examples must
+ * agree with the parser. The github-ops verdict example is a type sketch
+ * (`"approve" | "request_changes" | …`), so its field names are checked against
+ * emittedReviewIntentSchema in github-ops-review-mode.test.ts. The LAST json
+ * block of the flattened body is the `unable_to_review` example, and that one
+ * must parse as the agent's no-verdict report: if the example and the parser
+ * drift, an agent that follows the skill emits a block the parser reads as
+ * garbage, and the PR author is told the run was unreadable instead of why no
+ * review was possible.
  */
 
 const SKILL_MD = fileURLToPath(
   new URL("../../../../../deploy/skills/github-ops/SKILL.md", import.meta.url),
 );
 
-describe("emit-skill contract ↔ parser (no drift)", () => {
-  it("the SKILL.md fenced-JSON example parses against emittedReviewIntentSchema", () => {
-    const doc = readFileSync(SKILL_MD, "utf8");
-    // parseReviewIntent extracts the LAST ```json block — the contract example.
-    const res = parseReviewIntent(doc);
-    expect(res.ok).toBe(true);
-    if (res.ok) {
-      // Sanity that it's the review contract, not some other JSON.
-      expect(res.intent.verdict).toBe("request_changes");
-      expect(typeof res.intent.commit).toBe("string");
-      expect(typeof res.intent.summary).toBe("string");
-      expect(res.intent.findings?.[0]).toMatchObject({
-        severity: "error",
-        path: expect.any(String),
-        line: expect.any(Number),
-        quote: expect.any(String),
-      });
-    }
-  });
-});
-
-/**
- * ADR-009: the skill's `unable_to_review` example must parse as the agent's
- * no-verdict report. If the example and the parser drift, an agent that follows
- * the skill emits a block the parser reads as garbage — the PR author is told
- * the run was unreadable instead of being told why no review was possible.
- */
 describe("emit-skill unable_to_review example ↔ parser (no drift)", () => {
-  it("the SKILL.md unable example parses as a no-verdict report from the agent", () => {
-    const doc = readFileSync(SKILL_MD, "utf8");
-    const section = doc.slice(
-      doc.indexOf("## If you cannot review"),
-      doc.indexOf("## How you deliver your verdict"),
-    );
-    expect(section.length).toBeGreaterThan(0);
-    const res = parseReviewIntent(section);
+  it("the flattened body's last block parses as a no-verdict report from the agent", async () => {
+    const body = await loadReviewSkillBody();
+    const res = parseReviewIntent(body);
     expect(res).toMatchObject({ ok: false, source: "agent" });
     if (!res.ok && res.source === "agent") {
       expect(res.reason.length).toBeGreaterThan(0);
@@ -78,12 +50,16 @@ describe("emit-skill unable_to_review example ↔ parser (no drift)", () => {
     }
   });
 
-  it("the unable example sits BEFORE the verdict example, which stays the last block", () => {
-    // parseReviewIntent reads the LAST json block; the loader and the first
-    // guard in this file both rely on that block being the verdict contract.
-    const doc = readFileSync(SKILL_MD, "utf8");
-    expect(doc.indexOf("## If you cannot review")).toBeLessThan(
-      doc.indexOf("## How you deliver your verdict"),
+  it("the delivery section teaches both the verdict and the unable_to_review block", async () => {
+    const body = await loadReviewSkillBody();
+    const delivery = body.slice(
+      body.indexOf("## How you deliver your verdict"),
+      body.indexOf("## Your job"),
+    );
+    expect(delivery).toMatch(/```json\n\{ "verdict": "approve"/);
+    expect(delivery).toMatch(/```json\n\{ "verdict": "unable_to_review"/);
+    expect(delivery.indexOf('"verdict": "approve"')).toBeLessThan(
+      delivery.indexOf('"verdict": "unable_to_review"'),
     );
   });
 });
@@ -134,27 +110,30 @@ describe("seed inlines the tracked review skill (no box-local path)", () => {
     expect(seed).toContain("reviewSkillBody");
   });
 
-  it("the loader returns the tracked methodology with its verdict contract", () => {
-    const body = loadReviewSkillBody();
+  it("the loader returns the tracked methodology with its verdict contract", async () => {
+    const body = await loadReviewSkillBody();
     expect(body.length).toBeGreaterThan(500);
     // Frontmatter stripped: no leading fence, and the registry metadata is gone.
     expect(body.startsWith("---")).toBe(false);
     expect(body).not.toContain("\nname: github-ops");
+    // Flattened: every include is inlined, so the agent reads one text.
+    expect(body).not.toContain("<!-- include");
+    expect(body).toContain("The four `/simplify` lenses");
     // Still carries the wire contract the parser depends on.
-    expect(parseReviewIntent(body).ok).toBe(true);
+    expect(body).toMatch(/```json[\s\S]*"verdict"[\s\S]*```/);
   });
 
-  it("the loader rejects a skill missing the verdict contract", () => {
+  it("the loader rejects a skill missing the verdict contract", async () => {
     const bogus = fileURLToPath(
       new URL("./parse-review-intent.ts", import.meta.url),
     );
-    expect(() => loadReviewSkillBody(bogus)).toThrow(
+    await expect(loadReviewSkillBody(bogus)).rejects.toThrow(
       /no fenced-json verdict contract/,
     );
   });
 
-  it("the loader reports a missing skill file rather than seeding without it", () => {
-    expect(() => loadReviewSkillBody("/nonexistent/SKILL.md")).toThrow(
+  it("the loader reports a missing skill file rather than seeding without it", async () => {
+    await expect(loadReviewSkillBody("/nonexistent/SKILL.md")).rejects.toThrow(
       /not readable/,
     );
   });

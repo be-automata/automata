@@ -11,7 +11,7 @@ import {
   revertSkillToVersion,
   type RepoSkillVersionMeta,
 } from "@terragon/shared/model/repo-skills";
-import { validateSkillBody } from "@/server-lib/review/review-skill";
+import { validateSkillBodyForSave } from "@/server-lib/review/skill-save-checks";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { UserFacingError } from "@/lib/server-actions";
 
@@ -22,7 +22,10 @@ import { UserFacingError } from "@/lib/server-actions";
  * version history are the audit trail). Saves run THE shared per-skill validator
  * (`validateSkillBody` — the same registry the resolver applies at dispatch)
  * BEFORE any write, so a stored version can never be one the resolver would
- * refuse and silently fall back from. `source: "dashboard"` marks provenance
+ * refuse and silently fall back from. They also run the save-time-only rules
+ * (`validateSkillBodyForSave`, skill-save-checks.ts: a PR-diffing skill names
+ * its base as `{{baseBranch}}`), which the resolver never applies to stored
+ * versions. `source: "dashboard"` marks provenance
  * (the API route and skill-push.ts write `"api"` instead).
  */
 
@@ -147,7 +150,7 @@ export const saveRepoSkillAction = userOnlyAction(
     // Write-boundary contract check — surface the validator's own message so
     // the editor shows WHAT is missing (e.g. the fenced-json verdict contract).
     try {
-      validateSkillBody(skillName, body, "dashboard editor");
+      validateSkillBodyForSave(skillName, body, "dashboard editor");
     } catch (err) {
       throw new UserFacingError(
         err instanceof Error ? err.message : String(err),

@@ -393,12 +393,13 @@ describe("the tracked ported skills flatten completely", () => {
     );
   });
 
-  test("github-ops-ported: partials inlined, nothing fetched", async () => {
+  test("github-ops: partials inlined, nothing fetched", async () => {
     const { fetchText, calls } = fakeFetch({});
-    const body = await flattenSkillBody(
-      stripFrontmatter(read("github-ops-ported")),
-      { readPartial, fetchText, stripFrontmatter },
-    );
+    const body = await flattenSkillBody(stripFrontmatter(read("github-ops")), {
+      readPartial,
+      fetchText,
+      stripFrontmatter,
+    });
     assert.equal(calls.length, 0);
     assert.doesNotMatch(body, /<!-- include/);
     assert.match(body, /The four `\/simplify` lenses/);
