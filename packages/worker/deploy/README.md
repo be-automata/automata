@@ -395,7 +395,8 @@ network (`--network none`) and, until C3 (#430) bridges the egress proxy and bro
 sockets, no route to the control plane either: this path is for proving the container lifecycle,
 not for serving real runs.
 
-Install the rootless daemon on the throwaway box (root; idempotent; never on production):
+Install the rootless daemon on the throwaway box (root; idempotent). On production it is installed
+only through `deploy/provision-execution-box.sh --prepare-only` (below), which calls this installer:
 
 ```bash
 packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata
@@ -426,6 +427,140 @@ sudo -u automata packages/worker/deploy/linux/prove-container-limits.sh \
 `prove-container-limits.sh` prints one `PASS`/`FAIL` line per probe (memory OOM-kill, pids with a
 control run, cpu throttling, and `docker rm -f` reaping a `setsid` child) and exits 0 only when all
 pass.
+
+### Provisioning a box: `deploy/provision-execution-box.sh` (ADR-013 P2)
+
+One idempotent script brings a box to the container model (ADR-013 "Fleet"). It reuses
+`install-rootless-docker.sh` for the daemon (it does not duplicate it) and does the steps above in
+order: packages, rootless daemon, image pull **by digest** into the rootless store (a tag, or a
+tag next to a digest, is refused with exit 2 before anything runs: the worker's own rule),
+`gh attestation verify oci://…@sha256:… --repo be-automata/automata`, `verify.sh` as the worker
+account, then it records the digest in `/etc/automata/batteries-image.state` (`CURRENT=`, and the
+digest it replaces as `PREVIOUS=`) and keeps the previous digest pulled (it pulls it back if it is
+gone, and never removes an image), so an image rollback is an env change. Root; from a checkout at
+the revision being deployed:
+
+```bash
+img=ghcr.io/be-automata/automata-batteries@sha256:<digest>
+# Production box, before the release (plan P2): rootless daemon + verified digest only.
+sudo GH_TOKEN=<read-only token> deploy/provision-execution-box.sh --image "$img" --prepare-only
+# Fresh box (throwaway, or a new fleet box): also the worker unit, launcher and env.
+sudo GH_TOKEN=<read-only token> deploy/provision-execution-box.sh --image "$img"
+# Either, reporting only:
+sudo deploy/provision-execution-box.sh --image "$img" --prepare-only --dry-run
+```
+
+It prints one `ok|changed|skip <step> <detail>` line per step (installer and `apt` output go to
+stderr) and stops at the first `FAIL <step> <detail>` with exit 1. A second run on the same box
+prints only `ok` and `skip`. `--dry-run` changes nothing and reports what each step would change;
+the read-only checks (attestation, `verify.sh`) still run when the image is already present.
+Options: `--worker-user` (default `automata`), `--repo` (default: the checkout holding the script).
+
+- **`--prepare-only`** (the production box until the release PR): the four `worker-*` steps print
+  `skip`. No worker unit, launcher, env file, nft table, slot account, sudoers line or drop-in is
+  touched, and the host path keeps running. The installer does add the worker account to
+  `automata-docker` and to `automata-runner`'s group; a running worker picks those up only at its
+  next restart, which it does not need before the release.
+- **Full mode** also checks the base bring-up (`node` 24 and `pnpm`, from `cloud-init.yaml`: checked,
+  not installed), renders `linux/run-worker.sh.template` to `~/.automata/run-worker.sh` and
+  `linux/automata-worker.service` to `/etc/systemd/system/` (enabled, **never started or restarted**:
+  restart the worker yourself at an idle moment), and sets three keys in
+  `~/.automata/worker-box.env`, keeping every other line: `WORKER_BATTERIES_IMAGE`,
+  `WORKER_CONTAINER_DOCKER_SOCKET` and `WORKER_CONTAINER_RUN_GID` (`automata-runner`'s primary gid).
+  A new env file is created `0600` with only those keys: add the box's secrets and the slot tuple by
+  hand. Where the #367 loopback fence is provisioned (`/etc/automata/loopback-nft.conf` and its
+  loader), the rendered unit keeps its `ExecStartPre=+…nft-loopback-load.sh`; where it is not, the
+  line is left out of the render (it would fail every start, and a container has its own loopback).
+- **Never, in any mode:** `WORKER_DEV_CONTAINER_RUNS` (set by hand on the throwaway box only), and
+  nothing host-path is removed (accounts, sudoers, nft tables, drop-ins, battery trees: that is P4).
+- **No `gh` on the box:** the attestation step prints `skip` and a `WARNING` block on stderr saying
+  provenance was **not** verified. Install `gh` and re-run before the first run uses the digest.
+  `gh attestation verify` needs a token (`GH_TOKEN`; any read-only one).
+
+### Security probes: `linux/container-security-probes.sh` (ADR-013, seven probes)
+
+The script runs **inside** a run container as `agent` and prints one `PASS|FAIL|SKIP <n> <name>
+<detail>` line per probe; it exits non-zero if any probe fails. A probe that cannot gather its
+evidence fails rather than passes:
+
+| n   | name                 | expected                                                                                                                                                          |
+| --- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `egress-denied`      | `CONNECT` to `--denied-host` (default `example.org`) through the run's proxy (`127.0.0.1:3128`) refused with 403; no interface but `lo`, no route, no direct dial |
+| 2   | `engine-unreachable` | `7077`/`8888` on loopback, `10.0.2.2`, `172.17.0.1`, `169.254.169.254` and every `--host-addr` (×7077/8888/22) refuse or are unreachable                          |
+| 3   | `userns-mapping`     | container root maps to `--runner-uid` (`automata-runner`), `agent` to a subordinate uid (≥ 100000)                                                                |
+| 4   | `no-capabilities`    | `CapEff`, `CapPrm`, `CapBnd`, `CapAmb` zero; `NoNewPrivs` 1                                                                                                       |
+| 5   | `readonly-rootfs`    | rootfs dirs `EROFS`; `/workspace`, `HOME`, `/opt/flutter`, `/tmp`, `/dev/shm` writable                                                                            |
+| 6   | `review-no-write`    | review lane: `/run/automata` holds only `daemon.sock` and `egress-proxy.sock`, no GitHub token in any env or file in reach, `git push --dry-run` fails. Else SKIP |
+| 7   | `run-isolation`      | pid 1 is the container's init, no host/worker process visible, only the run's own mounts, no `--peer` token visible anywhere in reach                             |
+
+The lane comes from `--lane` or the container's `AUTOMATA_RUN_LANE`. Two checks are host-side by
+nature: probe 1's audit row and probe 7's two containers started together.
+
+**Scope choice: there is no probe lane in the worker yet.** ADR-013 says the worker "can launch [the
+probes] as a run of a dedicated probe lane"; a real lane touches dispatch, lane resolution and the
+run path, which is larger than P2. The host-side driver below gets the same evidence: it runs the
+script inside the containers the worker itself built (preferred: real argv, real proxy, real broker
+sockets), or in a standalone container that mirrors `src/agent-run/container-argv.ts`.
+
+**Driver A, live runs (all seven).** On the throwaway box (`WORKER_DEV_CONTAINER_RUNS=1`), start a
+review run and a task run at the same time (two slots), then, while both containers are up:
+
+```bash
+d() { sudo -u automata docker -H unix:///run/automata-docker/docker.sock "$@"; }
+d ps --filter label=automata.box --format '{{.Names}} {{.Label "automata.lane"}} {{.Label "automata.run"}}'
+# For each container, with the OTHER run's id as --peer:
+d exec -i <name> bash -s -- --runner-uid "$(id -u automata-runner)" --host-addr <box public IP> \
+  --peer <other run id> --allow-url https://api.anthropic.com \
+  < packages/worker/deploy/linux/container-security-probes.sh
+```
+
+`docker exec` inherits the container's user, groups, capabilities and namespaces, so the script
+stands exactly where the agent stands. It reads the run's proxy URL (and its proxy credential, never
+printed) from the run's own processes, as the agent could. Then the audit half of probe 1, against
+the database the www app writes (`start=` is printed on the script's first line):
+
+```sql
+select run_id, destination_host, action, mode, created_at from egress_events
+ where destination_host = 'example.org' and created_at >= '<start>' order by created_at;
+-- expect one action='deny', mode='enforce' row per probed container
+```
+
+**Driver B, standalone (probes 2-7, no live run needed).** Mirrors the run argv (labels and
+`--log-driver none` left out so `docker run` can print). There is no worker proxy here, so probe 1
+is left to driver A (`--only 2,3,4,5,6,7`). Both containers run at once and each names the other as
+its peer; `--self` proves each looked at its own workspace:
+
+```bash
+img=ghcr.io/be-automata/automata-batteries@sha256:<digest>
+gid=$(id -g automata-runner)
+sudo install -d -m 0755 -o automata -g automata /var/tmp/automata-probe
+probe_run() { # NAME SELF PEER LANE
+  local dir=/var/tmp/automata-probe/$1
+  sudo -u automata install -d -m 2770 -g "$gid" "$dir" "$dir/sock"
+  sudo -u automata git clone -q https://github.com/<test-org>/<test-repo>.git "$dir/repo"
+  echo "$2" | sudo -u automata tee "$dir/repo/.automata-probe-token" >/dev/null
+  sudo -u automata chgrp -R "$gid" "$dir/repo" && sudo -u automata chmod -R g+rwX "$dir/repo"
+  sudo -u automata docker -H unix:///run/automata-docker/docker.sock run --rm -i \
+    --name "automata-probe-$1" --pull never --init --network none --cap-drop ALL \
+    --security-opt no-new-privileges --read-only --user 10001:10001 --workdir /workspace \
+    --memory 1500m --memory-swap 1500m --pids-limit 4096 --cpus 2 \
+    --tmpfs /tmp:rw,nosuid,nodev,size=536870912,mode=1777 --shm-size 268435456b \
+    --mount "type=bind,src=$dir/repo,dst=/workspace" \
+    --mount "type=bind,src=$dir/sock,dst=/run/automata" \
+    --mount type=bind,src=/opt/automata-platform/packages/daemon/dist/index.js,dst=/opt/automata-daemon/index.js,readonly \
+    --mount type=volume,dst=/home/agent --mount type=volume,dst=/opt/flutter \
+    --mount type=volume,dst=/opt/somnio-ai-tools/agent-rules/adapters \
+    --group-add 0 --env AUTOMATA_RUN_LANE="$4" --entrypoint /bin/bash "$img" \
+    -s -- --only 2,3,4,5,6,7 --runner-uid "$(id -u automata-runner)" --host-addr <box public IP> \
+    --self "$2" --peer "$3" < packages/worker/deploy/linux/container-security-probes.sh
+}
+probe_run a probe-run-aaaa1111 probe-run-bbbb2222 review >a.out 2>&1 &
+probe_run b probe-run-bbbb2222 probe-run-aaaa1111 review >b.out 2>&1 &
+wait; cat a.out b.out; sudo rm -rf /var/tmp/automata-probe
+```
+
+A green P2 (and the post-release check) is driver A with every line `PASS` (probe 6 `SKIP` on the
+task container), plus the `deny` rows.
 
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
