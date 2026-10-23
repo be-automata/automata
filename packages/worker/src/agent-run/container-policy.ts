@@ -8,6 +8,7 @@ import {
   botGitIdentity,
   brokeredGitAuthConfig,
   buildRunProxyEnv,
+  gitProxyAuthConfig,
   isReservedRepoEnvKey,
 } from "./daemon-env";
 import { mergeForegroundOnlySettings } from "./foreground-only-hook";
@@ -129,6 +130,9 @@ export function buildContainerRunEnv(
   Object.assign(env, identity.env);
   const gitConfig: Array<[string, string]> = [
     ...(broker ? brokeredGitAuthConfig(broker) : []),
+    // A credentialed proxy (N > 1): Basic up front, or every git call over it
+    // is a 407 the proxy audits as a deny (box-proven: "Proxy CONNECT aborted").
+    ...gitProxyAuthConfig(opts.egressProxyUrl),
     ["credential.helper", ""],
     ...identity.config,
     // The clone is owned by the worker's uid on the host, never the

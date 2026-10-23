@@ -467,6 +467,7 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
     );
     expect(env).toContain("export AUTOMATA_DAEMON_CALLBACK_VIA_PROXY='1'");
     expect(env).toContain("url.http://127.0.0.1:3129/.insteadOf");
+    expect(env).toMatch(/GIT_CONFIG_KEY_\d+='http\.proxyAuthMethod'/);
     expect(env).toContain("export GH_TOKEN='run-bearer'");
     expect(env).not.toContain(String(proxyPort));
     expect(files[".config/gh/config.yml"]).toBe(
