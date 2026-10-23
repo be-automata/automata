@@ -1097,4 +1097,32 @@ describe("executeMergeAudit — provider_unavailable (#441)", () => {
       "did not produce a usable result",
     );
   });
+
+  // Card: protects=#472, a merged audit whose credential was rejected says
+  // so and names the reconnect; fails_when=it posts the generic "did not
+  // produce a usable result" or touches the tracker; no_claim=classification.
+  it("a rejected credential names the reconnect and changes no ticket", async () => {
+    const tracker = fakeTracker([issue("ACME-1")]);
+    const comments = fakeComments();
+    const outcome = await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText:
+        "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+      providerUnavailable: { kind: "auth_rejected" },
+      config: config("live"),
+      tracker: tracker.client,
+      comments: comments.client,
+      logger,
+    });
+    expect(outcome).toEqual({
+      outcome: "degraded_comment",
+      reason: "provider_unavailable: auth_rejected",
+    });
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    expect(comments.upserts[0]!.mode).toBe("replace-notice");
+    expect(comments.upserts[0]!.body).toContain(
+      "The audit run for ACME-1 could not run. Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. No ticket was changed.",
+    );
+  });
 });

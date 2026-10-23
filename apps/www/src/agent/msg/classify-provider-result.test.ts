@@ -465,3 +465,95 @@ describe("resolveResetText — clock edges (#441 refinement)", () => {
     expect(resolveResetText("17:75", NOW)).toBeUndefined();
   });
 });
+
+describe("classifyProviderResult — rejected credential (#472)", () => {
+  const REVOKED =
+    "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+
+  /** The prod batch: the CLI's synthetic assistant text, then the result. */
+  function revokedRun(text = REVOKED): ClaudeMessage[] {
+    return [
+      {
+        type: "assistant",
+        message: { role: "assistant", content: text },
+        parent_tool_use_id: null,
+        session_id: SESSION,
+      },
+      refusedResult(text),
+    ];
+  }
+
+  // Card: protects=the real revoked-token payload (agent text + result,
+  // is_error, 1 turn, zero cost) classifies as a rejected credential;
+  // fails_when=it stays agent-generic-error (null) or reads as a usage
+  // limit; no_claim=the notices (lane suites).
+  it("the prod revoked OAuth token payload is auth_rejected", () => {
+    expect(classify(revokedRun())).toEqual({ kind: "auth_rejected" });
+  });
+
+  // Card: protects=the other 401 texts the CLI prints for a dead credential
+  // (invalid API key body, expired token) classify the same; fails_when=only
+  // the revoked wording is known; no_claim=texts the CLI has not shipped.
+  it("other provider 401s with an authentication signature", () => {
+    expect(
+      classify([
+        refusedResult(
+          'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+        ),
+      ]),
+    ).toEqual({ kind: "auth_rejected" });
+    expect(
+      classify([
+        refusedResult(
+          'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+        ),
+      ]),
+    ).toEqual({ kind: "auth_rejected" });
+  });
+
+  // Card: protects=decision 3, the match stays narrow; fails_when=the agent's
+  // own text, a run that did work, an unanchored mention, or a bare 401
+  // without an authentication signature is labelled a dead credential;
+  // no_claim=what an unclassified run then posts.
+  it("never matches prose, a run that did work, or an unanchored 401", () => {
+    const prose: ClaudeMessage = {
+      type: "assistant",
+      message: { role: "assistant", content: REVOKED },
+      parent_tool_use_id: null,
+      session_id: SESSION,
+    };
+    expect(
+      classify([
+        prose,
+        refusedResult("done", { is_error: false, total_cost_usd: 0.4 }),
+      ]),
+    ).toBeNull();
+    expect(classify([refusedResult(REVOKED, { num_turns: 3 })])).toBeNull();
+    expect(
+      classify([refusedResult(REVOKED, { total_cost_usd: 0.05 })]),
+    ).toBeNull();
+    expect(
+      classify([refusedResult(`The handler now logs: ${REVOKED}`)]),
+    ).toBeNull();
+    expect(classify([refusedResult("API Error: 401 Unauthorized")])).toBeNull();
+    expect(
+      classify([refusedResult("API Error: 4010 authentication_error")]),
+    ).toBeNull();
+  });
+
+  // Card: protects=the classification round-trips through errorMessageInfo
+  // and its sentence tells an org admin to reconnect without naming the
+  // account; fails_when=the stored kind is dropped as malformed or the text
+  // points at a usage limit; no_claim=per-lane framing.
+  it("round-trips and names the fix, never the account", () => {
+    const parsed = parseProviderUnavailableInfo(
+      JSON.stringify(classify(revokedRun())),
+    );
+    expect(parsed).toEqual({ kind: "auth_rejected" });
+    const sentence = describeProviderUnavailable(parsed!);
+    expect(sentence).toContain("Claude credential for this organization");
+    expect(sentence).toContain("rejected");
+    expect(sentence).toContain("an org admin must reconnect it");
+    expect(sentence).not.toMatch(/@|usage limit|resets/);
+  });
+});

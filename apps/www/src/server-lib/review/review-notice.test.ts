@@ -286,6 +286,17 @@ describe("provider_unavailable notice (#441)", () => {
     expect(render({ kind: "credit_exhausted" })).toContain(
       "The Claude API credit balance is too low to run the agent.",
     );
+    // #472: a rejected credential never resets on its own and names the fix.
+    const rejected = render({ kind: "auth_rejected" });
+    expect(rejected).toContain(
+      "<!-- automata:review-notice-cause provider_unavailable until=never -->",
+    );
+    expect(rejected).toContain(
+      "Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it. Nothing was approved or blocked.",
+    );
+    expect(rejected).toContain(
+      "**Next:** push a new commit once an org admin reconnects the Claude credential, or have a teammate review.",
+    );
     // The marker round-trips to the same sha.
     expect(
       reviewNoticeSha({ id: 1, user: { login: BOT }, body: weekly }, BOT),

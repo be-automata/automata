@@ -199,7 +199,7 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
       return {
         title: "Claude subscription unavailable",
         reason:
-          "The connected Claude subscription refused the run (a usage limit, disabled access, or no credit). Retry after it is available again.",
+          "The connected Claude subscription refused the run (a usage limit, disabled access, no credit, or a rejected credential). Retry after it is available again.",
         action: "reconnect-credential",
       };
     case "missing-gemini-credentials":

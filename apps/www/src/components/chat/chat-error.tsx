@@ -347,7 +347,11 @@ function ChatContent({
       const provider = parseProviderUnavailableInfo(errorInfo);
       return (
         <ChatErrorContents
-          header="Claude subscription unavailable"
+          header={
+            provider?.kind === "auth_rejected"
+              ? "Claude credential rejected"
+              : "Claude subscription unavailable"
+          }
           body={
             provider
               ? describeProviderUnavailable(provider)

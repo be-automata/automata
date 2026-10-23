@@ -10,6 +10,12 @@ import { getOrganizationInstallationMode } from "@terragon/shared/model/github-i
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import type { ReviewLogger } from "@terragon/review/state/review-github-client";
 import { effectiveShadow } from "@/lib/github-side-effects";
+import {
+  describeProviderUnavailable,
+  providerUnavailableOfChat,
+  providerUnavailableRetryWhen,
+  type ProviderUnavailable,
+} from "@/agent/msg/classify-provider-result";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { getPostHogServer } from "@/lib/posthog-server";
 import {
@@ -53,7 +59,8 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
  *     tolerance floor and the verify-before-block reader, BEFORE the reply,
  *     so a crash between the two is finished by a redelivered run (the reply
  *     marker below makes the whole effect idempotent);
- *   - no parseable block → one short notice reply, never silence.
+ *   - no parseable block → one short notice reply, never silence; a run the
+ *     provider refused (#441/#472) names that cause instead.
  * Every reply carries the hidden marker `<!-- automata:mention-reply
  * comment=<id> -->`; an App-authored comment already carrying it means this
  * mention was answered and nothing is posted again. Only the App's own
@@ -62,6 +69,17 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
 
 export const MENTION_REPLY_NOTICE =
   "I couldn't complete this; a human should take a look.";
+
+/**
+ * The reply for a run the provider refused (#472): the generic "couldn't
+ * complete" would read as the agent failing at the task. Built from the
+ * classification alone, so it never names the account (epic #440 decision 5).
+ */
+export function renderMentionProviderNotice(
+  provider: ProviderUnavailable,
+): string {
+  return `I could not start on this. ${describeProviderUnavailable(provider)} Nothing was changed; mention me again ${providerUnavailableRetryWhen(provider)}.`;
+}
 
 export { mentionReplyMarker };
 
@@ -138,12 +156,18 @@ export async function executeMentionReply({
   stamp,
   terminalText,
   runReview,
+  providerUnavailable,
   logger,
 }: {
   github: MentionReplyGitHub;
   stamp: MentionLaneStamp;
   terminalText: string;
   runReview?: (reviewIntentText: string) => Promise<ReviewFromIntentOutcome>;
+  /**
+   * The run's provider classification (`provider-unavailable`). Consulted
+   * only when no reply parsed: a parsed reply is always posted as is.
+   */
+  providerUnavailable?: ProviderUnavailable | null;
   logger?: Logger;
 }): Promise<MentionReplyOutcome> {
   const marker = mentionReplyMarker(stamp.commentId);
@@ -197,9 +221,12 @@ export async function executeMentionReply({
     }
   }
 
+  const provider = parsed.ok ? null : (providerUnavailable ?? null);
   const body = parsed.ok
     ? renderMentionReply(parsed.value, stamp.commentId)
-    : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
+    : provider
+      ? `${renderMentionProviderNotice(provider)}\n\n${marker}`
+      : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
   try {
     if (inThread) {
       await github.replyToReviewComment(
@@ -217,11 +244,14 @@ export async function executeMentionReply({
     return { outcome: "post_failed", failureReason };
   }
   if (!parsed.ok) {
+    const reason = provider
+      ? `provider_unavailable: ${provider.kind}`
+      : parsed.reason;
     logger?.error("mention-reply: no usable block — posted the notice", {
       ...meta,
-      reason: parsed.reason,
+      reason,
     });
-    return { outcome: "notice_posted", reason: parsed.reason };
+    return { outcome: "notice_posted", reason };
   }
   return {
     outcome: "posted",
@@ -337,6 +367,7 @@ export async function handleMentionReplyAtFinish({
               reviewIntentText,
             })
         : undefined,
+      providerUnavailable: providerUnavailableOfChat(threadChat),
       logger,
     });
     getPostHogServer().capture({
