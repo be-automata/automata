@@ -58,6 +58,16 @@ export interface RecordedRunTerminal extends RunTerminal {
   at: number;
 }
 
+interface InFlightAttempt {
+  /** Epoch ms when the attempt started. */
+  startedAt: number;
+  /** Settles with the attempt's terminal once it ends (never rejects). */
+  ended: Promise<RecordedRunTerminal>;
+}
+
+/** The attempts executing in THIS process, by workflow run id. */
+const IN_FLIGHT = new Map<string, InFlightAttempt>();
+
 /** A redelivered attempt of a run id that already reached a terminal on this box. */
 export class RunAlreadyTerminalError extends NonRetryableError {
   constructor(
@@ -180,6 +190,14 @@ export function recordRunTerminal(
  * redelivered attempt's result IS the run's engine status — a throw would
  * mark a run whose work completed FAILED and fire onFailure. A run whose first
  * attempt failed is still refused with a throw: FAILED is its true status.
+ *
+ * An attempt of a run id whose earlier attempt is STILL RUNNING in this
+ * process (the engine REASSIGNED it after a heartbeat stall > 30 s while the
+ * process stayed alive — an engine-internal retry that ignores `retries: 0`)
+ * waits for that attempt to end, then is answered from its terminal exactly as
+ * above: never two attempts of one run at once. It waits before admission, so
+ * it holds no box slot meanwhile. Two worker processes, or a second box, are
+ * not covered here; the www generation fence is the backstop there.
  */
 export async function guardRunTerminal<T>(
   opts: {
@@ -192,7 +210,22 @@ export async function guardRunTerminal<T>(
 ): Promise<T> {
   const { root, runId, log, onAlreadyReturned } = opts;
   if (!runId) return run();
-  const prior = readRunTerminal(root, runId);
+  const inFlight = IN_FLIGHT.get(runId);
+  let prior: RecordedRunTerminal | null;
+  if (inFlight) {
+    log(
+      `run.concurrent_attempt ${JSON.stringify({
+        runId,
+        priorStartedAt: new Date(inFlight.startedAt).toISOString(),
+        action: "wait",
+      })}`,
+    );
+    const ended = await inFlight.ended;
+    // The ledger write is best-effort; the in-memory terminal is not.
+    prior = readRunTerminal(root, runId) ?? ended;
+  } else {
+    prior = readRunTerminal(root, runId);
+  }
   if (prior) {
     const noop = prior.outcome === "returned" && onAlreadyReturned;
     const err = new RunAlreadyTerminalError(runId, prior);
@@ -216,21 +249,29 @@ export async function guardRunTerminal<T>(
     if (noop) return onAlreadyReturned(prior);
     throw err;
   }
+  let settle: (terminal: RecordedRunTerminal) => void = () => {};
+  const entry: InFlightAttempt = {
+    startedAt: Date.now(),
+    ended: new Promise((resolve) => {
+      settle = resolve;
+    }),
+  };
+  IN_FLIGHT.set(runId, entry);
+  const end = (terminal: RunTerminal): void => {
+    const at = Date.now();
+    recordRunTerminal(root, runId, terminal, at, log);
+    if (IN_FLIGHT.get(runId) === entry) IN_FLIGHT.delete(runId);
+    settle({ ...terminal, at });
+  };
   try {
     const output = await run();
-    recordRunTerminal(root, runId, { outcome: "returned" }, Date.now(), log);
+    end({ outcome: "returned" });
     return output;
   } catch (err) {
-    recordRunTerminal(
-      root,
-      runId,
-      {
-        outcome: "failed",
-        detail: err instanceof Error ? `${err.name}: ${err.message}` : "",
-      },
-      Date.now(),
-      log,
-    );
+    end({
+      outcome: "failed",
+      detail: err instanceof Error ? `${err.name}: ${err.message}` : "",
+    });
     throw err;
   }
 }
