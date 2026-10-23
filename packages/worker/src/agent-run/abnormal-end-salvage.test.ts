@@ -808,13 +808,16 @@ describe("salvageWorkBranch refuses to publish secrets or a foreign HEAD (#437 r
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 
-  it("near-miss names (environment.ts, env.ts, .env.example, .env.sample, an SSH .pub key) are salvaged", async () => {
+  it("near-miss names (environment.ts, env.ts, .env.example, .env.sample, an SSH .pub key, id_rsa.ts) are salvaged", async () => {
     // protects=the denylist matches names, not substrings: ordinary files,
-    // the committed-by-convention example/sample env files and a public key
-    // (job 814) are still saved; fails_when=any of them blocks the salvage;
-    // no_claim=none beyond protects.
+    // the committed-by-convention example/sample env files, a public key
+    // (job 814) and source files named after a key type (job 815) are still
+    // saved; fails_when=any of them blocks the salvage; no_claim=none beyond
+    // protects.
     for (const f of [
       "keys/id_ed25519.pub",
+      "src/id_rsa.ts",
+      "test/id_ed25519_test.py",
       "environment.ts",
       "env.ts",
       ".env.example",
