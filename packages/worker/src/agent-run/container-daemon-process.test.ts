@@ -91,6 +91,10 @@ function fakeRuntime(
       calls.push(`copyIn ${dest}`);
       copied.push(snapshot(src));
     }),
+    exec: vi.fn(async (_id: string, argv: readonly string[]) => {
+      calls.push(`exec ${argv.join(" ")}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }),
     startAttached: vi.fn(() => {
       calls.push("start");
       return child as never;
@@ -253,8 +257,8 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     await expect(d.start()).rejects.toThrow(OOM);
   });
 
-  // card: protects=teardown reads the OOM flag, rm -f -v's the container, confirms it is gone, kills the attach child and is idempotent (one removal for many callers); fails_when=a second teardown removes again or the slot could be released before the container is gone; no_claim=the 10 s bound on a real daemon (integration suite)
-  it("teardown: inspect → rm → confirm gone, once", async () => {
+  // card: protects=teardown hands the workspace back (the container's own user opens it to the group) BEFORE it reads the OOM flag, rm -f -v's the container, confirms it is gone, kills the attach child, and is idempotent (one removal for many callers); fails_when=the hand-back runs after removal, a second teardown removes again, or the slot could be released before the container is gone; no_claim=the 10 s bound on a real daemon (integration suite)
+  it("teardown: hand back → inspect → rm → confirm gone, once", async () => {
     const rt = fakeRuntime();
     const d = make("pr", rt);
     await d.start();
@@ -263,10 +267,49 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     await d.teardown();
     expect(rt.calls).toEqual([
       "inspect",
+      "exec chmod -R g+rwX /workspace",
+      "inspect",
       `remove ${"c".repeat(64)}`,
       "inspect",
     ]);
     expect(rt.child.killed).toEqual(["SIGKILL"]);
+  });
+
+  // card: protects=a stopped container is not exec'd (it cannot be) and the skip is logged; removal still happens; fails_when=teardown execs a stopped container or the skip is silent; no_claim=cleanup of what the stopped run left (cleanupWorkdir logs it)
+  it("teardown: a stopped container skips the hand-back, logged, and is still removed", async () => {
+    const lines: string[] = [];
+    const rt = fakeRuntime({
+      state: () => ({
+        status: "exited",
+        running: false,
+        exitCode: 137,
+        oomKilled: true,
+      }),
+    });
+    const d = make("task", rt, { log: (l: string) => lines.push(l) });
+    await d.start();
+    rt.calls.length = 0;
+    await d.teardown();
+    expect(rt.exec).not.toHaveBeenCalled();
+    expect(rt.calls).toContain(`remove ${"c".repeat(64)}`);
+    expect(lines.join("\n")).toMatch(
+      /container\.workspace_handback .*"skipped":"not running"/,
+    );
+  });
+
+  // card: protects=a failing or throwing hand-back never blocks the removal (the slot must be released); fails_when=an exec error propagates out of teardown or skips the rm; no_claim=why the exec failed
+  it("teardown: a failed hand-back is logged and the container is still removed", async () => {
+    const lines: string[] = [];
+    const rt = fakeRuntime();
+    rt.exec.mockRejectedValueOnce(new Error("exec timed out"));
+    const d = make("task", rt, { log: (l: string) => lines.push(l) });
+    await d.start();
+    rt.calls.length = 0;
+    await d.teardown();
+    expect(rt.calls).toContain(`remove ${"c".repeat(64)}`);
+    expect(lines.join("\n")).toMatch(
+      /container\.workspace_handback .*"error":"exec timed out"/,
+    );
   });
 
   // card: protects=a transient `docker rm` failure is retried while the slot is still held, and teardown resolves once the container is confirmed gone; fails_when=one failed rm rejects the teardown (a leaked container) or the retry skips the confirm; no_claim=real daemon error shapes

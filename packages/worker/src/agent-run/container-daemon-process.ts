@@ -15,6 +15,7 @@ import {
   CONTAINER_DAEMON_BUNDLE,
   CONTAINER_DAEMON_SOCKET,
   CONTAINER_HOME,
+  CONTAINER_WORKSPACE,
   containerLanePolicy,
   containerNameForSlot,
   type ContainerLanePolicy,
@@ -151,6 +152,9 @@ export interface ContainerDaemonDeps {
   /** First backoff between removal attempts, doubled each time (default 2 s; tests shorten it). */
   retryDelayMs?: number;
 }
+
+/** Bound on the workspace hand-back exec at teardown (a hung exec must not hold the slot). */
+export const WORKSPACE_HAND_BACK_TIMEOUT_MS = 30_000;
 
 const DEFAULT_REMOVE_ATTEMPTS = 4;
 const DEFAULT_REMOVE_RETRY_MS = 2_000;
@@ -638,6 +642,7 @@ export class ContainerDaemonProcess implements RunDaemon {
     // after the daemon made the container. The slot's name finds it.
     const target = this.containerId ?? (this.startedAt ? this.name : null);
     try {
+      if (this.containerId) await this.handBackWorkspace(this.containerId);
       if (target) await this.removeConfirmed(target);
     } finally {
       try {
@@ -650,6 +655,39 @@ export class ContainerDaemonProcess implements RunDaemon {
       await fs.promises
         .rm(this.socketDir, { recursive: true, force: true })
         .catch(() => {});
+    }
+  }
+
+  /**
+   * Files the agent creates in the bind-mounted checkout belong to the
+   * container's mapped uid; one made 0700 (gstack's `.gstack/`, box-proven)
+   * leaves the worker unable to remove the run dir. Before removal, while the
+   * container still runs, its own user (the owner, no capability needed)
+   * opens the tree to the hand-over group the worker belongs to. Best-effort:
+   * a stopped container cannot exec, and cleanupWorkdir then logs whatever
+   * it could not remove.
+   */
+  private async handBackWorkspace(id: string): Promise<void> {
+    try {
+      const state = await this.runtime.inspectState(id);
+      if (!state?.running) {
+        this.log(
+          `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, skipped: state ? "not running" : "gone" })}`,
+        );
+        return;
+      }
+      const r = await this.runtime.exec(
+        id,
+        ["chmod", "-R", "g+rwX", CONTAINER_WORKSPACE],
+        WORKSPACE_HAND_BACK_TIMEOUT_MS,
+      );
+      this.log(
+        `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, code: r.code, ...(r.code === 0 ? {} : { stderr: redactSecrets(r.stderr.trim().slice(0, 200)) }) })}`,
+      );
+    } catch (err) {
+      this.log(
+        `container.workspace_handback ${JSON.stringify({ thread: this.input.threadId, error: err instanceof Error ? err.message : String(err) })}`,
+      );
     }
   }
 
