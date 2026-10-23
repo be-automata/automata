@@ -261,6 +261,50 @@ export function gitProxyAuthConfig(
     : [];
 }
 
+/**
+ * #81: the git config that points a run's git at its loopback git broker —
+ * github.com URLs rewritten onto the broker (`url.insteadOf`, which also
+ * catches an ad-hoc `git push https://github.com/…`) and authenticated with
+ * the per-run bearer git-broker.ts verifies. The ONE brokered git auth path:
+ * the agent's env (buildDaemonEnv) and the #437 timeout salvage both use it.
+ */
+export function brokeredGitAuthConfig(
+  broker: Pick<BrokerHandoff, "gitUrl" | "bearer">,
+): Array<[string, string]> {
+  return [
+    [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
+    [
+      `http.${broker.gitUrl}/.extraheader`,
+      `Authorization: Bearer ${broker.bearer}`,
+    ],
+  ];
+}
+
+/**
+ * The run's bot commit identity, both ways git takes it: the
+ * GIT_AUTHOR/COMMITTER_* env (wins even over a user.* the agent wrote into
+ * .git/config) and the user.name/user.email config entries. One builder for
+ * the agent's env (host and container) and the #437 timeout salvage.
+ */
+export function botGitIdentity(botLogin: string): {
+  env: Record<string, string>;
+  config: Array<[string, string]>;
+} {
+  const botEmail = `${botLogin}@users.noreply.github.com`;
+  return {
+    env: {
+      GIT_AUTHOR_NAME: botLogin,
+      GIT_AUTHOR_EMAIL: botEmail,
+      GIT_COMMITTER_NAME: botLogin,
+      GIT_COMMITTER_EMAIL: botEmail,
+    },
+    config: [
+      ["user.name", botLogin],
+      ["user.email", botEmail],
+    ],
+  };
+}
+
 /** GIT_CONFIG_* entries appended after whatever GIT_CONFIG_COUNT `env` carries — a new object; `env` is not mutated (nothing to add ⇒ `env` itself). */
 export function appendGitConfig(
   env: NodeJS.ProcessEnv,
@@ -556,22 +600,13 @@ export function buildDaemonEnv({
   //    onto the loopback git broker (insteadOf) and authenticated with the
   //    per-run bearer, exactly the `Bearer <runBearer>` git-broker.ts expects.
   //    Legacy: the installation token as a Basic extraheader for github.com.
-  const botEmail = `${botLogin}@users.noreply.github.com`;
+  const identity = botGitIdentity(botLogin);
   env.GIT_CONFIG_GLOBAL = "/dev/null";
   env.GIT_CONFIG_SYSTEM = "/dev/null";
   env.GIT_TERMINAL_PROMPT = "0";
-  env.GIT_AUTHOR_NAME = botLogin;
-  env.GIT_AUTHOR_EMAIL = botEmail;
-  env.GIT_COMMITTER_NAME = botLogin;
-  env.GIT_COMMITTER_EMAIL = botEmail;
+  Object.assign(env, identity.env);
   const gitAuthConfig: Array<[string, string]> = broker
-    ? [
-        [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
-        [
-          `http.${broker.gitUrl}/.extraheader`,
-          `Authorization: Bearer ${broker.bearer}`,
-        ],
-      ]
+    ? brokeredGitAuthConfig(broker)
     : [
         [
           "http.https://github.com/.extraheader",
@@ -583,8 +618,7 @@ export function buildDaemonEnv({
   const gitConfig: Array<[string, string]> = [
     ...gitAuthConfig,
     ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
-    ["user.name", botLogin],
-    ["user.email", botEmail],
+    ...identity.config,
     // #108 agent-uid mode: the WORKER clones the checkout, the AGENT runs in it,
     // and git refuses a repository owned by someone else —
     //

@@ -16,7 +16,6 @@ import {
   type RunAsAgent,
 } from "./agent-command";
 import {
-  hardenGitEnv,
   matchesDenyPath,
   MAX_REPORTED_DENIED_PATHS,
   pinFixBaseSha,
@@ -27,6 +26,7 @@ import {
   type RunFixCheckArgs,
   type SelfHealFixShape,
 } from "./self-heal-fix-check";
+import { hardenGitEnv } from "./untrusted-checkout-git";
 
 const PUSHED = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -269,7 +269,7 @@ describe("runFixCheck (GATE-01, R1)", () => {
     for (const call of calls) {
       expect(call.env.GIT_NO_REPLACE_OBJECTS).toBe("1");
       expect(call.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
-      expect(call.env.GIT_CONFIG_COUNT).toBe("3");
+      expect(call.env.GIT_CONFIG_COUNT).toBe("5");
       expect(call.env.GIT_CONFIG_KEY_0).toBe("safe.directory");
       expect(call.env.GIT_CONFIG_KEY_1).toBe("core.hooksPath");
       expect(call.env.GIT_CONFIG_VALUE_1).toBe("/dev/null");
@@ -279,6 +279,12 @@ describe("runFixCheck (GATE-01, R1)", () => {
     // Beside the clone, in the run dir — never in the checkout (#302).
     expect(check.env.HOME).toBe("/fix-check/home");
     expect(check.env.TMPDIR).toBe("/fix-check/tmp");
+    // #437 cleanup: git steps get no HOME; the checks keep the scratch
+    // HOME's own config dir (hardenGitEnv's /dev/null is not inherited).
+    expect("XDG_CONFIG_HOME" in check.env).toBe(false);
+    for (const call of calls.filter((c) => c !== check)) {
+      expect(call.env.HOME).toBe("/dev/null");
+    }
   });
 
   it("a failing check → completed + fail; no checks at all → error (never a pass)", async () => {
@@ -526,9 +532,34 @@ describe("hardenGitEnv", () => {
   it("starts at index 0 without a caller count and never mutates the input", () => {
     const input = { PATH: "/bin" };
     const out = hardenGitEnv(input);
-    expect(out.GIT_CONFIG_COUNT).toBe("2");
+    expect(out.GIT_CONFIG_COUNT).toBe("4");
     expect(out.GIT_CONFIG_KEY_0).toBe("core.hooksPath");
     expect(input).toEqual({ PATH: "/bin" });
+  });
+
+  it("takes no config, attributes or ignore file from a HOME (#437 review F2)", () => {
+    // protects=git in an untrusted checkout reads nothing from the agent
+    // account's home, even when sudo resets HOME; fails_when=HOME or
+    // XDG_CONFIG_HOME is inherited or the attributes/excludes files are not
+    // pinned at command scope; no_claim=git honouring them (the salvage's
+    // real-git tests).
+    const out = hardenGitEnv({ HOME: "/home/agent", GIT_CONFIG_COUNT: "1" });
+    expect(out.HOME).toBe("/dev/null");
+    expect(out.XDG_CONFIG_HOME).toBe("/dev/null");
+    expect(out.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    expect(out.GIT_CONFIG_NOSYSTEM).toBe("1");
+    expect(
+      [1, 2, 3, 4].map((i) => [
+        out[`GIT_CONFIG_KEY_${i}`],
+        out[`GIT_CONFIG_VALUE_${i}`],
+      ]),
+    ).toEqual([
+      ["core.hooksPath", "/dev/null"],
+      ["core.fsmonitor", "false"],
+      ["core.attributesFile", "/dev/null"],
+      ["core.excludesFile", "/dev/null"],
+    ]);
+    expect(out.GIT_CONFIG_COUNT).toBe("5");
   });
 });
 

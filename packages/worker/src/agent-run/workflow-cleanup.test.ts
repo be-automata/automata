@@ -29,6 +29,7 @@ const TEST_NAMESPACE_ROOT = fs.mkdtempSync(
 process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import type { RunAsAgent } from "./agent-command";
 import { runPaths } from "./run-owned-paths";
 import { recordRunTerminal } from "./run-terminal-ledger";
 import { resetPlaneKeyRingForTests } from "./payload-seal-keys";
@@ -308,6 +309,39 @@ vi.mock("./daemon-process", () => ({
     // #371: a test sets fakeRunCgroupDir to stand in for the ceiling's cgroup.
     runCgroupDir = () => fakeRunCgroupDir;
     memoryStarvation = () => fakeMemoryStarvation;
+  },
+}));
+
+// #437 Part B: the timeout salvage runs its git through runAsAgent. A case
+// that sets `agentCommandFake` scripts (and records) every call; otherwise
+// the real runner is used (no other case in this file reaches it).
+let agentCommandFake: RunAsAgent | null = null;
+vi.mock("./agent-command", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./agent-command")>();
+  return {
+    ...real,
+    runAsAgent: (a: Parameters<RunAsAgent>[0]) =>
+      agentCommandFake ? agentCommandFake(a) : real.runAsAgent(a),
+  };
+});
+
+// ADR-013 (dev-only) container path: a stand-in container daemon, so the
+// workflow's container branch runs without Docker. Its teardown is the
+// container removal (a promise the workflow awaits).
+vi.mock("./container-daemon-process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./container-daemon-process")>()),
+  ContainerDaemonProcess: class {
+    pid = 4242;
+    preflightGhAuth = vi.fn(async () => {});
+    start = vi.fn(async () => {});
+    spawnedLine = () => "daemon spawned in container: id=fake";
+    runCgroupDir = () => null;
+    sendMessage = vi.fn(async () => 42);
+    teardown = vi.fn(async () => {
+      finallyOrder.push("container-teardown");
+    });
+    agentFailure = () => null;
+    memoryStarvation = () => null;
   },
 }));
 
@@ -3290,5 +3324,333 @@ describe("#437: a task run's abnormal end posts one typed terminal", () => {
       await expect(runFn({ ...INPUT, ...extra }, taskCtx())).rejects.toThrow();
       expect(postRunTerminal).not.toHaveBeenCalled();
     }
+  });
+});
+
+/**
+ * #437 Part B: a timed-out task run salvages its work between the claim and
+ * the terminal post, while the git broker is still open. The salvage's git is
+ * scripted here (agentCommandFake); salvageWorkBranch itself runs for real,
+ * and abnormal-end-salvage.test.ts drives it against real git.
+ */
+describe("#437 Part B: the timeout salvage runs between the claim and the post", () => {
+  const LIMIT_MS = 30 * 60_000;
+  const WORK_BRANCH = "automata/task-123";
+  const SALVAGE_SHA = "c0ffee00".repeat(5);
+  const TASK_INPUT = { ...INPUT, workBranch: WORK_BRANCH };
+  // Captured before any case spies on it, so a re-spy never wraps a spy.
+  const realNow = Date.now.bind(Date);
+  let salvageCalls: Array<Parameters<RunAsAgent>[0]>;
+  let gitBrokerClose: ReturnType<typeof vi.fn>;
+
+  /** A git the agent left dirty: something staged, one commit to push. */
+  const STDOUT: Record<string, string> = {
+    "rev-list": `${SALVAGE_SHA}\n`,
+    log: "src/a.ts\0",
+  };
+  const EXIT: Record<string, number> = { diff: 1 }; // diff --cached: staged
+  const scriptedGit: RunAsAgent = async (a) => {
+    salvageCalls.push(a);
+    // `exec git <verb> …`; the config guard is `test -d .git … git config`,
+    // the HEAD check `head=$(git symbolic-ref …)` and the submodule check
+    // `test ! -e .gitmodules …`, the stale-lock cleanup `for p in index.lock …`.
+    const verb = a.script.startsWith("test -d .git")
+      ? "guard"
+      : a.script.startsWith("head=")
+        ? "head-state"
+        : a.script.startsWith("test ! -e .gitmodules")
+          ? "submodules"
+          : a.script.startsWith("for p in index.lock")
+            ? "stale-locks"
+            : (a.script.split(" ")[2] ?? "?");
+    finallyOrder.push(`salvage:${verb}`);
+    return {
+      exitCode: EXIT[verb] ?? 0,
+      stdout: STDOUT[verb] ?? "",
+      timedOut: false,
+      truncated: false,
+    };
+  };
+
+  /** The `timeout` post without a salvage: the PR 1 limit line. */
+  const limitPost = (runId: string) => ({
+    runExternalId: runId,
+    cause: "timeout",
+    info: "The run reached its 30-minute limit.",
+  });
+
+  /** The engine cancel at the 30-minute limit, fired from the poll. */
+  function timeoutCtx(runId: string) {
+    const c = {
+      ...ctx(),
+      workflowRunId: () => runId,
+    };
+    let offset = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    pollUntilTerminal.mockImplementation(async () => {
+      offset = LIMIT_MS;
+      c.abortController.abort();
+      c.cancelled = true;
+      return { outcome: "cancelled" };
+    });
+    return c;
+  }
+
+  const logLines = (c: { log: ReturnType<typeof vi.fn> }) =>
+    c.log.mock.calls.map((call) => String(call[0]));
+
+  beforeEach(() => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    // Brokered (the default): the salvage pushes through the git broker.
+    delete process.env.WORKER_CREDENTIAL_BROKER;
+    provisionWorkdir.mockReset().mockResolvedValue(RUN);
+    cleanupWorkdir.mockReset().mockResolvedValue(undefined);
+    postRunTerminal.mockReset().mockImplementation(async () => {
+      finallyOrder.push("post");
+      return "applied";
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal.mockReset();
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      cleanup: vi.fn(async () => {}),
+    });
+    gitBrokerClose = vi.fn(async () => {
+      finallyOrder.push("git-broker-close");
+    });
+    startGitBroker.mockResolvedValue({
+      url: "http://127.0.0.1:41999",
+      port: 41999,
+      close: gitBrokerClose,
+    });
+    releaseMock.mockClear();
+    salvageCalls = [];
+    agentCommandFake = scriptedGit;
+    fakeMemoryStarvation = null;
+    finallyOrder.length = 0;
+  });
+
+  afterEach(() => {
+    agentCommandFake = null;
+    delete process.env.WORKER_TIMEOUT_SALVAGE;
+    delete process.env.WORKER_DEV_CONTAINER_RUNS;
+    delete process.env.WORKER_BATTERIES_IMAGE;
+    delete process.env.WORKER_RUN_MEMORY_MAX;
+    vi.restoreAllMocks();
+  });
+
+  it("a timeout with a salvage posts the branch, in order: reap → salvage → reap → post → broker close → cleanup → release (AC1/AC2)", async () => {
+    // protects=AC2's thread text and Part A2's order: the salvage runs after
+    // the agent is dead and reaped, BEFORE the post (which names the branch)
+    // and BEFORE the git broker closes (the push needs it); the agent uid is
+    // reaped again after the salvage's own git; fails_when=the post carries
+    // the plain limit line, any step moves, or the push targets another ref
+    // or carries the installation token; no_claim=real git (the git steps are
+    // scripted; abnormal-end-salvage.test.ts runs them against a real repo)
+    // and the uid reaper itself (mocked).
+    const c = timeoutCtx("run-ext-salvage");
+
+    const out = await runFn(TASK_INPUT, c);
+
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunTerminal).toHaveBeenCalledTimes(1);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
+      runExternalId: "run-ext-salvage",
+      cause: "timeout",
+      info: `Unfinished work was saved to branch ${WORK_BRANCH} (commit c0ffee00).`,
+    });
+    const teardownOnward = finallyOrder.slice(finallyOrder.indexOf("teardown"));
+    expect(teardownOnward).toEqual([
+      "teardown",
+      "uid-reap:teardown",
+      "salvage:guard",
+      "salvage:check-ref-format",
+      "salvage:head-state",
+      "salvage:submodules",
+      "salvage:stale-locks",
+      "salvage:add",
+      "salvage:diff",
+      "salvage:commit",
+      "salvage:rev-list",
+      "salvage:log",
+      "salvage:push",
+      "uid-reap:teardown",
+      "post",
+      "git-broker-close",
+      "token-revoke",
+      "cleanupWorkdir",
+      "release",
+    ]);
+    // The push: the run's own repo by URL, HEAD to the work branch only.
+    const push = salvageCalls.find((a) => a.script.includes("git push"))!;
+    expect(push.args).toEqual(["https://github.com/o/r.git", WORK_BRANCH]);
+    expect(push.script).not.toMatch(/--force|\s-f\s|\+HEAD/);
+    // Every salvage git runs in the checkout, on a FRESH signal (the run's
+    // is aborted), with the broker's bearer auth and never the raw token.
+    for (const a of salvageCalls) {
+      expect(a.cwd).toBe(RUN.repo);
+      expect(a.signal?.aborted).toBe(false);
+      const env = JSON.stringify(a.env);
+      expect(env).toContain("url.http://127.0.0.1:41999/.insteadOf");
+      expect(env).not.toContain("inst-secret");
+    }
+    expect(logLines(c)).toContain(
+      `[agent-run thr_leak_1] salvage: pushed c0ffee00 to ${WORK_BRANCH}`,
+    );
+  });
+
+  it("a salvage that fails still posts `timeout` with the limit line, and the teardown finishes (AC5)", async () => {
+    // protects=AC5: a failed push never costs the typed terminal, the
+    // cleanup or the slot; fails_when=the run throws, posts nothing, names a
+    // branch it did not save, or skips cleanup/release; no_claim=the failure
+    // reasons themselves (abnormal-end-salvage.test.ts).
+    agentCommandFake = async (a) => {
+      const r = await scriptedGit(a);
+      return a.script.includes("git push") ? { ...r, exitCode: 128 } : r;
+    };
+    const c = timeoutCtx("run-ext-salvage-fail");
+
+    const out = await runFn(TASK_INPUT, c);
+
+    expect(out.outcome).toBe("cancelled");
+    expect(postRunTerminal.mock.calls.map((call) => call[1])).toEqual([
+      limitPost("run-ext-salvage-fail"),
+    ]);
+    expect(logLines(c)).toContain(
+      "[agent-run thr_leak_1] salvage: failed (push failed (exit 128))",
+    );
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("WORKER_TIMEOUT_SALVAGE=off skips the salvage and posts the plain limit line (Rollback)", async () => {
+    // protects=the Rollback note's switch; fails_when=any salvage git runs or
+    // the post names a branch; no_claim=the env parsing (config.test.ts).
+    process.env.WORKER_TIMEOUT_SALVAGE = "off";
+    const c = timeoutCtx("run-ext-salvage-off");
+
+    await runFn(TASK_INPUT, c);
+
+    expect(salvageCalls).toEqual([]);
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual(
+      limitPost("run-ext-salvage-off"),
+    );
+    expect(logLines(c)).toContain(
+      "[agent-run thr_leak_1] salvage: skipped (disabled)",
+    );
+    expect(finallyOrder.filter((s) => s === "uid-reap:teardown")).toHaveLength(
+      1,
+    );
+  });
+
+  it("a lost box lock skips the salvage and the second reap (AC6)", async () => {
+    // protects=AC6 through the workflow: a lost lock means another run may
+    // own the box, so no git runs as the agent uid and no uid-wide kill;
+    // fails_when=any salvage git or any teardown reap runs; no_claim=how the
+    // lock is lost (box-lock tests).
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return { release: releaseMock, lost: true, slot: 0 };
+    });
+    const c = timeoutCtx("run-ext-salvage-lost");
+
+    await runFn(TASK_INPUT, c);
+
+    expect(salvageCalls).toEqual([]);
+    expect(finallyOrder).not.toContain("uid-reap:teardown");
+    expect(logLines(c)).toContain(
+      "[agent-run thr_leak_1] salvage: skipped (lock lost)",
+    );
+    expect((postRunTerminal.mock.calls[0]![1] as { cause: string }).cause).toBe(
+      "timeout",
+    );
+  });
+
+  it("a lock lost DURING the salvage skips the second reap and says so (review F3)", async () => {
+    // protects=ADR-007's lost-lock rule for the post-salvage reap: once the
+    // kernel freed the slot, another run may own the agent uid, and a
+    // uid-wide kill would take its live agent; fails_when=the second reap
+    // runs, or the skip is not journaled; no_claim=the reaper itself
+    // (mocked) and how a lock is lost (box-lock tests).
+    const lock = { release: releaseMock, lost: false, slot: 0 };
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return lock;
+    });
+    agentCommandFake = async (a) => {
+      if (a.script.includes("git push")) lock.lost = true;
+      return scriptedGit(a);
+    };
+    const c = timeoutCtx("run-ext-salvage-lost-mid");
+
+    await runFn(TASK_INPUT, c);
+
+    expect(finallyOrder).toContain("salvage:push");
+    expect(finallyOrder.filter((s) => s === "uid-reap:teardown")).toEqual([
+      "uid-reap:teardown",
+    ]);
+    expect(logLines(c)).toContain(
+      `[agent-run thr_leak_1] box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+    );
+    expect(releaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("review and self-heal runs never salvage, even at the limit (AC10)", async () => {
+    // protects=AC10: lanes whose terminal is owned elsewhere keep today's
+    // behaviour; fails_when=any salvage git runs or a salvage line is
+    // logged; no_claim=what those lanes do post (the #125 C1 describe).
+    for (const extra of [
+      { prKey: "org-1/o/r/7", deliveryId: "gh-1" },
+      {
+        selfHeal: {
+          kind: "audit" as const,
+          checks: [],
+          checkToken: "CHECK_SENTINEL",
+        },
+      },
+    ]) {
+      const c = timeoutCtx(`run-ext-lane-${Object.keys(extra)[0]}`);
+      await runFn({ ...TASK_INPUT, ...extra }, c);
+      expect(salvageCalls).toEqual([]);
+      expect(logLines(c).some((l) => l.includes("salvage:"))).toBe(false);
+    }
+  });
+
+  it("the container path (ADR-013, dev-only) logs `salvage: skipped (container run)` and still posts `timeout`", async () => {
+    // protects=the operator's container-path fallback: no container route to
+    // the git broker exists until C3 (#430), and host-side git on the
+    // container-written checkout would run its .git/config as the worker;
+    // fails_when=any git runs, the line differs, the timeout is not posted, or
+    // the container is not removed before the post; no_claim=a live
+    // container (ContainerDaemonProcess is a stand-in here).
+    process.env.WORKER_DEV_CONTAINER_RUNS = "1";
+    process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
+    process.env.WORKER_RUN_MEMORY_MAX = "3G";
+    const c = timeoutCtx("run-ext-salvage-container");
+
+    const out = await runFn(TASK_INPUT, c);
+
+    expect(out.outcome).toBe("cancelled");
+    expect(salvageCalls).toEqual([]);
+    expect(logLines(c)).toContain(
+      "[agent-run thr_leak_1] salvage: skipped (container run)",
+    );
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual(
+      limitPost("run-ext-salvage-container"),
+    );
+    const order = finallyOrder.slice(
+      finallyOrder.indexOf("container-teardown"),
+    );
+    expect(order).toEqual([
+      "container-teardown",
+      "post",
+      "git-broker-close",
+      "token-revoke",
+      "cleanupWorkdir",
+      "release",
+    ]);
   });
 });
