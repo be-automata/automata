@@ -59,7 +59,8 @@ import {
  *     existing audit comment;
  *   - a re-run that changes nothing leaves the existing audit comment alone,
  *     because it could only re-render it with LESS (the original stage move
- *     and linked-ticket actions are no longer observable).
+ *     and linked-ticket actions are no longer observable); it still replaces
+ *     a run-failure notice, or creates the comment when none exists (#474).
  */
 
 /** Dependants probed per ticket. Past this the ticket is an epic-style hub. */
@@ -554,15 +555,12 @@ export async function executeMergeAudit({
   const results = outcomes.map((outcome) => outcome.result);
 
   // Every ticket already carries this PR's record and nothing was left to
-  // move: an earlier run did the work. Re-rendering now would drop the stage
-  // move and linked-ticket actions that run reported. (Shadow mode leaves no
-  // record to detect, so a shadow re-run just re-renders the same comment.)
-  if (live && outcomes.every((outcome) => outcome.settled)) {
-    logger.info("merge audit already recorded", { prNumber });
-    return { outcome: "skipped_already_recorded", tickets: results.length };
-  }
-
-  await comments.upsertMarkerComment(
+  // move: an earlier run did the work. Re-rendering over that run's audit
+  // would drop the stage move and linked-ticket actions it reported, so only
+  // a run-failure notice (or no comment at all) is replaced. (Shadow mode
+  // leaves no record to detect, so a shadow re-run just re-renders.)
+  const settled = live && outcomes.every((outcome) => outcome.settled);
+  const posted = await comments.upsertMarkerComment(
     marker,
     renderPrComment({
       prNumber,
@@ -574,8 +572,12 @@ export async function executeMergeAudit({
         url: tracker.issueUrl(key),
       })),
     }),
-    "replace",
+    settled ? "replace-notice" : "replace",
   );
+  if (posted === "kept_existing") {
+    logger.info("merge audit already recorded", { prNumber });
+    return { outcome: "skipped_already_recorded", tickets: results.length };
+  }
   const summary = {
     tickets: results.length,
     audited: results.filter((result) => result.audit !== null).length,

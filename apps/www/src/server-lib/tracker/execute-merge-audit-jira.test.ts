@@ -5,6 +5,7 @@ import {
   type MarkerCommentMode,
   type MarkerCommentResult,
 } from "./execute-merge-audit";
+import { isReplaceableAuditNotice } from "./merge-audit";
 import type { JiraTrackerConfig } from "./tracker-config";
 import {
   type TrackerClient,
@@ -85,7 +86,7 @@ function fakeJira(issues: TrackerIssue[], workflow = DEFAULT_WORKFLOW) {
 
 function fakeComments() {
   const upserts: Array<{ body: string; mode: MarkerCommentMode }> = [];
-  let existing = false;
+  let existing: string | null = null;
   return {
     upserts,
     client: {
@@ -96,11 +97,18 @@ function fakeComments() {
           mode: MarkerCommentMode,
         ): Promise<MarkerCommentResult> => {
           upserts.push({ body, mode });
-          if (!existing) {
-            existing = true;
+          if (existing === null) {
+            existing = body;
             return "created";
           }
-          return mode === "create-only" ? "kept_existing" : "updated";
+          if (
+            mode === "create-only" ||
+            (mode === "replace-notice" && !isReplaceableAuditNotice(existing))
+          ) {
+            return "kept_existing";
+          }
+          existing = body;
+          return "updated";
         },
       ),
     },
