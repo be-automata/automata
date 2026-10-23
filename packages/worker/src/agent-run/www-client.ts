@@ -615,7 +615,8 @@ export interface PollContext {
   /**
    * #473: awaited before EVERY status read. The read that serves terminal=true
    * also revokes the daemon token, so anything that must still reach www with
-   * that token (the egress audit batch) is delivered here, never after. Must
+   * that token (the egress audit batch) is delivered here. What arrives while
+   * the terminal read is in flight still misses the token. Must
    * not throw, and must return once `signal` aborts so a cancel is answered
    * promptly.
    *
