@@ -187,6 +187,15 @@ for pkg in docker-ce-rootless-extras uidmap dbus-user-session slirp4netns; do
   dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
+  # A bare docker-ce-rootless-extras resolves to the newest version and
+  # upgrades docker-ce with it, restarting the root daemon that runs the engine
+  # stack: pin it to the installed docker-ce instead.
+  dce_ver="$(dpkg-query -W -f='${Version}' docker-ce 2>/dev/null || true)"
+  if [ -n "$dce_ver" ]; then
+    for i in "${!missing[@]}"; do
+      [ "${missing[$i]}" != docker-ce-rootless-extras ] || missing[i]="docker-ce-rootless-extras=$dce_ver"
+    done
+  fi
   log "installing ${missing[*]}"
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
 fi
