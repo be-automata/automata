@@ -2040,14 +2040,24 @@ async function runAgentInner(
             return runAsAgent(args);
           },
         });
+        // Same rule as the reap above: a lock lost DURING the salvage means
+        // another run may own the agent uid now, so no uid-wide kill. This
+        // reap is also what bounds a salvage git that outlived its budget
+        // kill (salvageWorkBranch).
         if (salvageRan && !containerDaemon) {
-          await reapAgentUidEscapees({
-            agentUser: config.agentUser,
-            phase: "teardown",
-            threadId: input.threadId,
-            runNamespaceRoot: config.runNamespaceRoot,
-            log: admissionLog,
-          });
+          if (boxLock?.lost) {
+            admissionLog(
+              `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+            );
+          } else {
+            await reapAgentUidEscapees({
+              agentUser: config.agentUser,
+              phase: "teardown",
+              threadId: input.threadId,
+              runNamespaceRoot: config.runNamespaceRoot,
+              log: admissionLog,
+            });
+          }
         }
         await postAbnormalEnd(abnormal, end, { wwwOpts, log: step, salvage });
       }

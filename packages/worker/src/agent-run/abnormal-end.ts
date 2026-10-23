@@ -8,6 +8,11 @@ import {
   gitProxyAuthConfig,
   type BrokerHandoff,
 } from "./daemon-env";
+import {
+  disallowedLocalGitConfigKeys,
+  EXIT_UNSAFE_GITDIR,
+  GIT_LOCAL_CONFIG_GUARD_SCRIPT,
+} from "./git-local-config-guard";
 import { formatMemoryMax, MemoryStarvationError } from "./retry-classification";
 import { hardenGitEnv } from "./self-heal-fix-check";
 import type { TerminalCause } from "./types";
@@ -304,20 +309,24 @@ export const SALVAGE_COMMIT_MESSAGE =
 
 // Every script is a module constant; the branch, the message and the push URL
 // travel only as positional arguments ($1, $2), the same injection posture as
-// the self-heal checks (agent-command.ts).
-const REF_FORMAT_SCRIPT = 'git check-ref-format "refs/heads/$1"';
-const STATUS_SCRIPT = "git status --porcelain";
-const ADD_SCRIPT = "git add -A";
-const COMMIT_SCRIPT = 'git commit --quiet --no-verify --no-gpg-sign -m "$1"';
-const HEAD_SCRIPT = 'git rev-parse --verify --quiet "HEAD^{commit}"';
+// the self-heal checks (agent-command.ts). `exec git`: no shell stays between
+// the runner and git, so the process a budget kill reaches is git itself.
+const REF_FORMAT_SCRIPT = 'exec git check-ref-format "refs/heads/$1"';
+// --ignore-submodules=all: a status of a submodule would run git in it, with
+// ITS local config, which the guard never read.
+const STATUS_SCRIPT = "exec git status --porcelain --ignore-submodules=all";
+const ADD_SCRIPT = "exec git add -A";
+const COMMIT_SCRIPT =
+  'exec git commit --quiet --no-verify --no-gpg-sign -m "$1"';
+const HEAD_SCRIPT = 'exec git rev-parse --verify --quiet "HEAD^{commit}"';
 // Commits HEAD holds that no origin/* ref does: the agent's unpushed commits
 // (and the salvage commit). A work branch cut fresh from the base and never
 // committed to counts 0, so it is not pushed as an empty copy of the base.
-const UNPUSHED_SCRIPT = "git rev-list --count HEAD --not --remotes=origin";
-// Never --force, never a second ref: one explicit refspec, tags and
-// submodules off whatever the agent wrote into .git/config.
+const UNPUSHED_SCRIPT = "exec git rev-list --count HEAD --not --remotes=origin";
+// Never --force, never a second ref: one explicit refspec; tags, submodules
+// and signing off whatever push.* the allowlist let the agent write.
 const PUSH_SCRIPT =
-  'git push --quiet --no-verify --no-follow-tags --recurse-submodules=no --no-signed -- "$1" "HEAD:refs/heads/$2"';
+  'exec git push --quiet --no-verify --no-follow-tags --recurse-submodules=no --no-signed -- "$1" "HEAD:refs/heads/$2"';
 /** `git status` output is only tested for being empty; a cap is enough. */
 const STATUS_MAX_STDOUT_BYTES = 64 * 1024;
 
@@ -357,6 +366,13 @@ export interface SalvageWorkBranchArgs {
  * path, never the installation token), the run's bot identity, the run's
  * egress proxy, and hardenGitEnv's command-scope overrides (no hooks, no
  * fsmonitor, no global/system config) over the agent-writable .git/config.
+ *
+ * Nothing from a HOME either (review F2): HOME and XDG_CONFIG_HOME point at
+ * /dev/null and the attributes/excludes files are pinned to /dev/null at
+ * command scope, so even a sudo that resets HOME to the agent account's
+ * persistent home cannot hand git a config, attributes or ignore file from
+ * it (GIT_CONFIG_GLOBAL is /dev/null too, from hardenGitEnv). push.pushOption
+ * is reset (an empty value clears the list): the allowlist admits push.*.
  */
 export function salvageGitEnv({
   agentUser,
@@ -379,6 +395,8 @@ export function salvageGitEnv({
     env.USER = agentUser;
     env.LOGNAME = agentUser;
   }
+  env.HOME = "/dev/null";
+  env.XDG_CONFIG_HOME = "/dev/null";
   // Same identity, both ways, as buildDaemonEnv: the env wins over any
   // user.* the agent wrote into .git/config.
   const botEmail = `${botLogin}@users.noreply.github.com`;
@@ -395,6 +413,9 @@ export function salvageGitEnv({
       ? ([["safe.directory", workdir]] as Array<[string, string]>)
       : []),
     ...gitProxyAuthConfig(egressProxyUrl),
+    ["core.attributesFile", "/dev/null"],
+    ["core.excludesFile", "/dev/null"],
+    ["push.pushOption", ""],
   ]);
   if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
   return hardenGitEnv(env);
@@ -419,6 +440,25 @@ export function salvageGitEnv({
  * `salvage: skipped (<reason>)`. A reason is constant text (runAsAgent
  * discards stderr, so no URL or credential can reach it), redacted anyway.
  * No PR is opened.
+ *
+ * The checkout's .git is the agent's. Before any other git, the shared
+ * local-config guard (git-local-config-guard.ts, the self-heal fix check's)
+ * runs; any key outside its allowlist — a pushInsteadOf, a pushurl, a longer
+ * insteadOf than the broker's (each redirects the push), a filter driver or a
+ * receivepack (each runs a command outside the removed run cgroup) — skips
+ * the salvage: `skipped (unsafe local git config)`. The self-heal allowlist
+ * fits as-is: what it admits beyond a plain clone is user.*, branch
+ * tracking, remote.origin.(url|fetch) and single-level push.* and pull.*; the
+ * push goes by URL with one refspec (origin and branch tracking decide
+ * nothing), the identity is set by env, and every push.* key that changes
+ * what or how it pushes is overridden on the command (tags, submodules,
+ * signing, push options). A stricter list would only throw away the work of
+ * an agent that ran `git config push.autoSetupRemote true`.
+ *
+ * A budget kill is SIGKILL to the runner's child: as the agent uid that is
+ * sudo, which cannot relay it, so git may outlive the budget for a moment.
+ * That is bounded by the second agent-uid reap the workflow runs right
+ * after the salvage (workflow.ts), before the broker closes.
  *
  * Why a container run is skipped (ADR-013, dev-only): its only route to
  * GitHub is meant to be the git broker bridged in over a unix socket (C3,
@@ -454,7 +494,7 @@ export async function salvageWorkBranch(
   const budgetMs = args.budgetMs ?? SALVAGE_BUDGET_MS;
   const budget = AbortSignal.timeout(budgetMs);
   const deadline = Date.now() + budgetMs;
-  const env = salvageGitEnv({ ...args, broker });
+  let env: NodeJS.ProcessEnv = {};
   const git = async (
     script: string,
     scriptArgs: string[],
@@ -492,6 +532,19 @@ export async function salvageWorkBranch(
   };
 
   try {
+    env = salvageGitEnv({ ...args, broker });
+    const guard = await git(GIT_LOCAL_CONFIG_GUARD_SCRIPT, []);
+    if (guard.exitCode === EXIT_UNSAFE_GITDIR) {
+      return skipped("unsafe local git config");
+    }
+    if (guard.exitCode !== 0 || guard.truncated) {
+      throw new SalvageStepFailed(
+        `config guard failed (exit ${guard.exitCode ?? "killed"})`,
+      );
+    }
+    if (disallowedLocalGitConfigKeys(guard.stdout).length > 0) {
+      return skipped("unsafe local git config");
+    }
     await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
     const status = await ok(
       "status",

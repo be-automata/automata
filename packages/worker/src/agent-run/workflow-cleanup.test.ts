@@ -3346,7 +3346,10 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   /** A git the agent left dirty: every step succeeds, one commit to push. */
   const scriptedGit: RunAsAgent = async (a) => {
     salvageCalls.push(a);
-    const verb = a.script.split(" ")[1] ?? "?";
+    // `exec git <verb> …`; the config guard is `test -d .git … git config`.
+    const verb = a.script.startsWith("test -d .git")
+      ? "guard"
+      : (a.script.split(" ")[2] ?? "?");
     finallyOrder.push(`salvage:${verb}`);
     const stdout =
       verb === "status"
@@ -3446,6 +3449,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect(teardownOnward).toEqual([
       "teardown",
       "uid-reap:teardown",
+      "salvage:guard",
       "salvage:check-ref-format",
       "salvage:status",
       "salvage:add",
@@ -3461,7 +3465,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "release",
     ]);
     // The push: the run's own repo by URL, HEAD to the work branch only.
-    const push = salvageCalls.find((a) => a.script.startsWith("git push"))!;
+    const push = salvageCalls.find((a) => a.script.includes("git push"))!;
     expect(push.args).toEqual(["https://github.com/o/r.git", WORK_BRANCH]);
     expect(push.script).not.toMatch(/--force|\s-f\s|\+HEAD/);
     // Every salvage git runs in the checkout, on a FRESH signal (the run's
@@ -3485,7 +3489,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     // reasons themselves (abnormal-end-salvage.test.ts).
     agentCommandFake = async (a) => {
       const r = await scriptedGit(a);
-      return a.script.startsWith("git push") ? { ...r, exitCode: 128 } : r;
+      return a.script.includes("git push") ? { ...r, exitCode: 128 } : r;
     };
     const c = timeoutCtx("run-ext-salvage-fail");
 
@@ -3549,6 +3553,35 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect((postRunTerminal.mock.calls[0]![1] as { cause: string }).cause).toBe(
       "timeout",
     );
+  });
+
+  it("a lock lost DURING the salvage skips the second reap and says so (review F3)", async () => {
+    // protects=ADR-007's lost-lock rule for the post-salvage reap: once the
+    // kernel freed the slot, another run may own the agent uid, and a
+    // uid-wide kill would take its live agent; fails_when=the second reap
+    // runs, or the skip is not journaled; no_claim=the reaper itself
+    // (mocked) and how a lock is lost (box-lock tests).
+    const lock = { release: releaseMock, lost: false, slot: 0 };
+    acquireBoxSlotMock.mockImplementationOnce(async () => {
+      admissionOrder.push("lock");
+      return lock;
+    });
+    agentCommandFake = async (a) => {
+      if (a.script.includes("git push")) lock.lost = true;
+      return scriptedGit(a);
+    };
+    const c = timeoutCtx("run-ext-salvage-lost-mid");
+
+    await runFn(TASK_INPUT, c);
+
+    expect(finallyOrder).toContain("salvage:push");
+    expect(finallyOrder.filter((s) => s === "uid-reap:teardown")).toEqual([
+      "uid-reap:teardown",
+    ]);
+    expect(logLines(c)).toContain(
+      `[agent-run thr_leak_1] box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+    );
+    expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 
   it("review and self-heal runs never salvage, even at the limit (AC10)", async () => {

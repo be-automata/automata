@@ -231,7 +231,7 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     fs.writeFileSync(path.join(work, "e.ts"), "export const e = 5;\n");
     const run: RunAsAgent = (a) =>
       runAsAgent(
-        a.script.startsWith("git push")
+        a.script.includes("git push")
           ? { ...a, script: "sleep 30", args: [] }
           : a,
       );
@@ -262,12 +262,13 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
 
   it("only the work branch is ever pushed, whatever the agent wrote into .git/config", async () => {
     // protects="never push any other ref": no tag, no other branch, no
-    // matching/mirror push, and origin's URL decides nothing; fails_when=the
-    // remote gains any ref but refs/heads/<workBranch>, or the push follows
-    // origin's URL; no_claim=a --force (never passed; the refspec has no +).
+    // matching push, and origin's URL decides nothing — with only keys the
+    // config guard ALLOWS (a remote.origin.push refspec is refused by the
+    // guard, see the F1/F2 describe); fails_when=the remote gains any ref but
+    // refs/heads/<workBranch>, or the push follows origin's URL;
+    // no_claim=a --force (never passed; the refspec has no +).
     git(work, "config", "push.followTags", "true");
     git(work, "config", "push.default", "matching");
-    git(work, "config", "remote.origin.push", "refs/heads/*:refs/heads/*");
     // An agent-redirected origin must not receive the push.
     const decoy = path.join(root, "decoy.git");
     fs.mkdirSync(decoy);
@@ -384,5 +385,134 @@ describe("abnormalEndInfo with a salvage (#437 Part B)", () => {
         salvage: { branch: "b".repeat(280), sha: SHA },
       }),
     ).toBe("The run reached its 30-minute limit.");
+  });
+});
+
+/**
+ * Security review of the salvage (F1/F2): the checkout's .git is the agent's,
+ * written while it ran. Every case plants config a hostile agent could, then
+ * runs the real salvage against real git.
+ */
+describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2)", () => {
+  let decoy: string;
+
+  beforeEach(() => {
+    decoy = path.join(root, "decoy.git");
+    fs.mkdirSync(decoy);
+    git(decoy, "init", "--quiet", "--bare");
+    // Dirty, so a salvage that proceeds would commit and push.
+    fs.writeFileSync(path.join(work, "wip.ts"), "export const wip = 1;\n");
+  });
+
+  it.each([
+    [
+      "url.<decoy>.pushInsteadOf",
+      (): [string, string] => [
+        `url.${decoy}.pushInsteadOf`,
+        "https://github.com/o/r.git",
+      ],
+    ],
+    [
+      "remote.<url>.pushurl",
+      (): [string, string] => [
+        "remote.https://github.com/o/r.git.pushurl",
+        decoy,
+      ],
+    ],
+    // Longer than the broker's `https://github.com/`, so it wins the rewrite.
+    [
+      "a longer url.<decoy>.insteadOf",
+      (): [string, string] => [
+        `url.${decoy}/.insteadOf`,
+        "https://github.com/o/",
+      ],
+    ],
+  ] as const)(
+    "%s: skipped (unsafe local git config), nothing reaches the decoy",
+    async (_name, entry) => {
+      // protects=F1: the push lands on the run's repository through the
+      // broker or not at all; fails_when=a local key redirects the push and
+      // the salvage reports `pushed`, or anything reaches the decoy;
+      // no_claim=GitHub (bare repos stand in for the broker's target and the
+      // agent's decoy).
+      const [key, value] = entry();
+      git(work, "config", key, value);
+      if (key.endsWith(".insteadOf")) {
+        // The decoy as a "remote root": <decoy>/r.git under o/.
+        fs.mkdirSync(path.join(decoy, "r.git"));
+        git(path.join(decoy, "r.git"), "init", "--quiet", "--bare");
+      }
+
+      const result = await salvageWorkBranch(args());
+
+      expect(result).toBeNull();
+      expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+      expect(git(decoy, "for-each-ref")).toBe("");
+      if (key.endsWith(".insteadOf")) {
+        expect(git(path.join(decoy, "r.git"), "for-each-ref")).toBe("");
+      }
+      expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+    },
+  );
+
+  it("a .gitattributes clean filter configured locally never runs (F2)", async () => {
+    // protects=F2: no agent-configured command runs as the agent uid outside
+    // the (already removed) run cgroup; fails_when=the filter's marker file
+    // is written; no_claim=the cgroup itself (the second reap is the
+    // backstop, workflow-cleanup tests).
+    const marker = path.join(root, "FILTER_RAN");
+    fs.writeFileSync(path.join(work, ".gitattributes"), "* filter=x\n");
+    git(work, "config", "filter.x.clean", `touch ${marker}; cat`);
+
+    const result = await salvageWorkBranch(args());
+
+    expect(result).toBeNull();
+    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("a remote.<url>.receivepack never runs (F2)", async () => {
+    // protects=F2's second vector: a local transport's receive-pack command
+    // is agent-chosen; fails_when=its marker is written or the push
+    // proceeds; no_claim=none beyond protects.
+    const marker = path.join(root, "RECEIVEPACK_RAN");
+    git(
+      work,
+      "config",
+      // The remote is named by the URL the salvage pushes to.
+      "remote.https://github.com/o/r.git.receivepack",
+      `touch ${marker}; git-receive-pack`,
+    );
+
+    await salvageWorkBranch(args());
+
+    expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("a post-commit hook in .git/hooks never runs (pins core.hooksPath)", async () => {
+    // protects=hooks stay off at command scope (`--no-verify` alone skips
+    // only pre-commit and commit-msg); fails_when=the hook's marker is
+    // written; no_claim=none beyond protects.
+    const marker = path.join(root, "HOOK_RAN");
+    const hook = path.join(work, ".git", "hooks", "post-commit");
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+
+    const result = await salvageWorkBranch(args());
+
+    expect(result).not.toBeNull();
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("the allowed keys an agent commonly writes do not block the salvage", async () => {
+    // protects=the guard is not so strict it throws away work for ordinary
+    // config (the self-heal allowlist: user.*, push.*, branch tracking);
+    // fails_when=such a checkout is skipped; no_claim=none beyond protects.
+    git(work, "config", "user.name", "Agent");
+    git(work, "config", "push.autoSetupRemote", "true");
+    git(work, "config", `branch.${WORK_BRANCH}.remote`, "origin");
+
+    expect(await salvageWorkBranch(args())).not.toBeNull();
+    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(true);
   });
 });
