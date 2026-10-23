@@ -1077,6 +1077,34 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     expect(postEgressEvents).toHaveBeenCalledTimes(1);
   });
 
+  it("#473: flush() posts the buffer and waits for a timer post still in flight", async () => {
+    let settleTimerPost: () => void = () => {};
+    postEgressEvents.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settleTimerPost = resolve;
+        }),
+    );
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    vi.advanceTimersByTime(2_000); // the tick's post is now in flight
+    batcher.add(event(2));
+
+    let flushed = false;
+    const flushing = batcher.flush().then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // The fresh batch went out at once; the tick's post is still pending.
+    expect(postEgressEvents).toHaveBeenCalledTimes(2);
+    expect(flushed).toBe(false);
+
+    settleTimerPost();
+    await flushing;
+    expect(flushed).toBe(true);
+    await batcher.close();
+  });
+
   it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({
@@ -1512,6 +1540,67 @@ describe("agent-run run task — the terminal poll is journaled per run", () => 
     expect(poll, lines.join("\n")).toBe(
       `[agent-run ${INPUT.threadId}] thread-status: complete (terminal=true)`,
     );
+  });
+});
+
+describe("#473: no egress audit batch is dropped at run end", () => {
+  it("the batch buffered during the run is posted BEFORE the terminal status read that revokes the token", async () => {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => 0,
+      close: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    const order: string[] = [];
+    postEgressEvents.mockImplementation(async (..._args: unknown[]) => {
+      order.push("egress-post");
+    });
+    pollUntilTerminal
+      .mockReset()
+      .mockImplementation(
+        async (pollCtx: { beforeStatusRead?: () => Promise<void> }) => {
+          // The agent's last request lands in the batch (under the 20 cap,
+          // inside the 2 s tick), then the read that is served terminal=true.
+          const [proxyOpts] = startEgressProxy.mock.calls[0] as [
+            { onEvent: (e: unknown) => void },
+          ];
+          proxyOpts.onEvent({
+            destinationHost: "api.example.com",
+            destinationPort: 443,
+            action: "allow",
+            policyLevel: "domain",
+            mode: "enforce",
+          });
+          await pollCtx.beforeStatusRead?.();
+          order.push("terminal-read");
+          return { outcome: "completed", finalStatus: "complete" };
+        },
+      );
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+
+    await runFn(EGRESS_INPUT, ctx());
+
+    // Exactly one post, and it preceded the revoking read: the teardown's
+    // final flush found nothing left to send with a dead token.
+    expect(order).toEqual(["egress-post", "terminal-read"]);
+    const [, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(events).toEqual([
+      expect.objectContaining({ destinationHost: "api.example.com" }),
+    ]);
   });
 });
 

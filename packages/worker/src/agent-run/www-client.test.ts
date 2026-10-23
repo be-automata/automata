@@ -1225,6 +1225,38 @@ describe("pollUntilTerminal: the run was memory-starved", () => {
     expect(result).toEqual({ outcome: "completed", finalStatus: "complete" });
   });
 
+  it("#473: beforeStatusRead is awaited before every read, the terminal one included", async () => {
+    const order: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          order.push("read");
+          return jsonResponse(200, { status: "working", terminal: false });
+        })
+        .mockImplementationOnce(async () => {
+          order.push("read");
+          return jsonResponse(200, { status: "complete", terminal: true });
+        }),
+    );
+    const result = await pollUntilTerminal(
+      {
+        cancelled: false,
+        log: () => {},
+        beforeStatusRead: async () => {
+          await Promise.resolve();
+          order.push("flush");
+        },
+      },
+      opts,
+      0,
+      noSleep,
+    );
+    expect(result.outcome).toBe("completed");
+    expect(order).toEqual(["flush", "read", "flush", "read"]);
+  });
+
   it("a cancellation still wins — a superseded run is not re-labelled OOM", async () => {
     const result = await pollUntilTerminal(
       {

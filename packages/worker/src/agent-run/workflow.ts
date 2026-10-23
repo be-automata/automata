@@ -277,19 +277,27 @@ const EGRESS_BATCH_FLUSH_MS = 2_000;
  * /api/daemon/egress-event every 2s or 20 events, with a final flush on
  * close(). postEgressEvents never throws (and neither does add()), so audit
  * delivery can NEVER fail the run — lost audit rows are logged, not fatal.
+ *
+ * #473: flush() resolves only once every post started so far has settled, so
+ * the run can deliver its audit trail before the terminal status read revokes
+ * the daemon token (pollUntilTerminal's beforeStatusRead).
  */
 export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   add: (event: EgressDecisionEvent) => void;
+  flush: () => Promise<void>;
   close: () => Promise<void>;
 } {
   let buffer: EgressEventWire[] = [];
-  const flush = (): Promise<void> => {
-    if (buffer.length === 0) {
-      return Promise.resolve();
+  const inFlight = new Set<Promise<void>>();
+  const flush = async (): Promise<void> => {
+    if (buffer.length > 0) {
+      const events = buffer;
+      buffer = [];
+      const post = postEgressEvents(wwwOpts, events);
+      inFlight.add(post);
+      void post.finally(() => inFlight.delete(post));
     }
-    const events = buffer;
-    buffer = [];
-    return postEgressEvents(wwwOpts, events);
+    await Promise.all(inFlight);
   };
   const timer = setInterval(() => void flush(), EGRESS_BATCH_FLUSH_MS);
   // Never hold the worker process open for an audit flush tick.
@@ -312,6 +320,7 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
         void flush();
       }
     },
+    flush,
     async close() {
       clearInterval(timer);
       await flush();
@@ -1227,6 +1236,11 @@ async function runAgentInner(
     // Any OOM kill in the run's cgroup fails the run, even when only a child
     // died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
+    // #473: the terminal read revokes the daemon token, so the egress audit
+    // batch goes out before every read — the final one included.
+    beforeStatusRead: async () => {
+      await egressEvents?.flush();
+    },
   };
   let daemonForPoll: RunDaemon | null = null;
   // #371: this run's headroom reservation (set under the slot, below).

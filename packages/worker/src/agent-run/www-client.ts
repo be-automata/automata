@@ -604,6 +604,15 @@ export interface PollContext {
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
   memoryStarvation?: () => unknown | null;
+  /**
+   * #473: awaited before EVERY status read. The read that serves terminal=true
+   * also revokes the daemon token, so anything that must still reach www with
+   * that token (the egress audit batch) is delivered here, never after. Must
+   * not throw.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  beforeStatusRead?: () => Promise<void>;
 }
 
 export interface PollResult {
@@ -679,6 +688,8 @@ export async function pollUntilTerminal(
     if (starved !== null) {
       throw starved;
     }
+
+    await ctx.beforeStatusRead?.();
 
     let poll: ThreadStatusPoll;
     try {
