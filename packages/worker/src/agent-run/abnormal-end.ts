@@ -1,21 +1,18 @@
 import { redactSecrets } from "@terragon/utils/redact";
 
 import { runAsAgent, type RunAsAgent } from "./agent-command";
+import { SHA1_HEX } from "./batteries-manifest";
 import {
   appendGitConfig,
+  botGitIdentity,
   brokeredGitAuthConfig,
   buildRunProxyEnv,
   gitProxyAuthConfig,
   type BrokerHandoff,
 } from "./daemon-env";
-import {
-  disallowedLocalGitConfigKeys,
-  EXIT_UNSAFE_GITDIR,
-  GIT_LOCAL_CONFIG_GUARD_SCRIPT,
-} from "./git-local-config-guard";
 import { formatMemoryMax, MemoryStarvationError } from "./retry-classification";
-import { hardenGitEnv } from "./self-heal-fix-check";
 import type { TerminalCause } from "./types";
+import { checkLocalGitConfig, hardenGitEnv } from "./untrusted-checkout-git";
 import {
   postRunTerminal,
   type RunTerminalResult,
@@ -119,8 +116,7 @@ export function abnormalEndInfo(
       // an extreme branch name falls back to the plain limit line.
       if (saved.length <= TERMINAL_INFO_MAX_CHARS) return saved;
     }
-    const minutes = Math.round(o.runExecutionTimeoutMs / 60_000);
-    return `The run reached its ${minutes}-minute limit.`;
+    return `The run reached its ${limitMinutes(o.runExecutionTimeoutMs)}-minute limit.`;
   }
   if (cause === "out-of-memory") {
     // The thrown error when the poll loop raised it, else the daemon's signal
@@ -133,6 +129,11 @@ export function abnormalEndInfo(
     }
   }
   return undefined;
+}
+
+/** The run's execution limit in whole minutes (the info line, the salvage commit). */
+function limitMinutes(runExecutionTimeoutMs: number): number {
+  return Math.round(runExecutionTimeoutMs / 60_000);
 }
 
 /** The run-terminal route's `detail.info` bound (www-enforced). */
@@ -259,7 +260,7 @@ export async function postAbnormalEnd(
   {
     wwwOpts,
     log,
-    salvage = null,
+    salvage,
     post,
     sleep,
   }: {
@@ -302,35 +303,41 @@ export interface SalvageResult {
   sha: string;
 }
 
-/** The hard budget for the whole commit + push, on a signal of its own. */
+/** What the salvage did, and whether it ran any git as the agent uid. */
+export interface SalvageOutcome {
+  result: SalvageResult | null;
+  spawned: boolean;
+}
+
+/** The hard budget for the whole salvage, on a signal of its own. */
 export const SALVAGE_BUDGET_MS = 60_000;
-export const SALVAGE_COMMIT_MESSAGE =
-  "wip: run timed out at 30m (automata salvage)";
+
+/** `wip: run timed out at <limit>m (automata salvage)`. */
+export function salvageCommitMessage(runExecutionTimeoutMs: number): string {
+  return `wip: run timed out at ${limitMinutes(runExecutionTimeoutMs)}m (automata salvage)`;
+}
 
 // Every script is a module constant; the branch, the message and the push URL
 // travel only as positional arguments ($1, $2), the same injection posture as
 // the self-heal checks (agent-command.ts). `exec git`: no shell stays between
 // the runner and git, so the process a budget kill reaches is git itself.
 const REF_FORMAT_SCRIPT = 'exec git check-ref-format "refs/heads/$1"';
-// --ignore-submodules=all: a status of a submodule would run git in it, with
-// ITS local config, which the guard never read.
-const STATUS_SCRIPT = "exec git status --porcelain --ignore-submodules=all";
 const ADD_SCRIPT = "exec git add -A";
+// Exit 1 = something is staged. --ignore-submodules=all: a submodule is never
+// entered, so git never runs under ITS local config, which no guard read.
+const STAGED_SCRIPT = "exec git diff --cached --quiet --ignore-submodules=all";
 const COMMIT_SCRIPT =
   'exec git commit --quiet --no-verify --no-gpg-sign -m "$1"';
-const HEAD_SCRIPT = 'exec git rev-parse --verify --quiet "HEAD^{commit}"';
-// Commits HEAD holds that no origin/* ref does: the agent's unpushed commits
-// (and the salvage commit). A work branch cut fresh from the base and never
-// committed to counts 0, so it is not pushed as an empty copy of the base.
-const UNPUSHED_SCRIPT = "exec git rev-list --count HEAD --not --remotes=origin";
+// The newest commit HEAD holds that no origin/* ref does (the salvage commit,
+// or the agent's unpushed work); empty = nothing to save. A work branch cut
+// fresh from the base and never committed to is not pushed as a copy of it.
+const UNPUSHED_HEAD_SCRIPT =
+  "exec git rev-list --max-count=1 HEAD --not --remotes=origin";
 // Never --force, never a second ref: one explicit refspec; tags, submodules
-// and signing off whatever push.* the allowlist let the agent write.
+// and signing off whatever push.* the guard's allowlist let the agent write.
 const PUSH_SCRIPT =
   'exec git push --quiet --no-verify --no-follow-tags --recurse-submodules=no --no-signed -- "$1" "HEAD:refs/heads/$2"';
-/** `git status` output is only tested for being empty; a cap is enough. */
-const STATUS_MAX_STDOUT_BYTES = 64 * 1024;
 
-const FULL_SHA = /^[0-9a-f]{40}$/;
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /** A salvage step that did not succeed; its message is constant text. */
@@ -355,6 +362,8 @@ export interface SalvageWorkBranchArgs {
   agentUser: string;
   botLogin: string;
   egressProxyUrl: string | null;
+  /** The run's execution limit (names it in the salvage commit). */
+  runExecutionTimeoutMs: number;
   log: (line: string) => void;
   run?: RunAsAgent;
   budgetMs?: number;
@@ -362,17 +371,10 @@ export interface SalvageWorkBranchArgs {
 
 /**
  * The env every salvage git runs with: the agent's own brokered auth
- * (brokeredGitAuthConfig, the one the daemon env carries — never a second
- * path, never the installation token), the run's bot identity, the run's
- * egress proxy, and hardenGitEnv's command-scope overrides (no hooks, no
- * fsmonitor, no global/system config) over the agent-writable .git/config.
- *
- * Nothing from a HOME either (review F2): HOME and XDG_CONFIG_HOME point at
- * /dev/null and the attributes/excludes files are pinned to /dev/null at
- * command scope, so even a sudo that resets HOME to the agent account's
- * persistent home cannot hand git a config, attributes or ignore file from
- * it (GIT_CONFIG_GLOBAL is /dev/null too, from hardenGitEnv). push.pushOption
- * is reset (an empty value clears the list): the allowlist admits push.*.
+ * (brokeredGitAuthConfig — never a second path, never the installation
+ * token), the run's bot identity, the run's egress proxy, and hardenGitEnv
+ * (untrusted-checkout-git.ts). push.pushOption is reset (an empty value
+ * clears the list): the guard's allowlist admits push.*.
  */
 export function salvageGitEnv({
   agentUser,
@@ -386,6 +388,7 @@ export function salvageGitEnv({
 > & {
   broker: Pick<BrokerHandoff, "gitUrl" | "bearer">;
 }): NodeJS.ProcessEnv {
+  const identity = botGitIdentity(botLogin);
   let env: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "LANG", "LC_ALL"]) {
     const value = process.env[key];
@@ -395,26 +398,15 @@ export function salvageGitEnv({
     env.USER = agentUser;
     env.LOGNAME = agentUser;
   }
-  env.HOME = "/dev/null";
-  env.XDG_CONFIG_HOME = "/dev/null";
-  // Same identity, both ways, as buildDaemonEnv: the env wins over any
-  // user.* the agent wrote into .git/config.
-  const botEmail = `${botLogin}@users.noreply.github.com`;
-  env.GIT_AUTHOR_NAME = botLogin;
-  env.GIT_AUTHOR_EMAIL = botEmail;
-  env.GIT_COMMITTER_NAME = botLogin;
-  env.GIT_COMMITTER_EMAIL = botEmail;
+  Object.assign(env, identity.env);
   env = appendGitConfig(env, [
     ...brokeredGitAuthConfig(broker),
     ["credential.helper", ""],
-    ["user.name", botLogin],
-    ["user.email", botEmail],
+    ...identity.config,
     ...(agentUser
       ? ([["safe.directory", workdir]] as Array<[string, string]>)
       : []),
     ...gitProxyAuthConfig(egressProxyUrl),
-    ["core.attributesFile", "/dev/null"],
-    ["core.excludesFile", "/dev/null"],
     ["push.pushOption", ""],
   ]);
   if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
@@ -423,67 +415,39 @@ export function salvageGitEnv({
 
 /**
  * #437 Part B: save a timed-out task run's work before its checkout is
- * deleted. Called in the teardown after the agent is dead (daemon killed,
- * uid escapees reaped: nothing writes the tree) and before the git broker
- * closes (the push needs it). As the agent uid, in the checkout:
- *
- *   1. a dirty tree is committed (`git add -A`, SALVAGE_COMMIT_MESSAGE, the
- *      run's bot identity);
- *   2. then, dirty or clean, HEAD is pushed to the work branch — and only
- *      there — when it holds commits no origin/* ref does (the salvage
- *      commit, or commits the agent made and never pushed).
- *
- * The commit and push share one hard 60 s budget on a FRESH signal (the
- * run's own is already aborted). Never throws and never changes the cause;
- * logs exactly one line: `salvage: pushed <sha8> to <branch>` |
- * `salvage: nothing to save` | `salvage: failed (<reason>)` |
- * `salvage: skipped (<reason>)`. A reason is constant text (runAsAgent
- * discards stderr, so no URL or credential can reach it), redacted anyway.
- * No PR is opened.
- *
- * The checkout's .git is the agent's. Before any other git, the shared
- * local-config guard (git-local-config-guard.ts, the self-heal fix check's)
- * runs; any key outside its allowlist — a pushInsteadOf, a pushurl, a longer
- * insteadOf than the broker's (each redirects the push), a filter driver or a
- * receivepack (each runs a command outside the removed run cgroup) — skips
- * the salvage: `skipped (unsafe local git config)`. The self-heal allowlist
- * fits as-is: what it admits beyond a plain clone is user.*, branch
- * tracking, remote.origin.(url|fetch) and single-level push.* and pull.*; the
- * push goes by URL with one refspec (origin and branch tracking decide
- * nothing), the identity is set by env, and every push.* key that changes
- * what or how it pushes is overridden on the command (tags, submodules,
- * signing, push options). A stricter list would only throw away the work of
- * an agent that ran `git config push.autoSetupRemote true`.
- *
- * A budget kill is SIGKILL to the runner's child: as the agent uid that is
- * sudo, which cannot relay it, so git may outlive the budget for a moment.
- * That is bounded by the second agent-uid reap the workflow runs right
- * after the salvage (workflow.ts), before the broker closes.
- *
- * Why a container run is skipped (ADR-013, dev-only): its only route to
- * GitHub is meant to be the git broker bridged in over a unix socket (C3,
- * #430), which does not exist yet — the git broker listens on host TCP
- * loopback, which a `--network none` container cannot reach, and a container
- * run gets no broker at all today (container-daemon-process.ts copyInPolicy),
- * so its agent cannot push either. A salvage container would need that
- * bridge built first. Running the git on the HOST instead, as the worker,
- * would execute the container-written .git/config and attributes (filter
- * drivers) as the worker uid: a way out of the container's hardening. So it
- * logs `salvage: skipped (container run)` until C3 lands the bridge.
+ * deleted — after the agent is dead and reaped, before the git broker closes.
+ * As the agent uid, in the checkout: refuse an agent-steered .git
+ * (checkLocalGitConfig, untrusted-checkout-git.ts), commit a dirty tree
+ * (salvageCommitMessage, the bot identity), then push HEAD to the work branch
+ * — by URL, one refspec, never forced — when it holds unpushed commits. One
+ * hard budget on a FRESH signal (the run's is already aborted). Never throws,
+ * never changes the cause, opens no PR; logs exactly one line:
+ * `salvage: pushed <sha8> to <branch>` | `salvage: nothing to save` |
+ * `salvage: failed (<reason>)` | `salvage: skipped (<reason>)`, the reason
+ * constant text (runAsAgent discards stderr). A budget kill reaches sudo, not
+ * the git under it; the workflow's post-salvage reap bounds that git.
  */
 export async function salvageWorkBranch(
   args: SalvageWorkBranchArgs,
-): Promise<SalvageResult | null> {
-  if (args.cause !== "timeout") return null;
-  const log = (line: string) => args.log(redactSecrets(`salvage: ${line}`));
-  const skipped = (reason: string): null => {
-    log(`skipped (${reason})`);
-    return null;
+): Promise<SalvageOutcome> {
+  let spawned = false;
+  if (args.cause !== "timeout") return { result: null, spawned };
+  const done = (
+    line: string,
+    result: SalvageResult | null = null,
+  ): SalvageOutcome => {
+    args.log(redactSecrets(`salvage: ${line}`));
+    return { result, spawned };
   };
+  const skipped = (reason: string) => done(`skipped (${reason})`);
   const { workBranch, broker } = args;
   if (!args.enabled) return skipped("disabled");
   if (!workBranch) return skipped("no work branch");
   if (args.lockLost) return skipped("lock lost");
+  // ADR-013 (dev-only): a container's only route to GitHub is meant to be the
+  // git broker bridged in over a unix socket (C3, #430), not built yet; host
+  // git as the worker on the container-written .git would run its config as
+  // the worker uid. Unlocked by C3.
   if (args.containerRun) return skipped("container run");
   if (!broker) return skipped("no git broker");
   if (!REPO_SLUG.test(args.repoFullName)) {
@@ -492,89 +456,56 @@ export async function salvageWorkBranch(
 
   const run = args.run ?? runAsAgent;
   const budgetMs = args.budgetMs ?? SALVAGE_BUDGET_MS;
+  // The one clock: runAsAgent SIGKILLs its child when this signal aborts.
   const budget = AbortSignal.timeout(budgetMs);
-  const deadline = Date.now() + budgetMs;
-  let env: NodeJS.ProcessEnv = {};
-  const git = async (
-    script: string,
-    scriptArgs: string[],
-    maxStdoutBytes?: number,
-  ) => {
-    if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
-    const r = await run({
-      agentUser: args.agentUser,
-      cwd: args.workdir,
-      script,
-      args: scriptArgs,
-      env,
-      timeoutMs: Math.max(1, deadline - Date.now()),
-      signal: budget,
-      ...(maxStdoutBytes !== undefined ? { maxStdoutBytes } : {}),
-    });
-    if (r.timedOut || budget.aborted) {
-      throw new SalvageStepFailed("budget exceeded");
-    }
-    return r;
-  };
-  const ok = async (
-    verb: string,
-    script: string,
-    scriptArgs: string[] = [],
-    maxStdoutBytes?: number,
-  ) => {
-    const r = await git(script, scriptArgs, maxStdoutBytes);
-    if (r.exitCode !== 0) {
-      throw new SalvageStepFailed(
-        `${verb} failed (exit ${r.exitCode ?? "killed"})`,
-      );
-    }
-    return r;
-  };
-
   try {
-    env = salvageGitEnv({ ...args, broker });
-    const guard = await git(GIT_LOCAL_CONFIG_GUARD_SCRIPT, []);
-    if (guard.exitCode === EXIT_UNSAFE_GITDIR) {
-      return skipped("unsafe local git config");
-    }
-    if (guard.exitCode !== 0 || guard.truncated) {
+    const env = salvageGitEnv({ ...args, broker });
+    const git = async (script: string, scriptArgs: string[] = []) => {
+      if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
+      spawned = true;
+      const r = await run({
+        agentUser: args.agentUser,
+        cwd: args.workdir,
+        script,
+        args: scriptArgs,
+        env,
+        timeoutMs: budgetMs,
+        signal: budget,
+      });
+      if (r.timedOut || budget.aborted) {
+        throw new SalvageStepFailed("budget exceeded");
+      }
+      return r;
+    };
+    const ok = async (verb: string, script: string, scriptArgs?: string[]) => {
+      const r = await git(script, scriptArgs);
+      if (r.exitCode !== 0) {
+        throw new SalvageStepFailed(
+          `${verb} failed (exit ${r.exitCode ?? "killed"})`,
+        );
+      }
+      return r;
+    };
+
+    const guard = await checkLocalGitConfig((script) => git(script));
+    if (guard === "unsafe") return skipped("unsafe local git config");
+    if (guard === "error") throw new SalvageStepFailed("config guard failed");
+    await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
+    await ok("add", ADD_SCRIPT);
+    const staged = await git(STAGED_SCRIPT);
+    if (staged.exitCode === 1) {
+      await ok("commit", COMMIT_SCRIPT, [
+        salvageCommitMessage(args.runExecutionTimeoutMs),
+      ]);
+    } else if (staged.exitCode !== 0) {
       throw new SalvageStepFailed(
-        `config guard failed (exit ${guard.exitCode ?? "killed"})`,
+        `staged check failed (exit ${staged.exitCode ?? "killed"})`,
       );
     }
-    if (disallowedLocalGitConfigKeys(guard.stdout).length > 0) {
-      return skipped("unsafe local git config");
-    }
-    await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
-    const status = await ok(
-      "status",
-      STATUS_SCRIPT,
-      [],
-      STATUS_MAX_STDOUT_BYTES,
-    );
-    const dirty = status.truncated || status.stdout.trim().length > 0;
-    if (dirty) {
-      await ok("add", ADD_SCRIPT);
-      await ok("commit", COMMIT_SCRIPT, [SALVAGE_COMMIT_MESSAGE]);
-    }
-    const head = await git(HEAD_SCRIPT, []);
-    const sha = head.stdout.trim();
-    if (head.exitCode !== 0 || !FULL_SHA.test(sha)) {
-      // No commit at all (an empty repository): nothing was ever made.
-      if (!dirty) {
-        log("nothing to save");
-        return null;
-      }
-      throw new SalvageStepFailed("rev-parse failed");
-    }
-    const unpushed = await ok("rev-list", UNPUSHED_SCRIPT);
-    const count = Number.parseInt(unpushed.stdout.trim(), 10);
-    if (!Number.isSafeInteger(count)) {
+    const sha = (await ok("rev-list", UNPUSHED_HEAD_SCRIPT)).stdout.trim();
+    if (sha === "") return done("nothing to save");
+    if (!SHA1_HEX.test(sha)) {
       throw new SalvageStepFailed("rev-list output unreadable");
-    }
-    if (count === 0) {
-      log("nothing to save");
-      return null;
     }
     // The run's own repository, by URL: the broker's insteadOf rewrite
     // carries it to GitHub, so whatever the agent set remote.origin.url to
@@ -583,14 +514,15 @@ export async function salvageWorkBranch(
       `https://github.com/${args.repoFullName}.git`,
       workBranch,
     ]);
-    log(`pushed ${sha.slice(0, 8)} to ${workBranch}`);
-    return { branch: workBranch, sha };
+    return done(`pushed ${sha.slice(0, 8)} to ${workBranch}`, {
+      branch: workBranch,
+      sha,
+    });
   } catch (err) {
     const reason =
       err instanceof SalvageStepFailed
         ? err.message
         : `runner threw (${err instanceof Error ? err.name : "unknown"})`;
-    log(`failed (${reason})`);
-    return null;
+    return done(`failed (${reason})`);
   }
 }

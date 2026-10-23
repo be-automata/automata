@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,11 +15,15 @@ import path from "node:path";
 
 import {
   abnormalEndInfo,
-  SALVAGE_COMMIT_MESSAGE,
+  salvageCommitMessage,
   salvageWorkBranch,
   type SalvageWorkBranchArgs,
 } from "./abnormal-end";
-import { runAsAgent, type RunAsAgent } from "./agent-command";
+import {
+  runAsAgent,
+  type AgentCommandResult,
+  type RunAsAgent,
+} from "./agent-command";
 
 /**
  * #437 Part B against REAL git: a temp checkout with a bare "GitHub" remote.
@@ -23,6 +36,8 @@ import { runAsAgent, type RunAsAgent } from "./agent-command";
 const BOT = "automata-ai-bot[bot]";
 const BEARER = "BEARER_SENTINEL_9f3c1d";
 const WORK_BRANCH = "automata/task-123";
+const LIMIT_MS = 30 * 60_000;
+const SALVAGE_MESSAGE = "wip: run timed out at 30m (automata salvage)";
 
 /** Test-side git, isolated from the machine's own config. */
 const GIT_ENV: NodeJS.ProcessEnv = {
@@ -41,11 +56,22 @@ function git(cwd: string, ...args: string[]): string {
     .trim();
 }
 
+/** The fixture, built once and copied per test. */
+let template: string;
 let root: string;
 let remotes: string;
 let bare: string;
 let work: string;
 let logs: string[];
+
+function layout(dir: string) {
+  const r = path.join(dir, "remotes");
+  return {
+    remotes: r,
+    bare: path.join(r, "o", "r.git"),
+    work: path.join(dir, "repo"),
+  };
+}
 
 /** The bare remote's refs as `<ref> <sha>` lines. */
 function remoteRefs(): Map<string, string> {
@@ -64,6 +90,14 @@ function publish(ref: string): void {
   git(work, "update-ref", `refs/remotes/origin/${ref}`, "HEAD");
 }
 
+/** A commit the agent made itself (and never pushed); returns its sha. */
+function agentCommit(file: string, message: string): string {
+  fs.writeFileSync(path.join(work, file), `// ${message}\n`);
+  git(work, "add", file);
+  git(work, "commit", "--quiet", "-m", message);
+  return git(work, "rev-parse", "HEAD");
+}
+
 function args(
   over: Partial<SalvageWorkBranchArgs> = {},
 ): SalvageWorkBranchArgs {
@@ -79,28 +113,45 @@ function args(
     agentUser: "",
     botLogin: BOT,
     egressProxyUrl: null,
+    runExecutionTimeoutMs: LIMIT_MS,
     log: (line) => logs.push(line),
     ...over,
   };
 }
 
+/** The salvage's result alone (most cases assert on it and the log). */
+async function salvage(over: Partial<SalvageWorkBranchArgs> = {}) {
+  return (await salvageWorkBranch(args(over))).result;
+}
+
+beforeAll(() => {
+  template = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "salvage-fixture-")),
+  );
+  const t = layout(template);
+  fs.mkdirSync(t.bare, { recursive: true });
+  git(t.bare, "init", "--quiet", "--bare");
+  fs.mkdirSync(t.work);
+  git(t.work, "init", "--quiet", "-b", "main");
+  fs.writeFileSync(path.join(t.work, "README.md"), "hello\n");
+  git(t.work, "add", "README.md");
+  git(t.work, "commit", "--quiet", "-m", "base");
+  // The clone's shape: origin is GitHub, origin/main is the base.
+  git(t.work, "remote", "add", "origin", "https://github.com/o/r.git");
+  git(t.work, "push", "--quiet", t.bare, "HEAD:refs/heads/main");
+  git(t.work, "update-ref", "refs/remotes/origin/main", "HEAD");
+  // provisionWorkdir: the work branch, cut from the cloned HEAD.
+  git(t.work, "checkout", "--quiet", "-b", WORK_BRANCH);
+});
+
+afterAll(() => {
+  fs.rmSync(template, { recursive: true, force: true });
+});
+
 beforeEach(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "salvage-")));
-  remotes = path.join(root, "remotes");
-  bare = path.join(remotes, "o", "r.git");
-  work = path.join(root, "repo");
-  fs.mkdirSync(bare, { recursive: true });
-  git(bare, "init", "--quiet", "--bare");
-  fs.mkdirSync(work);
-  git(work, "init", "--quiet", "-b", "main");
-  fs.writeFileSync(path.join(work, "README.md"), "hello\n");
-  git(work, "add", "README.md");
-  git(work, "commit", "--quiet", "-m", "base");
-  // The clone's shape: origin is GitHub, origin/main is the base.
-  git(work, "remote", "add", "origin", "https://github.com/o/r.git");
-  publish("main");
-  // provisionWorkdir: the work branch, cut from the cloned HEAD.
-  git(work, "checkout", "--quiet", "-b", WORK_BRANCH);
+  fs.cpSync(template, root, { recursive: true });
+  ({ remotes, bare, work } = layout(root));
   logs = [];
 });
 
@@ -119,14 +170,16 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     fs.writeFileSync(path.join(work, "README.md"), "hello, edited\n");
     fs.writeFileSync(path.join(work, "new.ts"), "export {};\n");
 
-    const result = await salvageWorkBranch(args());
+    const outcome = await salvageWorkBranch(args());
 
     const head = git(work, "rev-parse", "HEAD");
-    expect(result).toEqual({ branch: WORK_BRANCH, sha: head });
+    expect(outcome).toEqual({
+      result: { branch: WORK_BRANCH, sha: head },
+      spawned: true,
+    });
     expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(head);
-    expect(git(bare, "log", "-1", "--format=%s", head)).toBe(
-      SALVAGE_COMMIT_MESSAGE,
-    );
+    expect(git(bare, "log", "-1", "--format=%s", head)).toBe(SALVAGE_MESSAGE);
+    expect(salvageCommitMessage(LIMIT_MS)).toBe(SALVAGE_MESSAGE);
     expect(git(bare, "log", "-1", "--format=%an <%ae>|%cn", head)).toBe(
       `${BOT} <${BOT}@users.noreply.github.com>|${BOT}`,
     );
@@ -145,14 +198,9 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     // protects=AC3; fails_when=a salvage commit is added on a clean tree or
     // the agent's local commits stay unpushed; no_claim=none beyond protects
     // (same stand-ins as AC2).
-    fs.writeFileSync(path.join(work, "a.ts"), "export const a = 1;\n");
-    git(work, "add", "a.ts");
-    git(work, "commit", "--quiet", "-m", "agent: first part");
-    const agentHead = git(work, "rev-parse", "HEAD");
+    const agentHead = agentCommit("a.ts", "agent: first part");
 
-    const result = await salvageWorkBranch(args());
-
-    expect(result).toEqual({ branch: WORK_BRANCH, sha: agentHead });
+    expect(await salvage()).toEqual({ branch: WORK_BRANCH, sha: agentHead });
     expect(git(work, "rev-parse", "HEAD")).toBe(agentHead);
     expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(agentHead);
     expect(git(bare, "log", "-1", "--format=%s", agentHead)).toBe(
@@ -167,15 +215,11 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     // protects=AC3's "or that remote ref does not exist" half; fails_when=a
     // work branch that never reached the remote is left unpushed;
     // no_claim=none beyond protects.
-    fs.writeFileSync(path.join(work, "b.ts"), "export const b = 2;\n");
-    git(work, "add", "b.ts");
-    git(work, "commit", "--quiet", "-m", "agent: b");
+    const agentHead = agentCommit("b.ts", "agent: b");
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
 
-    const result = await salvageWorkBranch(args());
-
-    expect(result?.sha).toBe(git(work, "rev-parse", "HEAD"));
-    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(result?.sha);
+    expect((await salvage())?.sha).toBe(agentHead);
+    expect(remoteRefs().get(`refs/heads/${WORK_BRANCH}`)).toBe(agentHead);
   });
 
   it("a clean tree with nothing unpushed pushes nothing (AC4)", async () => {
@@ -184,19 +228,16 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     // base is not "work"); fails_when=anything is committed or pushed, or the
     // line is not `nothing to save`; no_claim=none beyond protects.
     const before = remoteRefs();
-    expect(await salvageWorkBranch(args())).toBeNull();
+    expect(await salvage()).toBeNull();
     expect(remoteRefs()).toEqual(before);
     expect(logs).toEqual(["salvage: nothing to save"]);
 
-    fs.writeFileSync(path.join(work, "c.ts"), "export const c = 3;\n");
-    git(work, "add", "c.ts");
-    git(work, "commit", "--quiet", "-m", "agent: c");
+    const head = agentCommit("c.ts", "agent: c");
     publish(WORK_BRANCH);
     const pushed = remoteRefs();
-    const head = git(work, "rev-parse", "HEAD");
     logs = [];
 
-    expect(await salvageWorkBranch(args())).toBeNull();
+    expect(await salvage()).toBeNull();
     expect(git(work, "rev-parse", "HEAD")).toBe(head);
     expect(remoteRefs()).toEqual(pushed);
     expect(logs).toEqual(["salvage: nothing to save"]);
@@ -211,53 +252,51 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     fs.writeFileSync(path.join(work, "d.ts"), "export const d = 4;\n");
     const missing = path.join(root, "no-such-remotes");
 
-    const result = await salvageWorkBranch(
-      args({ broker: { gitUrl: `file://${missing}`, bearer: BEARER } }),
-    );
+    const result = await salvage({
+      broker: { gitUrl: `file://${missing}`, bearer: BEARER },
+    });
 
     expect(result).toBeNull();
     expect(logs).toEqual(["salvage: failed (push failed (exit 128))"]);
     // The commit itself still happened: a later look at the checkout (it is
     // deleted right after) would find it, but nothing claims it was saved.
-    expect(git(work, "log", "-1", "--format=%s")).toBe(SALVAGE_COMMIT_MESSAGE);
+    expect(git(work, "log", "-1", "--format=%s")).toBe(SALVAGE_MESSAGE);
   });
 
-  it("a push that outlives the 60 s budget is killed and logged, never thrown", async () => {
+  it("a push that outlives the budget is cut off by the budget's own signal and logged, never thrown", async () => {
     // protects=the hard budget on a fresh signal: a hung push cannot hold the
     // teardown (and the box lock) past it; fails_when=the salvage waits for
     // the hung step, throws, or logs anything but `failed (budget
-    // exceeded)`; no_claim=the 60 s value itself (a 1.5 s budget stands in;
-    // a `sleep 30` stands in for a hung push, killed by the real runAsAgent).
-    fs.writeFileSync(path.join(work, "e.ts"), "export const e = 5;\n");
-    const run: RunAsAgent = (a) =>
-      runAsAgent(
-        a.script.includes("git push")
-          ? { ...a, script: "sleep 30", args: [] }
-          : a,
-      );
+    // exceeded)`; no_claim=the 60 s value (50 ms stands in) and runAsAgent's
+    // kill on abort (agent-command tests) — every step here is a fake whose
+    // push resolves only when the budget signal aborts.
+    const ok = (stdout = "", exitCode = 0): AgentCommandResult => ({
+      exitCode,
+      stdout,
+      timedOut: false,
+      truncated: false,
+    });
+    let pushSignal: AbortSignal | undefined;
+    const run: RunAsAgent = async (a) => {
+      if (a.script.includes("git push")) {
+        pushSignal = a.signal;
+        return new Promise((resolve) =>
+          a.signal?.addEventListener("abort", () => resolve(ok("", -1)), {
+            once: true,
+          }),
+        );
+      }
+      if (a.script.includes("diff --cached")) return ok("", 1);
+      if (a.script.includes("rev-list")) return ok(`${"a".repeat(40)}\n`);
+      return ok();
+    };
     const t0 = Date.now();
 
-    const result = await salvageWorkBranch(args({ run, budgetMs: 1_500 }));
+    expect(await salvage({ run, budgetMs: 50 })).toBeNull();
 
-    expect(result).toBeNull();
-    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(pushSignal?.aborted).toBe(true);
     expect(logs).toEqual(["salvage: failed (budget exceeded)"]);
-    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
-  }, 15_000);
-
-  it("a lost box lock skips the salvage without running a single git command (AC6)", async () => {
-    // protects=AC6: another run may own the box once the lock is lost;
-    // fails_when=any git runs, anything is committed or pushed, or the line
-    // differs; no_claim=how the lock is lost (box-lock tests).
-    fs.writeFileSync(path.join(work, "f.ts"), "export const f = 6;\n");
-    const run = vi.fn(runAsAgent);
-
-    expect(await salvageWorkBranch(args({ lockLost: true, run }))).toBeNull();
-
-    expect(run).not.toHaveBeenCalled();
-    expect(logs).toEqual(["salvage: skipped (lock lost)"]);
-    expect(git(work, "status", "--porcelain")).toBe("?? f.ts");
-    expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
   });
 
   it("only the work branch is ever pushed, whatever the agent wrote into .git/config", async () => {
@@ -275,37 +314,32 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
     git(decoy, "init", "--quiet", "--bare");
     git(work, "remote", "set-url", "origin", decoy);
     git(work, "checkout", "--quiet", "-b", "other");
-    fs.writeFileSync(path.join(work, "other.ts"), "export {};\n");
-    git(work, "add", "other.ts");
-    git(work, "commit", "--quiet", "-m", "other branch");
+    agentCommit("other.ts", "other branch");
     git(work, "tag", "-a", "v9", "-m", "a tag");
     git(work, "checkout", "--quiet", WORK_BRANCH);
     fs.writeFileSync(path.join(work, "g.ts"), "export {};\n");
     git(work, "tag", "-a", "v10", "-m", "tag on HEAD's parent");
 
-    const result = await salvageWorkBranch(args());
-
-    expect(result).not.toBeNull();
+    expect(await salvage()).not.toBeNull();
     expect([...remoteRefs().keys()].sort()).toEqual(
       ["refs/heads/main", `refs/heads/${WORK_BRANCH}`].sort(),
     );
     expect(git(decoy, "for-each-ref")).toBe("");
   });
 
-  it("no log line of any outcome carries the bearer, the auth header or the broker URL (AC12)", async () => {
-    // protects=AC12 for Part B's journal lines; fails_when=any line holds the
-    // per-run bearer, an Authorization header or the broker URL;
-    // no_claim=the persisted terminal info (built from branch + sha only,
-    // see abnormalEndInfo below).
+  it("no log line of a run that reached git carries the bearer, the auth header or the broker URL (AC12)", async () => {
+    // protects=AC12 for Part B's journal lines; fails_when=a pushed or failed
+    // line holds the per-run bearer, an Authorization header or the broker
+    // URL; no_claim=the skip lines (constant text, pinned by the gating
+    // table) and the persisted terminal info (branch + sha only, see
+    // abnormalEndInfo below).
     const runs: Array<Partial<SalvageWorkBranchArgs>> = [
       {},
       { broker: { gitUrl: `file://${root}/missing`, bearer: BEARER } },
-      { lockLost: true },
-      { containerRun: true },
     ];
     for (const over of runs) {
       fs.writeFileSync(path.join(work, "h.ts"), `// ${Math.random()}\n`);
-      await salvageWorkBranch(args(over));
+      await salvage(over);
     }
     expect(logs).toHaveLength(runs.length);
     for (const line of logs) {
@@ -313,7 +347,7 @@ describe("salvageWorkBranch (#437 Part B) against a real git checkout", () => {
       expect(line.toLowerCase()).not.toContain("authorization");
       expect(line).not.toContain(root);
       expect(line).toMatch(
-        /^salvage: (pushed [0-9a-f]{8} to \S+|nothing to save|failed \(.+\)|skipped \(.+\))$/,
+        /^salvage: (pushed [0-9a-f]{8} to \S+|failed \(.+\))$/,
       );
     }
   });
@@ -323,19 +357,33 @@ describe("salvageWorkBranch gating (#437 Part B)", () => {
   it.each([
     [{ enabled: false }, "salvage: skipped (disabled)"],
     [{ workBranch: undefined }, "salvage: skipped (no work branch)"],
+    // AC6: another run may own the box once the lock is lost.
+    [{ lockLost: true }, "salvage: skipped (lock lost)"],
     [{ containerRun: true }, "salvage: skipped (container run)"],
     [{ broker: null }, "salvage: skipped (no git broker)"],
-  ] as const)("%j logs one skip line and runs no git", async (over, line) => {
-    // protects=WORKER_TIMEOUT_SALVAGE=off, a run with no work branch, the
-    // container path (no broker route until C3) and a legacy-direct box (no
-    // second auth path) each skip with their reason; fails_when=git runs or
-    // the line differs; no_claim=the workflow passing these values
-    // (workflow-cleanup tests).
-    const run = vi.fn(runAsAgent);
-    expect(await salvageWorkBranch(args({ ...over, run }))).toBeNull();
-    expect(run).not.toHaveBeenCalled();
-    expect(logs).toEqual([line]);
-  });
+  ] as const)(
+    "%j logs one skip line, runs no git and leaves the tree as it was",
+    async (over, line) => {
+      // protects=WORKER_TIMEOUT_SALVAGE=off, a run with no work branch, a
+      // lost box lock (AC6), the container path (no broker route until C3)
+      // and a legacy-direct box (no second auth path) each skip with their
+      // reason; fails_when=git runs, anything is committed or pushed, or the
+      // line differs; no_claim=the workflow passing these values
+      // (workflow-cleanup tests).
+      fs.writeFileSync(path.join(work, "f.ts"), "export const f = 6;\n");
+      const run = vi.fn(runAsAgent);
+
+      expect(await salvageWorkBranch(args({ ...over, run }))).toEqual({
+        result: null,
+        spawned: false,
+      });
+
+      expect(run).not.toHaveBeenCalled();
+      expect(logs).toEqual([line]);
+      expect(git(work, "status", "--porcelain")).toBe("?? f.ts");
+      expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
+    },
+  );
 
   it("any cause but timeout is silent and touches nothing", async () => {
     // protects=out-of-memory/daemon-failed/run-failed-unreported keep PR 1's
@@ -347,7 +395,10 @@ describe("salvageWorkBranch gating (#437 Part B)", () => {
       "daemon-failed",
       "run-failed-unreported",
     ] as const) {
-      expect(await salvageWorkBranch(args({ cause, run }))).toBeNull();
+      expect(await salvageWorkBranch(args({ cause, run }))).toEqual({
+        result: null,
+        spawned: false,
+      });
     }
     expect(run).not.toHaveBeenCalled();
     expect(logs).toEqual([]);
@@ -355,7 +406,7 @@ describe("salvageWorkBranch gating (#437 Part B)", () => {
 });
 
 describe("abnormalEndInfo with a salvage (#437 Part B)", () => {
-  const LIMIT = { runExecutionTimeoutMs: 30 * 60_000, starvation: null };
+  const LIMIT = { runExecutionTimeoutMs: LIMIT_MS, starvation: null };
   const SHA = "0123456789abcdef0123456789abcdef01234567";
 
   it("names the branch and the short sha; without a salvage the limit line stays", () => {
@@ -405,31 +456,35 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
   });
 
   it.each([
-    [
-      "url.<decoy>.pushInsteadOf",
-      (): [string, string] => [
+    {
+      name: "url.<decoy>.pushInsteadOf",
+      entry: (): [string, string] => [
         `url.${decoy}.pushInsteadOf`,
         "https://github.com/o/r.git",
       ],
-    ],
-    [
-      "remote.<url>.pushurl",
-      (): [string, string] => [
+      nestedDecoy: false,
+    },
+    {
+      name: "remote.<url>.pushurl",
+      entry: (): [string, string] => [
         "remote.https://github.com/o/r.git.pushurl",
         decoy,
       ],
-    ],
-    // Longer than the broker's `https://github.com/`, so it wins the rewrite.
-    [
-      "a longer url.<decoy>.insteadOf",
-      (): [string, string] => [
+      nestedDecoy: false,
+    },
+    {
+      // Longer than the broker's `https://github.com/`, so it wins the
+      // rewrite; the decoy is then a "remote root" holding r.git.
+      name: "a longer url.<decoy>.insteadOf",
+      entry: (): [string, string] => [
         `url.${decoy}/.insteadOf`,
         "https://github.com/o/",
       ],
-    ],
-  ] as const)(
-    "%s: skipped (unsafe local git config), nothing reaches the decoy",
-    async (_name, entry) => {
+      nestedDecoy: true,
+    },
+  ])(
+    "$name: skipped (unsafe local git config), nothing reaches the decoy",
+    async ({ entry, nestedDecoy }) => {
       // protects=F1: the push lands on the run's repository through the
       // broker or not at all; fails_when=a local key redirects the push and
       // the salvage reports `pushed`, or anything reaches the decoy;
@@ -437,20 +492,17 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
       // agent's decoy).
       const [key, value] = entry();
       git(work, "config", key, value);
-      if (key.endsWith(".insteadOf")) {
-        // The decoy as a "remote root": <decoy>/r.git under o/.
-        fs.mkdirSync(path.join(decoy, "r.git"));
-        git(path.join(decoy, "r.git"), "init", "--quiet", "--bare");
+      const nested = path.join(decoy, "r.git");
+      if (nestedDecoy) {
+        fs.mkdirSync(nested);
+        git(nested, "init", "--quiet", "--bare");
       }
 
-      const result = await salvageWorkBranch(args());
+      expect(await salvage()).toBeNull();
 
-      expect(result).toBeNull();
       expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
       expect(git(decoy, "for-each-ref")).toBe("");
-      if (key.endsWith(".insteadOf")) {
-        expect(git(path.join(decoy, "r.git"), "for-each-ref")).toBe("");
-      }
+      if (nestedDecoy) expect(git(nested, "for-each-ref")).toBe("");
       expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(false);
     },
   );
@@ -464,9 +516,8 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
     fs.writeFileSync(path.join(work, ".gitattributes"), "* filter=x\n");
     git(work, "config", "filter.x.clean", `touch ${marker}; cat`);
 
-    const result = await salvageWorkBranch(args());
+    expect(await salvage()).toBeNull();
 
-    expect(result).toBeNull();
     expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
     expect(fs.existsSync(marker)).toBe(false);
   });
@@ -484,7 +535,7 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
       `touch ${marker}; git-receive-pack`,
     );
 
-    await salvageWorkBranch(args());
+    await salvage();
 
     expect(logs).toEqual(["salvage: skipped (unsafe local git config)"]);
     expect(fs.existsSync(marker)).toBe(false);
@@ -498,9 +549,8 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
     const hook = path.join(work, ".git", "hooks", "post-commit");
     fs.writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
 
-    const result = await salvageWorkBranch(args());
+    expect(await salvage()).not.toBeNull();
 
-    expect(result).not.toBeNull();
     expect(fs.existsSync(marker)).toBe(false);
   });
 
@@ -512,7 +562,7 @@ describe("salvageWorkBranch refuses an agent-steered checkout (#437 review F1/F2
     git(work, "config", "push.autoSetupRemote", "true");
     git(work, "config", `branch.${WORK_BRANCH}.remote`, "origin");
 
-    expect(await salvageWorkBranch(args())).not.toBeNull();
+    expect(await salvage()).not.toBeNull();
     expect(remoteRefs().has(`refs/heads/${WORK_BRANCH}`)).toBe(true);
   });
 });

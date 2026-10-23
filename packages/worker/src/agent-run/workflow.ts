@@ -1978,14 +1978,13 @@ async function runAgentInner(
       // died mid-run, so the kernel already freed it) means another run may
       // legitimately own the box now — its live agent would be collateral of
       // a uid-wide kill, so the scan is skipped and logged instead.
-      if (containerDaemon) {
-        // ADR-013: the container's removal above replaced the uid-wide scan:
-        // every process of the run lived in the container's pid namespace.
-      } else if (boxLock?.lost) {
-        admissionLog(
-          `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
-        );
-      } else {
+      const reapTeardownEscapees = async (): Promise<void> => {
+        if (boxLock?.lost) {
+          admissionLog(
+            `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
+          );
+          return;
+        }
         await reapAgentUidEscapees({
           agentUser: config.agentUser,
           phase: "teardown",
@@ -1993,7 +1992,10 @@ async function runAgentInner(
           runNamespaceRoot: config.runNamespaceRoot,
           log: admissionLog,
         });
-      }
+      };
+      // ADR-013: a container's removal above replaced the uid-wide scan:
+      // every process of the run lived in the container's pid namespace.
+      if (!containerDaemon) await reapTeardownEscapees();
       // #437 Part A2: claim and post the typed terminal of an abnormal end
       // once the agent is dead, BEFORE the brokers close and the checkout goes.
       // A normal end, or a run this plane does not own, claims null. The OOM
@@ -2015,13 +2017,9 @@ async function runAgentInner(
           : null;
       if (!abnormalExit) abnormal.claimed = true;
       if (end) {
-        // #437 Part B: a timed-out run's work is committed and pushed to its
-        // work branch now — the agent is dead, the git broker still open —
-        // and the post names the branch. Silent for any other cause; never
-        // throws. On the host path the salvage git ran as the agent uid
-        // after the reap above, so anything it left behind (a filter driver
-        // the agent configured) is reaped again before the closes below.
-        let salvageRan = false;
+        // #437 Part B: a timeout's work is pushed now (agent dead, broker
+        // open) and the post names the branch; then the salvage's own
+        // agent-uid git is reaped (same lost-lock rule) before the closes.
         const salvage = await salvageWorkBranch({
           cause: end.cause,
           workBranch: input.workBranch,
@@ -2034,32 +2032,15 @@ async function runAgentInner(
           agentUser: config.agentUser,
           botLogin: config.botLogin,
           egressProxyUrl: egressProxy?.url ?? null,
+          runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
           log: step,
-          run: (args) => {
-            salvageRan = true;
-            return runAsAgent(args);
-          },
         });
-        // Same rule as the reap above: a lock lost DURING the salvage means
-        // another run may own the agent uid now, so no uid-wide kill. This
-        // reap is also what bounds a salvage git that outlived its budget
-        // kill (salvageWorkBranch).
-        if (salvageRan && !containerDaemon) {
-          if (boxLock?.lost) {
-            admissionLog(
-              `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
-            );
-          } else {
-            await reapAgentUidEscapees({
-              agentUser: config.agentUser,
-              phase: "teardown",
-              threadId: input.threadId,
-              runNamespaceRoot: config.runNamespaceRoot,
-              log: admissionLog,
-            });
-          }
-        }
-        await postAbnormalEnd(abnormal, end, { wwwOpts, log: step, salvage });
+        if (salvage.spawned && !containerDaemon) await reapTeardownEscapees();
+        await postAbnormalEnd(abnormal, end, {
+          wwwOpts,
+          log: step,
+          salvage: salvage.result,
+        });
       }
       // #66: close the egress proxy after the daemon is dead (no more child
       // traffic), then flush the last audit batch. Both are best-effort — an

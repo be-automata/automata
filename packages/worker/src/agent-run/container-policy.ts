@@ -3,7 +3,12 @@ import {
   CONTAINER_WORKSPACE,
   type ContainerLanePolicy,
 } from "./container-argv";
-import { buildRunProxyEnv, isReservedRepoEnvKey } from "./daemon-env";
+import {
+  botGitIdentity,
+  brokeredGitAuthConfig,
+  buildRunProxyEnv,
+  isReservedRepoEnvKey,
+} from "./daemon-env";
 import { mergeForegroundOnlySettings } from "./foreground-only-hook";
 
 /**
@@ -110,27 +115,15 @@ export function buildContainerRunEnv(
   }
   env.GH_CONFIG_DIR = CONTAINER_GH_CONFIG_DIR;
 
-  const botEmail = `${opts.botLogin}@users.noreply.github.com`;
+  const identity = botGitIdentity(opts.botLogin);
   env.GIT_CONFIG_GLOBAL = "/dev/null";
   env.GIT_CONFIG_SYSTEM = "/dev/null";
   env.GIT_TERMINAL_PROMPT = "0";
-  env.GIT_AUTHOR_NAME = opts.botLogin;
-  env.GIT_AUTHOR_EMAIL = botEmail;
-  env.GIT_COMMITTER_NAME = opts.botLogin;
-  env.GIT_COMMITTER_EMAIL = botEmail;
+  Object.assign(env, identity.env);
   const gitConfig: Array<[string, string]> = [
-    ...(broker
-      ? ([
-          [`url.${broker.gitUrl}/.insteadOf`, "https://github.com/"],
-          [
-            `http.${broker.gitUrl}/.extraheader`,
-            `Authorization: Bearer ${broker.bearer}`,
-          ],
-        ] as Array<[string, string]>)
-      : []),
+    ...(broker ? brokeredGitAuthConfig(broker) : []),
     ["credential.helper", ""],
-    ["user.name", opts.botLogin],
-    ["user.email", botEmail],
+    ...identity.config,
     // The clone is owned by the worker's uid on the host, never the
     // container's: scoped to the one checkout the run was given.
     ["safe.directory", CONTAINER_WORKSPACE],

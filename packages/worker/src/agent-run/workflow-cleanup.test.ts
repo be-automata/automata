@@ -3343,7 +3343,9 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   let salvageCalls: Array<Parameters<RunAsAgent>[0]>;
   let gitBrokerClose: ReturnType<typeof vi.fn>;
 
-  /** A git the agent left dirty: every step succeeds, one commit to push. */
+  /** A git the agent left dirty: something staged, one commit to push. */
+  const STDOUT: Record<string, string> = { "rev-list": `${SALVAGE_SHA}\n` };
+  const EXIT: Record<string, number> = { diff: 1 }; // diff --cached: staged
   const scriptedGit: RunAsAgent = async (a) => {
     salvageCalls.push(a);
     // `exec git <verb> …`; the config guard is `test -d .git … git config`.
@@ -3351,16 +3353,20 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       ? "guard"
       : (a.script.split(" ")[2] ?? "?");
     finallyOrder.push(`salvage:${verb}`);
-    const stdout =
-      verb === "status"
-        ? " M src/a.ts\n"
-        : verb === "rev-parse"
-          ? `${SALVAGE_SHA}\n`
-          : verb === "rev-list"
-            ? "1\n"
-            : "";
-    return { exitCode: 0, stdout, timedOut: false, truncated: false };
+    return {
+      exitCode: EXIT[verb] ?? 0,
+      stdout: STDOUT[verb] ?? "",
+      timedOut: false,
+      truncated: false,
+    };
   };
+
+  /** The `timeout` post without a salvage: the PR 1 limit line. */
+  const limitPost = (runId: string) => ({
+    runExternalId: runId,
+    cause: "timeout",
+    info: "The run reached its 30-minute limit.",
+  });
 
   /** The engine cancel at the 30-minute limit, fired from the poll. */
   function timeoutCtx(runId: string) {
@@ -3451,10 +3457,9 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "uid-reap:teardown",
       "salvage:guard",
       "salvage:check-ref-format",
-      "salvage:status",
       "salvage:add",
+      "salvage:diff",
       "salvage:commit",
-      "salvage:rev-parse",
       "salvage:rev-list",
       "salvage:push",
       "uid-reap:teardown",
@@ -3497,11 +3502,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
 
     expect(out.outcome).toBe("cancelled");
     expect(postRunTerminal.mock.calls.map((call) => call[1])).toEqual([
-      {
-        runExternalId: "run-ext-salvage-fail",
-        cause: "timeout",
-        info: "The run reached its 30-minute limit.",
-      },
+      limitPost("run-ext-salvage-fail"),
     ]);
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: failed (push failed (exit 128))",
@@ -3519,11 +3520,9 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     await runFn(TASK_INPUT, c);
 
     expect(salvageCalls).toEqual([]);
-    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
-      runExternalId: "run-ext-salvage-off",
-      cause: "timeout",
-      info: "The run reached its 30-minute limit.",
-    });
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual(
+      limitPost("run-ext-salvage-off"),
+    );
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: skipped (disabled)",
     );
@@ -3624,11 +3623,9 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: skipped (container run)",
     );
-    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
-      runExternalId: "run-ext-salvage-container",
-      cause: "timeout",
-      info: "The run reached its 30-minute limit.",
-    });
+    expect(postRunTerminal.mock.calls[0]![1]).toEqual(
+      limitPost("run-ext-salvage-container"),
+    );
     const order = finallyOrder.slice(
       finallyOrder.indexOf("container-teardown"),
     );
