@@ -72,6 +72,41 @@ describe("runKnowledgePurgeSweep", () => {
     expect(r).toEqual({ purged: 1, failed: 0, timedOut: 1 });
   });
 
+  it("logs a timed-out purge's outcome when it settles late", async () => {
+    let finish: (counts: typeof COUNTS) => void = () => undefined;
+    let fail: (error: Error) => void = () => undefined;
+    const purge = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<typeof COUNTS>((resolve) => (finish = resolve)),
+      )
+      .mockImplementationOnce(
+        () => new Promise<typeof COUNTS>((_, reject) => (fail = reject)),
+      );
+    const deps = makeDeps({
+      purge,
+      budget: { totalMs: 5_000, perOrgMs: 20, limit: 10 },
+    });
+    const r = await runKnowledgePurgeSweep(deps);
+    expect(r).toEqual({ purged: 0, failed: 0, timedOut: 2 });
+
+    finish(COUNTS);
+    fail(new TypeError("secret statement text"));
+    await vi.waitFor(() => {
+      expect(deps.log.log).toHaveBeenCalledWith(
+        "[cron:knowledge-purge] finished after timeout",
+        { organizationId: "A", ...COUNTS },
+      );
+      expect(deps.log.error).toHaveBeenCalledWith(
+        "[cron:knowledge-purge] failed after timeout",
+        { organizationId: "B", error: "TypeError" },
+      );
+    });
+    expect(JSON.stringify(vi.mocked(deps.log.error).mock.calls)).not.toContain(
+      "secret",
+    );
+  });
+
   it("skips remaining orgs when the total budget is exhausted", async () => {
     const deps = makeDeps({
       purge: vi.fn(() => new Promise<never>(() => undefined)),

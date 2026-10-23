@@ -115,6 +115,7 @@ describe("deploy/migrations", () => {
       "2026-10-22-review-rerun",
       "2026-10-23-knowledge-org-controls",
       "2026-10-24-knowledge-op-fingerprint-index",
+      "2026-10-25-knowledge-updated-at",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);

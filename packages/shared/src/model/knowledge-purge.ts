@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, lt, lte, or } from "drizzle-orm";
+import { and, asc, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
 
 import type { DB } from "../db";
 import {
@@ -99,7 +99,11 @@ export async function purgeKnowledgeData({
       .returning({ id: knowledgeIntent.id });
     await tx
       .update(organizationReviewSettings)
-      .set({ knowledgePurgedAt: now, updatedAt: now })
+      .set({
+        knowledgePurgedAt: now,
+        knowledgeUpdatedAt: now,
+        updatedAt: sql`${organizationReviewSettings.updatedAt}`,
+      })
       .where(eq(organizationReviewSettings.organizationId, organizationId));
     return {
       claims: claims.length,

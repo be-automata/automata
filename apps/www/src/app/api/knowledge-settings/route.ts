@@ -71,7 +71,8 @@ export async function GET(): Promise<NextResponse> {
       id: a.id,
       action: a.action,
       target: a.target,
-      actorUserId: a.actorUserId,
+      // Who acted is for admins; members see what changed, not by whom.
+      actorUserId: orgAdmin || platformAdmin ? a.actorUserId : null,
       createdAt: a.createdAt.toISOString(),
     })),
     viewer: { isOrgAdmin: orgAdmin, isPlatformAdmin: platformAdmin },

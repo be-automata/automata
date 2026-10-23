@@ -282,6 +282,50 @@ describe("knowledge controls", () => {
       await update(orgB, { engine: true }, { expectedUpdatedAt: null });
     });
 
+    it("keeps its stamp apart from the PR-review settings' updatedAt", async () => {
+      const reviewRow = async () => {
+        const [row] = await db
+          .select()
+          .from(schema.organizationReviewSettings)
+          .where(eq(schema.organizationReviewSettings.organizationId, orgA));
+        if (!row) throw new Error("expected a settings row");
+        return row;
+      };
+      const first = await update(orgA, { engine: true });
+      const reviewStampBefore = (await reviewRow()).updatedAt.getTime();
+
+      // A PR-review save bumps updatedAt; the knowledge stamp still matches.
+      await db
+        .update(schema.organizationReviewSettings)
+        .set({ trustedAuthorThreshold: "MEMBER" })
+        .where(eq(schema.organizationReviewSettings.organizationId, orgA));
+      const reviewStampAfterReviewSave = (
+        await reviewRow()
+      ).updatedAt.getTime();
+      expect(reviewStampAfterReviewSave).not.toBe(reviewStampBefore);
+      const second = await update(
+        orgA,
+        { budgetMicroUsd: 5_000_000 },
+        { expectedUpdatedAt: first.updatedAt },
+      );
+      expect(second.budgetMicroUsd).toBe(5_000_000);
+
+      // Knowledge writes (update, offboard, undo) leave updatedAt alone.
+      await offboardKnowledge({
+        db,
+        organizationId: orgA,
+        actorUserId: userId,
+      });
+      await clearKnowledgeOffboard({
+        db,
+        organizationId: orgA,
+        actorUserId: userId,
+      });
+      expect((await reviewRow()).updatedAt.getTime()).toBe(
+        reviewStampAfterReviewSave,
+      );
+    });
+
     it("refuses to enable while offboarded", async () => {
       await offboardKnowledge({
         db,
