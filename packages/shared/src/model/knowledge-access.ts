@@ -3,7 +3,6 @@ import {
   advanceKnowledgeCursor,
   decideKnowledgeOp,
   getKnowledgeCursor,
-  knowledgeGateReason,
   observeKnowledgeHead,
   reserveKnowledgeBudget,
   settleKnowledgeBudget,
@@ -13,6 +12,7 @@ import { listKnowledgeAdminActions } from "./knowledge-admin-log";
 import {
   clearKnowledgeOffboard,
   getKnowledgeControls,
+  getKnowledgeGateReason,
   getKnowledgeSpend,
   offboardKnowledge,
   updateKnowledgeControls,
@@ -65,12 +65,7 @@ export function forKnowledge({
   organizationId: string;
 }) {
   async function gated<T>(run: () => Promise<T>): Promise<KnowledgeGated<T>> {
-    const controls = await getKnowledgeControls({ db, organizationId });
-    const reason = knowledgeGateReason({
-      knowledgeEngine: controls.engine,
-      knowledgeOffboardedAt: controls.offboardedAt,
-      knowledgeBudgetMicroUsd: controls.budgetMicroUsd,
-    });
+    const reason = await getKnowledgeGateReason({ db, organizationId });
     if (reason) return { ok: false, reason };
     return { ok: true, value: await run() };
   }

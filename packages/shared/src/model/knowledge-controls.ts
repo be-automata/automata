@@ -77,9 +77,16 @@ function toControls(
     purgedAt: row?.knowledgePurgedAt ?? null,
     enabled: gateReason === null,
     gateReason,
-    updatedAt: row?.updatedAt ?? null,
+    updatedAt: row?.knowledgeUpdatedAt ?? null,
   };
 }
+
+/**
+ * Knowledge writes stamp `knowledgeUpdatedAt` and leave the shared `updatedAt`
+ * (the PR-review settings' optimistic-concurrency stamp) as it is: assigning
+ * the column to itself also keeps drizzle's `$onUpdate` from bumping it.
+ */
+const KEEP_REVIEW_UPDATED_AT = sql`${organizationReviewSettings.updatedAt}`;
 
 async function readOrgRow(
   db: DB,
@@ -155,6 +162,17 @@ export async function setKnowledgeBudgetCeiling(
     });
 }
 
+/** The kill-switch verdict alone: one primary-key read, no cache. */
+export async function getKnowledgeGateReason({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<KnowledgeGateReason | null> {
+  return knowledgeGateReason(await readOrgRow(db, organizationId));
+}
+
 /** Live read, no cache. */
 export async function getKnowledgeControls({
   db,
@@ -221,11 +239,11 @@ export async function updateKnowledgeControls({
     const tx = rawTx as unknown as DB;
     const row = await readOrgRow(tx, organizationId, true);
     if (expectedUpdatedAt !== undefined) {
+      const stamp = row?.knowledgeUpdatedAt ?? null;
       const matches =
         expectedUpdatedAt === null
-          ? row === undefined
-          : row !== undefined &&
-            row.updatedAt.getTime() === expectedUpdatedAt.getTime();
+          ? stamp === null
+          : stamp !== null && stamp.getTime() === expectedUpdatedAt.getTime();
       if (!matches) throw new KnowledgeControlsConflictError();
     }
     if (patch.engine === true && row?.knowledgeOffboardedAt)
@@ -241,11 +259,16 @@ export async function updateKnowledgeControls({
         organizationId,
         ...fields,
         updatedByUserId: actorUserId,
-        updatedAt: now,
+        knowledgeUpdatedAt: now,
       })
       .onConflictDoUpdate({
         target: [organizationReviewSettings.organizationId],
-        set: { ...fields, updatedByUserId: actorUserId, updatedAt: now },
+        set: {
+          ...fields,
+          updatedByUserId: actorUserId,
+          knowledgeUpdatedAt: now,
+          updatedAt: KEEP_REVIEW_UPDATED_AT,
+        },
       });
 
     if (patch.budgetMicroUsd !== undefined) {
@@ -321,14 +344,14 @@ export async function offboardKnowledge({
       knowledgeEngine: false,
       knowledgeOffboardedAt: now,
       updatedByUserId: actorUserId,
-      updatedAt: now,
+      knowledgeUpdatedAt: now,
     };
     await tx
       .insert(organizationReviewSettings)
       .values({ organizationId, ...fields })
       .onConflictDoUpdate({
         target: [organizationReviewSettings.organizationId],
-        set: fields,
+        set: { ...fields, updatedAt: KEEP_REVIEW_UPDATED_AT },
       });
     await recordKnowledgeAdminAction({
       db: tx,
@@ -365,7 +388,8 @@ export async function clearKnowledgeOffboard({
       .set({
         knowledgeOffboardedAt: null,
         updatedByUserId: actorUserId,
-        updatedAt: now,
+        knowledgeUpdatedAt: now,
+        updatedAt: KEEP_REVIEW_UPDATED_AT,
       })
       .where(eq(organizationReviewSettings.organizationId, organizationId));
     await recordKnowledgeAdminAction({

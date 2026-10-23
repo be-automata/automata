@@ -1686,6 +1686,11 @@ export const organizationReviewSettings = pgTable(
     }),
     /** Set by the purge; a purge is due only while NULL or older than offboarded_at. */
     knowledgePurgedAt: timestamp("knowledge_purged_at", { mode: "date" }),
+    /**
+     * Optimistic-concurrency stamp of the knowledge controls, separate from
+     * `updatedAt` (the PR-review settings' stamp). NULL = no knowledge write yet.
+     */
+    knowledgeUpdatedAt: timestamp("knowledge_updated_at", { mode: "date" }),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",

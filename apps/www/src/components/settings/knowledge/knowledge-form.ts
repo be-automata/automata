@@ -64,6 +64,8 @@ export interface KnowledgeFieldError {
 
 const MICRO_PER_DOLLAR = 1_000_000;
 const BUDGET_PATTERN = /^(\d{1,9})(?:\.(\d{1,6}))?$/;
+/** Mirrors KNOWLEDGE_BUDGET_ABSOLUTE_MAX_MICRO_USD (the server's $10,000 cap). */
+export const KNOWLEDGE_BUDGET_MAX_MICRO_USD = 10_000 * MICRO_PER_DOLLAR;
 
 /** Dollars as typed -> micro-USD. Empty means "use the platform default". */
 export function dollarsToMicroUsd(
@@ -83,7 +85,13 @@ export function dollarsToMicroUsd(
   }
   const whole = match[1] ?? "0";
   const fraction = (match[2] ?? "").padEnd(6, "0");
-  return { value: Number(whole) * MICRO_PER_DOLLAR + Number(fraction) };
+  const value = Number(whole) * MICRO_PER_DOLLAR + Number(fraction);
+  if (value > KNOWLEDGE_BUDGET_MAX_MICRO_USD) {
+    return {
+      error: { field: "budget", message: "The budget can be at most $10,000." },
+    };
+  }
+  return { value };
 }
 
 /** Micro-USD -> "20.00" for display (two decimals, rounded half up). */

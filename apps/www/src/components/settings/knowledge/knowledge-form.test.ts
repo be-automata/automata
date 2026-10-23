@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { KNOWLEDGE_BUDGET_ABSOLUTE_MAX_MICRO_USD } from "@terragon/shared/model/knowledge";
+
 import {
+  KNOWLEDGE_BUDGET_MAX_MICRO_USD,
   dollarsToMicroUsd,
   draftFromControls,
   draftToPatch,
@@ -49,13 +52,27 @@ describe("dollarsToMicroUsd", () => {
   it("treats empty as the platform default", () => {
     expect(dollarsToMicroUsd("")).toEqual({ value: null });
   });
-  it.each(["-1", "abc", "1e3x", "1.1234567", "1.", ".5"])(
-    "rejects %s",
-    (text) => {
-      const r = dollarsToMicroUsd(text);
-      expect("error" in r && r.error.field).toBe("budget");
-    },
-  );
+  it("accepts the server's $10,000 maximum and refuses a cent more", () => {
+    expect(dollarsToMicroUsd("10000")).toEqual({
+      value: KNOWLEDGE_BUDGET_MAX_MICRO_USD,
+    });
+    expect(KNOWLEDGE_BUDGET_MAX_MICRO_USD).toBe(
+      KNOWLEDGE_BUDGET_ABSOLUTE_MAX_MICRO_USD,
+    );
+  });
+  it.each([
+    "-1",
+    "abc",
+    "1e3x",
+    "1.1234567",
+    "1.",
+    ".5",
+    "10000.01",
+    "999999999",
+  ])("rejects %s", (text) => {
+    const r = dollarsToMicroUsd(text);
+    expect("error" in r && r.error.field).toBe("budget");
+  });
 });
 
 describe("microUsdToDollars", () => {

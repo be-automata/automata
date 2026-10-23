@@ -141,6 +141,7 @@ describe("/api/knowledge-settings", () => {
       expect(body.controls.ceilingMicroUsd).toBe(100_000_000);
       expect(body.spend.spentMicroUsd).toBe(2);
       expect(body.actions).toHaveLength(1);
+      expect(body.actions[0].actorUserId).toBeNull();
       expect(body.viewer).toEqual({
         isOrgAdmin: false,
         isPlatformAdmin: false,
@@ -148,6 +149,13 @@ describe("/api/knowledge-settings", () => {
       expect(listKnowledgeAdminActions).toHaveBeenCalledWith(
         expect.objectContaining({ organizationId: ORG, limit: 20 }),
       );
+    });
+
+    it("shows the admin-log actor to org and platform admins only", async () => {
+      expect((await (await GET()).json()).actions[0].actorUserId).toBe(USER);
+      vi.mocked(isOrgAdmin).mockResolvedValue(false);
+      vi.mocked(isPlatformAdmin).mockResolvedValue(true);
+      expect((await (await GET()).json()).actions[0].actorUserId).toBe(USER);
     });
   });
 

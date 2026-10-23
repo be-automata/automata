@@ -44,9 +44,15 @@ type Outcome =
   | { status: "timeout" }
   | { status: "error"; name: string };
 
+/**
+ * Race the work against its slot. A timeout cannot cancel the purge
+ * transaction (it commits or rolls back on its own), so `onLate` receives the
+ * outcome it settles with after the slot ended.
+ */
 async function withinBudget(
   ms: number,
   work: () => Promise<KnowledgePurgeCounts>,
+  onLate: (outcome: Outcome) => void,
 ): Promise<Outcome> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<Outcome>((resolve) => {
@@ -63,7 +69,11 @@ async function withinBudget(
     }
   })();
   try {
-    return await Promise.race([run, timeout]);
+    const outcome = await Promise.race([run, timeout]);
+    if (outcome.status === "timeout") {
+      void (async () => onLate(await run))();
+    }
+    return outcome;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -93,8 +103,22 @@ export async function runKnowledgePurgeSweep(
     const remaining = budget.totalMs - (Date.now() - startedAt);
     if (remaining <= 0) break;
     const slotMs = Math.min(budget.perOrgMs, remaining);
-    const outcome = await withinBudget(slotMs, () =>
-      deps.purge(organizationId, now),
+    const outcome = await withinBudget(
+      slotMs,
+      () => deps.purge(organizationId, now),
+      (late) => {
+        if (late.status === "done") {
+          deps.log.log("[cron:knowledge-purge] finished after timeout", {
+            organizationId,
+            ...late.counts,
+          });
+        } else if (late.status === "error") {
+          deps.log.error("[cron:knowledge-purge] failed after timeout", {
+            organizationId,
+            error: late.name,
+          });
+        }
+      },
     );
     if (outcome.status === "done") {
       result.purged += 1;
