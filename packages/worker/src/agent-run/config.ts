@@ -13,11 +13,6 @@ import {
   ADMISSION_DEFERRAL_BUDGET_S,
   sumBackoffSeconds,
 } from "./admission-retry";
-import {
-  agentUserForSlot,
-  assertAgentUser,
-  slotAgentUsers,
-} from "./spawn-as-user";
 
 /**
  * Execution-plane worker box configuration (ADR-003). Unlike the control plane
@@ -30,17 +25,11 @@ import {
  * arrive per-run as workflow input, never from here (ADR-002 §3).
  */
 export interface WorkerConfig {
-  /** Absolute path to node used to spawn the daemon (defaults to this runtime). */
-  nodeBin: string;
-  /** Absolute path to the built daemon bundle (packages/daemon/dist/index.js). */
-  daemonDist: string;
   /**
-   * Directory holding the `claude` binary. Prepended to the spawned daemon's
-   * PATH so its `bash -lc "... | claude ..."` resolves the agent CLI without the
-   * daemon bundle hardcoding an absolute path (team-lead: PATH-resolved override).
-   * Empty → rely on the daemon's login-shell PATH.
+   * Absolute path to the built daemon bundle (packages/daemon/dist/index.js),
+   * bind-mounted read-only into every run container (ADR-013 Decision 4).
    */
-  claudeBinDir: string;
+  daemonDist: string;
   /** ANTHROPIC_API_KEY passed to the daemon when the box has no Claude creds file. */
   anthropicApiKey: string;
   /**
@@ -72,29 +61,13 @@ export interface WorkerConfig {
    */
   boxTrust: "owner" | "shared" | "box-key";
   /**
-   * Dedicated unprivileged unix account the agent child runs as (#108).
-   *
-   * Empty (the DEFAULT) = EXACTLY today's behaviour: no sudo wrapper, no ACLs,
-   * no group-kill shell-out, no observe-mode proxy. Non-empty additionally
-   * REQUIRES an explicit WORKER_WORKDIR_ROOT (see the loader) — the default
-   * root is os.tmpdir(), which on macOS is a 0700 dir owned by the worker's own
-   * uid and untraversable by any other, so every run would die at clone.
-   *
-   * macOS-only mechanism; nothing here is platform-gated at config level so the
-   * package still typechecks and tests on any platform.
-   */
-  agentUser: string;
-  /**
    * #205: how many agent runs this box admits at once — the counting box
-   * budget. 1 (the DEFAULT) is byte-for-byte today's exclusive lock on
-   * `box.lock` under the one `WORKER_AGENT_USER`. N > 1 takes slot files
-   * `box.lock.<i>` and runs slot i as `${WORKER_AGENT_USER}-${i}`
-   * (`agentUserForSlot`), because a uid is the only fence between two
-   * concurrent runs on one host. N > 1 REQUIRES the per-run memory ceiling
-   * (#204): without a cgroup per run there is no bounded blast radius for a
-   * sibling and no `cgroup.kill` reach for its teardown. Both requirements are
-   * enforced by the loader, so a box cannot boot — or run — half-configured.
-   * Must equal the worker's engine `slots` and the engine global cap (#372).
+   * budget. 1 (the DEFAULT) is an exclusive lock on `box.lock`; N > 1 takes
+   * slot files `box.lock.<i>`. Slot i's run is the container named
+   * `automata-run-<workerId>-<i>` (ADR-013): its own pid, mount and network
+   * namespaces fence it from its siblings, and its `--memory` (the required
+   * per-run ceiling) bounds its blast radius. Must equal the worker's engine
+   * `slots` and the engine global cap (#372).
    */
   boxSlots: number;
   /**
@@ -112,27 +85,20 @@ export interface WorkerConfig {
    */
   perOrgMaxRuns: number;
   /**
-   * #205: every slot's agent account, slot 0 first — `[agentUser]` at N = 1,
-   * `[]` with agent-uid mode off. The one list every box-wide operation (the
-   * shared namespace grants, the boot scan, the stale-dir sweep) iterates.
-   */
-  agentUsers: string[];
-  /**
    * #205: WHICH slot the current run holds — a per-run override the workflow
-   * sets on its copy of the config after the slot acquire, together with the
-   * slot's `agentUser`. Never read from env and undefined at boot. With
+   * sets on its copy of the config after the slot acquire. Never read from env and undefined at boot. With
    * `boxSlots > 1` every per-run namespace path (daemon socket, pidfile,
    * gh-broker socket) lives under the slot's own subdir, so a run can reach
    * only its own sockets; with `boxSlots === 1` the flat layout is unchanged.
    */
   boxSlot?: number;
   /**
-   * #204: per-run memory ceiling in bytes. 0 (the DEFAULT) = off, and the spawn
-   * is byte-for-byte what it is today. Requires agent-uid mode and a delegated
-   * cgroup subtree; see run-cgroup.ts.
+   * #204: per-run memory ceiling in bytes (`WORKER_RUN_MEMORY_MAX`). REQUIRED
+   * since ADR-013 P3: every run container gets it as `--memory` (no swap), so
+   * the loader refuses a box without it (container-config.ts).
    */
   memoryMaxBytes: number;
-  /** #204: per-run `pids.max`. Only read when the ceiling is on. */
+  /** #204: per-run `--pids-limit` (`WORKER_RUN_TASKS_MAX`, default 4096). */
   tasksMax: number;
   /**
    * #371: memory-headroom admission check (ADR-007 Decision 5). `MemAvailable`
@@ -251,11 +217,11 @@ export interface WorkerConfig {
   /** Optional loopback /healthz port. null → no new listener (default). */
   healthPort: number | null;
   /**
-   * ADR-013 P1: the DEV-ONLY container run path (container-config.ts). null —
-   * the default, and always in production — is the host-uid path, unchanged.
-   * Set only when `WORKER_DEV_CONTAINER_RUNS=1`; deleted by the release PR.
+   * ADR-013: the container every agent run executes in — the pinned batteries
+   * image, the rootless daemon's socket and the per-container limits
+   * (container-config.ts). Always set; an unusable value refuses boot.
    */
-  containerRuns: ContainerRunsConfig | null;
+  containerRuns: ContainerRunsConfig;
 }
 
 function defaultDaemonDist(): string {
@@ -264,10 +230,9 @@ function defaultDaemonDist(): string {
   // provisioning documents this. We can't require.resolve the dist path — the
   // daemon package's "." export is the TS source and its exports map blocks
   // package.json — so we derive it from this file's monorepo location. On a bundled
-  // deploy set WORKER_DAEMON_DIST explicitly to override this. In agent-uid mode
-  // the launcher (deploy/linux/run-worker.sh.template) exports it to the copy it
-  // stages under /usr/local/automata/daemon, so this default is the non-agent-uid
-  // path only.
+  // deploy set WORKER_DAEMON_DIST explicitly to override this; the box launcher
+  // (deploy/linux/run-worker.sh.template) exports it to the copy it stages under
+  // /usr/local/automata/daemon.
   // this file: packages/worker/src/agent-run/config.ts → up 3 = packages/worker.
   const workerPkgRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -275,14 +240,6 @@ function defaultDaemonDist(): string {
     "..",
   );
   return path.join(workerPkgRoot, "..", "daemon", "dist", "index.js");
-}
-
-function resolveClaudeBinDir(explicit: string | undefined): string {
-  if (explicit && explicit.trim()) {
-    // Accept either the binary path or its directory.
-    return explicit.endsWith("/claude") ? path.dirname(explicit) : explicit;
-  }
-  return "";
 }
 
 /** Parses a positive-int env value, falling back to `fallback` on anything non-finite or ≤0. */
@@ -562,13 +519,12 @@ export function loadWorkerConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): WorkerConfig {
   const pollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? "7000");
-  // #108: validate the agent-uid opt-in HERE, not in a separate boot assert —
-  // worker.ts calls loadWorkerConfig at boot AND the workflow calls it per run,
-  // so a misconfigured box can neither start nor execute.
-  // #204. Parsed before the agentUser gate below so a nonsense value is refused
-  // at boot rather than at the first run — the whole-tuple validation ADR-002's
-  // capacity model needs (global cap, worker slots, per-run ceiling, swap) starts
-  // with this one not being a typo.
+  // Every refusal below fires at boot AND per run: worker.ts calls
+  // loadWorkerConfig at boot and the workflow calls it for every run, so a
+  // misconfigured box can neither start nor execute.
+  // #204. The whole-tuple validation ADR-002's capacity model needs (global
+  // cap, worker slots, per-run ceiling, swap) starts with this one not being a
+  // typo.
   const memoryMaxBytes = parseMemoryMax(env.WORKER_RUN_MEMORY_MAX);
   const runNamespaceRoot =
     env.WORKER_RUN_NAMESPACE_ROOT?.trim() || DEFAULT_RUN_NAMESPACE_ROOT;
@@ -576,14 +532,8 @@ export function loadWorkerConfig(
     env.WORKER_RUN_TERMINAL_ROOT,
     runNamespaceRoot,
   );
-  // ONLY VALIDATED WHEN THE CEILING IS ON. `parseTasksMax` throws on a set-but-
-  // invalid value, and running it unconditionally meant a box that never enabled
-  // the ceiling could be stopped from booting by a stray `WORKER_RUN_TASKS_MAX` —
-  // breaking the default-off promise this feature makes twice over. With the
-  // ceiling off the value is unused, so it is not this feature's business to
-  // reject it.
-  const tasksMax =
-    memoryMaxBytes > 0 ? parseTasksMax(env.WORKER_RUN_TASKS_MAX) : 0;
+  // `--pids-limit` for every run container.
+  const tasksMax = parseTasksMax(env.WORKER_RUN_TASKS_MAX);
 
   // #215. Parsed here, alongside the #204 block, so a typo is refused at boot
   // rather than at the first tick.
@@ -599,8 +549,7 @@ export function loadWorkerConfig(
     // A POLL PERIOD AT OR ABOVE THE THRESHOLD CANNOT DETECT ANYTHING. The first
     // tick after the wedge would already be past the deadline in the best case
     // and could be a whole period late, so the box would look guarded and be
-    // guarded by nothing. Refuse, the same way WORKER_RUN_MEMORY_MAX without
-    // WORKER_AGENT_USER is refused.
+    // guarded by nothing. Refuse rather than boot unguarded.
     if (livenessPollS >= livenessStaleAfterS) {
       throw new Error(
         `WORKER_LIVENESS_POLL_S=${livenessPollS} must be well below ` +
@@ -611,71 +560,20 @@ export function loadWorkerConfig(
     }
   }
 
-  // ADR-013 P1: parsed before the uid-drop pairings below, which it relaxes
-  // (a run container is fenced by the container, not by a slot account).
-  // null unless WORKER_DEV_CONTAINER_RUNS=1, so every refusal below is
-  // byte-for-byte what it was for a host-model box.
+  // ADR-013: every run is a container from the pinned image, so the image,
+  // the rootless daemon's socket and the per-run ceiling (`--memory`) are
+  // required: a box without them refuses to boot (container-config.ts).
   const containerRuns = parseContainerRunsConfig(
     env,
     memoryMaxBytes,
     parseBytesEnv,
   );
-  const agentUser = env.WORKER_AGENT_USER?.trim() || "";
-  if (agentUser) {
-    assertAgentUser(agentUser);
-    if (!env.WORKER_WORKDIR_ROOT?.trim()) {
-      throw new Error(
-        "WORKER_AGENT_USER is set but WORKER_WORKDIR_ROOT is not: the default " +
-          "workdir root is os.tmpdir(), which on macOS is mode 0700 and owned by " +
-          "the worker's own uid — the agent uid cannot traverse it and every run " +
-          "would die at clone. Set WORKER_WORKDIR_ROOT (e.g. /usr/local/automata/runs).",
-      );
-    }
-  }
-  // THE CEILING NEEDS THE UID DROP, so asking for one without the other is a
-  // misconfiguration, not a degraded mode. Without the drop the agent is this
-  // process's own child in this process's own cgroup, and capping it would cap
-  // the WORKER — so the per-run path declines. It used to decline with a log
-  // line and run on, which is the fail-open this whole feature argues against:
-  // the operator asked for a ceiling, the box booted happily, and every run went
-  // uncapped with one 'skipped' line to show for it. Rejecting here fails at
-  // boot AND at every run, because every caller loads this config.
-  // A container run takes the ceiling as `--memory` instead (ADR-013), so the
-  // uid drop is not what makes it enforceable there.
-  if (memoryMaxBytes > 0 && !agentUser && !containerRuns) {
-    throw new Error(
-      "WORKER_RUN_MEMORY_MAX is set but WORKER_AGENT_USER is empty: the per-run " +
-        "memory ceiling caps the AGENT, which only exists as a separate process " +
-        "under the uid drop. Without it the ceiling would cap this worker, so it " +
-        "is declined — and a box told to cap its runs must not run them uncapped. " +
-        "Set WORKER_AGENT_USER, or unset WORKER_RUN_MEMORY_MAX.",
-    );
-  }
-  // #205. Parsed after the ceiling and the uid drop because N > 1 depends on
-  // both: the slot accounts are what fence concurrent runs from each other,
-  // and the per-run cgroup is what bounds a sibling's blast radius and gives
-  // its teardown a kill that cannot reach the others. A box asking for N > 1
-  // without either is a misconfiguration, not a degraded mode — refuse here,
-  // at boot AND at every run, since every caller loads this config.
+  // #205. Each slot's run is its own container (pid, mount and network
+  // namespaces) bounded by its own `--memory`, so N > 1 needs nothing beyond
+  // the ceiling containerRuns already required above.
   const boxSlots = parseBoxSlots(env.WORKER_BOX_SLOTS);
   // Container runs: each run is its own container (pid, mount and network
   // namespaces), so the slot accounts are not the fence between them.
-  if (boxSlots > 1 && !agentUser && !containerRuns) {
-    throw new Error(
-      `WORKER_BOX_SLOTS=${boxSlots} but WORKER_AGENT_USER is empty: concurrent ` +
-        "runs are fenced from each other by running each slot as its own agent " +
-        "account, which needs the uid drop. Set WORKER_AGENT_USER, or set " +
-        "WORKER_BOX_SLOTS=1.",
-    );
-  }
-  if (boxSlots > 1 && memoryMaxBytes <= 0) {
-    throw new Error(
-      `WORKER_BOX_SLOTS=${boxSlots} but WORKER_RUN_MEMORY_MAX is unset: more than ` +
-        "one run at a time needs the per-run memory ceiling (#204) — without a " +
-        "cgroup per run a sibling has no bounded blast radius and no cgroup.kill. " +
-        "Set WORKER_RUN_MEMORY_MAX, or set WORKER_BOX_SLOTS=1.",
-    );
-  }
   // #372. THE TUPLE MOVES TOGETHER. The engine's "global" key is per workflow
   // variant, the worker's `slots` is the engine-native cross-workflow cap and the
   // counting box lock is the host cap: `WORKER_GLOBAL_MAX_RUNS` must EQUAL
@@ -684,7 +582,7 @@ export function loadWorkerConfig(
   // on the box lock with their 30-minute clocks running) or starve slots the
   // box paid for (global < slots). The per-org fairness cap must not exceed the
   // global cap (a cap no run can reach is a lie in the registration). Refused
-  // here, at boot AND at every run, like the #205 pairings above.
+  // here, at boot AND at every run.
   // Unset = the slots (the only consistent value — a box already running
   // WORKER_BOX_SLOTS=2 keeps booting across this change); an EXPLICIT value
   // that disagrees is still refused below.
@@ -710,10 +608,6 @@ export function loadWorkerConfig(
         "misconfiguration — set WORKER_PER_ORG_MAX_RUNS at or below the global cap.",
     );
   }
-  // Every slot's account name must be a valid login NOW, not at the first run
-  // of that slot: a base near the 31-character limit plus `-<i>` is refused by
-  // assertAgentUser, and that refusal belongs at boot.
-  const agentUsers = slotAgentUsers(agentUser, boxSlots);
   // #371. Parsed here so a typo is refused at boot, not at the first admission.
   const headroomFloorBytes = parseBytesEnv(
     "WORKER_HEADROOM_FLOOR",
@@ -749,11 +643,9 @@ export function loadWorkerConfig(
     );
   }
   return {
-    agentUser,
     boxSlots,
     globalMaxRuns,
     perOrgMaxRuns,
-    agentUsers,
     headroomFloorBytes,
     headroomCommitFraction,
     headroomRunCommitBytes,
@@ -763,9 +655,7 @@ export function loadWorkerConfig(
     tasksMax,
     livenessStaleAfterS,
     livenessPollS,
-    nodeBin: env.WORKER_NODE_BIN?.trim() || process.execPath,
     daemonDist: env.WORKER_DAEMON_DIST?.trim() || defaultDaemonDist(),
-    claudeBinDir: resolveClaudeBinDir(env.CLAUDE_BIN),
     anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
     // Only the exact string opts in. Anything else (unset, typo, "true") stays
     // "shared", so a misconfigured box degrades to the mode that keeps provider
@@ -827,15 +717,10 @@ export function loadWorkerConfig(
 
 /**
  * #205: the config one run uses once it holds slot `slot` — the same box config
- * with the slot's own agent account and index. At slot 0 the account is the
- * base name, so N = 1 is unchanged.
+ * with the slot's index (its container name and per-run namespace subdir).
  */
 export function configForSlot(cfg: WorkerConfig, slot: number): WorkerConfig {
-  return {
-    ...cfg,
-    agentUser: agentUserForSlot(cfg.agentUser, slot),
-    boxSlot: slot,
-  };
+  return { ...cfg, boxSlot: slot };
 }
 
 /** Resolves a per-mechanism mode: an explicit off/dry-run/on wins; "inherit" defers to the global mode. */

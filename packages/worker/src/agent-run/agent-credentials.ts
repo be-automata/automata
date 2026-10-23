@@ -1,26 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { authFilePathForAgent } from "@terragon/agent/auth-file";
+import { CONTAINER_WORKSPACE } from "./container-argv";
 import type { PulledAgentCredentials } from "./www-client";
-import { reapplyPathGrant } from "./agent-uid-fs";
 import type { RunPaths } from "./run-owned-paths";
-import {
-  seedBatteries,
-  seedForegroundOnly,
-  type SeedBatteriesOptions,
-  type SeedBatteriesResult,
-} from "./batteries-seed";
-import {
-  excludeHarnessState,
-  harnessMcpServers,
-  seededHarnessPacks,
-} from "./harness-seed";
-import type { BatterySeed } from "./task-agent";
-
-type Grant = (target: string, kind: "file" | "directory") => Promise<void>;
 
 /**
- * Materialises a run's agent provider credential on the execution box (D1).
+ * Materialises a run's agent provider credential on the execution box (D1),
+ * into the run's HOME STAGING dir: ContainerDaemonProcess copies that dir into
+ * the run container's HOME volume before it starts (ADR-013 Decision 4), then
+ * the staging dir goes with the run dir.
  *
  * The agent CLIs authenticate off a file in $HOME (Claude reads
  * ~/.claude/.credentials.json; packages/daemon/src/claude.ts probes exactly that
@@ -43,8 +32,6 @@ export interface MaterialisedCredentials {
   env: Record<string, string>;
   /** Remove every credential byte this wrote. Safe to call twice. */
   cleanup: () => Promise<void>;
-  /** Battery seeding outcome — present ONLY for orchestrated review runs and task runs with packs. */
-  batteries?: SeedBatteriesResult;
 }
 
 /**
@@ -76,56 +63,27 @@ export interface MaterialisedCredentials {
  * mitigation (e.g. the CLI's `--bare`, which skips hooks) is a separate,
  * run-mode-level decision tracked outside this module.
  *
- * THE ONLY WRITER of `~/.claude.json` (it overwrites), so the run's
- * user-scope MCP servers — the seeded harness packs' wrappers, resolved by
- * seedBatteries — are written here too, in the same file write. Each entry is
- * a command inside a root-owned pack and carries no env: nothing secret ever
- * lands in this file.
+ * THE ONLY WRITER of `~/.claude.json` (it overwrites). The clone is always at
+ * `/workspace` in the container, so one key covers it (no realpath spelling).
  */
 async function seedWorkspaceTrust({
-  grant,
   home,
   workdir,
-  mcpServers = {},
 }: {
   home: string;
   workdir: string;
-  /** The run's ACL re-grant (a no-op when agent-uid mode is off). */
-  grant: Grant;
-  /** User-scope MCP servers (harnessMcpServers); empty = no key at all. */
-  mcpServers?: Record<
-    string,
-    { type: "stdio"; command: string; args: string[] }
-  >;
 }): Promise<void> {
-  // The CLI keys trust by the RESOLVED cwd. On macOS os.tmpdir() returns
-  // /var/folders/…, a symlink to /private/var/folders/…, so seeding the
-  // symlinked spelling misses: the agent still printed "this workspace has not
-  // been trusted" with the /private path, made zero API calls and exited 1.
-  // Seed both spellings — the realpath is the one that matters, the raw one is
-  // insurance against a CLI that does not resolve.
-  const resolved = await fs.realpath(workdir).catch(() => workdir);
   const trust = {
     hasTrustDialogAccepted: true,
     hasCompletedProjectOnboarding: true,
   };
   const config = {
     hasCompletedOnboarding: true,
-    projects: {
-      [workdir]: trust,
-      [resolved]: trust,
-    },
-    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    projects: { [workdir]: trust },
   };
-  const trustFile = path.join(home, ".claude.json");
-  await fs.writeFile(trustFile, JSON.stringify(config), {
+  await fs.writeFile(path.join(home, ".claude.json"), JSON.stringify(config), {
     mode: 0o600,
   });
-  // LINUX ONLY. `mode: 0o600` at CREATION is by itself enough to zero the POSIX
-  // ACL mask — no chmod needed — so the agent's grant on this file is born dead
-  // and the CLI reports an untrusted workspace, which ends the run in seconds
-  // with no output. No-op on macOS. See reapplyFileGrant.
-  await grant(trustFile, "file");
 }
 
 /**
@@ -147,98 +105,26 @@ async function seedWorkspaceTrust({
  * worker and the daemon's per-agent adapters, #77); an agent we have no path
  * for degrades to built-in-credits rather than guessing a location.
  *
- * `seed` (built by the caller with batterySeedForRun) links battery packs
- * into this HOME through seedBatteries:
- * - ORCHESTRATED review runs (D2): the selected packs plus a hooks-off
- *   `settings.json` at the user layer (`hooksOff: true`). Safe because the
- *   review argv keeps `--setting-sources user`, so the PR's own project
- *   `.claude/` and `.mcp.json` never load (02-FINDINGS Q3).
- * - TASK runs (Phase 7) with admin-selected packs (already shape-gated by
- *   taskAgentForRun): the same fences with `hooksOff: false`.
- * No seed (classic reviews, runs without task packs): no packs linked.
- *
- * `foregroundOnly` (foregroundOnlyForRun: every non-review run) writes a
- * user-level settings.json holding only the foreground-only PreToolUse
- * guard, so background Bash/Monitor (killed when the headless session ends)
- * are refused — with or without packs. Review runs: HOME exactly as before.
+ * The batteries are image contents (ADR-013): nothing is linked here, and the
+ * run's settings (deny rules, the foreground-only guard, the lane's share of
+ * the image's hooks) are composed per lane at copy-in (container-policy.ts).
  */
 export async function materialiseAgentCredentials({
   credentials,
   agent,
   run,
-  agentUser,
-  seed,
-  foregroundOnly = false,
-  batteries,
-  trustWorkdir,
+  trustWorkdir = CONTAINER_WORKSPACE,
 }: {
   credentials: PulledAgentCredentials;
   agent: string;
   /** The run's paths: the HOME is created at `home`, `repo` is marked trusted. */
   run: RunPaths;
-  /**
-   * The dedicated role account the agent child runs as, when agent-uid mode is
-   * on. Empty/absent = default-off, and every grant below is a no-op.
-   */
-  agentUser?: string;
-  /** The packs to seed and whether hooks go off; absent = no seeding. */
-  seed?: BatterySeed;
-  /** Install the foreground-only guard (non-review runs); ignored on a hooks-off seed. */
-  foregroundOnly?: boolean;
-  /** Test/override seam for seedBatteries; production passes only `log`. */
-  batteries?: Omit<SeedBatteriesOptions, "agentUser">;
-  /**
-   * The path the agent sees its clone at, when that is not `run.repo`: a
-   * container run (ADR-013) mounts the clone at `/workspace`, so the trust
-   * seed must name that path. Absent = `run.repo` (the host path, unchanged).
-   */
+  /** The path the agent sees its clone at (default `/workspace`, ADR-013). */
   trustWorkdir?: string;
 }): Promise<MaterialisedCredentials> {
   const home = run.home;
-  const users = agentUser ? [agentUser] : [];
-  // Every grant below; production passes no exec/platform seam, so this is
-  // reapplyPathGrant exactly as before (tests inject both via `batteries`).
-  const grant: Grant = (target, kind) =>
-    reapplyPathGrant({
-      target,
-      kind,
-      users,
-      ...(batteries?.aclExec ? { exec: batteries.aclExec } : {}),
-      ...(batteries?.platform ? { platform: batteries.platform } : {}),
-    });
   await fs.mkdir(home, { recursive: true, mode: 0o700 });
-  // 0700 at creation zeroes the POSIX ACL mask on Linux, so the agent cannot
-  // TRAVERSE its own HOME — and then every grant on the files inside is moot.
-  // Restore the access entry; the inherited default ACL is untouched by mode.
-  await grant(home, "directory");
-  // seedBatteries creates and grants `<home>/.claude` in both modes, so the
-  // credential write below does not repeat that.
-  const log = batteries?.log ?? console.log;
-  const seeded = seed
-    ? await seedBatteries(home, seed.batteries, {
-        ...batteries,
-        log,
-        agentUser,
-        hooksOff: seed.hooksOff,
-        ...(foregroundOnly ? { foregroundOnly: true } : {}),
-      })
-    : undefined;
-  if (!seed && foregroundOnly) {
-    await seedForegroundOnly(home, { ...batteries, log, agentUser });
-  }
-  // AFTER seeding: the trust file is also where the seeded harness packs'
-  // MCP servers go, and it is written whole, once.
-  await seedWorkspaceTrust({
-    home,
-    workdir: trustWorkdir ?? run.repo,
-    grant,
-    mcpServers: harnessMcpServers(seeded?.harness),
-  });
-  // Seeded harness packs write state into the checkout (.gstack/,
-  // .claude-flow/, .swarm/); keep it out of the PR, before the agent starts.
-  if (seededHarnessPacks(seeded?.harness).length > 0) {
-    await excludeHarnessState(run.repo, grant);
-  }
+  await seedWorkspaceTrust({ home, workdir: trustWorkdir });
   const cleanup = async () => {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
   };
@@ -247,7 +133,6 @@ export async function materialiseAgentCredentials({
     delivered: false,
     env: {},
     cleanup,
-    batteries: seeded,
   };
 
   if (credentials.type === "built-in-credits") {
@@ -273,26 +158,13 @@ export async function materialiseAgentCredentials({
   }
 
   const target = path.join(home, relativePath);
-  const credentialDir = path.dirname(target);
-  if (!(seeded && credentialDir === path.join(home, ".claude"))) {
-    // 0700 on the directories: the credential must not be world- or
-    // group-readable even for the instant before the file's own mode is
-    // applied.
-    await fs.mkdir(credentialDir, { recursive: true, mode: 0o700 });
-    // Same 0700 mask trap one level down (e.g. `<home>/.claude`).
-    await grant(credentialDir, "directory");
-  }
+  // 0700 on the directories: the credential must not be world- or
+  // group-readable even for the instant before the file's own mode is applied.
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   await fs.writeFile(target, credentials.contents, { mode: 0o600 });
   // writeFile only honours `mode` when it CREATES the file; an existing file
   // (retry into the same run dir) keeps its old mode, so set it explicitly.
   await fs.chmod(target, 0o600);
-  // LINUX ONLY, AND LOAD-BEARING: both lines above land the group-class bits at
-  // zero, and on Linux those bits ARE the POSIX ACL mask — so each one on its
-  // own is enough to zero the agent's grant on this exact file while `getfacl`
-  // still lists the entry. Without this the agent cannot read the credential it
-  // was just handed, and the run dies in seconds with no output. No-op on macOS,
-  // where an ACE survives chmod. See reapplyFileGrant.
-  await grant(target, "file");
 
   return { ...base, delivered: true };
 }

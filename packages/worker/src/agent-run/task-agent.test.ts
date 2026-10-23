@@ -3,12 +3,8 @@ import { describe, expect, it } from "vitest";
 import { resolveRunLane } from "./run-lane";
 import {
   TASK_AGENT_MAX_PACKS,
-  batterySeedForRun,
-  foregroundOnlyForRun,
-  readTokenForRun,
+  formatBatteriesLine,
   taskAgentForRun,
-  taskRunOutcome,
-  type TaskAgentGate,
 } from "./task-agent";
 import type { AgentRunInput } from "./types";
 
@@ -96,7 +92,7 @@ describe("taskAgentForRun (phase 7)", () => {
     expect(gate.reason).toContain("[1]");
   });
 
-  it("an unknown but well-formed id passes (the manifest is the authority)", () => {
+  it("an unknown but well-formed id passes (the image is the authority)", () => {
     expect(gateFor({ batteries: ["not-in-manifest"] })).toEqual({
       kind: "seed",
       batteries: ["not-in-manifest"],
@@ -105,321 +101,39 @@ describe("taskAgentForRun (phase 7)", () => {
   });
 });
 
-describe("foregroundOnlyForRun", () => {
-  it.each(["task", "pr"] as const)(
-    "every %s-lane run gets the guard, with or without packs",
-    (lane) => {
-      expect(foregroundOnlyForRun(lane, undefined)).toBe(true);
-      expect(
-        foregroundOnlyForRun(lane, {
-          batteries: ["somnio-skills"],
-          hooksOff: false,
-        }),
-      ).toBe(true);
-    },
-  );
+describe("formatBatteriesLine (ADR-013)", () => {
+  const imageDigest = `sha256:${"ab12".repeat(16)}`;
 
-  it("review runs never get it (classic or orchestrated)", () => {
-    expect(foregroundOnlyForRun("review", undefined)).toBe(false);
+  // card: protects=every run logs which image its batteries come from (12 hex of the digest) and its lane, and a task run names the pack ids it asked for or that they were invalid; fails_when=the digest, lane or pack list is missing or a refused gate prints its value; no_claim=what the image contains (verify.sh)
+  it("names the image digest and lane, plus the task packs when the run carried any", () => {
     expect(
-      foregroundOnlyForRun("review", {
-        batteries: ["gstack-review"],
-        hooksOff: true,
-      }),
-    ).toBe(false);
-  });
-
-  it("a hooks-off seed keeps its settings, whatever the lane", () => {
-    expect(
-      foregroundOnlyForRun("task", { batteries: [], hooksOff: true }),
-    ).toBe(false);
-  });
-});
-
-describe("batterySeedForRun (phase 5/7)", () => {
-  const SEED_GATE: TaskAgentGate = {
-    kind: "seed",
-    batteries: ["somnio-skills"],
-    lane: "task",
-  };
-
-  it("an orchestrated review seeds its packs with hooks off", () => {
-    expect(
-      batterySeedForRun(
-        { mode: "orchestrated", batteries: ["gstack-review"] },
-        { kind: "none" },
-      ),
-    ).toEqual({ batteries: ["gstack-review"], hooksOff: true });
-  });
-
-  it("a task seed links its packs with hooks on", () => {
-    expect(batterySeedForRun(undefined, SEED_GATE)).toEqual({
-      batteries: ["somnio-skills"],
-      hooksOff: false,
-    });
-  });
-
-  it("an orchestrated review wins over a task seed", () => {
-    expect(
-      batterySeedForRun(
-        { mode: "orchestrated", batteries: ["gstack-review"] },
-        SEED_GATE,
-      ),
-    ).toEqual({ batteries: ["gstack-review"], hooksOff: true });
-  });
-
-  it.each<[string, Parameters<typeof batterySeedForRun>]>([
-    ["absent review, no task gate", [undefined, { kind: "none" }]],
-    [
-      "classic review",
-      [{ mode: "classic", batteries: ["gstack-review"] }, { kind: "none" }],
-    ],
-    [
-      "rejected task gate",
-      [undefined, { kind: "rejected", lane: "task", reason: "x" }],
-    ],
-    [
-      "an empty task list",
-      [undefined, { kind: "seed", batteries: [], lane: "task" }],
-    ],
-  ])("%s ⇒ no seed (HOME exactly today's)", (_name, args) => {
-    expect(batterySeedForRun(...args)).toBeUndefined();
-  });
-});
-
-describe("readTokenForRun (phase 7, read-only task token gate)", () => {
-  const NOW = Date.parse("2026-10-04T02:00:00Z");
-  const SEED_GATE = {
-    kind: "seed" as const,
-    batteries: ["somnio-skills"],
-    lane: "task" as const,
-  };
-  const SEEDED = {
-    ok: true as const,
-    packs: ["somnio-skills"],
-    manifestHash: "a".repeat(64),
-    requires: ["github-read-token"],
-  };
-  const inMs = (ms: number) => new Date(NOW + ms).toISOString();
-  const gate = (over: Record<string, unknown> = {}) =>
-    readTokenForRun({
-      lane: "task",
-      taskGate: SEED_GATE,
-      seeded: SEEDED,
-      input: {
-        githubReadToken: "ghs_read",
-        githubReadTokenExpiresAt: inMs(30 * 60_000),
-      },
-      brokered: true,
-      now: NOW,
-      ...over,
-    } as Parameters<typeof readTokenForRun>[0]);
-
-  it("all conditions hold ⇒ the token", () => {
-    expect(gate()).toEqual({ token: "ghs_read" });
-  });
-
-  it("no expiry shipped ⇒ allowed (GitHub caps the token at 1h)", () => {
-    expect(gate({ input: { githubReadToken: "ghs_read" } })).toEqual({
-      token: "ghs_read",
-    });
-  });
-
-  it.each([
-    ["30 s from now (inside the 1-minute margin)", inMs(30_000)],
-    ["exactly at the margin", inMs(60_000)],
-    ["in the past", inMs(-1)],
-    ["unparseable", "garbage"],
-  ])("expiresAt %s ⇒ expired", (_name, expiresAt) => {
-    expect(
-      gate({
-        input: {
-          githubReadToken: "ghs_read",
-          githubReadTokenExpiresAt: expiresAt,
-        },
-      }),
-    ).toEqual({ skip: "expired" });
-  });
-
-  it("review lane with a forged token ⇒ review-lane", () => {
-    expect(
-      gate({
+      formatBatteriesLine({
+        imageDigest,
         lane: "review",
-        taskGate: { kind: "rejected", lane: "review", reason: "review-lane" },
+        taskGate: { kind: "none" },
       }),
-    ).toEqual({ skip: "review-lane" });
-    expect(gate({ lane: "review" })).toEqual({ skip: "review-lane" });
-  });
-
-  it.each([
-    ["no task gate seed", { taskGate: { kind: "none" } }],
-    [
-      "seeding unavailable",
-      { seeded: { ok: false, reason: "manifest-drift" } },
-    ],
-    ["not seeded at all", { seeded: undefined }],
-    [
-      "no seeded pack requires it",
-      {
-        seeded: {
-          ok: true,
-          packs: ["somnio-review"],
-          manifestHash: "a".repeat(64),
-        },
-      },
-    ],
-  ])("%s ⇒ no-requiring-pack", (_name, over) => {
-    expect(gate(over)).toEqual({ skip: "no-requiring-pack" });
-  });
-
-  it.each([[{}], [{ githubReadToken: "" }]])(
-    "token absent (%j) ⇒ not-delivered",
-    (input) => {
-      expect(gate({ input })).toEqual({ skip: "not-delivered" });
-    },
-  );
-
-  it("legacy (not brokered) ⇒ no-broker", () => {
-    expect(gate({ brokered: false })).toEqual({ skip: "no-broker" });
-  });
-});
-
-describe("taskRunOutcome (phase 7)", () => {
-  const SEEDED = {
-    ok: true as const,
-    packs: ["somnio-skills"],
-    manifestHash: "0123456789ab".padEnd(64, "f"),
-    requires: ["github-read-token"],
-  };
-  const base = {
-    lane: "task" as const,
-    seeded: SEEDED,
-    input: { githubReadToken: "ghs_read" },
-    brokered: true,
-    now: Date.parse("2026-10-04T02:00:00Z"),
-  };
-
-  it("a seeding gate: the lane line, the applied line and the token", () => {
+    ).toBe("batteries: image=ab12ab12ab12 lane=review");
     expect(
-      taskRunOutcome({
-        ...base,
-        taskGate: { kind: "seed", batteries: ["somnio-skills"], lane: "task" },
-      }),
-    ).toEqual({
-      batteriesLine:
-        "batteries: lane=task packs=somnio-skills manifest=0123456789ab",
-      readTokenLine: "task agent: read-token=applied",
-      githubReadToken: "ghs_read",
-    });
-  });
-
-  it("a seeding gate that skips: one skip=<reason> line, no token", () => {
-    expect(
-      taskRunOutcome({
-        ...base,
-        brokered: false,
-        taskGate: { kind: "seed", batteries: ["somnio-skills"], lane: "pr" },
-      }),
-    ).toEqual({
-      batteriesLine:
-        "batteries: lane=pr packs=somnio-skills manifest=0123456789ab",
-      readTokenLine: "task agent: read-token=skip=no-broker",
-    });
-  });
-
-  it.each<[string, TaskAgentGate, string]>([
-    [
-      "none",
-      { kind: "none" },
-      "batteries: mode=orchestrated packs=somnio-skills manifest=0123456789ab",
-    ],
-    [
-      "rejected on the review lane",
-      { kind: "rejected", lane: "review", reason: "review-lane" },
-      "batteries: mode=orchestrated packs=somnio-skills manifest=0123456789ab",
-    ],
-    [
-      "rejected on the task lane",
-      { kind: "rejected", lane: "task", reason: "x" },
-      "batteries: unavailable lane=task reason=task-agent-invalid",
-    ],
-  ])(
-    "gate %s: only the batteries line — no read-token line, no token, even with one shipped",
-    (_name, taskGate, line) => {
-      expect(taskRunOutcome({ ...base, taskGate })).toEqual({
-        batteriesLine: line,
-      });
-    },
-  );
-});
-
-describe("harness packs through the task gate", () => {
-  const HASH = "0123456789ab".padEnd(64, "f");
-  const HARNESS_HASH = "fedcba987654".padEnd(64, "0");
-  const base = {
-    input: {},
-    brokered: true,
-    now: Date.parse("2026-10-04T02:00:00Z"),
-  };
-
-  it("the shape gate passes harness ids on the task lane (seedBatteries is the fence)", () => {
-    expect(
-      gateFor({ batteries: ["somnio-skills", "gstack", "gsd", "ruflo"] }),
-    ).toEqual({
-      kind: "seed",
-      batteries: ["somnio-skills", "gstack", "gsd", "ruflo"],
-      lane: "task",
-    });
-  });
-
-  it("the review lane still never takes them, and its seed keeps hooks off", () => {
-    const gate = gateFor({ batteries: ["gstack"] }, { prKey: "o/r#1" });
-    expect(gate).toEqual({
-      kind: "rejected",
-      lane: "review",
-      reason: "review-lane",
-    });
-    expect(batterySeedForRun(undefined, gate)).toBeUndefined();
-  });
-
-  it("the batteries line names the harness hash and packs; a harness pack never asks for the read token", () => {
-    const outcome = taskRunOutcome({
-      ...base,
-      lane: "task",
-      taskGate: {
-        kind: "seed",
-        batteries: ["somnio-skills", "gstack"],
+      formatBatteriesLine({
+        imageDigest,
         lane: "task",
-      },
-      seeded: {
-        ok: true,
-        packs: ["somnio-skills"],
-        manifestHash: HASH,
-        harness: { ok: true, harnessHash: HARNESS_HASH, packs: [] },
-      },
-    });
-    expect(outcome).toEqual({
-      batteriesLine:
-        "batteries: lane=task packs=somnio-skills manifest=0123456789ab harness=fedcba987654 harness-packs=none",
-      readTokenLine: "task agent: read-token=skip=no-requiring-pack",
-    });
-  });
-
-  it("an unavailable harness says why on the same line", () => {
+        taskGate: gateFor({ batteries: ["gsd", "ruflo"] }),
+      }),
+    ).toBe("batteries: image=ab12ab12ab12 lane=task task-packs=gsd,ruflo");
     expect(
-      taskRunOutcome({
-        ...base,
-        lane: "pr",
-        taskGate: { kind: "seed", batteries: ["gsd"], lane: "pr" },
-        seeded: {
-          ok: true,
-          packs: [],
-          manifestHash: HASH,
-          harness: { ok: false, reason: "harness-drift" },
-        },
-      }).batteriesLine,
-    ).toBe(
-      "batteries: lane=pr packs=none manifest=0123456789ab harness=unavailable harness-reason=harness-drift",
-    );
+      formatBatteriesLine({
+        imageDigest,
+        lane: "task",
+        taskGate: gateFor({ batteries: ["Bad Id"] }),
+      }),
+    ).toBe("batteries: image=ab12ab12ab12 lane=task task-packs=invalid");
+    // A review that carried packs is refused by the gate and logs nothing extra.
+    expect(
+      formatBatteriesLine({
+        imageDigest,
+        lane: "review",
+        taskGate: gateFor({ batteries: ["gsd"] }, { prKey: "acme/web#1" }),
+      }),
+    ).toBe("batteries: image=ab12ab12ab12 lane=review");
   });
 });

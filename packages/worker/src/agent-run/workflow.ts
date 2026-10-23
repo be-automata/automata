@@ -10,18 +10,15 @@ import {
   type EngineCaps,
 } from "./definition";
 import { configForSlot, loadWorkerConfig } from "./config";
-import { readMemoryAnon } from "./run-cgroup";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
-import { reapOwnThreadAttempts, reclaimDeadWorkerRuns } from "./reclaim";
-import { reapAgentUidEscapees } from "./uid-reaper";
+import { reclaimDeadWorkerRuns } from "./reclaim";
 import { runAsAgent } from "./agent-command";
-import { DaemonProcess } from "./daemon-process";
 import {
   ContainerDaemonProcess,
   settleDaemonTeardown,
   type RunDaemon,
 } from "./container-daemon-process";
-import { CONTAINER_WORKSPACE } from "./container-argv";
+import { preflightHostGhAuth } from "./gh-preflight";
 import {
   runSelfHealChecks,
   type SelfHealCheckResult,
@@ -47,12 +44,7 @@ import {
   resolveRunLane,
 } from "./run-lane";
 import { reviewAgentForRun, withReviewAgentWire } from "./review-agent-wire";
-import {
-  batterySeedForRun,
-  foregroundOnlyForRun,
-  taskAgentForRun,
-  taskRunOutcome,
-} from "./task-agent";
+import { formatBatteriesLine, taskAgentForRun } from "./task-agent";
 import {
   classifyNextMessageError,
   nonRetryablePreflight,
@@ -106,7 +98,7 @@ import {
   salvageWorkBranch,
   type AbnormalEnd,
   type AbnormalEndState,
-  type SalvageOutcome,
+  type SalvageResult,
 } from "./abnormal-end";
 import {
   ensureRunNamespace,
@@ -870,7 +862,6 @@ const DEFAULT_SELF_HEAL_DEPS: SelfHealAuditStepDeps = {
 export async function runSelfHealAuditStep({
   input,
   workdir,
-  agentUser,
   egressProxyUrl,
   step,
   signal,
@@ -878,7 +869,6 @@ export async function runSelfHealAuditStep({
 }: {
   input: Pick<AgentRunInput, "selfHeal" | "threadId" | "daemonCallbackUrl">;
   workdir: string;
-  agentUser: string;
   egressProxyUrl: string | null;
   step: (msg: string) => void;
   signal?: AbortSignal;
@@ -897,16 +887,7 @@ export async function runSelfHealAuditStep({
         const value = process.env[key];
         if (value !== undefined) env[key] = value;
       }
-      const run = runPathsForRepo(workdir);
-      env.HOME = run.home;
-      if (agentUser) {
-        env.USER = agentUser;
-        env.LOGNAME = agentUser;
-        env.TMPDIR = run.tmp;
-        env.GIT_CONFIG_COUNT = "1";
-        env.GIT_CONFIG_KEY_0 = "safe.directory";
-        env.GIT_CONFIG_VALUE_0 = workdir;
-      }
+      env.HOME = runPathsForRepo(workdir).home;
       if (egressProxyUrl) {
         env = appendGitConfig(
           buildRunProxyEnv(egressProxyUrl, env),
@@ -916,7 +897,6 @@ export async function runSelfHealAuditStep({
       results = await deps.runChecks({
         checks: requested,
         run: runAsAgent,
-        agentUser,
         workdir,
         env,
         note: (message) => step(`self-heal checks: ${message}`),
@@ -1048,16 +1028,14 @@ export async function reportSelfHealFixAborted({
 
 /**
  * GATE-01 (R1 box step): after a fix run's agent finished, kill everything
- * the agent could still be (daemon group, agent-uid escapees), close the
- * brokers it pushed through, then check exactly the commit that landed on
- * GitHub and report it with the gate token. The finally block's teardown,
- * reap and closes run again afterwards as no-ops. Never throws and never
- * changes the run outcome.
+ * the agent could still be (its container is removed), close the brokers it
+ * pushed through, then check exactly the commit that landed on GitHub and
+ * report it with the gate token. The finally block's teardown and closes run
+ * again afterwards as no-ops. Never throws and never changes the run outcome.
  */
 export async function runSelfHealFixStep({
   input,
   workdir,
-  agentUser,
   egressProxyUrl,
   baseSha,
   lockLost,
@@ -1076,13 +1054,13 @@ export async function runSelfHealFixStep({
   /** #380: from the unsealed RunSecrets, never from the input. */
   installationToken: string;
   workdir: string;
-  agentUser: string;
   egressProxyUrl: string | null;
   /** origin/<base>, pinned before the agent ran (pinFixBaseSha). */
   baseSha: string | null;
-  /** The box lock was lost: another run may own the agent uid now. */
+  /** The box lock was lost: another run may own the box slot now. */
   lockLost: boolean;
   teardown: () => void;
+  /** Resolves once the agent is gone (its container removed). */
   reap: () => Promise<unknown>;
   gitBroker: Pick<GitBroker, "lastPushedSha" | "close"> | null;
   ghBroker: Pick<GhBroker, "close"> | null;
@@ -1145,13 +1123,6 @@ export async function runSelfHealFixStep({
         const value = process.env[key];
         if (value !== undefined) env[key] = value;
       }
-      if (agentUser) {
-        env.USER = agentUser;
-        env.LOGNAME = agentUser;
-        env.GIT_CONFIG_COUNT = "1";
-        env.GIT_CONFIG_KEY_0 = "safe.directory";
-        env.GIT_CONFIG_VALUE_0 = workdir;
-      }
       // #205: same proxy-auth entry as the agent's git (one helper, one rule).
       const checkEnv = appendGitConfig(env, gitProxyAuthConfig(egressProxyUrl));
       report = await deps.runCheck({
@@ -1159,7 +1130,6 @@ export async function runSelfHealFixStep({
         pushedSha,
         baseSha,
         workdir,
-        agentUser,
         run: runAsAgent,
         env: egressProxyUrl
           ? buildRunProxyEnv(egressProxyUrl, checkEnv)
@@ -1254,8 +1224,8 @@ async function runAgentInner(
     // #204: filled in once the daemon exists (below). Until then there is no agent
     // to have died, and the poll loop has not started either.
     agentFailure: () => daemonForPoll?.agentFailure() ?? null,
-    // Any OOM kill in the run's cgroup fails the run, even when only a child
-    // died and the agent finished its turn (prod 2026-10-04, e335c83d).
+    // Any OOM kill in the run's container fails the run, even when only a
+    // child died and the agent finished its turn (prod 2026-10-04, e335c83d).
     memoryStarvation: () => daemonForPoll?.memoryStarvation() ?? null,
     // #473: the terminal read revokes the daemon token, so the egress audit
     // batch goes out before every read — the final one included.
@@ -1283,8 +1253,8 @@ async function runAgentInner(
 
   let boxLock: BoxLock | null = null;
   let run: Awaited<ReturnType<typeof provisionWorkdir>>;
-  // Hoisted above the try so the main finally (#184 teardown uid-scan) can
-  // log through the same prefix as the admission steps.
+  // Hoisted above the try so the main finally can log through the same
+  // prefix as the admission steps.
   const admissionLog = (m: string) =>
     ctx.log(`[agent-run ${input.threadId}] ${m}`);
   try {
@@ -1297,35 +1267,20 @@ async function runAgentInner(
     // Credentials still touch disk only after the slot AND the admission
     // scan, so the on-disk credential window is unchanged; a cancel while
     // waiting throws into this catch with nothing on disk to clean.
-    // #152 Stage A admission reap, BEFORE the lock: (a) a dead sibling
-    // worker's orphans die now, not at the next boot; (b) any prior attempt
-    // of THIS run (engine redelivery after a worker death) is SIGKILLed by
-    // its recorded process-group pid — as the account its slot dir names
-    // (#205) — so the zombie can never share the box with its own redelivery.
-    // Both are best-effort and never throw; the safety argument for the
-    // no-engine-read own-thread kill lives on reapOwnThreadAttempts.
-    // Re-assert the cross-uid namespace grant BEFORE anything writes into the
-    // dir or binds a socket in it. The boot-time claim is not enough: the
-    // default root lives under /tmp, macOS reaps /tmp entries untouched for
-    // three days, and a bare recreated dir kills the run at the daemon's
-    // pidfile write with "Permission denied" — which reaches the user as
-    // "Review intent could not be parsed". Idempotent; see run-namespace.ts.
+    // Admission, BEFORE the lock: re-create this worker's namespace dir (a
+    // /tmp cleaner may have removed it; the gh broker binds in it) and remove
+    // a dead sibling worker's dir now, not at the next boot. A prior attempt
+    // of THIS run (engine redelivery after a worker death) cannot share the
+    // box with its redelivery: its container holds this slot's name and is
+    // removed before the new one is created (ContainerDaemonProcess.start).
+    // Both are best-effort and never throw; see run-namespace.ts.
     await ensureRunNamespace({
       root: config.runNamespaceRoot,
       workerId: getProcessWorkerId(),
-      agentUser: config.agentUser,
-      agentUsers: config.agentUsers,
     });
     reclaimDeadWorkerRuns({
       root: config.runNamespaceRoot,
       selfWorkerId: getProcessWorkerId(),
-      agentUser: config.agentUser,
-      log: admissionLog,
-    });
-    reapOwnThreadAttempts({
-      root: config.runNamespaceRoot,
-      threadId: input.threadId,
-      agentUser: config.agentUser,
       log: admissionLog,
     });
     // #371: admission under the slot and BEFORE the clone, with the deferral
@@ -1337,11 +1292,10 @@ async function runAgentInner(
     // so no engine-dispatched sibling can take the freed box slot — the box
     // runs at most N − (deferred runs) agents and the engine's queue waits its
     // scheduleTimeout. The release matters for the lock's out-of-process
-    // tenants (a self-heal run, the boot uid scan) and for Decision 5: a
+    // tenants (a self-heal run) and for Decision 5: a
     // waiting run is never a lock holder. Nothing of the run is on disk while it waits. The
     // reservation lives as long as the run (released in the finally and in
-    // every pre-daemon unwind); once the run's cgroup exists it shrinks by the
-    // anonymous memory the kernel already charges the run (daemon.start()).
+    // every pre-daemon unwind).
     const baseConfig = config;
     const admission = getAdmissionController(config);
     let deferralStartedAt: number | null = null;
@@ -1372,10 +1326,9 @@ async function runAgentInner(
           );
         }
       }
-      // #205: from here on this run IS slot `boxLock.slot`, running as that
-      // slot's account (configForSlot); its per-run artefacts live in the
-      // slot's own subdir. Every later read of `config` — clone grants,
-      // credential HOME, brokers, daemon, reaps, cleanup — means the slot's.
+      // #205: from here on this run IS slot `boxLock.slot` (configForSlot):
+      // its container takes the slot's name and its per-run artefacts live in
+      // the slot's own subdir. Every later read of `config` means the slot's.
       config = configForSlot(baseConfig, boxLock.slot);
       try {
         reservation =
@@ -1442,11 +1395,8 @@ async function runAgentInner(
         root: config.runNamespaceRoot,
         workerId: getProcessWorkerId(),
         slot: boxLock.slot,
-        agentUser: config.agentUser,
       });
-      step(
-        `box slot ${boxLock.slot}/${config.boxSlots} as ${config.agentUser}`,
-      );
+      step(`box slot ${boxLock.slot}/${config.boxSlots}`);
     }
     // Provision: clone into a per-run workdir keyed on threadId. threadId is
     // unique per thread; threadChatId is the shared legacy sentinel when
@@ -1461,9 +1411,6 @@ async function runAgentInner(
       installationToken: secrets.installationToken,
       workdirRoot: config.workdirRoot,
       runId: input.threadId,
-      // #108: empty (the default) ⇒ no ACLs are touched at all. #205: the
-      // SLOT's account, so a sibling slot cannot read this run's HOME.
-      agentUser: config.agentUser,
     });
   } catch (err) {
     reservation?.release();
@@ -1471,15 +1418,13 @@ async function runAgentInner(
     throw err;
   }
   let materialised: MaterialisedCredentials;
-  // Every cleanupWorkdir below: agent-uid mode hands the agent's files back
-  // before the rm (as the slot's account, #205), and a workdir that still
-  // survives is logged, not swallowed.
-  const workdirCleanup = { agentUser: config.agentUser, log: admissionLog };
+  // Every cleanupWorkdir below: a workdir that survives the rm is logged, not
+  // swallowed.
+  const workdirCleanup = { log: admissionLog };
   // The one unwind for every pre-daemon failure: close what was opened, wipe
   // the credential, remove the workdir, and ONLY THEN give the slot back
   // (ADR-007 I2, the same order as the finally) — at N > 1 a parked waiter
-  // takes a freed slot immediately, and its admission reap as this slot's
-  // account would kill a hand-back still in flight.
+  // takes a freed slot immediately.
   const abandon = async (
     ...closers: Array<{ close(): Promise<void> } | null>
   ) => {
@@ -1506,8 +1451,6 @@ async function runAgentInner(
   let runReviewAgent: ReturnType<typeof reviewAgentForRun>["reviewAgent"];
   let lane: ReturnType<typeof resolveRunLane>;
   let taskGate: ReturnType<typeof taskAgentForRun>;
-  let batterySeed: ReturnType<typeof batterySeedForRun>;
-  let foregroundOnly: ReturnType<typeof foregroundOnlyForRun>;
   try {
     step(
       `clone complete: ${input.repoFullName}@${input.branch}` +
@@ -1546,9 +1489,8 @@ async function runAgentInner(
     // the try is ever entered, and the cloned workdir is stranded on the box's
     // disk for good. Cleaning the workdir also removes the per-run HOME beneath
     // it, so a half-written credential cannot survive either.
-    // Phase 5: bounds-check the review shape BEFORE seeding, so a rejected
-    // orchestrated run seeds AND runs classic, and its `batteries:` line says
-    // what actually runs. Numbers/field names only (H2).
+    // Phase 5: bounds-check the review shape, so a rejected orchestrated run
+    // runs classic. Numbers/field names only (H2).
     const reviewAgentGate = reviewAgentForRun(input.reviewAgent);
     runReviewAgent = reviewAgentGate.reviewAgent;
     if (reviewAgentGate.rejected) {
@@ -1556,8 +1498,9 @@ async function runAgentInner(
         `review agent: bounds-rejected (${reviewAgentGate.rejected}) → classic`,
       );
     }
-    // Phase 7: task-run packs, shape-gated BEFORE seeding (reason only, H2).
-    // The review lane never takes task packs, whatever the input carries.
+    // Phase 7: task-run packs, shape-gated (reason only, H2). The review lane
+    // never takes task packs, whatever the input carries; every battery is
+    // in the image (ADR-013), so the gate only reaches the `batteries:` line.
     lane = resolveRunLane(input);
     taskGate = taskAgentForRun(input.taskAgent, lane);
     if (taskGate.kind === "rejected") {
@@ -1567,40 +1510,19 @@ async function runAgentInner(
           : `task agent: rejected (${taskGate.reason})`,
       );
     }
-    batterySeed = batterySeedForRun(runReviewAgent, taskGate);
-    foregroundOnly = foregroundOnlyForRun(lane, batterySeed);
   } catch (err) {
     await abandon();
     throw err;
   }
 
   try {
-    // #184 (#152 Stage B2): uid-wide scan UNDER the slot lock, BEFORE any
-    // credential touches disk and BEFORE this run spawns its daemon. ADR-007
-    // I2/I4: with the slot held no process of THIS slot's account belongs to a
-    // live run, so everything the scan finds is an escapee (a detached
-    // `bash -lc | claude` subtree a worker-driven teardown could not reach by
-    // pgid) and is killed as one set — kill(2) bounds `-1` to the issuing
-    // account, so a sibling slot's live run is out of reach (#205). Never
-    // throws; on a disabled agent uid it is a no-op.
-    // ADR-013 P1 (dev-only switch): a container run has no agent uid to
-    // scan; its predecessor is removed by slot name in
-    // ContainerDaemonProcess.start(), before its own container is created.
-    if (!config.containerRuns) {
-      await reapAgentUidEscapees({
-        agentUser: config.agentUser,
-        phase: "admission",
-        threadId: input.threadId,
-        runNamespaceRoot: config.runNamespaceRoot,
-        log: admissionLog,
-      });
-    }
     const pulled =
       config.boxTrust === "owner"
         ? await pullAgentCredentials(wwwOpts, signal)
         : { agent: "", credentials: { type: "built-in-credits" as const } };
-    // EVERY run gets a fresh per-run HOME, credential or not, and that HOME is
-    // seeded as a trusted workspace (realpath'd — macOS tmpdir is a symlink).
+    // EVERY run gets a fresh per-run HOME (a staging dir the container copies
+    // into its HOME volume), credential or not, seeded as a trusted
+    // workspace for /workspace.
     // Both halves are load-bearing: the fresh HOME keeps a run off the
     // operator's own logins/Keychain, and the trust seed is what lets a
     // review run (--permission-mode default, no skip-permissions) grant its
@@ -1614,14 +1536,6 @@ async function runAgentInner(
       credentials: pulled.credentials,
       agent: pulled.agent,
       run,
-      batteries: { log: admissionLog },
-      ...(config.containerRuns
-        ? // ADR-013: the HOME built here is a STAGING dir the container run
-          // copies into the image's HOME volume. No packs are linked (the
-          // image installs every battery), the settings are composed per
-          // lane at copy-in, and the trust seed names /workspace.
-          { trustWorkdir: CONTAINER_WORKSPACE }
-        : { agentUser: config.agentUser, seed: batterySeed, foregroundOnly }),
     });
   } catch (err) {
     await abandon();
@@ -1643,53 +1557,34 @@ async function runAgentInner(
   step(
     `agent credential: ${describeCredentialSource(credentialSource)} (box trust: ${config.boxTrust})`,
   );
-  // Phase 5/7: exactly one `batteries:` line per run. A task/pr-lane run that
-  // carried packs names its lane: seeded, or why not. Every other run —
-  // reviews and runs without taskAgent — keeps today's exact line
-  // (`mode=classic` / `mode=orchestrated …`), so unconfigured repos are
-  // byte-identical in HOME and in the log. The same call decides the
-  // read-only task token (brokered is config-decided: a broker start failure
-  // below throws, so the run never reaches the daemon without its brokers);
-  // its line is logged after the brokers come up, as before.
-  const taskOutcome = taskRunOutcome({
-    lane,
-    taskGate,
-    seeded: materialised.batteries,
-    input: {
-      githubReadToken: secrets.githubReadToken,
-      githubReadTokenExpiresAt: input.githubReadTokenExpiresAt,
-    },
-    brokered: config.credentialBroker === "on",
-    now: Date.now(),
-  });
-  step(taskOutcome.batteriesLine);
-  // Every non-review run: materialise either wrote the foreground-only guard
-  // into the HOME settings or threw, so reaching here means it is installed.
-  // Reviews log nothing new.
-  if (foregroundOnly) {
+  // Exactly one `batteries:` line per run (ADR-013: the image digest).
+  step(
+    formatBatteriesLine({
+      imageDigest: config.containerRuns.image.digest,
+      lane,
+      taskGate,
+    }),
+  );
+  // Every non-review run's container settings carry the foreground-only
+  // guard (containerLanePolicy); reviews log nothing new.
+  if (lane !== "review") {
     step("task agent: foreground-only hook installed");
   }
 
-  // #66 slice 2: per-run egress enforcement, iff the control plane resolved a
-  // policy onto this run's input. Absent policy ⇒ nothing starts and nothing
-  // is injected — zero behavior change. The proxy must be up BEFORE the
-  // daemon env is first built (preflightGhAuth builds it), because the env is
-  // memoised. A proxy-start failure must not strand the clone: this sits
-  // outside the try/finally that owns cleanup, so it cleans up itself.
+  // #66 slice 2: per-run egress proxy. ADR-013 C3: a `--network none`
+  // container's only route out is this proxy, so EVERY run gets one: enforce
+  // when the control plane resolved a policy onto the run, else observe —
+  // allow everything, audit everything, and mark every row so nothing
+  // downstream can read it as enforcement (a repo with no policy must not
+  // silently acquire a deny-all fence). A proxy-start failure must not strand
+  // the clone: this sits outside the try/finally that owns cleanup, so it
+  // cleans up itself.
   let egressProxy: EgressProxy | null = null;
   let egressEvents: ReturnType<typeof createEgressEventBatcher> | null = null;
-  // #108: agent-uid runs ALWAYS get a proxy. Under the PF anchor the agent has
-  // no direct route to 80/443, so without one the agent CLI's own provider call
-  // dies; but a repo with no policy must not silently acquire a deny-all fence
-  // either. Hence observe: allow everything, audit everything, and mark every
-  // row so nothing downstream can read it as enforcement. Absent BOTH a policy
-  // and an agent user, nothing starts and nothing is injected — zero change.
   const egressMode: "enforce" | "observe" = input.egressPolicy
     ? "enforce"
     : "observe";
-  // ADR-013 C3: a `--network none` container's only route out is this proxy,
-  // so a container run always gets one (observe when the repo has no policy).
-  if (input.egressPolicy || config.agentUser || config.containerRuns) {
+  {
     try {
       const batcher = createEgressEventBatcher(wwwOpts);
       egressEvents = batcher;
@@ -1721,14 +1616,11 @@ async function runAgentInner(
   }
 
   // #81: per-run GitHub credential brokers — the installation token stays in
-  // THIS process's heap; the agent child gets only a per-run bearer, in EVERY
-  // lane. permissionMode arrives only with the pulled message — AFTER the env
-  // is first built (preflightGhAuth memoises it) — so brokering is not
-  // lane-gated: review keeps its daemon-side strip on top, which now removes
-  // the bearer + broker git config too (strictly less than today). Both
-  // brokers must be up BEFORE the env is built. Same self-cleanup rule as the
-  // egress block above — and fail-closed: a broker start failure throws
-  // rather than falling back to a raw-token env.
+  // THIS process's heap. A container of a lane that may write gets only a
+  // per-run bearer through forwarded sockets; a review container gets no
+  // broker socket at all (containerLanePolicy). Both brokers must be up
+  // before the host gh preflight. Same self-cleanup rule as the egress block
+  // above — and fail-closed: a broker start failure throws.
   let gitBroker: GitBroker | null = null;
   let ghBroker: GhBroker | null = null;
   let broker: BrokerHandoff | null = null;
@@ -1770,63 +1662,38 @@ async function runAgentInner(
     );
   }
 
-  // Phase 7: the read-only task token (decided above). Logged by outcome
-  // only — never the value; runs without task packs log nothing here.
-  if (taskOutcome.readTokenLine !== undefined) {
-    step(taskOutcome.readTokenLine);
-  }
-  const hostDaemon = (): DaemonProcess =>
-    new DaemonProcess(
-      config,
-      input,
-      workdir,
-      materialised,
-      egressProxy?.url ?? null,
-      broker,
-      {
-        secrets: {
-          installationToken: secrets.installationToken,
-          daemonToken: secrets.daemonToken,
-          ...(secrets.repoEnv !== undefined
-            ? { repoEnv: secrets.repoEnv }
-            : {}),
-        },
-        lane,
-        ...(taskOutcome.githubReadToken !== undefined
-          ? { githubReadToken: taskOutcome.githubReadToken }
-          : {}),
+  // ADR-013: every run is a container from the pinned image; everything
+  // around the spawn — admission, slot, ledger, brokers, poll, teardown
+  // order — is unchanged.
+  const containerDaemon = new ContainerDaemonProcess(
+    config,
+    input,
+    run,
+    materialised,
+    lane,
+    {
+      secrets: {
+        daemonToken: secrets.daemonToken,
+        ...(secrets.repoEnv !== undefined ? { repoEnv: secrets.repoEnv } : {}),
       },
-    );
-  // ADR-013 P1: only with WORKER_DEV_CONTAINER_RUNS=1 (never set in
-  // production) does the run go into a container; everything around the
-  // spawn — admission, slot, ledger, brokers, poll, teardown order — is the
-  // same code either way.
-  const containerDaemon = config.containerRuns
-    ? new ContainerDaemonProcess(config, input, run, materialised, lane, {
-        secrets: {
-          daemonToken: secrets.daemonToken,
-          ...(secrets.repoEnv !== undefined
-            ? { repoEnv: secrets.repoEnv }
-            : {}),
-        },
-        // C3 (#430): the same proxy and brokers as the host path, reached
-        // through forwarded sockets; a review lane gets no broker socket.
-        egressProxyUrl: egressProxy?.url ?? null,
-        broker,
-        // The bot-identity precondition runs on the host against the
-        // brokers, exactly as on the host path, then its scratch is removed.
-        hostPreflight: async () => {
-          const probe = hostDaemon();
-          try {
-            await probe.preflightGhAuth();
-          } finally {
-            probe.teardown();
-          }
-        },
-        log: admissionLog,
-      })
-    : null;
-  const daemon: RunDaemon = containerDaemon ?? hostDaemon();
+      // C3 (#430): the proxy and brokers, reached through forwarded sockets;
+      // a review lane gets no broker socket.
+      egressProxyUrl: egressProxy?.url ?? null,
+      broker,
+      // The bot-identity precondition runs on the host against the brokers
+      // before the container exists (gh-preflight.ts).
+      hostPreflight: () =>
+        preflightHostGhAuth({
+          workdir,
+          installationToken: secrets.installationToken,
+          botLogin: config.botLogin,
+          broker,
+          egressProxyUrl: egressProxy?.url ?? null,
+        }),
+      log: admissionLog,
+    },
+  );
+  const daemon: RunDaemon = containerDaemon;
   daemonForPoll = daemon;
   // Exactly one fix-check report per fix run: the check's, or "aborted".
   let fixReported = false;
@@ -1853,7 +1720,6 @@ async function runAgentInner(
     await runSelfHealAuditStep({
       input,
       workdir,
-      agentUser: config.agentUser,
       egressProxyUrl: egressProxy?.url ?? null,
       step,
       signal,
@@ -1862,18 +1728,7 @@ async function runAgentInner(
     // Run: bring up the daemon, then pull the message it should execute.
     await daemon.start();
     abnormal.daemonStarted = true;
-    step(
-      containerDaemon
-        ? containerDaemon.spawnedLine()
-        : `daemon spawned: pid=${daemon.pid ?? "unknown"}`,
-    );
-    // #371: from here the run's own cgroup says what anonymous memory the
-    // kernel already charges it (what Committed_AS counts); the headroom
-    // reservation counts only the remainder.
-    const runCgroupDir = daemon.runCgroupDir();
-    if (runCgroupDir) {
-      reservation?.observe(() => readMemoryAnon({ cgroupDir: runCgroupDir }));
-    }
+    step(containerDaemon.spawnedLine());
     // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
     // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
     let message: Awaited<ReturnType<typeof pullNextMessage>>;
@@ -1951,7 +1806,6 @@ async function runAgentInner(
         input,
         installationToken: secrets.installationToken,
         workdir,
-        agentUser: config.agentUser,
         egressProxyUrl: egressProxy?.url ?? null,
         baseSha: fixBaseSha,
         lockLost: boxLock?.lost === true,
@@ -1961,17 +1815,8 @@ async function runAgentInner(
         teardown: () => {
           void Promise.resolve(daemon.teardown()).catch(() => {});
         },
-        // A container run's "reap" is its removal (awaited, idempotent).
-        reap: () =>
-          containerDaemon
-            ? containerDaemon.teardown()
-            : reapAgentUidEscapees({
-                agentUser: config.agentUser,
-                phase: "teardown",
-                threadId: input.threadId,
-                runNamespaceRoot: config.runNamespaceRoot,
-                log: admissionLog,
-              }),
+        // The "reap" is the container's removal (awaited, idempotent).
+        reap: () => containerDaemon.teardown(),
         gitBroker,
         ghBroker,
         runStartedAt,
@@ -2016,99 +1861,45 @@ async function runAgentInner(
       };
       // #437 Part B: a timeout's work is pushed while the broker is open, and
       // the post names the branch.
-      const salvageEnd = (claimed: AbnormalEnd): Promise<SalvageOutcome> =>
-        salvageWorkBranch({
-          cause: claimed.cause,
+      // ADR-013: the salvage runs git INSIDE the container (never host git on
+      // the container-written .git), so the end is claimed and a timeout
+      // salvaged BEFORE the removal below. The salvage first freezes the
+      // container's whole tree (SIGSTOP, init aside: prepareSalvage), so the
+      // agent is stopped, not dead, until the removal kills it. The OOM flag
+      // is re-read first, as the removal would have.
+      await containerDaemon.refresh();
+      const end = claimEnd();
+      let salvage: SalvageResult | null = null;
+      if (end) {
+        salvage = await salvageWorkBranch({
+          cause: end.cause,
           workBranch: input.workBranch,
           lockLost: boxLock?.lost === true,
           enabled: config.timeoutSalvage !== "off",
           container: containerDaemon,
           broker,
           repoFullName: input.repoFullName,
-          workdir,
-          agentUser: config.agentUser,
           botLogin: config.botLogin,
-          egressProxyUrl: egressProxy?.url ?? null,
           runExecutionTimeoutMs: abnormal.runExecutionTimeoutMs,
           log: step,
         });
-      let end: AbnormalEnd | null = null;
-      let salvage: SalvageOutcome | null = null;
-      let endSettled = false;
-      if (containerDaemon) {
-        // ADR-013: a container run's salvage runs git INSIDE its container
-        // (never host git on the container-written .git), so its end is
-        // claimed and a timeout salvaged BEFORE the removal below. The
-        // salvage first freezes the container's whole tree (SIGSTOP, init
-        // aside: prepareSalvage), so the agent is stopped, not dead, until
-        // the removal kills it. The OOM flag is re-read first, as the
-        // removal would have.
-        await containerDaemon.refresh();
-        end = claimEnd();
-        endSettled = true;
-        if (end) salvage = await salvageEnd(end);
       }
-      // Terminal OR cancel (incl. scheduleTimeout): SIGKILL the daemon's process
-      // group so no orphan survives, then remove the workdir. Runs on normal return,
-      // throw, and cancellation (pollUntilTerminal returns promptly on cancel).
-      // A container run's teardown resolves once its container is gone
-      // (rm -f -v, retried with backoff while this run still holds the slot);
-      // a host run's is synchronous and returns nothing, so nothing is awaited.
-      // A removal that kept failing is logged, never thrown (see
-      // settleDaemonTeardown for why the slot still goes).
-      const containerGone = settleDaemonTeardown(
-        daemon,
-        input.threadId,
-        admissionLog,
-      );
-      if (containerGone) await containerGone;
+      // Terminal OR cancel (incl. scheduleTimeout): remove the container
+      // (`docker rm -f -v`: SIGKILL to its whole pid namespace, so no orphan
+      // survives), then the workdir. Runs on normal return, throw, and
+      // cancellation (pollUntilTerminal returns promptly on cancel). It
+      // resolves once the container is gone (retried with backoff while this
+      // run still holds the slot); a removal that kept failing is logged,
+      // never thrown (see settleDaemonTeardown for why the slot still goes).
+      await settleDaemonTeardown(daemon, input.threadId, admissionLog);
       // #371: idempotent — a run that never reached its first progress poll still
       // frees its headroom reservation here.
       reservation?.release();
-      // #184 (#152 Stage B2): the teardown uid-scan runs right after the
-      // daemon's group is SIGKILLed and BEFORE the proxy/brokers close —
-      // escapees are child traffic, so they must be dead before those closes
-      // and before the credential wipe below (ADR-007 I2/I4). The 250 ms settle
-      // lives inside the reaper; it never throws, so it cannot mask the run's
-      // real outcome. The box lock still goes last. A LOST lock (the helper
-      // died mid-run, so the kernel already freed it) means another run may
-      // legitimately own the box now — its live agent would be collateral of
-      // a uid-wide kill, so the scan is skipped and logged instead.
-      const reapTeardownEscapees = async (): Promise<void> => {
-        if (boxLock?.lost) {
-          admissionLog(
-            `box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
-          );
-          return;
-        }
-        await reapAgentUidEscapees({
-          agentUser: config.agentUser,
-          phase: "teardown",
-          threadId: input.threadId,
-          runNamespaceRoot: config.runNamespaceRoot,
-          log: admissionLog,
-        });
-      };
-      // ADR-013: a container's removal above replaced the uid-wide scan:
-      // every process of the run lived in the container's pid namespace.
-      if (!containerDaemon) await reapTeardownEscapees();
-      if (!endSettled) {
-        // A host run claims once the agent is dead and reaped. The OOM
-        // signal is read here, after the teardown: the host daemon caches
-        // the count it read before removing the cgroup.
-        end = claimEnd();
-        if (end) {
-          // Agent dead, broker open; then the salvage's own agent-uid git
-          // is reaped (same lost-lock rule) before the closes.
-          salvage = await salvageEnd(end);
-          if (salvage.spawned) await reapTeardownEscapees();
-        }
-      }
       if (end) {
         await postAbnormalEnd(abnormal, end, {
           wwwOpts,
           log: step,
-          salvage: salvage?.result ?? null,
+          salvage,
         });
       }
       // #66: close the egress proxy after the daemon is dead (no more child
@@ -2133,8 +1924,8 @@ async function runAgentInner(
         await reportSelfHealFixAborted({ input, step });
       }
     } finally {
-      // #380: both ghs_ tokens are revoked HERE — after the daemon is dead,
-      // the escapees reaped, the brokers/proxy closed and the fix check
+      // #380: both ghs_ tokens are revoked HERE — after the container is
+      // gone, the brokers/proxy closed and the fix check
       // reported (it still needed the token), and BEFORE the box lock goes.
       // Best effort, never throws, one `token.revoke` line per token.
       await revoker.revokeOnce();
@@ -2145,8 +1936,9 @@ async function runAgentInner(
         await materialised.cleanup();
         await cleanupWorkdir(run.runDir, workdirCleanup);
       } finally {
-        // The box lock goes last (ADR-007 I2): the next run may start only once
-        // this one's daemon is dead and its disk footprint is gone — and it
+        // The box lock goes last (ADR-007 I2, ADR-013 I6): the next run may
+        // start only once this one's container is gone and its disk footprint
+        // is gone — and it
         // goes whatever the cleanup did, or the slot stays held until a restart.
         await boxLock?.release();
       }

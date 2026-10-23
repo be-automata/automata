@@ -3,19 +3,12 @@ import path from "node:path";
 import { parsePinnedImage, type PinnedImage } from "./container-image";
 
 /**
- * The dev-only container run path (ADR-013 Decision 6, plan P1), as the worker
- * configuration sees it.
- *
- * `WORKER_DEV_CONTAINER_RUNS=1` is the ONE switch. Only the exact string `1`
- * turns it on; unset, empty, `0` or any typo leaves it OFF, so production
- * (which never sets it) keeps the host-uid path byte-for-byte. It exists only
- * until the release PR (P3), which deletes it together with the host path; it
- * has no per-repo or per-lane form. With it on, the worker logs a boot WARNING.
- *
- * Every knob below is read ONLY when the switch is on: a stray
- * `WORKER_BATTERIES_IMAGE` on a host-model box must not stop it from booting.
+ * The container run path (ADR-013), as the worker configuration sees it.
+ * Since the release PR (P3) it is the ONLY execution path: every knob below
+ * is read at boot and at every run, and an unusable value refuses both.
+ * `WORKER_BATTERIES_IMAGE` (digest-pinned) and `WORKER_RUN_MEMORY_MAX` (the
+ * slot tuple's per-run ceiling, which becomes `--memory`) are required.
  */
-export const CONTAINER_RUNS_SWITCH = "WORKER_DEV_CONTAINER_RUNS";
 
 /**
  * The rootless daemon's API socket. Deliberately NOT `/run/user/<uid>/` (that
@@ -60,15 +53,9 @@ export interface ContainerRunsConfig {
   runGid: number | null;
 }
 
-/** Parse the switch alone: true iff `WORKER_DEV_CONTAINER_RUNS` is exactly `1`. */
-export function containerRunsEnabled(env: NodeJS.ProcessEnv): boolean {
-  return env[CONTAINER_RUNS_SWITCH]?.trim() === "1";
-}
-
 /**
- * The container-run config, or null when the switch is off. Throws on a
- * switched-on box whose knobs are unusable — at boot AND at every run, like
- * every other loadWorkerConfig refusal.
+ * The container-run config. Throws on a box whose knobs are unusable — at
+ * boot AND at every run, like every other loadWorkerConfig refusal.
  *
  * `memoryMaxBytes` is the slot tuple's per-run ceiling (`WORKER_RUN_MEMORY_MAX`):
  * it becomes `--memory`, so it is REQUIRED here. A run container without a
@@ -82,14 +69,11 @@ export function parseContainerRunsConfig(
     raw: string | undefined,
     fallback: number,
   ) => number,
-): ContainerRunsConfig | null {
-  if (!containerRunsEnabled(env)) {
-    return null;
-  }
+): ContainerRunsConfig {
   const image = parsePinnedImage(env.WORKER_BATTERIES_IMAGE);
   if (memoryMaxBytes <= 0) {
     throw new Error(
-      `${CONTAINER_RUNS_SWITCH}=1 but WORKER_RUN_MEMORY_MAX is unset: every run container gets --memory from the slot tuple (ADR-013 Decision 3), so the ceiling is required`,
+      `WORKER_RUN_MEMORY_MAX is unset: every run container gets --memory from the slot tuple (ADR-013 Decision 3), so the ceiling is required`,
     );
   }
   const dockerSocket =

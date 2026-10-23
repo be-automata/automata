@@ -3,11 +3,12 @@
 # This is a TEMPLATE. Replace the __PLACEHOLDER__ tokens, install to
 # /etc/systemd/system/automata-worker.service, then `systemctl daemon-reload`.
 # It replaces the macOS launchd unit (../com.automata.worker.plist) one-for-one:
-# ONE unit, no standby, `slots: 1` plus the kernel box lock keep the box to one
-# agent run at a time.
+# ONE unit, no standby; the engine slots plus the kernel box lock bound how many
+# agent runs the box admits, and every run is a container on the rootless
+# daemon (ADR-013).
 #
 # Tokens:
-#   __USER__   service account the worker runs as (NOT root, NOT the agent uid)
+#   __USER__   service account the worker runs as (NOT root)
 #   __HOME__   that account's home — holds .automata/{run-worker.sh,worker-box.env}
 #   __REPO__   absolute path to the automata-platform checkout
 
@@ -48,29 +49,6 @@ WorkingDirectory=__REPO__/packages/worker
 # `activating`.
 ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
 
-# ── #367: (re)load the agent-uid loopback fence, bound to THIS start's cgroup ──
-#
-# `inet automata_loopback` admits the agent's loopback connections by the
-# RECEIVING socket's cgroup (`socket cgroupv2 … "system.slice/automata-worker.service"`),
-# and nft resolves that path to a cgroup inode id AT LOAD TIME. systemd creates
-# this unit's cgroup before any ExecStartPre= runs and recreates it on every
-# restart, so the table is loaded here, by the unit itself, on every start:
-# loaded earlier (automata-egress.service, Before= this unit) the path does not
-# exist yet; loaded once, the id goes stale on the first restart and the fence
-# then refuses the run's own proxy and broker — every run dies in seconds.
-#
-# ExecStartPre=, NOT ExecStartPost=: Type=exec means an ExecStartPost= would
-# run after the worker process is up and polling, an unfenced window. The `+`
-# runs the loader as root with the unit's sandboxing (ProtectKernelTunables,
-# ProtectSystem, ProtectControlGroups) lifted for this one command — it needs
-# CAP_NET_ADMIN and the real /sys/fs/cgroup. A non-zero exit stops the unit
-# before ExecStart= (fail-closed), and the 15s Restart= cycle keeps the reason
-# in the journal. The engine-readiness wait above is unaffected.
-#
-# Install: render __AGENT_UID__/__MARK__ into /etc/automata/loopback-nft.conf
-# and the loader to /usr/local/sbin/nft-loopback-load.sh (AGENT-UID-PROVISIONING.md §7).
-ExecStartPre=+/usr/bin/env WORKER_USER=__USER__ /usr/local/sbin/nft-loopback-load.sh /etc/automata/loopback-nft.conf
-
 ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 
 # ── Drain, not kill ────────────────────────────────────────────────────────
@@ -79,8 +57,11 @@ ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 # in-flight run to completion. Everything here exists to let that finish.
 #
 # KillMode=mixed: SIGTERM goes to MainPID alone, so the worker decides when its
-# children die. `control-group` would SIGTERM the agent and its daemon directly
-# and drop the in-flight review — the exact loss this unit is shaped to prevent.
+# children die. `control-group` would SIGTERM its `docker start --attach`
+# children and the forwarders directly and drop the in-flight review — the
+# exact loss this unit is shaped to prevent. (The run containers themselves
+# live under the rootless daemon, outside this unit's cgroup; the worker
+# removes them at teardown and, after a crash, by label at boot.)
 KillMode=mixed
 KillSignal=SIGTERM
 # A real agent run is minutes, and a review can sit behind one. This is the
@@ -99,68 +80,29 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=automata-worker
 
-# ── #204: the per-run memory ceiling is an OPT-IN DROP-IN, not part of this unit ──
+# ── Per-run limits live on the containers, not on this unit ────────────────
 #
-# The ceiling needs two things this unit deliberately does NOT provide:
-# `Delegate=memory pids` and the absence of `ProtectControlGroups=`. Both live in
-# `automata-worker.service.d/10-ceiling.conf`, installed only on a box that
-# enables the ceiling.
-#
-# WHY IT IS SPLIT. `ProtectControlGroups=yes` remounts /sys/fs/cgroup read-only
-# inside the unit's namespace, so a delegated subtree is correctly OWNED and
-# completely unwritable and the ceiling cannot be armed. Shipping it relaxed in
-# the base unit would weaken hardening on every box, including the ones that
-# never enable the ceiling — a regression they get nothing for. The drop-in
-# confines the relaxation to the boxes that need it.
-#
-# A MISCONFIGURED BOX FAILS LOUDLY, it does not run uncapped: with
-# `WORKER_RUN_MEMORY_MAX` set and the drop-in absent, the worker refuses to boot
-# and names the missing delegation (`hello/worker.ts`). With the ceiling unset,
-# this unit boots exactly as it did before #204.
-#
-# Install:  install -D -m0644 automata-worker.service.d/10-ceiling.conf \
-#             /etc/systemd/system/automata-worker.service.d/10-ceiling.conf
-#           systemctl daemon-reload && systemctl restart automata-worker.service
+# Every agent run is a container on the rootless daemon (ADR-013), limited by
+# Docker's flags (`--memory`, `--pids-limit`, `--cpus`) through THAT daemon's
+# delegated cgroup subtree. This unit needs no `Delegate=` and keeps
+# `ProtectControlGroups=yes`.
 
-# ── Hardening that does NOT fight the agent-uid design ─────────────────────
-#
-# The worker legitimately spawns an agent under a DIFFERENT uid via sudo, so
-# NoNewPrivileges MUST stay off — it would break the uid drop that the whole
-# egress fence depends on. The rest is free.
+# NoNewPrivileges and RestrictSUIDSGID stay as they were under the host-uid
+# model (ADR-013 P3 deletes code only, so a revert is a pure redeploy on a box
+# that still has the host provisioning). Tighten them with the P4 cleanup.
 NoNewPrivileges=no
 PrivateTmp=no
 
 # ProtectSystem=full remounts /usr read-only inside this unit's namespace — and
 # /usr/local/automata is a subpath of /usr. The launcher stages the daemon bundle
-# there on every agent-uid run (run-worker.sh.template), so without this
-# exception that install fails with "Read-only file system" the moment
-# WORKER_AGENT_USER is set — i.e. exactly when the Linux fence is turned on, and
-# never before, which is why it stayed invisible while the mode was off.
-# Verified on the box: the same write under a transient unit with
-# ProtectSystem=full fails read-only and succeeds without it.
-#
-# Keep the exception as narrow as the one directory. Widening it to /usr/local
-# hands the unit everything else installed there.
+# (bind-mounted read-only into every run container) and keeps the run-terminal
+# ledger there, so that one directory stays writable. Keep the exception as
+# narrow as the one directory.
 ProtectSystem=full
 ReadWritePaths=/usr/local/automata
 
 ProtectHome=no
 ProtectKernelTunables=yes
-
-# ProtectControlGroups IS set here, and the ceiling's drop-in is what turns it
-# off where the ceiling is enabled. `=yes` remounts /sys/fs/cgroup READ-ONLY
-# inside this unit's namespace, so a delegated subtree stays correctly owned and
-# entirely unwritable — the worker then reports a missing `Delegate=` that is in
-# fact present, a maximally confusing symptom for a one-line cause.
-#
-# Isolated on the box rather than assumed, because relaxing more hardening than
-# necessary would be the wrong trade. With Delegate=memory pids:
-#   baseline (no hardening) ............ subtree_control WRITABLE
-#   ProtectControlGroups=yes ........... read-only   <-- the only culprit
-#   ProtectKernelTunables=yes .......... WRITABLE
-#   ProtectSystem=full ................. WRITABLE
-#   the other two together ............. WRITABLE
-# So the drop-in relaxes exactly this one line, and only on boxes that cap runs.
 ProtectControlGroups=yes
 
 RestrictSUIDSGID=no

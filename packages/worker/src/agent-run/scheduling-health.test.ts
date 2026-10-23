@@ -22,6 +22,11 @@ import {
 } from "./scheduling-maintenance";
 
 const TENANT_ID = "707d0855-80ab-4e1f-a156-f1c4546cbf52";
+/** ADR-013 P3: the config every box must carry (image + per-run ceiling). */
+const REQ = {
+  WORKER_BATTERIES_IMAGE: `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`,
+  WORKER_RUN_MEMORY_MAX: "1500M",
+};
 
 /** Records every statement/params pair and answers from a keyed lookup table matched against the SQL text. */
 class FakePg implements PgLike {
@@ -432,7 +437,7 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
 
   describe("latency bounds (AC-5b)", () => {
     it("nominal = deadAfter + interval; alertable = deadAfter + 2*interval, from the actual production defaults", () => {
-      const cfg = loadWorkerConfig({});
+      const cfg = loadWorkerConfig(REQ);
       expect(
         nominalRecoveryLatencySeconds(cfg.workerDeadAfterS, cfg.maintIntervalS),
       ).toBe(660); // 600 + 60 = 11 min
@@ -447,7 +452,7 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
 
   describe("threshold arithmetic", () => {
     it("default stuckQueuedS (900) is exactly half of the 30m scheduleTimeout at workflow.ts:236", () => {
-      const cfg = loadWorkerConfig({});
+      const cfg = loadWorkerConfig(REQ);
       const scheduleTimeoutS = 30 * 60;
       expect(cfg.stuckQueuedS).toBe(scheduleTimeoutS / 2);
     });
@@ -514,12 +519,13 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
 
 describe("runMaintenanceTick — resilience and gating", () => {
   const baseConfig = loadWorkerConfig({
+    ...REQ,
     HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
     HATCHET_ENGINE_TENANT_ID: TENANT_ID,
   });
 
   it("master gate: with engineDatabaseUrl unset, no engine db is touched", async () => {
-    const unconfigured = loadWorkerConfig({});
+    const unconfigured = loadWorkerConfig(REQ);
     const log = vi.fn();
     const snapshot = await runMaintenanceTick({
       config: unconfigured,
@@ -680,6 +686,7 @@ describe("reclaimEngineSlots — orphan labeling on the write path", () => {
 
 describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
   const config = loadWorkerConfig({
+    ...REQ,
     HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
     HATCHET_ENGINE_TENANT_ID: TENANT_ID,
     WORKER_SLOT_RECLAIM: "on",
@@ -699,7 +706,7 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
 
   it("master gate: with engineDatabaseUrl unset, the db is never touched", async () => {
     const db = makeEngineDb(new FakePg(() => ({ rows: [] })));
-    await bootTimeSlotReclaim(loadWorkerConfig({}), vi.fn(), db as never);
+    await bootTimeSlotReclaim(loadWorkerConfig(REQ), vi.fn(), db as never);
     expect(db.withAdvisoryLock).not.toHaveBeenCalled();
     expect(db.query).not.toHaveBeenCalled();
   });
@@ -776,6 +783,7 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
 
   it("slot reclaim 'off' → no engine queries at all", async () => {
     const offConfig = loadWorkerConfig({
+      ...REQ,
       HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
       WORKER_SLOT_RECLAIM: "off",
     });
@@ -797,6 +805,7 @@ describe("startMaintenanceLoop — healthz listener resilience", () => {
       });
     });
     const config = loadWorkerConfig({
+      ...REQ,
       HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
       HATCHET_ENGINE_TENANT_ID: TENANT_ID,
       WORKER_HEALTH_PORT: String(port),

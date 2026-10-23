@@ -1,17 +1,10 @@
 import { redactSecrets } from "@terragon/utils/redact";
 
-import {
-  runAsAgent,
-  type AgentCommandResult,
-  type RunAsAgent,
-} from "./agent-command";
-import { SHA1_HEX } from "./batteries-manifest";
+import type { AgentCommandResult, RunAsAgent } from "./agent-command";
 import {
   appendGitConfig,
   botGitIdentity,
   brokeredGitAuthConfig,
-  buildRunProxyEnv,
-  gitProxyAuthConfig,
   type BrokerHandoff,
 } from "./daemon-env";
 import { formatMemoryMax, MemoryStarvationError } from "./retry-classification";
@@ -307,12 +300,6 @@ export interface SalvageResult {
   sha: string;
 }
 
-/** What the salvage did, and whether it ran any git as the agent uid. */
-export interface SalvageOutcome {
-  result: SalvageResult | null;
-  spawned: boolean;
-}
-
 /** The hard budget for the whole salvage, on a signal of its own. */
 export const SALVAGE_BUDGET_MS = 60_000;
 
@@ -320,6 +307,8 @@ export const SALVAGE_BUDGET_MS = 60_000;
 export function salvageCommitMessage(runExecutionTimeoutMs: number): string {
   return `wip: run timed out at ${limitMinutes(runExecutionTimeoutMs)}m (automata salvage)`;
 }
+
+const SHA1_HEX = /^[0-9a-f]{40}$/;
 
 // Every script is a module constant; the branch, the message and the push URL
 // travel only as positional arguments ($1, $2), the same injection posture as
@@ -339,8 +328,7 @@ const HEAD_STATE_SCRIPT =
   "done";
 // `add -A` runs `git status` INSIDE every tracked gitlink, under that
 // submodule's own agent-writable config and attributes, which no guard read
-// (a filter there runs as the agent uid; diff.ignoreSubmodules does not stop
-// it). So no gitlink (mode 160000) may be in the index, and no .gitmodules
+// (a filter there would run; diff.ignoreSubmodules does not stop it). So no gitlink (mode 160000) may be in the index, and no .gitmodules
 // may exist. NUL-separated records, so a path cannot fake a mode; a path
 // holding a newline can only cause a refusal. Listed twice so a failing
 // ls-files fails the step instead of passing the pipeline.
@@ -351,9 +339,9 @@ const SUBMODULE_SCRIPT =
   `if git ls-files -s -z | tr '\\0' '\\n' | grep -q '^160000 '; then exit ${EXIT_SUBMODULES}; fi`;
 // A run killed at its limit can die inside a git command and leave the index,
 // HEAD or work-branch ref lock behind; add/commit would then exit 128 and the
-// work be lost. Safe to clear: the agent and its escapees are reaped and the
-// box lock is held, so no git of this run is still writing. As the agent uid,
-// so it can only remove what the agent could.
+// work be lost. Safe to clear: every process of the container is frozen
+// (prepareSalvage) and the box lock is held, so no git of this run is still
+// writing. As the container's user, so it can only remove what the agent could.
 const STALE_LOCKS_SCRIPT =
   'for p in index.lock HEAD.lock "refs/heads/$1.lock"; do ' +
   'f=$(git rev-parse --git-path "$p") || exit 1; rm -f -- "$f" || exit 1; ' +
@@ -425,33 +413,27 @@ export interface SalvageWorkBranchArgs {
   /** The claimed cause: only `timeout` is salvaged; any other is silent. */
   cause: TerminalCause;
   workBranch: string | undefined;
-  /** The box lock was lost: another run may own the agent uid and box now. */
+  /** The box lock was lost: another run may own the box slot now. */
   lockLost: boolean;
   /** config.timeoutSalvage !== "off". */
   enabled: boolean;
   /**
-   * An ADR-013 container run's own salvage hooks (ContainerDaemonProcess);
-   * null on the host path. Set, every git step runs INSIDE the container.
+   * The run container's own salvage hooks (ContainerDaemonProcess): every git
+   * step runs INSIDE the container, as its user.
    */
-  container: ContainerSalvageTarget | null;
+  container: ContainerSalvageTarget;
   /** The run's git broker handoff; null on a legacy-direct (unbrokered) box. */
   broker: Pick<BrokerHandoff, "gitUrl" | "bearer"> | null;
   repoFullName: string;
-  /** The run's checkout. */
-  workdir: string;
-  /** The slot's agent account; "" runs git as the worker (dev). */
-  agentUser: string;
   botLogin: string;
-  egressProxyUrl: string | null;
   /** The run's execution limit (names it in the salvage commit). */
   runExecutionTimeoutMs: number;
   log: (line: string) => void;
-  run?: RunAsAgent;
   budgetMs?: number;
 }
 
 /**
- * ADR-013: what a container run lends its salvage (ContainerDaemonProcess).
+ * ADR-013: what a run container lends its salvage (ContainerDaemonProcess).
  * The salvage runs after the agent's time is up but BEFORE the container is
  * removed, as the container's own user, so no git on the container-written
  * .git ever runs as the worker uid on the host.
@@ -473,47 +455,15 @@ export interface ContainerSalvageTarget {
 }
 
 /**
- * The env every salvage git runs with: the agent's own brokered auth
- * (brokeredGitAuthConfig — never a second path, never the installation
- * token), the run's bot identity, the run's egress proxy, and hardenGitEnv
- * (untrusted-checkout-git.ts). push.pushOption is reset (an empty value
- * clears the list): the guard's allowlist admits push.*.
- */
-export function salvageGitEnv({
-  agentUser,
-  workdir,
-  broker,
-  botLogin,
-  egressProxyUrl,
-}: Pick<
-  SalvageWorkBranchArgs,
-  "agentUser" | "workdir" | "botLogin" | "egressProxyUrl"
-> & {
-  broker: Pick<BrokerHandoff, "gitUrl" | "bearer">;
-}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of ["PATH", "LANG", "LC_ALL"]) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
-  if (agentUser) {
-    env.USER = agentUser;
-    env.LOGNAME = agentUser;
-  }
-  return withSalvageGitConfig(env, {
-    broker,
-    botLogin,
-    safeDirectory: agentUser ? workdir : null,
-    egressProxyUrl,
-  });
-}
-
-/**
- * The same git env for a salvage inside an ADR-013 container: no host PATH
- * or locale (the image's own apply), the checkout scoped by safe.directory
- * (the clone belongs to the worker's uid on the host, never the
- * container's), and no egress proxy — the only network a salvage git uses
- * is the broker on the container's loopback.
+ * The git env of a salvage inside the run's container: the agent's own
+ * brokered auth (brokeredGitAuthConfig — never a second path, never the
+ * installation token), the run's bot identity and hardenGitEnv
+ * (untrusted-checkout-git.ts). push.pushOption is reset (an empty value clears
+ * the list): the guard's allowlist admits push.*. No host PATH or locale (the
+ * image's own apply), the checkout scoped by safe.directory (the clone belongs
+ * to the worker's uid on the host, never the container's), and no egress
+ * proxy — the only network a salvage git uses is the broker on the
+ * container's loopback.
  */
 export function containerSalvageGitEnv({
   workdir,
@@ -524,9 +474,18 @@ export function containerSalvageGitEnv({
   broker: Pick<BrokerHandoff, "gitUrl" | "bearer">;
   botLogin: string;
 }): Record<string, string> {
-  const env = withSalvageGitConfig(
-    {},
-    { broker, botLogin, safeDirectory: workdir, egressProxyUrl: null },
+  const identity = botGitIdentity(botLogin);
+  const env = hardenGitEnv(
+    appendGitConfig({ ...identity.env }, [
+      ...brokeredGitAuthConfig(broker),
+      ["credential.helper", ""],
+      ...identity.config,
+      ["safe.directory", workdir],
+      ["push.pushOption", ""],
+      // `git commit` otherwise spawns a DETACHED `git maintenance run --auto`.
+      ["maintenance.auto", "false"],
+      ["gc.auto", "0"],
+    ]),
   );
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -535,44 +494,11 @@ export function containerSalvageGitEnv({
   return out;
 }
 
-function withSalvageGitConfig(
-  base: NodeJS.ProcessEnv,
-  {
-    broker,
-    botLogin,
-    safeDirectory,
-    egressProxyUrl,
-  }: {
-    broker: Pick<BrokerHandoff, "gitUrl" | "bearer">;
-    botLogin: string;
-    safeDirectory: string | null;
-    egressProxyUrl: string | null;
-  },
-): NodeJS.ProcessEnv {
-  const identity = botGitIdentity(botLogin);
-  let env: NodeJS.ProcessEnv = { ...base, ...identity.env };
-  env = appendGitConfig(env, [
-    ...brokeredGitAuthConfig(broker),
-    ["credential.helper", ""],
-    ...identity.config,
-    ...(safeDirectory !== null
-      ? ([["safe.directory", safeDirectory]] as Array<[string, string]>)
-      : []),
-    ...gitProxyAuthConfig(egressProxyUrl),
-    ["push.pushOption", ""],
-    // `git commit` otherwise spawns a DETACHED `git maintenance run --auto`.
-    ["maintenance.auto", "false"],
-    ["gc.auto", "0"],
-  ]);
-  if (egressProxyUrl) env = buildRunProxyEnv(egressProxyUrl, env);
-  return hardenGitEnv(env);
-}
-
 /**
  * #437 Part B: save a timed-out task run's work before its checkout is
- * deleted — after the agent is dead and reaped (an ADR-013 container's is
- * frozen instead: ContainerSalvageTarget), before the git broker closes. As
- * the agent uid (a container's own user), in the checkout: refuse an agent-steered .git
+ * deleted — with the run's container frozen (ContainerSalvageTarget), before
+ * the git broker closes and the container is removed. As the container's own
+ * user, in the checkout: refuse an agent-steered .git
  * (checkLocalGitConfig, untrusted-checkout-git.ts), commit a dirty tree
  * (salvageCommitMessage, the bot identity), then push HEAD to the work branch
  * — by URL, one refspec, never forced — when it holds unpushed commits. One
@@ -581,20 +507,19 @@ function withSalvageGitConfig(
  * `salvage: pushed <sha8> to <branch>` | `salvage: nothing to save` |
  * `salvage: failed (<reason>)` | `salvage: skipped (<reason>)`, the reason
  * constant text (runAsAgent discards stderr). The budget ends the salvage
- * even when a step's runner never settles (a killed sudo whose git still
- * holds its pipe); the workflow's post-salvage reap kills that git.
+ * even when a step's runner never settles (a hung `docker exec`); the
+ * container's removal right after kills whatever it still runs.
  */
 export async function salvageWorkBranch(
   args: SalvageWorkBranchArgs,
-): Promise<SalvageOutcome> {
-  let spawned = false;
-  if (args.cause !== "timeout") return { result: null, spawned };
+): Promise<SalvageResult | null> {
+  if (args.cause !== "timeout") return null;
   const done = (
     line: string,
     result: SalvageResult | null = null,
-  ): SalvageOutcome => {
+  ): SalvageResult | null => {
     args.log(redactSecrets(`salvage: ${line}`));
-    return { result, spawned };
+    return result;
   };
   const skipped = (reason: string) => done(`skipped (${reason})`);
   const { workBranch, broker } = args;
@@ -606,20 +531,19 @@ export async function salvageWorkBranch(
     return skipped("invalid repository name");
   }
 
-  // ADR-013: a container run's git runs inside its container, as its user,
+  // ADR-013: the salvage's git runs inside the run's container, as its user,
   // on the checkout as the container sees it. Host git as the worker on the
   // container-written .git would run its config as the worker uid.
   const { container } = args;
-  const run = container ? container.runInContainer : (args.run ?? runAsAgent);
-  const workdir = container ? container.salvageWorkdir : args.workdir;
+  const run = container.runInContainer;
+  const workdir = container.salvageWorkdir;
   const budgetMs = args.budgetMs ?? SALVAGE_BUDGET_MS;
   // The one clock: runAsAgent SIGKILLs its child when this signal aborts.
   const budget = AbortSignal.timeout(budgetMs);
-  // The budget ends a step even when its runner never settles: a SIGKILLed
-  // sudo whose git still holds the stdout pipe never closes. That step is
-  // left to settle unobserved (the post-salvage reap kills its git; a
-  // container's removal kills whatever its exec still runs); the abort
-  // listener goes with every step. Null: the budget ran out first.
+  // The budget ends a step even when its runner never settles (a hung
+  // `docker exec`). That step is left to settle unobserved (the container's
+  // removal kills whatever its exec still runs); the abort listener goes with
+  // every step. Null: the budget ran out first.
   const bounded = async <T>(step: Promise<T>): Promise<T | null> => {
     step.catch(() => {});
     let onAbort = (): void => {};
@@ -634,29 +558,21 @@ export async function salvageWorkBranch(
     }
   };
   try {
-    let env: NodeJS.ProcessEnv;
-    if (container) {
-      if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
-      spawned = true;
-      const gitUrl = await bounded(container.prepareSalvage(budgetMs));
-      if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
-      if (gitUrl === null) {
-        throw new SalvageStepFailed("container prepare failed");
-      }
-      env = containerSalvageGitEnv({
-        workdir,
-        broker: { gitUrl, bearer: broker.bearer },
-        botLogin: args.botLogin,
-      });
-    } else {
-      env = salvageGitEnv({ ...args, broker });
+    if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
+    const gitUrl = await bounded(container.prepareSalvage(budgetMs));
+    if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
+    if (gitUrl === null) {
+      throw new SalvageStepFailed("container prepare failed");
     }
+    const env = containerSalvageGitEnv({
+      workdir,
+      broker: { gitUrl, bearer: broker.bearer },
+      botLogin: args.botLogin,
+    });
     const git = async (script: string, scriptArgs: string[] = []) => {
       if (budget.aborted) throw new SalvageStepFailed("budget exceeded");
-      spawned = true;
       const r: AgentCommandResult | null = await bounded(
         run({
-          agentUser: args.agentUser,
           cwd: workdir,
           script,
           args: scriptArgs,

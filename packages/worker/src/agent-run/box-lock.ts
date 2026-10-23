@@ -61,8 +61,8 @@ export { BOX_SLOTS_MAX };
  * parks on a waiting acquire. Liveness is still the kernel's: no staleness
  * threshold, no liveness beat, no mtime read, no reclaim, no polling loop
  * (ADR-007 I1).
- * The slot index is what names the run's agent account (`agentUserForSlot`),
- * which is the fence between concurrent runs.
+ * The slot index names the run's container (`containerNameForSlot`); the
+ * container is the fence between concurrent runs (ADR-013).
  */
 
 export class BoxLockUnavailableError extends Error {

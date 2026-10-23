@@ -163,7 +163,6 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     config = {
       ...loadWorkerConfig({
         WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
-        WORKER_DEV_CONTAINER_RUNS: "1",
         WORKER_BATTERIES_IMAGE: IMAGE,
         WORKER_RUN_MEMORY_MAX: "2G",
         WORKER_DAEMON_DIST: path.join(root, "daemon.js"),
@@ -458,7 +457,6 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
     config = {
       ...loadWorkerConfig({
         WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
-        WORKER_DEV_CONTAINER_RUNS: "1",
         WORKER_BATTERIES_IMAGE: IMAGE,
         WORKER_RUN_MEMORY_MAX: "2G",
         WORKER_DAEMON_DIST: path.join(root, "daemon.js"),
@@ -671,13 +669,12 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
     expect(rt.exec).not.toHaveBeenCalled();
   });
 
-  // card: protects=#437 Part B: a salvage step runs through `docker exec` in the run's container (runAsAgent's /bin/sh -c argv, the step's workdir and env handed to spawnExec), and its exit code and stdout come back as runAsAgent reports them; fails_when=the step runs on the host, under sudo, in another container or dir, or loses its env; no_claim=docker itself (spawnExec's own test)
+  // card: protects=#437 Part B: a salvage step runs through `docker exec` in the run's container (runAsAgent's /bin/sh -c argv, the step's workdir and env handed to spawnExec), and its exit code and stdout come back as runAsAgent reports them; fails_when=the step runs on the host, in another container or dir, or loses its env; no_claim=docker itself (spawnExec's own test)
   it("runInContainer: a salvage step is a docker exec of runAsAgent's argv", async () => {
     const rt = fakeRuntime();
     const d = make("task", rt);
     await d.start();
     const r = await d.runInContainer({
-      agentUser: "agent-slot-0",
       cwd: "/workspace",
       script: 'exec git check-ref-format "refs/heads/$1"',
       args: ["automata/task-1"],
@@ -705,18 +702,6 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
 });
 
 describe("settleDaemonTeardown (the workflow's teardown step)", () => {
-  // card: protects=switch OFF: the host daemon's synchronous teardown runs once and NOTHING is returned to await, so the host path's finally keeps its exact ordering; fails_when=a promise (an extra await tick) is returned for the host daemon or teardown is skipped; no_claim=the rest of the finally block
-  it("host daemon: teardown runs synchronously, nothing to await", () => {
-    let calls = 0;
-    const out = settleDaemonTeardown(
-      { teardown: () => void calls++ },
-      "thr_1",
-      () => {},
-    );
-    expect(out).toBeUndefined();
-    expect(calls).toBe(1);
-  });
-
   // card: protects=a container whose removal kept failing is LOGGED and the teardown carries on (brokers, credential wipe and slot release still run), never thrown out of the finally; fails_when=the rejection propagates or goes unlogged; no_claim=the next admission's by-name removal (start() tests)
   it("container daemon: a failed removal is logged, never thrown", async () => {
     const lines: string[] = [];

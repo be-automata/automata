@@ -13,14 +13,15 @@ then install to `~/Library/LaunchAgents/`.
 
 **The concurrency tuple is ONE setting (#372).** `WORKER_BOX_SLOTS` (default 1)
 agent-runs execute at a time on the box: engine `slots` on the single unit plus N
-kernel slot locks (`src/agent-run/box-lock.ts`), one agent account per slot (#205;
-`AGENT-UID-PROVISIONING.md` §6). `WORKER_GLOBAL_MAX_RUNS` (default 1) is the
+kernel slot locks (`src/agent-run/box-lock.ts`), each slot's run a container named
+after its slot (#205, ADR-013). `WORKER_GLOBAL_MAX_RUNS` (default 1) is the
 engine's `'agent-run-global-memory-budget'` cap and `WORKER_PER_ORG_MAX_RUNS`
 (default 1) the per-org fairness cap, both registered on every workflow VARIANT by
 `src/agent-run/definition.ts` (the global key caps each variant separately and is
 not the box budget; every run has `slotCost: 1`). The config loader refuses — at boot AND at every run — an explicit
-`WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS` (unset follows the slots), `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and N > 1
-without the uid drop or the #204 ceiling. ONCE at boot (Linux, N > 1, ceiling on,
+`WORKER_GLOBAL_MAX_RUNS ≠ WORKER_BOX_SLOTS` (unset follows the slots), `WORKER_PER_ORG_MAX_RUNS > WORKER_GLOBAL_MAX_RUNS`, and a box
+without `WORKER_BATTERIES_IMAGE` or the per-run ceiling `WORKER_RUN_MEMORY_MAX` (every run is a
+container, ADR-013). ONCE at boot (Linux, N > 1, ceiling on,
 commit arm not inert: `WORKER_HEADROOM_COMMIT_FRACTION < 1`) the worker also
 refuses `WORKER_BOX_SLOTS × WORKER_HEADROOM_RUN_COMMIT + 2 GiB base >
 WORKER_HEADROOM_COMMIT_FRACTION × CommitLimit` — the #371 admission inequality with a fixed 2 GiB base, so it is a LOWER bound: a
@@ -49,14 +50,11 @@ set -a; source ~/.automata/worker-box.env; set +a
 bash scripts/assert-auth-enabled.sh || exit 1
 # Daemon bundle must be current (worker consumes packages/daemon/dist).
 pnpm run daemon:build || exit 1
-# #108 agent-uid mode ONLY: publish the just-built bundle where the agent uid can
-# read it, so WORKER_DAEMON_DIST always matches the build. Own that ONE directory
-# as the operator (`sudo chown $(id -un) /usr/local/automata/daemon`) so this
-# needs no extra sudo grant.
-if [ -n "${WORKER_AGENT_USER:-}" ]; then
-  install -m 0444 dist/../../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
-  # The launcher stages the bundle, so the launcher names it: without this the
-  # worker runs the checkout's dist and the staged copy is dead weight.
+# Publish the just-built bundle where the rootless Docker daemon can read it (it
+# is bind-mounted read-only into every run container), so WORKER_DAEMON_DIST
+# always matches the build. The service account owns that ONE directory.
+if [ -d /usr/local/automata/daemon ]; then
+  install -m 0444 ../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
   export WORKER_DAEMON_DIST=/usr/local/automata/daemon/index.js
 fi
 exec node --import tsx src/hello/worker.ts
@@ -76,26 +74,20 @@ exec node --import tsx src/hello/worker.ts
 (`assertAuthEnabledFromEnv`) is the second, cross-platform layer, so even a box whose
 `run-worker.sh` was not updated still fails closed.
 
-## Agent-uid mode (#108)
+## Run isolation (ADR-013)
 
-`WORKER_AGENT_USER` runs the agent child as a dedicated unprivileged role
-account so the PF egress anchor can fence it without fencing the operator.
-It is OFF by default — empty means byte-for-byte the behaviour above.
+Every agent run, in every lane, is a fresh container from the pinned batteries image on the
+rootless Docker daemon ("Container runs" below). The host-uid model (#108: a slot account per
+run spawned through `sudo`, the nft/PF egress and loopback fences, a delegated cgroup per run,
+the uid reaper, battery packs linked into a per-run HOME) was deleted by the ADR-013 release PR.
+The box keeps its host provisioning (slot accounts, sudoers lines, nft tables, unit drop-ins,
+the host battery tree) until the P4 cleanup, so reverting that PR is a pure redeploy.
 
-Host provisioning (role account, `/usr/local/automata` tree, sudoers, PF wrapper
-conf + preflight/verify scripts + boot LaunchDaemon) and the verification gates
-are in `AGENT-UID-PROVISIONING.md`. Two things that will otherwise bite:
-
-- `WORKER_AGENT_USER` without `WORKER_WORKDIR_ROOT` is a hard boot failure. The
-  default root is `os.tmpdir()` — 0700, owned by the worker's uid, untraversable
-  by any other.
-- `WORKER_NODE_BIN` must be node **≥22.21.0 (22.x) or ≥24.0.0**. The worker
-  probes it at boot and refuses to start below that floor. The Linux box runs
-  exactly `nodejs=24.21.0-1nodesource1`, held with `apt-mark hold`
-  (`cloud-init.yaml`); see "Upgrading Node on a live box" below.
-- `WORKER_RUN_MEMORY_MAX` (#204) is the per-run memory ceiling and **requires**
-  `WORKER_AGENT_USER` plus the `automata-worker.service.d/10-ceiling.conf`
-  drop-in; set without either, the worker refuses to boot.
+- `WORKER_BATTERIES_IMAGE` (digest-pinned, already in the rootless daemon's store) and
+  `WORKER_RUN_MEMORY_MAX` (`--memory`, no swap) are required; without either the worker
+  refuses to boot. `WORKER_RUN_TASKS_MAX` (default 4096) is `--pids-limit`.
+- The worker's own node (`nodejs=24.21.0-1nodesource1`, held with `apt-mark hold` by
+  `cloud-init.yaml`) runs only the worker; the agent and its daemon run on the image's node.
 - Memory-headroom admission (#371, Linux only; inert where `/proc/meminfo` is
   absent): a run is admitted under its slot only if `MemAvailable − reserved ≥
 WORKER_HEADROOM_FLOOR` (default `1G`; `0` = inert) AND `Committed_AS +
@@ -116,8 +108,8 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   refusal (slot re-acquire waits included). Journal lines `box.headroom_rejected` /
   `box.headroom_deferred_wait` / `box.headroom_ok` carry the decision and the
   three memory values.
-  **Restart etiquette:** a deferred run holds NO run cgroup, box lock or run
-  dir, so a cgroup-based "nothing in flight" check misses it; a restart issued
+  **Restart etiquette:** a deferred run holds NO container, box lock or run
+  dir, so a container-based "nothing in flight" check misses it; a restart issued
   during a deferral pauses the worker and BLOCKS in the SDK drain until that run
   is admitted-and-finished or fails final (up to the 12-minute budget), and a
   failure that ends the drain is redelivered to the next worker and re-executed.
@@ -307,8 +299,9 @@ not a rolling restart:
 
 The box runs one exact NodeSource build, held with `apt-mark hold`. A major bump
 is a maintenance window, not a deploy: apt swaps `/usr/bin/node` underneath the
-running worker, so every run started afterwards gets its daemon and agent on the
-new Node while the worker is still on the old one. **Stop the worker first.**
+running worker, so the worker would keep running on the old binary until its
+next restart. **Stop the worker first.** (The agent and its daemon run on the
+batteries image's own Node, ADR-013.)
 
 NodeSource publishes one repo per major, so once the repo is switched the old
 major can no longer be installed from apt. Download the rollback package
@@ -319,8 +312,8 @@ major can no longer be installed from apt. Download the rollback package
 install -d -m 0700 /var/lib/automata/rollback
 cd /var/lib/automata/rollback && apt-get download nodejs=22.23.3-1nodesource1
 
-# 1. idle check by cgroup (not by uid), then stop
-ls /sys/fs/cgroup/automata-runs.slice/ 2>/dev/null   # no run-* dirs = idle
+# 1. idle check (no run container on the box), then stop
+docker -H unix:///run/automata-docker/docker.sock ps --filter label=automata.box --format '{{.Names}}'   # empty = idle
 systemctl stop automata-worker      # 0s with nothing in flight; if it hangs
                                     # draining an empty box: systemctl kill -s SIGKILL automata-worker
 
@@ -335,7 +328,6 @@ cd /opt/automata-platform && CI=1 pnpm install --frozen-lockfile; echo "exit=$?"
 
 # 4. verify before starting
 node -v && pnpm -v
-runuser -u automata-agent -- /usr/local/bin/claude --version
 systemctl start automata-worker
 journalctl -u automata-worker -f    # "listening for actions" + liveness heartbeat
 ```
@@ -347,42 +339,19 @@ Then confirm one review run completes. Keep the window under the 30-minute
 `apt-mark hold nodejs`, repeat step 3, start. (Point `nodesource.sources` back at
 `node_22.x` if apt should keep resolving 22.)
 
-## Harness batteries on the execution box
+## Container runs (ADR-013)
 
-gstack, GSD and ruflo (with its MCP server) are installed by the same root
-`linux/install-batteries.sh` run as the review batteries, from
-`harness.json` and the lockfiles under `batteries/<id>/`. The full runbook
-(what lands where, how a pack is built, the production step, rollback, the
-container drill) is "Harness batteries on the execution box" in
-`deploy/PILOT-RUNBOOK.md`. The checks an operator runs:
-
-```bash
-automata-batteries doctor                 # human summary; exit 0 = every pack OK
-automata-batteries doctor --json | jq '.ok, .harness, [.packs[] | {id, ok, stampValid, nodeAbiMatch}]'
-automata-batteries verify-as-agent        # root: every check AS automata-agent,
-                                          # incl. a sandboxed Chromium launch
-cat /usr/local/lib/automata-batteries/harness.sha256   # absent = last harness install failed
-```
-
-A harness failure never invalidates the review batteries' `manifest.sha256`;
-it only leaves `harness.sha256.invalid` behind.
-
-## Container runs (DEV/TEST ONLY until the ADR-013 release PR)
-
-[ADR-013](../../../docs/adr/ADR-013-image-per-run-execution.md) moves every agent run into a
-fresh container from the pinned batteries image. Until its release PR the container path is
-**dark**: the worker takes it only with `WORKER_DEV_CONTAINER_RUNS=1`, set by hand on a throwaway
-box and **never on the production box** (no provisioning step writes it). Unset, `0` or any other
-value is the host-uid path, unchanged. With it on, the worker logs a boot `WARNING` and refuses to
-boot unless the rootless daemon answers and the pinned digest is already in its store; it then
-removes every run container a dead worker of this box left behind (label `automata.box`).
+[ADR-013](../../../docs/adr/ADR-013-image-per-run-execution.md): every agent run, in every lane,
+is a fresh container from the pinned batteries image on the rootless Docker daemon. It is the only
+execution path; there is no switch. The worker refuses to boot unless the rootless daemon answers
+and the pinned digest is already in its store; it then removes every run container a dead worker of
+this box left behind (label `automata.box`).
 
 | Variable                         | Default                            | Meaning                                                                                            |
 | -------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `WORKER_DEV_CONTAINER_RUNS`      | unset (off)                        | Exactly `1` turns the container path on.                                                           |
-| `WORKER_BATTERIES_IMAGE`         | none (required when on)            | `ghcr.io/be-automata/automata-batteries@sha256:<digest>`; a tag is refused. Never pulled by a run. |
+| `WORKER_BATTERIES_IMAGE`         | none (required)                    | `ghcr.io/be-automata/automata-batteries@sha256:<digest>`; a tag is refused. Never pulled by a run. |
 | `WORKER_CONTAINER_DOCKER_SOCKET` | `/run/automata-docker/docker.sock` | The rootless daemon's socket (group `automata-docker`).                                            |
-| `WORKER_RUN_MEMORY_MAX`          | none (required when on)            | The slot tuple's ceiling, used as `--memory` and `--memory-swap`.                                  |
+| `WORKER_RUN_MEMORY_MAX`          | none (required)                    | The slot tuple's ceiling, used as `--memory` and `--memory-swap`.                                  |
 | `WORKER_RUN_TASKS_MAX`           | 4096                               | `--pids-limit`.                                                                                    |
 | `WORKER_CONTAINER_CPUS`          | 2                                  | `--cpus`.                                                                                          |
 | `WORKER_CONTAINER_TMP_SIZE`      | 512M                               | The `/tmp` tmpfs cap (counts against `--memory`).                                                  |
@@ -794,72 +763,15 @@ during the observation window (see Promotion below). A structured log line
 / `"scheduling.tick_skipped_locked"`) is emitted to `worker.log` on every tick with a
 non-empty finding.
 
-### Reading `box-budget.json`
+### Run containers instead of `box-budget.json`
 
-The uid-scan reaper (#184, `uid-reaper.ts`) writes
-`<runNamespaceRoot>/box-budget.json` after every non-skipped, non-errored scan
-(boot, run admission, and run teardown), atomically, with the shape:
-
-```json
-{
-  "ts": "2026-09-06T12:00:00.000Z",
-  "phase": "boot" | "admission" | "teardown",
-  "threadId": "…",   // optional — absent on boot scans (no run owns them)
-  "scanned": 0,
-  "killed": 0,
-  "residual": 0,
-  "failed": 0,
-  "escapeesSinceBoot": 0
-}
-```
-
-`scanned`/`killed`/`residual`/`failed` describe the agent-uid processes reaped
-by that one scan; `escapeesSinceBoot` accumulates `killed` across every scan
-since the worker started. The five macOS per-user launchd helpers
-(`distnoted`, `lsd`, `csnameddatad`, `secd`, `contactsd`) are excluded from
-every one of those counts — they respawn on demand and are not agent-run
-state. `groups` (distinct pgids among the targets) and `helpers` (the excluded
-helper count) appear only in the `box.escapees_reaped` log line, never in the
-file.
-
-Every non-skipped scan logs `box.escapees_reaped` with the same counts plus
-`groups` and `helpers`. `box.escapees_residual` is logged only when
-`residual > 0` after the scan's kill — **this is the operator's cue**: it
-means the uid-wide `sudo -n -u _automata-agent -- /bin/kill -9 -- -1` did not
-clear everything within its bound. `residual > 0` can also mean the residual
-re-scan itself failed (a `box.escapees_scan_failed` with `stage: "residual"`
-precedes it); in that case the pre-kill target list is reported conservatively
-as `residual`, so the kill may well have landed — confirm with the `ps` below
-before acting. The log line's `sample` lists up to five command basenames, not
-pgids. The manual hatch: find their pgids with
-`ps -axo pid,pgid,uid,comm | grep <name>` (or `pgrep -u _automata-agent -l`),
-then `sudo -n -u _automata-agent /bin/kill -9 -- -<pgid>`. `box.budget_write_failed` means
-the `box-budget.json` write itself failed (e.g. an unwritable
-`runNamespaceRoot`) — the scan and kill still ran; only the file is missing.
-`box.escapees_scan_failed` carries a `stage`: `scan` means `ps`, `id -u` or the
-`WORKER_AGENT_USER` name check failed BEFORE the kill and nothing was killed;
-`residual` means the kill WAS issued and only the post-kill re-scan failed, so
-the pre-kill target list is reported conservatively as `residual` (see above);
-`unexpected` is the belt-and-braces catch and may be either. Each enumerator
-is bounded to 2 s (SIGKILLed on timeout) so a hung `ps` or a wedged directory
-service surfaces here instead of holding the run's finally open.
-`box.escapees_kill_failed` means the sudo kill could not be spawned (`failed: 1`
-in the reaped line). `box.escapees_kill_nonzero` means the kill process exited
-non-zero and carries `code`, `signal` and a `stderr` tail: an empty tail is
-`kill`'s own ESRCH exit 1 (the set emptied under us, not a failure); a tail
-matching `sudo:` / `password` / `not allowed` / `command not found` is a REFUSED
-sudo (no NOPASSWD grant) — the signal was never sent, so that scan reports
-`failed: 1`, `killed: 0` and `residual` = `scanned`; fix the sudoers grant, do not
-hunt pgids. `box.escapees_scan_skipped` with `reason: "lock lost"` means the
-run's box-lock helper died mid-run (a `box lock LOST by …` line precedes it), so
-the teardown scan was NOT run — another run may already own the box and its
-live agent would be collateral of a uid-wide kill; the next admission scan
-reclaims instead. All of these are fail-open: the run continues, the box stays
-single-flight, and the next phase re-scans.
-
-When `WORKER_AGENT_USER` is empty, the boot log prints `box uid-scan
-disabled: WORKER_AGENT_USER is empty` and no scan, lock, or `box-budget.json`
-write happens at all.
+The uid-scan reaper and its `box-budget.json` were deleted with the host-uid path (ADR-013 P3):
+every process of a run lives in its container's pid namespace, so `docker rm -f` kills all of it,
+`setsid` escapees included. What replaces the scan's lines: `container.predecessor_removed` (a
+redelivered run removed the container still holding its slot's name), `container.removed` /
+`container.remove_retry` / `container.teardown_failed` at teardown, and the boot line's
+`orphan container(s) removed` count. To list what is on the box:
+`docker -H unix:///run/automata-docker/docker.sock ps -a --filter label=automata.box=<box id>`.
 
 ### Recovery-latency bounds — alert on the ALERTABLE figure, not 5 minutes
 

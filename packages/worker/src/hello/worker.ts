@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { hatchet } from "../hatchet-client";
 import {
   assertAuthEnabledFromEnv,
@@ -17,27 +14,15 @@ import {
   resolveProbeWorkerName,
   startEngineLivenessWatchdog,
 } from "../agent-run/engine-liveness";
-import { harnessDoctorLine } from "../agent-run/batteries-seed";
 import { armGrowthTriggers } from "../agent-run/growth-triggers-io";
 import { loadPlaneKeysAtBoot } from "../agent-run/payload-seal-keys";
-import { assertNodeBinSupportsEnvProxy } from "../agent-run/node-floor";
 import {
-  EGRESS_FENCE_UIDS_FILE,
-  assertFenceCoversSlotUids,
-  assertProcHidepid,
-  assertSlotAccountsExist,
-  assertSlotAccountsOutsideGroup,
-  assertSlotSudoGrants,
-  assertSlotWorkdirTraverse,
   assertSlotsFitCommitLimit,
-  hidepidDropinLeftAtOneSlot,
-  retiredSlotAccounts,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
 import { sweepStaleRunDirs } from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { runTerminalRootBootLines } from "../agent-run/run-terminal-ledger";
-import { bootUidScan } from "../agent-run/uid-reaper";
 import {
   bootTimeSlotReclaim,
   startMaintenanceLoop,
@@ -46,40 +31,23 @@ import {
   claimRunNamespace,
   getProcessWorkerId,
 } from "../agent-run/run-namespace";
-import {
-  assessCgroupSupport,
-  prepareDelegatedRoot,
-} from "../agent-run/run-cgroup";
 import { containerRunsBoot } from "../agent-run/container-boot";
 import { buildWorkflows } from "../registry";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
-const execFileAsync = promisify(execFile);
-
 /**
- * Claim this worker process's namespaced run dir and reap orphans left by DEAD
+ * Claim this worker process's namespaced run dir and remove the dirs left by DEAD
  * sibling workers (Phase 0.2b). Order matters: write our OWN worker.lock FIRST so a
  * concurrently-booting sibling never mistakes our fresh dir for an orphan, THEN scan
- * siblings. Reclaim only ever group-SIGKILLs daemons under a dir whose worker pid is
- * confirmed dead — a live worker's daemons are never touched (safe for ≥2 workers).
+ * siblings. Reclaim only ever removes a dir whose worker pid is confirmed dead — a
+ * live worker's dir is never touched (safe for ≥2 workers).
  */
 async function claimNamespaceAndReclaim(): Promise<void> {
   const cfg = loadWorkerConfig();
   const root = cfg.runNamespaceRoot;
   const workerId = getProcessWorkerId();
   try {
-    // #108 F2: this ALSO applies the cross-uid ACEs, on the empty dir, before
-    // anything is created inside it. macOS applies ACE inheritance at create
-    // time, so a grant added later (per-run, inside DaemonProcess.start())
-    // never reaches the gh-broker socket workflow.ts already bound.
-    // #205: at N > 1 every slot account gets traverse here; the inheritable
-    // grant lands on each slot's own subdir at admission (ensureSlotNamespace).
-    await claimRunNamespace({
-      root,
-      workerId,
-      agentUser: cfg.agentUser,
-      agentUsers: cfg.agentUsers,
-    });
+    await claimRunNamespace({ root, workerId });
   } catch (err) {
     // A worker that can't claim its dir would leak every run's resources — fail loud.
     console.error("worker: failed to claim run namespace", err);
@@ -88,61 +56,8 @@ async function claimNamespaceAndReclaim(): Promise<void> {
   reclaimDeadWorkerRuns({
     root,
     selfWorkerId: workerId,
-    // #108: empty (the default) ⇒ process.kill(-pgid), exactly as before.
-    agentUser: loadWorkerConfig().agentUser,
     log: (message) => console.log(`[worker-boot] ${message}`),
   });
-}
-
-/**
- * #204 boot step: vacate the delegated cgroup root and enable the controllers.
- *
- * A box that did NOT ask for a ceiling (`memoryMaxBytes <= 0`) returns immediately
- * and boots exactly as it does today — that is the whole of the default-off path.
- *
- * A box that DID ask and cannot deliver refuses to boot. The earlier version logged
- * "ceiling OFF" and carried on, which was the worst of both: every subsequent run
- * still built a cgroup and then died writing `memory.max`, so the box failed every
- * run while its boot log claimed the feature was simply disabled. Same rule as the
- * per-run path — a ceiling that cannot be applied must never quietly become no
- * ceiling — and refusing at boot is the cheapest place to say so.
- */
-function prepareCeilingSubtreeAtBoot(): void {
-  const cfg = loadWorkerConfig();
-  // ADR-013 P1: a container run takes its ceiling as Docker's --memory on the
-  // rootless daemon's own delegated subtree; the worker's subtree is unused.
-  if (cfg.memoryMaxBytes <= 0 || cfg.containerRuns) {
-    return;
-  }
-  let procSelfCgroup: string;
-  try {
-    procSelfCgroup = readFileSync("/proc/self/cgroup", "utf8");
-  } catch {
-    throw new Error(
-      "memory ceiling requested (WORKER_RUN_MEMORY_MAX) but /proc/self/cgroup is unreadable",
-    );
-  }
-  // requireEnabled:false — this call runs immediately before the line that does
-  // the enabling. Asking for it here would refuse every boot.
-  const support = assessCgroupSupport({
-    procSelfCgroup,
-    requireEnabled: false,
-  });
-  if (!support.supported) {
-    throw new Error(
-      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but unavailable: ${support.reason}`,
-    );
-  }
-  try {
-    prepareDelegatedRoot({ root: support.root, pid: process.pid });
-    console.log(
-      `[worker-boot] memory ceiling armed: ${support.root} (memory.max=${cfg.memoryMaxBytes} per run, pids.max=${cfg.tasksMax})`,
-    );
-  } catch (e) {
-    throw new Error(
-      `memory ceiling requested (WORKER_RUN_MEMORY_MAX) but subtree preparation failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
 }
 
 /**
@@ -182,7 +97,7 @@ async function main() {
   }
 
   // #372: the memory side of the tuple against THIS box, decided BEFORE any
-  // boot side effect (namespace claim, reclaim, uid scan, engine-DB repair): a
+  // boot side effect (namespace claim, reclaim, engine-DB repair): a
   // refused tuple under Restart=always must crash-loop on nothing but this
   // message. The config loader
   // checked the knobs against each other; this checks N × ceiling + base
@@ -199,53 +114,6 @@ async function main() {
     process.exit(1);
   }
   warnIfSlotsExceedMemory(bootCfg);
-
-  // #108 A5: agent-uid mode leans on node's built-in env-proxy support for the
-  // agent CLI child. Node 20 has none, and a box on it would turn every fenced
-  // run into a silent 90s stall with zero output rather than an error. Probe the
-  // configured node ONCE at boot and refuse to start below the floor.
-  try {
-    const cfg = bootCfg;
-    if (cfg.agentUser) {
-      await assertNodeBinSupportsEnvProxy({
-        nodeBin: cfg.nodeBin,
-        exec: (file, args) => execFileAsync(file, args),
-      });
-      console.log(
-        `[worker-boot] agent-uid mode: ${cfg.agentUser}; node env-proxy floor OK`,
-      );
-      // #205, N > 1 only — N = 1 boots exactly as it always has (no new fatal
-      // check, no new line; a missing account still surfaces at the first run,
-      // as before). Above 1: every slot account must exist with its own
-      // non-root, non-worker uid; sudo must let the worker run as each (a
-      // Runas list not re-rendered for the new slots); and the kernel fence
-      // must provably cover every slot uid (the preflight's marker, written
-      // only after a successful `nft -f`). A box that fails any of these would
-      // otherwise register N slots of capacity it does not have.
-      if (cfg.boxSlots > 1) {
-        const slotUids = await assertSlotAccountsExist(cfg.agentUsers);
-        await assertSlotSudoGrants(cfg.agentUsers);
-        await assertSlotWorkdirTraverse(cfg.agentUsers, cfg.workdirRoot);
-        assertFenceCoversSlotUids({ uids: slotUids });
-        const exemptGid = assertProcHidepid();
-        await assertSlotAccountsOutsideGroup(cfg.agentUsers, exemptGid);
-        console.log(
-          `[worker-boot] box slots: ${cfg.boxSlots} (${cfg.agentUsers.join(", ")}; uids ${slotUids.join(", ")}); egress fence covers every slot uid (${EGRESS_FENCE_UIDS_FILE})`,
-        );
-      } else {
-        // The drop-in that N > 1 needs relaxes hardening N = 1 does not have
-        // to give up; nothing else notices it left behind after a rollback.
-        const leftBehind = hidepidDropinLeftAtOneSlot();
-        if (leftBehind) console.warn(`[worker-boot] WARNING: ${leftBehind}`);
-      }
-    }
-  } catch (err) {
-    console.error(
-      "[worker-boot] FATAL: agent-uid configuration is unusable — refusing to start",
-      err,
-    );
-    process.exit(1);
-  }
 
   // #183 (#152 Stage B1): the box's one agent-run lock is a kernel flock(2)
   // taken through a helper binary (lockf on darwin, flock on linux). Probe it
@@ -290,69 +158,31 @@ async function main() {
 
   await claimNamespaceAndReclaim();
 
-  // ADR-013 P1: the dev-only container run path. Null (and silent) unless
-  // WORKER_DEV_CONTAINER_RUNS=1; when on, the rootless daemon, the pinned
-  // image and the orphan sweep are checked before registration, fail-closed.
+  // ADR-013: every agent run is a container, so the rootless daemon, the
+  // pinned image and the orphan sweep are checked before registration,
+  // fail-closed: a box that fails here could run nothing.
   try {
     await containerRunsBoot({
       config: bootCfg,
       workerId: getProcessWorkerId(),
       log: (m) => console.log(`[worker-boot] ${m}`),
-      warn: (m) => console.warn(`[worker-boot] WARNING: ${m}`),
     });
   } catch (err) {
     console.error(
-      "[worker-boot] FATAL: container runs are switched on but unusable — refusing to start",
+      "[worker-boot] FATAL: the container runtime is unusable — refusing to start",
       err,
     );
     process.exit(1);
   }
 
-  // Harness battery packs (gstack, GSD, ruflo): one doctor line, never fatal.
-  // A box without the harness install (or on the wrong Node) boots and runs
-  // exactly as before; task runs that ask for the packs seed none and say
-  // why. Also warms the per-pack tree validation, so the first run does not
-  // walk node_modules while holding the box lock.
-  console.log(`[worker-boot] ${await harnessDoctorLine()}`);
-
-  // #184 (#152 Stage B2): reclaim agent-uid escapees left by a dead worker,
-  // under a NON-blocking take of the box lock. Busy ⇒ a live run owns the box
-  // and its own teardown scan reclaims; never block or kill without the lock.
-  // Never throws: fail-open on the scan (the box is still single-flight
-  // without it); the helper assert above stays fail-closed.
-  const bootUidScanConfig = loadWorkerConfig();
-  // #205: slot accounts a higher N left behind. No live slot guards them, so
-  // the boot scan takes each one's own lock file and reaps it too, and the
-  // stale-dir sweep hands back their dirs.
-  const retiredSlots = await retiredSlotAccounts(
-    bootUidScanConfig.agentUser,
-    bootUidScanConfig.boxSlots,
-  );
-  await bootUidScan({
-    root: bootUidScanConfig.runNamespaceRoot,
-    agentUser: bootUidScanConfig.agentUser,
-    // #205: every slot held, every slot's account scanned — or skipped whole.
-    slots: bootUidScanConfig.boxSlots,
-    retiredSlots,
-    log: (m) => console.log(`[worker-boot] ${m}`),
-  });
-
   // Remove run dirs older than 24h that earlier teardowns could not (every run
   // is hard-capped at 30 min, so a dir that old cannot belong to a live run on
-  // any slot). AFTER the uid scan, so no escapee is still writing into them;
-  // BEFORE registration, so the hand-back's own agent-uid processes are not
-  // mistaken for escapees by a first run's admission scan. Never throws, and the
-  // catch is belt and braces: residue must never stop a boot.
+  // any slot). AFTER the orphan containers are removed, so nothing is still
+  // writing into them. Never throws, and the catch is belt and braces: residue
+  // must never stop a boot.
   try {
     await sweepStaleRunDirs({
-      workdirRoot: bootUidScanConfig.workdirRoot,
-      agentUser: bootUidScanConfig.agentUser,
-      // #205: a stale dir may belong to any slot's account — including a slot
-      // retired by a lower N; each hands back its own.
-      agentUsers: [
-        ...bootUidScanConfig.agentUsers,
-        ...retiredSlots.map((r) => r.account),
-      ],
+      workdirRoot: bootCfg.workdirRoot,
       log: (m) => console.log(`[worker-boot] ${m}`),
     });
   } catch (err) {
@@ -384,31 +214,9 @@ async function main() {
     console.warn(`[worker-boot] WARNING: ${ledgerBoot.warning}`);
   }
 
-  // #204: prepare the delegated cgroup subtree once, at boot, before any run.
-  //
-  // Two reasons it cannot be per-run. The worker must move ITSELF out of the
-  // delegated root (cgroup v2 refuses to enable controllers for the children of
-  // a cgroup that holds processes), and doing that repeatedly is pointless; and
-  // `cgroup.subtree_control` is a property of the root, not of a run.
-  //
-  // FAIL-CLOSED, and only for a box that asked. With `WORKER_RUN_MEMORY_MAX`
-  // unset this returns immediately and the boot is what it has always been. With
-  // it set and unarmable — no delegation, a mistyped `Delegate=`, not Linux — the
-  // worker refuses to start and names the precondition that failed. The earlier
-  // "log it and carry on" was the worst of both: the box then failed every run
-  // while its boot log said the feature was simply off.
-  try {
-    prepareCeilingSubtreeAtBoot();
-  } catch (err) {
-    console.error(
-      "[worker-boot] FATAL: the per-run memory ceiling is configured but cannot be armed — refusing to start",
-      err,
-    );
-    process.exit(1);
-  }
   // #371: decide the memory-headroom gate once and say so — armed with its
   // thresholds, or OFF and why (inert rollback values, a platform without
-  // /proc/meminfo). FAIL-CLOSED like the ceiling: a configured check whose
+  // /proc/meminfo). FAIL-CLOSED: a configured check whose
   // /proc/meminfo cannot be read at boot refuses to start instead of running
   // every job unguarded while the log says "OFF".
   try {

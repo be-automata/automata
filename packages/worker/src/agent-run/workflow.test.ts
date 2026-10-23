@@ -30,21 +30,6 @@ vi.mock("./box-lock", () => ({
     slot: 0,
   })),
 }));
-// #184: the real reaper's default spawnKill is a REAL `sudo kill -9 -- -1`
-// as the agent uid — on the pilot box that is lethal to live work. The mock
-// is the only fence; it lands in the same edit as the workflow import.
-vi.mock("./uid-reaper", () => ({
-  reapAgentUidEscapees: vi.fn(async () => ({
-    skipped: true,
-    scanned: 0,
-    groups: 0,
-    helpers: 0,
-    killed: 0,
-    residual: 0,
-    failed: 0,
-    durationMs: 0,
-  })),
-}));
 
 /**
  * Phase 0.1 registration-shape proof for the agent-run WORKFLOW (converted from a
@@ -78,6 +63,10 @@ function fakeHatchetToken(): string {
 
 process.env.HATCHET_CLIENT_TOKEN = fakeHatchetToken();
 process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
+// ADR-013 P3: every box runs its agents in containers, so loadWorkerConfig
+// (which onFailure calls for the seal key path) needs the image and ceiling.
+process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
+process.env.WORKER_RUN_MEMORY_MAX = "1500M";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let workflowDef: any;
@@ -759,7 +748,6 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
         selfHeal: { kind: "audit", checks, checkToken: TOKEN },
       },
       workdir: "/w",
-      agentUser: "",
       egressProxyUrl: "http://127.0.0.1:1",
       step: (m) => h.lines.push(m),
       deps: h.deps,
@@ -783,7 +771,6 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
         selfHeal: { kind: "audit", checks, checkToken: TOKEN },
       },
       workdir: "/w",
-      agentUser: "",
       egressProxyUrl: null,
       step: (m) => h.lines.push(m),
       deps: h.deps,
@@ -803,7 +790,6 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
         selfHeal: { kind: "audit", checks: [], checkToken: TOKEN },
       },
       workdir: "/w",
-      agentUser: "",
       egressProxyUrl: null,
       step: (m) => h.lines.push(m),
       deps: h.deps,
@@ -818,7 +804,6 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
     await runSelfHealAuditStep({
       input: base,
       workdir: "/w",
-      agentUser: "",
       egressProxyUrl: null,
       step: (m) => h.lines.push(m),
       deps: h.deps,
@@ -839,7 +824,6 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
           selfHeal: { kind: "audit", checks: [], checkToken: TOKEN },
         },
         workdir: "/w",
-        agentUser: "",
         egressProxyUrl: null,
         step: (m) => lines.push(m),
         deps: h.deps,
@@ -964,7 +948,6 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
         input: INPUT,
         installationToken: INSTALLATION_TOKEN,
         workdir: "/w",
-        agentUser: "",
         egressProxyUrl: null,
         baseSha: BASE,
         lockLost: over.lockLost ?? false,
@@ -1101,7 +1084,6 @@ describe("runSelfHealFixStep (GATE-01 / TMO-01 / OBS-01)", () => {
       input: { ...INPUT, selfHeal: undefined },
       installationToken: INSTALLATION_TOKEN,
       workdir: "/w",
-      agentUser: "",
       egressProxyUrl: null,
       baseSha: BASE,
       lockLost: false,

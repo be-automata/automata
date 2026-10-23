@@ -1,13 +1,6 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
 import { describe, expect, it } from "vitest";
 
-import { loadWorkerConfig } from "./config";
-import { DaemonProcess } from "./daemon-process";
 import {
-  AGENT_PATH_PREPEND_ENV,
   appendGitConfig,
   buildDaemonEnv,
   buildRunProxyEnv,
@@ -15,10 +8,6 @@ import {
   isReservedRepoEnvKey,
   SAFE_ENV_KEYS,
 } from "./daemon-env";
-import type { AgentRunInput } from "./types";
-
-/** #380: the unsealed run secrets DaemonProcess now receives explicitly. */
-const TEST_SECRETS = { installationToken: "inst", daemonToken: "daemon" };
 
 const INSTALL_TOKEN = "ghs_installationtoken123";
 
@@ -46,7 +35,6 @@ function build(overrides: Record<string, string | undefined> = {}) {
       ...overrides,
     },
     anthropicApiKey: "sk-ant-xxx",
-    claudeBinDir: "/opt/claude/bin",
     installationToken: INSTALL_TOKEN,
     ghConfigDir: "/tmp/isolated-gh",
     botLogin: "automata-ai-bot[bot]",
@@ -112,7 +100,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       const env = buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
         anthropicApiKey: "sk-ant-boxkey",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -127,7 +114,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       const env = buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
         anthropicApiKey: "sk-ant-boxkey",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -149,7 +135,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       const env = buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
         anthropicApiKey: "",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -172,7 +157,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     const nonReviewLane = buildDaemonEnv({
       baseEnv: { PATH: "/usr/bin", HOME: "/home/op", CLAUDE_CODE_SIMPLE: "1" },
       anthropicApiKey: "sk-ant-boxkey",
-      claudeBinDir: "",
       installationToken: INSTALL_TOKEN,
       ghConfigDir: "/tmp/isolated-gh",
       botLogin: "automata-ai-bot[bot]",
@@ -200,7 +184,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       const env = buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op", ...ambientProxies },
         anthropicApiKey: "sk-ant-xxx",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -216,37 +199,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       expect(JSON.stringify(env)).not.toContain("corp-proxy.internal");
       // #108 D1: belt-and-braces for the agent CLI child (node >=22.21/>=24).
       expect(env.NODE_USE_ENV_PROXY).toBe("1");
-      // #108 F5: a policy-bearing run WITHOUT agentUser keeps the DIRECT daemon
-      // callback it has always had. This is the pre-existing #66 shape.
-      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
-    });
-
-    it("opts the daemon callback onto the proxy ONLY in agent-uid mode (#108 F5)", () => {
-      const env = buildDaemonEnv({
-        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
-        anthropicApiKey: "sk-ant-xxx",
-        claudeBinDir: "",
-        installationToken: INSTALL_TOKEN,
-        ghConfigDir: "/tmp/isolated-gh",
-        botLogin: "automata-ai-bot[bot]",
-        egressProxyUrl: PROXY_URL,
-        agentUser: "_automata-agent",
-        runHome: "/tmp/run-home",
-      });
-      expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBe("1");
-    });
-
-    it("never opts in without a proxy, even in agent-uid mode (#108 F5)", () => {
-      const env = buildDaemonEnv({
-        baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
-        anthropicApiKey: "sk-ant-xxx",
-        claudeBinDir: "",
-        installationToken: INSTALL_TOKEN,
-        ghConfigDir: "/tmp/isolated-gh",
-        botLogin: "automata-ai-bot[bot]",
-        agentUser: "_automata-agent",
-        runHome: "/tmp/run-home",
-      });
       expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
     });
 
@@ -254,7 +206,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       const env = buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op", ...ambientProxies },
         anthropicApiKey: "sk-ant-xxx",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -265,100 +216,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       // The default-off proof for #108 D1: no proxy, no node proxy hint.
       expect(env.NODE_USE_ENV_PROXY).toBeUndefined();
       expect(env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY).toBeUndefined();
-    });
-  });
-
-  describe("#108 — agent-uid mode drops what is unsafe across a uid boundary", () => {
-    const AMBIENT = {
-      PATH: "/usr/bin",
-      HOME: "/home/op",
-      USER: "operator",
-      NODE_OPTIONS: "--require /Users/op/evil.js",
-      TMPDIR: "/var/folders/j0/abc/T/",
-      TMP: "/var/folders/j0/abc/T/",
-      TEMP: "/var/folders/j0/abc/T/",
-      XDG_CONFIG_HOME: "/home/op/.config",
-      XDG_DATA_HOME: "/home/op/.local/share",
-      XDG_CACHE_HOME: "/home/op/.cache",
-      XDG_RUNTIME_DIR: "/run/user/501",
-    };
-
-    const base = {
-      anthropicApiKey: "sk-ant-xxx",
-      claudeBinDir: "",
-      installationToken: INSTALL_TOKEN,
-      ghConfigDir: "/tmp/isolated-gh",
-      botLogin: "automata-ai-bot[bot]",
-    };
-
-    it("agentUser empty: forwards NODE_OPTIONS, TMPDIR, USER and the XDG dirs exactly as today", () => {
-      const env = buildDaemonEnv({ baseEnv: AMBIENT, ...base });
-      expect(env.NODE_OPTIONS).toBe("--require /Users/op/evil.js");
-      expect(env.TMPDIR).toBe("/var/folders/j0/abc/T/");
-      expect(env.TMP).toBe("/var/folders/j0/abc/T/");
-      expect(env.TEMP).toBe("/var/folders/j0/abc/T/");
-      expect(env.USER).toBe("operator");
-      expect(env.XDG_CONFIG_HOME).toBe("/home/op/.config");
-      expect(env.XDG_RUNTIME_DIR).toBe("/run/user/501");
-      expect(env.LOGNAME).toBeUndefined();
-    });
-
-    it("agentUser set: NODE_OPTIONS is dropped (sudo -E would carry a --require across)", () => {
-      const env = buildDaemonEnv({
-        baseEnv: AMBIENT,
-        ...base,
-        agentUser: "_automata-agent",
-      });
-      expect(env.NODE_OPTIONS).toBeUndefined();
-    });
-
-    it("agentUser set: the operator TMPDIR/TMP/TEMP and every XDG_* var are dropped", () => {
-      const env = buildDaemonEnv({
-        baseEnv: AMBIENT,
-        ...base,
-        agentUser: "_automata-agent",
-      });
-      for (const key of [
-        "TMP",
-        "TEMP",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_RUNTIME_DIR",
-      ]) {
-        expect(env[key], key).toBeUndefined();
-      }
-      expect(env.TMPDIR).toBeUndefined(); // no runTmpDir given
-    });
-
-    it("agentUser set: TMPDIR points into the run workdir when one is given", () => {
-      const env = buildDaemonEnv({
-        baseEnv: AMBIENT,
-        ...base,
-        agentUser: "_automata-agent",
-        runTmpDir: "/usr/local/automata/runs/thr_1/tmp",
-      });
-      expect(env.TMPDIR).toBe("/usr/local/automata/runs/thr_1/tmp");
-    });
-
-    it("agentUser set: USER and LOGNAME name the agent account, not the operator", () => {
-      const env = buildDaemonEnv({
-        baseEnv: AMBIENT,
-        ...base,
-        agentUser: "_automata-agent",
-      });
-      expect(env.USER).toBe("_automata-agent");
-      expect(env.LOGNAME).toBe("_automata-agent");
-    });
-
-    it("agentUser set: HOME is still the per-run HOME (the #50 seed is unaffected)", () => {
-      const env = buildDaemonEnv({
-        baseEnv: AMBIENT,
-        ...base,
-        agentUser: "_automata-agent",
-        runHome: "/usr/local/automata/runs/thr_1/home",
-      });
-      expect(env.HOME).toBe("/usr/local/automata/runs/thr_1/home");
     });
   });
 
@@ -374,7 +231,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
       return buildDaemonEnv({
         baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
         anthropicApiKey: "sk-ant-xxx",
-        claudeBinDir: "",
         installationToken: INSTALL_TOKEN,
         ghConfigDir: "/tmp/isolated-gh",
         botLogin: "automata-ai-bot[bot]",
@@ -431,7 +287,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
         buildDaemonEnv({
           baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
           anthropicApiKey: "sk-ant-xxx",
-          claudeBinDir: "",
           installationToken: INSTALL_TOKEN,
           ghConfigDir: "/tmp/isolated-gh",
           botLogin: "automata-ai-bot[bot]",
@@ -467,7 +322,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
           buildDaemonEnv({
             baseEnv: { PATH: "/usr/bin", HOME: "/home/op" },
             anthropicApiKey: "sk-ant-xxx",
-            claudeBinDir: "",
             installationToken: INSTALL_TOKEN,
             ghConfigDir: "/tmp/isolated-gh",
             botLogin: "automata-ai-bot[bot]",
@@ -531,12 +385,12 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     expect(values[keys.indexOf("user.name")]).toBe("automata-ai-bot[bot]");
   });
 
-  it("preserves non-credential env the agent needs (PATH augmented, HOME/LANG kept)", () => {
+  it("preserves non-credential env (PATH, HOME, LANG kept)", () => {
     const env = build();
     expect(env.HOME).toBe("/home/op");
     expect(env.LANG).toBe("en_US.UTF-8");
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
-    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+    expect(env.PATH).toBe("/usr/bin:/bin");
   });
 
   it("does not leak a stale GIT_CONFIG_KEY_* injection from the base env", () => {
@@ -549,52 +403,6 @@ describe("buildDaemonEnv — credential isolation (ADR-002 customer box)", () =>
     });
     // Our injection replaces it: KEY_0 is our extraheader, not the operator's helper.
     expect(env.GIT_CONFIG_KEY_0).toBe("http.https://github.com/.extraheader");
-  });
-});
-
-describe("#108: git must not refuse the agent's own checkout", () => {
-  const base = {
-    baseEnv: {} as NodeJS.ProcessEnv,
-    anthropicApiKey: "",
-    claudeBinDir: "/usr/local/bin",
-    installationToken: "ghs_x",
-    ghConfigDir: "/tmp/gh",
-    botLogin: "automata-ai-bot[bot]",
-    workdir: "/usr/local/automata/runs/thr-1",
-  };
-
-  function gitConfigOf(env: NodeJS.ProcessEnv): Record<string, string> {
-    const out: Record<string, string> = {};
-    const n = Number(env.GIT_CONFIG_COUNT ?? "0");
-    for (let i = 0; i < n; i++) {
-      const k = env[`GIT_CONFIG_KEY_${i}`];
-      const v = env[`GIT_CONFIG_VALUE_${i}`];
-      if (k !== undefined) out[k] = v ?? "";
-    }
-    return out;
-  }
-
-  it("marks THIS run's checkout safe for the agent uid", () => {
-    // The worker clones it, the agent runs in it, and git refuses a repository
-    // owned by someone else: "detected dubious ownership". Every git command
-    // then fails — including the `git diff origin/main...HEAD` a review agent
-    // opens with, so it reports that it cannot review instead of producing a
-    // verdict. Observed in production the first run that got that far.
-    const env = buildDaemonEnv({ ...base, agentUser: "automata-agent" });
-    expect(gitConfigOf(env)["safe.directory"]).toBe(base.workdir);
-  });
-
-  it("scopes it to the workdir and never uses the wildcard", () => {
-    // `*` would trust every repository on the box, including other runs' and
-    // the operator's own checkouts.
-    const env = buildDaemonEnv({ ...base, agentUser: "automata-agent" });
-    expect(gitConfigOf(env)["safe.directory"]).not.toBe("*");
-    expect(Object.values(gitConfigOf(env))).not.toContain("*");
-  });
-
-  it("adds nothing in default mode, where owner and runner are one uid", () => {
-    const env = buildDaemonEnv({ ...base, agentUser: "" });
-    expect(gitConfigOf(env)).not.toHaveProperty("safe.directory");
   });
 });
 
@@ -622,7 +430,6 @@ describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
     const env = buildDaemonEnv({
       baseEnv: { PATH: "/bin" },
       anthropicApiKey: "k",
-      claudeBinDir: "",
       installationToken: "t",
       ghConfigDir: "/g",
       botLogin: "b",
@@ -636,7 +443,6 @@ describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
     const env = buildDaemonEnv({
       baseEnv: { PATH: "/bin", CHECK_TOKEN: "TOKEN_SENTINEL" },
       anthropicApiKey: "k",
-      claudeBinDir: "",
       installationToken: "t",
       ghConfigDir: "/g",
       botLogin: "b",
@@ -645,62 +451,10 @@ describe("buildRunProxyEnv (phase 8 shared proxy subset)", () => {
   });
 });
 
-describe("GATE-01: a fix run's gate token never reaches the daemon/agent env (09-10)", () => {
-  it("the env DaemonProcess builds from a fix input carries no gate token", async () => {
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-gate-"));
-    const input: AgentRunInput = {
-      threadId: "thr_gate",
-      threadChatId: "tc_1",
-      repoFullName: "o/r",
-      branch: "main",
-      daemonCallbackUrl: "http://localhost:3999",
-      orgId: "org-1",
-      selfHeal: {
-        kind: "fix",
-        attemptId: "11111111-1111-4111-8111-111111111111",
-        branch: "automata/fix-1-a1",
-        baseBranch: "main",
-        checks: [],
-        denyExceptions: [],
-        gateToken: "TOKEN_SENTINEL",
-      },
-    };
-    const daemon = new DaemonProcess(
-      loadWorkerConfig({}),
-      input,
-      workdir,
-      null,
-      "http://127.0.0.1:4242",
-      {
-        gitUrl: "http://127.0.0.1:41999",
-        ghSocketPath: "/tmp/gate-gh.sock",
-        bearer: "bearer",
-        repoFullName: "o/r",
-      },
-      { secrets: TEST_SECRETS },
-    );
-    const internals = daemon as unknown as {
-      ensureEnv(): Promise<NodeJS.ProcessEnv>;
-      ghConfigDir: string | null;
-    };
-    try {
-      const env = await internals.ensureEnv();
-      expect(Object.keys(env).length).toBeGreaterThan(0);
-      expect(JSON.stringify(env)).not.toContain("TOKEN_SENTINEL");
-    } finally {
-      if (internals.ghConfigDir) {
-        fs.rmSync(internals.ghConfigDir, { recursive: true, force: true });
-      }
-      fs.rmSync(workdir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("task-run repo environment (prompt-defined automations)", () => {
   const base = {
     baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
     anthropicApiKey: "sk-ant-box",
-    claudeBinDir: "/opt/claude/bin",
     installationToken: INSTALL_TOKEN,
     ghConfigDir: "/tmp/isolated-gh",
     botLogin: "automata-ai-bot[bot]",
@@ -737,7 +491,7 @@ describe("task-run repo environment (prompt-defined automations)", () => {
         https_proxy: "http://evil",
       },
     });
-    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
+    expect(env.PATH).toBe("/usr/bin:/bin");
     expect(env.HOME).toBe("/run/home");
     expect(env.home).toBeUndefined();
     expect(env.NODE_OPTIONS).toBeUndefined();
@@ -798,31 +552,17 @@ describe("task-run repo environment (prompt-defined automations)", () => {
   });
 });
 
-describe("harness battery env (gstack, gsd, ruflo)", () => {
+describe("reserved repo env keys and git proxy auth", () => {
   const base = {
     baseEnv: { PATH: "/usr/bin:/bin", HOME: "/home/op" },
     anthropicApiKey: "sk-ant-box",
-    claudeBinDir: "/opt/claude/bin",
     installationToken: INSTALL_TOKEN,
     ghConfigDir: "/tmp/isolated-gh",
     botLogin: "automata-ai-bot[bot]",
     runHome: "/run/home",
   };
-  const PACK = "/usr/local/lib/automata-batteries/gstack@df89475b";
-  const batteryEnv = {
-    GSTACK_SESSION_KIND: "spawned",
-    PLAYWRIGHT_BROWSERS_PATH: `${PACK}/ms-playwright`,
-    MCP_TIMEOUT: "30000",
-  };
 
-  it("applies the seeded packs' env", () => {
-    const env = buildDaemonEnv({ ...base, batteryEnv });
-    expect(env.GSTACK_SESSION_KIND).toBe("spawned");
-    expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${PACK}/ms-playwright`);
-    expect(env.MCP_TIMEOUT).toBe("30000");
-  });
-
-  it("repoEnv can never set or override a battery key (any case), nor the browse proxy", () => {
+  it("repoEnv can never set a battery key (any case), nor the browse proxy", () => {
     const repoEnv = {
       GSTACK_SESSION_KIND: "interactive",
       PLAYWRIGHT_BROWSERS_PATH: "/evil",
@@ -833,114 +573,32 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
       BROWSE_PROXY_URL: "http://evil:1",
       BROWSE_PROXY_USER: "u",
     };
-    const withPacks = buildDaemonEnv({
-      ...base,
-      egressProxyUrl: "http://127.0.0.1:9999",
-      browseProxy: true,
-      repoEnv,
-      batteryEnv,
-    });
-    expect(withPacks.GSTACK_SESSION_KIND).toBe("spawned");
-    expect(withPacks.PLAYWRIGHT_BROWSERS_PATH).toBe(`${PACK}/ms-playwright`);
-    expect(withPacks.MCP_TIMEOUT).toBe("30000");
-    expect(withPacks.BROWSE_PROXY_URL).toBe("http://127.0.0.1:9999");
-    for (const key of [
-      "playwright_skip_validate_host_requirements",
-      "MCP_TOOL_TIMEOUT",
-      "CLAUDE_FLOW_MODE",
-      "BROWSE_PROXY_USER",
-    ]) {
-      expect(withPacks[key]).toBeUndefined();
-    }
-    // Without packs the repo still cannot set them.
-    const without = buildDaemonEnv({ ...base, repoEnv });
+    const env = buildDaemonEnv({ ...base, repoEnv });
     for (const key of Object.keys(repoEnv)) {
-      expect(without[key]).toBeUndefined();
+      expect(env[key]).toBeUndefined();
+      expect(isReservedRepoEnvKey(key)).toBe(true);
     }
   });
 
   it("repoEnv can never set the somnio-engineering pack's YTCTL or CLAUDE_PLUGIN_ROOT (any case)", () => {
-    // A repo value would swap the tracker CLI, or the dir the plugin's
-    // skills run their scripts from.
-    const SOMNIO =
-      "/usr/local/lib/automata-batteries/somnio-engineering@510facec";
-    const somnioEnv = {
-      CLAUDE_PLUGIN_ROOT: `${SOMNIO}/src/plugins/somnio-engineering-ai`,
-      YTCTL: `${SOMNIO}/bin/ytctl`,
-    };
     const repoEnv = {
       YTCTL: "/tmp/evil-ytctl",
       ytctl: "/tmp/evil-ytctl",
       CLAUDE_PLUGIN_ROOT: "/tmp/evil-plugin",
       claude_plugin_root: "/tmp/evil-plugin",
     };
-    const withPack = buildDaemonEnv({
-      ...base,
-      repoEnv,
-      batteryEnv: somnioEnv,
-    });
-    expect(withPack.YTCTL).toBe(somnioEnv.YTCTL);
-    expect(withPack.CLAUDE_PLUGIN_ROOT).toBe(somnioEnv.CLAUDE_PLUGIN_ROOT);
-    expect(withPack.ytctl).toBeUndefined();
-    expect(withPack.claude_plugin_root).toBeUndefined();
-    const without = buildDaemonEnv({ ...base, repoEnv });
+    const env = buildDaemonEnv({ ...base, repoEnv });
     for (const key of Object.keys(repoEnv)) {
-      expect(without[key]).toBeUndefined();
+      expect(env[key]).toBeUndefined();
     }
   });
 
-  it("only battery-prefixed keys apply (defense in depth past the manifest guard)", () => {
-    const env = buildDaemonEnv({
-      ...base,
-      batteryEnv: {
-        PATH: "/evil",
-        HOME: "/evil",
-        NODE_OPTIONS: "x",
-        MCP_TIMEOUT: "5",
-      },
-    });
-    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
-    expect(env.HOME).toBe("/run/home");
-    expect(env.NODE_OPTIONS).toBeUndefined();
-    expect(env.MCP_TIMEOUT).toBe("5");
-  });
-
-  it("browse proxy: BROWSE_PROXY_URL is the run's egress proxy, only with gstack AND a proxy", () => {
-    const proxy = "http://127.0.0.1:9999";
+  it("repoEnv can never set an AUTOMATA_ key (the daemon's PATH prepend included)", () => {
+    const repoEnv = { AUTOMATA_AGENT_PATH_PREPEND: "/tmp/evil" };
+    expect(isReservedRepoEnvKey("AUTOMATA_AGENT_PATH_PREPEND")).toBe(true);
     expect(
-      buildDaemonEnv({ ...base, egressProxyUrl: proxy, browseProxy: true })
-        .BROWSE_PROXY_URL,
-    ).toBe(proxy);
-    expect(
-      buildDaemonEnv({ ...base, egressProxyUrl: proxy }).BROWSE_PROXY_URL,
+      buildDaemonEnv({ ...base, repoEnv }).AUTOMATA_AGENT_PATH_PREPEND,
     ).toBeUndefined();
-    expect(
-      buildDaemonEnv({ ...base, browseProxy: true }).BROWSE_PROXY_URL,
-    ).toBeUndefined();
-  });
-
-  it("#205 browse proxy with a per-run credential: the URL never carries userinfo; the credential goes to BROWSE_PROXY_USER/PASS", () => {
-    const proxy = "http://run:s3cr%40t@127.0.0.1:9999";
-    const env = buildDaemonEnv({
-      ...base,
-      egressProxyUrl: proxy,
-      browseProxy: true,
-    });
-    expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:9999");
-    expect(env.BROWSE_PROXY_URL).not.toContain("@");
-    expect(env.BROWSE_PROXY_USER).toBe("run");
-    expect(env.BROWSE_PROXY_PASS).toBe("s3cr@t");
-    // The agent CLI's own proxy env keeps the credentialed URL (undici/curl/git
-    // read userinfo); only Chromium's path is split.
-    expect(env.HTTPS_PROXY).toBe(proxy);
-    // Credential-less (N = 1): no BROWSE_PROXY_USER/PASS at all — byte-identical.
-    const plain = buildDaemonEnv({
-      ...base,
-      egressProxyUrl: "http://127.0.0.1:9999",
-      browseProxy: true,
-    });
-    expect(plain.BROWSE_PROXY_USER).toBeUndefined();
-    expect(plain.BROWSE_PROXY_PASS).toBeUndefined();
   });
 
   it("#205 gitProxyAuthConfig/appendGitConfig: the one rule the check runner and fix-check env share with the agent's git", () => {
@@ -992,120 +650,5 @@ describe("harness battery env (gstack, gsd, ruflo)", () => {
     expect(gitEntries(buildDaemonEnv(base)).has("http.proxyAuthMethod")).toBe(
       false,
     );
-  });
-
-  it("hands the seeded packs' PATH dirs to the daemon, never PATH itself", () => {
-    const env = buildDaemonEnv({
-      ...base,
-      batteryPathDirs: [`${PACK}/bin`, "/other/pack/bin"],
-    });
-    expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${PACK}/bin:/other/pack/bin`);
-    // PATH stays today's: sudo's secure_path would replace it in agent-uid
-    // mode anyway, so the daemon applies the prepend on its side of sudo.
-    expect(env.PATH).toBe("/opt/claude/bin:/usr/bin:/bin");
-  });
-
-  it("drops a relative PATH dir or one that would split into more entries", () => {
-    const env = buildDaemonEnv({
-      ...base,
-      batteryPathDirs: ["bin", `${PACK}/bin:/tmp/evil`, `${PACK}/bin`],
-    });
-    expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${PACK}/bin`);
-    expect(
-      buildDaemonEnv({ ...base, batteryPathDirs: ["relative"] })[
-        AGENT_PATH_PREPEND_ENV
-      ],
-    ).toBeUndefined();
-  });
-
-  it("repoEnv can never set the PATH prepend (the AUTOMATA_ prefix is reserved)", () => {
-    const repoEnv = { [AGENT_PATH_PREPEND_ENV]: "/tmp/evil" };
-    expect(isReservedRepoEnvKey(AGENT_PATH_PREPEND_ENV)).toBe(true);
-    expect(
-      buildDaemonEnv({ ...base, repoEnv })[AGENT_PATH_PREPEND_ENV],
-    ).toBeUndefined();
-    expect(
-      buildDaemonEnv({ ...base, repoEnv, batteryPathDirs: [`${PACK}/bin`] })[
-        AGENT_PATH_PREPEND_ENV
-      ],
-    ).toBe(`${PACK}/bin`);
-  });
-
-  it("changes nothing when absent", () => {
-    expect(
-      buildDaemonEnv({
-        ...base,
-        batteryEnv: {},
-        batteryPathDirs: [],
-        browseProxy: false,
-      }),
-    ).toEqual(buildDaemonEnv(base));
-  });
-});
-
-describe("harness battery env: the DaemonProcess call site wires it", () => {
-  it("a seeded gstack reaches the env DaemonProcess builds (env + PATH dirs + browse proxy)", async () => {
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "dp-harness-"));
-    const input: AgentRunInput = {
-      threadId: "thr_harness",
-      threadChatId: "tc_1",
-      repoFullName: "o/r",
-      branch: "main",
-      daemonCallbackUrl: "http://localhost:3999",
-      orgId: "org-1",
-    };
-    // #380: the owner's env now arrives inside the sealed secrets.
-    const harnessSecrets = {
-      ...TEST_SECRETS,
-      repoEnv: { PLAYWRIGHT_BROWSERS_PATH: "/evil" },
-    };
-    const packDir = "/usr/local/lib/automata-batteries/gstack@x";
-    const daemon = new DaemonProcess(
-      loadWorkerConfig({}),
-      input,
-      workdir,
-      {
-        home: path.join(workdir, "home"),
-        delivered: false,
-        env: {},
-        batteries: {
-          harness: {
-            ok: true,
-            harnessHash: "a".repeat(64),
-            packs: [
-              {
-                id: "gstack",
-                pin: "x",
-                packDir,
-                env: { PLAYWRIGHT_BROWSERS_PATH: `${packDir}/ms-playwright` },
-                pathDirs: [`${packDir}/bin`],
-                mcpServers: {},
-                denyTools: [],
-                headlessSafe: [],
-                linked: [],
-              },
-            ],
-          },
-        },
-      },
-      "http://127.0.0.1:4242",
-      null,
-      { secrets: harnessSecrets },
-    );
-    const internals = daemon as unknown as {
-      ensureEnv(): Promise<NodeJS.ProcessEnv>;
-      ghConfigDir: string | null;
-    };
-    try {
-      const env = await internals.ensureEnv();
-      expect(env.PLAYWRIGHT_BROWSERS_PATH).toBe(`${packDir}/ms-playwright`);
-      expect(env.BROWSE_PROXY_URL).toBe("http://127.0.0.1:4242");
-      expect(env[AGENT_PATH_PREPEND_ENV]).toBe(`${packDir}/bin`);
-    } finally {
-      if (internals.ghConfigDir) {
-        fs.rmSync(internals.ghConfigDir, { recursive: true, force: true });
-      }
-      fs.rmSync(workdir, { recursive: true, force: true });
-    }
   });
 });

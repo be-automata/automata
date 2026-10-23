@@ -50,21 +50,17 @@ bash scripts/assert-auth-enabled.sh || exit 1
 # current for THIS revision, not whatever the last deploy left behind.
 pnpm run daemon:build || exit 1
 
-# Agent-uid mode only: publish the just-built bundle where the agent uid can
-# read it, and point the worker AT it. The agent account cannot read the service
-# user's home, and the staged copy is a snapshot taken at THIS boot: a later
-# `daemon:build` in the checkout (the deploy recipe's pull + build, run before
-# the restart) rewrites packages/daemon/dist under a live worker, and every run
-# spawned after that would execute a daemon from a different revision than the
-# worker driving it. /usr/local/automata/daemon is owned by the service account
-# precisely so this needs no sudo grant.
-#
-# The export is what makes the staging mean something. Without it the worker
-# falls back to the checkout's dist (config.ts defaultDaemonDist) and the staged
-# copy is written on every boot and executed by nothing — which is how the box
-# ran until this line existed. The launcher stages the file, so the launcher
-# names it: the two can no longer disagree, and no box env has to repeat it.
-if [ -n "${WORKER_AGENT_USER:-}" ]; then
+# Publish the just-built bundle where the rootless Docker daemon can read it
+# (it bind-mounts it read-only into every run container, ADR-013), and point
+# the worker AT it. The daemon's user cannot read the service user's home, and
+# the staged copy is a snapshot taken at THIS boot: a later `daemon:build` in
+# the checkout (the deploy recipe's pull + build, run before the restart)
+# rewrites packages/daemon/dist under a live worker, and every run started
+# after that would execute a daemon from a different revision than the worker
+# driving it. /usr/local/automata/daemon is owned by the service account, so
+# this needs no sudo grant; a box without it (a dev checkout) keeps the
+# checkout's dist (config.ts defaultDaemonDist).
+if [ -d /usr/local/automata/daemon ]; then
   install -m 0444 ../daemon/dist/index.js /usr/local/automata/daemon/index.js || exit 1
   export WORKER_DAEMON_DIST=/usr/local/automata/daemon/index.js
 fi

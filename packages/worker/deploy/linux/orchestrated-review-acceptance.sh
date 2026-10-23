@@ -12,11 +12,11 @@ set -euo pipefail
 #   orchestrated-review-acceptance.sh box --since <journalctl time> \
 #       --repo <owner/name> --pr <n> --expect orchestrated|classic
 #       Operator evidence on the execution box, as root, Linux only:
-#       manifest.sha256 valid, the gsd-reviewers agent file installed as a
-#       regular root-owned file, the staged daemon carrying the Phase 5
+#       the staged daemon carrying the Phase 5
 #       `--max-turns` flag and result hold, and the worker journal since --since holds
-#       exactly ONE lane=review run for --repo/--pr whose batteries and
-#       review-agent lines match --expect, within the 30-minute budget. The
+#       exactly ONE lane=review run for --repo/--pr whose batteries line names
+#       the pinned image (ADR-013: every battery is image contents) and whose
+#       review-agent line matches --expect, within the 30-minute budget. The
 #       transcript half lives in the control plane, so it is printed as
 #       EVIDENCE manual lines for the operator to judge.
 #
@@ -45,7 +45,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -P "$SCRIPT_DIR/../../../.." && pwd -P)"
 
-BATTERIES_ROOT=/usr/local/lib/automata-batteries
 DAEMON_BUNDLE=/usr/local/automata/daemon/index.js
 BOX_CHECKOUT=/opt/automata-platform
 BUDGET_SECONDS=1800
@@ -190,16 +189,16 @@ analyse_daemon_bundle() {
   fi
 }
 
-# analyse_review_journal <journal file> <owner/name> <pr> <expect> <manifest 12-hex prefix>
+# analyse_review_journal <journal file> <owner/name> <pr> <expect>
 # The journal comes from `journalctl -o short-unix`: every line starts with
 # its epoch seconds. Lines are grouped per `[agent-run <threadId>` (a trace
 # suffix is dropped); one TSV row per thread is judged in bash. A redelivered
 # run keeps its threadId, so one push = one distinct thread.
 analyse_review_journal() {
-  local journal="$1" repo="$2" pr="$3" expect="$4" prefix="$5"
+  local journal="$1" repo="$2" pr="$3" expect="$4"
   local tid lane run_pr run_repo span batt agent bounds
   local count=0 tids="" sel_tid="" sel_span="" sel_batt="" sel_agent="" sel_bounds=""
-  local packs manifest reason
+  local image_line='^batteries: image=[0-9a-f]{12} lane=review$'
 
   # shellcheck disable=SC2016 # the single-quoted text is an awk program
   while IFS=$'\t' read -r tid lane run_pr run_repo span batt agent bounds; do
@@ -263,27 +262,11 @@ analyse_review_journal() {
   evidence "review journal span seconds" "$sel_span"
 
   if [ "$expect" = "orchestrated" ]; then
-    case "$sel_batt" in
-      "batteries: mode=orchestrated packs="*)
-        packs="${sel_batt#batteries: mode=orchestrated packs=}"
-        packs="${packs%% *}"
-        manifest="${sel_batt##* manifest=}"
-        if [ -z "$packs" ] || [ "$packs" = "none" ]; then
-          check "SC2 orchestrated batteries seeded" FAIL "(packs=${packs:-empty})"
-        elif [ "$manifest" != "$prefix" ]; then
-          check "SC2 orchestrated batteries seeded" FAIL "(manifest=$manifest, installed manifest.sha256 starts $prefix)"
-        else
-          check "SC2 orchestrated batteries seeded" PASS "(packs=$packs manifest=$manifest)"
-        fi
-        ;;
-      "batteries: unavailable mode=orchestrated reason="*)
-        reason="${sel_batt#batteries: unavailable mode=orchestrated reason=}"
-        check "SC2 orchestrated batteries seeded" FAIL "(unavailable: reason=$reason)"
-        ;;
-      *)
-        check "SC2 orchestrated batteries seeded" FAIL "(batteries line: $sel_batt)"
-        ;;
-    esac
+    if [[ "$sel_batt" =~ $image_line ]]; then
+      check "SC2 review batteries from the image" PASS "($sel_batt)"
+    else
+      check "SC2 review batteries from the image" FAIL "(batteries line: $sel_batt)"
+    fi
     if [ "$sel_bounds" = "1" ]; then
       check "SC2 orchestrated wire stamped" FAIL "(review agent: bounds-rejected → classic)"
     elif [ "$sel_agent" = "-" ]; then
@@ -292,8 +275,8 @@ analyse_review_journal() {
       check "SC2 orchestrated wire stamped" PASS "($sel_agent)"
     fi
   else
-    if [ "$sel_batt" = "batteries: mode=classic" ] && [ "$sel_agent" = "-" ]; then
-      check "SC3 classic run" PASS "(batteries: mode=classic, no orchestrated wire line)"
+    if [[ "$sel_batt" =~ $image_line ]] && [ "$sel_agent" = "-" ]; then
+      check "SC3 classic run" PASS "($sel_batt, no orchestrated wire line)"
     else
       check "SC3 classic run" FAIL "(batteries line: $sel_batt; review agent line: $sel_agent)"
     fi
@@ -309,7 +292,7 @@ analyse_review_journal() {
 # With no matching run, every per-run CHECK fails explicitly.
 finish_review_checks_missing() {
   if [ "$1" = "orchestrated" ]; then
-    check "SC2 orchestrated batteries seeded" FAIL "(no matching run)"
+    check "SC2 review batteries from the image" FAIL "(no matching run)"
     check "SC2 orchestrated wire stamped" FAIL "(no matching run)"
   else
     check "SC3 classic run" FAIL "(no matching run)"
@@ -321,7 +304,7 @@ print_manual_checklist() {
   if [ "$1" = "orchestrated" ]; then
     echo "EVIDENCE manual transcript: init tools include Agent/Task and Skill"
     echo "EVIDENCE manual transcript: init skills include gstack-review and security-audit"
-    echo "EVIDENCE manual transcript: init agents include gsd-code-reviewer and gsd-security-auditor (if missing: symlinked agent files did not load → execute 06-04 Task 2)"
+    echo "EVIDENCE manual transcript: init agents include gsd-code-reviewer and gsd-security-auditor"
     echo "EVIDENCE manual transcript: at least one assistant line with a non-null parent_tool_use_id"
     echo "EVIDENCE manual transcript: at least one Skill tool_use or a Bash call to shellcheck/actionlint/gitleaks"
     echo "EVIDENCE manual transcript: the lead's last message ends with a block opened by the json review-intent tag"
@@ -336,7 +319,7 @@ print_manual_checklist() {
 }
 
 box_mode() {
-  local since="" repo="" pr="" expect="" hash prefix manifest_json gsd_sha agent_path agent_stat
+  local since="" repo="" pr="" expect=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --since | --repo | --pr | --expect)
@@ -369,48 +352,13 @@ box_mode() {
   GIT_CHECKOUT="$BOX_CHECKOUT"
   WORK="$(mktemp -d /tmp/orchestrated-review-acceptance.XXXXXX)"
 
-  hash=""
-  if [ -s "$BATTERIES_ROOT/manifest.sha256" ]; then
-    # shellcheck disable=SC2016 # the single-quoted text is an awk program
-    hash="$(run_awk 'NR == 1 { print $1 }' "$BATTERIES_ROOT/manifest.sha256")"
-  fi
-  if [ -e "$BATTERIES_ROOT/manifest.sha256.invalid" ]; then
-    check "box install manifest" FAIL "(manifest.sha256.invalid present: the last install failed)"
-  elif [[ "$hash" =~ ^[0-9a-f]{64}$ ]]; then
-    check "box install manifest" PASS "(manifest.sha256 $hash)"
-  else
-    check "box install manifest" FAIL "(manifest.sha256 missing or not 64-hex)"
-  fi
-  evidence "manifest.sha256" "${hash:-none}"
-  prefix="${hash:0:12}"
-
-  manifest_json="$WORK/batteries.json"
-  if git_ro cat-file blob HEAD:packages/worker/deploy/batteries.json >"$manifest_json" 2>/dev/null &&
-    jq -e . "$manifest_json" >/dev/null 2>&1; then
-    evidence "checkout HEAD" "$(git_ro rev-parse HEAD)"
-  else
-    printf '{}\n' >"$manifest_json"
-  fi
-  gsd_sha="$(jq -r '.packs[]? | select(.id == "gsd-reviewers") | .sha' "$manifest_json")"
-  agent_path="$BATTERIES_ROOT/gsd-reviewers@$gsd_sha/agents/gsd-code-reviewer.md"
-  if [ -z "$gsd_sha" ]; then
-    check "box gsd agent file" FAIL "(the checkout manifest has no gsd-reviewers pin)"
-  elif [ -L "$agent_path" ] || [ ! -e "$agent_path" ]; then
-    check "box gsd agent file" FAIL "($agent_path missing or a symlink)"
-  else
-    agent_stat="$(stat -c '%F|%U|%a' -- "$agent_path")"
-    evidence "gsd agent file" "$agent_path ($agent_stat)"
-    case "$agent_stat" in
-      "regular file|root|"*[0-7][0145][0145]) check "box gsd agent file" PASS "(regular, root-owned, not group/other-writable)" ;;
-      *) check "box gsd agent file" FAIL "($agent_stat)" ;;
-    esac
-  fi
+  evidence "checkout HEAD" "$(git_ro rev-parse HEAD 2>/dev/null || echo unknown)"
 
   analyse_daemon_bundle "$DAEMON_BUNDLE"
 
   if journalctl -u automata-worker.service --since "$since" --no-pager -o short-unix >"$WORK/journal.txt" 2>"$WORK/journal.err"; then
     evidence "journal lines since $since" "$(wc -l <"$WORK/journal.txt" | tr -d ' ')"
-    analyse_review_journal "$WORK/journal.txt" "$repo" "$pr" "$expect" "$prefix"
+    analyse_review_journal "$WORK/journal.txt" "$repo" "$pr" "$expect"
   else
     check "SC2 one review run per push" FAIL "(journalctl -u automata-worker.service failed: $(head -n 1 "$WORK/journal.err"))"
   fi

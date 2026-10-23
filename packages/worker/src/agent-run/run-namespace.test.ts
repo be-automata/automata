@@ -2,15 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { INHERITABLE_ACE_RIGHTS, TRAVERSE_ACE_RIGHTS } from "./agent-uid-fs";
 import {
   claimRunNamespace,
   ensureRunNamespace,
   ensureSlotNamespace,
   runGhSocketPath,
-  runPidPath,
-  runSocketPath,
-  accountForPidFile,
   slotIndexOfDir,
   slotFor,
   slotRunDir,
@@ -18,221 +14,66 @@ import {
   workerRunDir,
 } from "./run-namespace";
 
-/**
- * #108 F2: the cross-uid ACEs must predate anything created in the dir.
- *
- * macOS applies ACE inheritance at CREATE time, and workflow.ts binds the
- * gh-broker socket in this dir BEFORE DaemonProcess.start() runs — so a grant
- * applied inside start() reached the daemon socket but never the gh socket, and
- * the agent's `gh` could not connect. These tests fence that ordering.
- *
- * What they do NOT fence any more is "boot only". That was the original reading
- * of the same constraint, and it cost a production outage: the grant was applied
- * once, to a /tmp dir that macOS later reaped, and every subsequent run died on
- * an unwritable pidfile. The grant is re-asserted at admission now — still
- * before any broker binds, so the ordering above is untouched.
- */
-describe("claimRunNamespace", () => {
-  const roots: string[] = [];
-  afterEach(() => {
-    for (const r of roots.splice(0)) {
-      fs.rmSync(r, { recursive: true, force: true });
-    }
-  });
-
-  function mkRoot(): string {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claim-ns-"));
-    roots.push(root);
-    return root;
+const roots: string[] = [];
+afterEach(() => {
+  for (const r of roots.splice(0)) {
+    fs.rmSync(r, { recursive: true, force: true });
   }
+});
 
-  it("applies traverse on the root and the inheritable grant on the run dir", async () => {
-    const root = mkRoot();
-    const calls: string[][] = [];
-    await claimRunNamespace({
-      root,
-      workerId: "w-1",
-      agentUser: "_automata-agent",
-      workerLogin: "operator",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "darwin",
-    });
-    const dir = workerRunDir(root, "w-1");
-    expect(calls.map((a) => `${a[1]} @ ${a[2]}`)).toEqual([
-      `_automata-agent allow ${TRAVERSE_ACE_RIGHTS} @ ${root}`,
-      `_automata-agent allow ${INHERITABLE_ACE_RIGHTS} @ ${dir}`,
-      `operator allow ${INHERITABLE_ACE_RIGHTS} @ ${dir}`,
-    ]);
-  });
+function mkRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "run-ns-"));
+  roots.push(root);
+  return root;
+}
 
-  it("applies the ACEs to an EMPTY dir, before the lock file exists", async () => {
-    // The whole point: everything created afterwards inherits. If the lock
-    // already existed when the grant landed, so would a broker socket.
+describe("claimRunNamespace", () => {
+  // card: protects=the boot claim creates this worker's dir and stakes its own pid in worker.lock (what makes a sibling's reclaim leave it alone); fails_when=the lock is missing or names another pid; no_claim=the sibling reclaim itself (reclaim tests)
+  it("creates the worker dir and writes this process's pid into worker.lock", async () => {
     const root = mkRoot();
-    const seen: boolean[] = [];
-    await claimRunNamespace({
-      root,
-      workerId: "w-2",
-      agentUser: "_automata-agent",
-      workerLogin: "operator",
-      exec: async () => {
-        seen.push(fs.existsSync(workerLockPath(root, "w-2")));
-      },
-      platform: "darwin",
-    });
-    expect(seen).toEqual([false, false, false]);
-    expect(fs.existsSync(workerLockPath(root, "w-2"))).toBe(true);
-  });
-
-  it("is a no-op on ACLs when agentUser is empty (default-off contract)", async () => {
-    const root = mkRoot();
-    const calls: string[][] = [];
-    const dir = await claimRunNamespace({
-      root,
-      workerId: "w-3",
-      agentUser: "",
-      workerLogin: "operator",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "darwin",
-    });
-    expect(calls).toEqual([]);
+    const dir = await claimRunNamespace({ root, workerId: "w-3" });
     expect(dir).toBe(workerRunDir(root, "w-3"));
     expect(fs.readFileSync(workerLockPath(root, "w-3"), "utf8")).toBe(
       String(process.pid),
     );
   });
-
-  it("propagates an ACE failure rather than booting a worker that cannot rendezvous", async () => {
-    const root = mkRoot();
-    await expect(
-      claimRunNamespace({
-        root,
-        workerId: "w-4",
-        agentUser: "_automata-agent",
-        workerLogin: "operator",
-        exec: async () => {
-          throw new Error("chmod: Operation not permitted");
-        },
-        platform: "darwin",
-      }),
-    ).rejects.toThrow(/Operation not permitted/);
-    expect(fs.existsSync(workerLockPath(root, "w-4"))).toBe(false);
-  });
 });
 
 /**
- * The reaped-/tmp regression. Production, 2026-09-28: a worker up since Sep 6
- * served a run whose namespace dir was born Sep 28 — macOS's /tmp cleaner had
- * removed it, the run recreated it bare, and the daemon (agent uid) could not
- * write its pidfile:
- *
- *   automata-daemon: /tmp/.../<threadId>.pid: Permission denied
- *
- * The run died ~1s in and surfaced as "Review intent could not be parsed",
- * because the agent produced nothing to parse. Three layers between cause and
- * symptom, and it repeats on every idle box.
+ * The reaped-/tmp regression (production 2026-09-28): a run whose namespace dir
+ * had been removed under a live worker could not bind its sockets. The dir is
+ * re-created at every admission.
  */
 describe("ensureRunNamespace — survives the dir being reaped", () => {
-  const roots: string[] = [];
-  afterEach(() => {
-    for (const r of roots.splice(0)) {
-      fs.rmSync(r, { recursive: true, force: true });
-    }
-  });
-
-  function mkRoot(): string {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ensure-ns-"));
-    roots.push(root);
-    return root;
-  }
-
-  it("recreates a removed dir AND re-applies both grants", async () => {
+  // card: protects=a namespace dir removed under a live worker (a /tmp cleaner) is re-created at the next admission; fails_when=the second call leaves the dir missing; no_claim=the gh broker bind that follows
+  it("recreates a removed dir", async () => {
     const root = mkRoot();
-    const calls: string[][] = [];
-    const opts = {
-      root,
-      workerId: "w-1",
-      agentUser: "_automata-agent",
-      workerLogin: "operator",
-      exec: async (_f: string, a: string[]) => void calls.push(a),
-      platform: "darwin" as NodeJS.Platform,
-    };
-
+    const opts = { root, workerId: "w-1" };
     await ensureRunNamespace(opts);
     const dir = workerRunDir(root, "w-1");
-    expect(fs.existsSync(dir)).toBe(true);
-
-    // The /tmp cleaner, or a stray rm.
     fs.rmSync(dir, { recursive: true, force: true });
-    expect(fs.existsSync(dir)).toBe(false);
-    calls.length = 0;
-
     await ensureRunNamespace(opts);
-
-    // Recreating the dir is not enough on its own: a bare dir is exactly the
-    // state that killed the run. The grants must come back with it.
     expect(fs.existsSync(dir)).toBe(true);
-    expect(calls.map((a) => `${a[1]} @ ${a[2]}`)).toEqual([
-      `_automata-agent allow ${TRAVERSE_ACE_RIGHTS} @ ${root}`,
-      `_automata-agent allow ${INHERITABLE_ACE_RIGHTS} @ ${dir}`,
-      `operator allow ${INHERITABLE_ACE_RIGHTS} @ ${dir}`,
-    ]);
   });
 
-  it("does not write the worker lock — that stays a boot-time claim", () => {
-    // A sibling worker reaps orphans under a workerId whose lock pid is dead.
-    // If every run rewrote the lock, a run served by a worker that has since
-    // died would keep re-staking a dead claim.
+  // card: protects=the worker lock stays a boot-time claim (a run never re-stakes a dead worker's claim); fails_when=ensureRunNamespace writes worker.lock; no_claim=claimRunNamespace's own write
+  it("does not write the worker lock — that stays a boot-time claim", async () => {
     const root = mkRoot();
-    return ensureRunNamespace({
-      root,
-      workerId: "w-1",
-      agentUser: "",
-      platform: "darwin",
-    }).then(() => {
-      expect(fs.existsSync(workerLockPath(root, "w-1"))).toBe(false);
-    });
-  });
-
-  it("touches no ACL when the agent uid is disabled (default-off)", async () => {
-    const root = mkRoot();
-    const calls: string[][] = [];
-    await ensureRunNamespace({
-      root,
-      workerId: "w-1",
-      agentUser: "",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "darwin",
-    });
-    expect(calls).toEqual([]);
-    expect(fs.existsSync(workerRunDir(root, "w-1"))).toBe(true);
+    await ensureRunNamespace({ root, workerId: "w-1" });
+    expect(fs.existsSync(workerLockPath(root, "w-1"))).toBe(false);
   });
 });
 
-describe("#205: slot layout — one subdir per slot, granted to that slot alone", () => {
-  const roots: string[] = [];
-  afterEach(() => {
-    for (const r of roots.splice(0)) {
-      fs.rmSync(r, { recursive: true, force: true });
-    }
-  });
-  function mkRoot(): string {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "slot-ns-"));
-    roots.push(root);
-    return root;
-  }
-
-  it("the flat layout is byte-identical when no slot is given (N = 1)", () => {
+describe("#205: slot layout — one subdir per slot", () => {
+  it("the flat layout is unchanged when no slot is given (N = 1)", () => {
     const root = "/tmp/automata-agent-run";
     expect(slotRunDir(root, "w-1")).toBe(workerRunDir(root, "w-1"));
-    expect(runSocketPath(root, "w-1", "thr_1")).toBe(`${root}/w-1/thr_1.sock`);
-    expect(runPidPath(root, "w-1", "thr_1")).toBe(`${root}/w-1/thr_1.pid`);
     expect(runGhSocketPath(root, "w-1", "thr_1")).toBe(
       `${root}/w-1/thr_1-gh.sock`,
     );
   });
 
-  it("slot i puts every per-run artefact under s<i>/ and stays under the sun_path limit", () => {
+  it("slot i puts the run's gh broker socket under s<i>/ and stays under the sun_path limit", () => {
     const root = "/tmp/automata-agent-run";
     const threadId = "fc4eff11-fb76-49c4-af74-128c7b1200f0";
     expect(slotRunDir(root, "w-12345-abcdef12", 2)).toBe(
@@ -241,26 +82,7 @@ describe("#205: slot layout — one subdir per slot, granted to that slot alone"
     const gh = runGhSocketPath(root, "w-12345-abcdef12", threadId, 15);
     expect(gh).toBe(`${root}/w-12345-abcdef12/s15/${threadId}-gh.sock`);
     expect(Buffer.byteLength(gh)).toBeLessThan(104);
-    expect(runPidPath(root, "w-1", threadId, 1)).toBe(
-      `${root}/w-1/s1/${threadId}.pid`,
-    );
     expect(() => slotRunDir(root, "w-1", -1)).toThrow(/slot/);
-  });
-
-  it("accountForPidFile: the slot dir names the account; the flat layout is the base account", () => {
-    expect(accountForPidFile("/x/w-1/thr_1.pid", "automata-agent")).toBe(
-      "automata-agent",
-    );
-    expect(accountForPidFile("/x/w-1/s0/thr_1.pid", "automata-agent")).toBe(
-      "automata-agent",
-    );
-    expect(accountForPidFile("/x/w-1/s2/thr_1.pid", "automata-agent")).toBe(
-      "automata-agent-2",
-    );
-    // A dir that merely starts with `s` is not a slot dir.
-    expect(accountForPidFile("/x/w-1/socks/thr_1.pid", "automata-agent")).toBe(
-      "automata-agent",
-    );
   });
 
   it("slotIndexOfDir trusts only names the worker would create: s<i> with i < BOX_SLOTS_MAX — never Infinity, never a throw", () => {
@@ -280,10 +102,6 @@ describe("#205: slot layout — one subdir per slot, granted to that slot alone"
       "socks",
     ]) {
       expect(slotIndexOfDir(hostile)).toBeNull();
-      // and the account derivation treats the file as flat-layout
-      expect(
-        accountForPidFile(`/x/w-1/${hostile}/thr_1.pid`, "automata-agent"),
-      ).toBe("automata-agent");
     }
   });
 
@@ -294,80 +112,14 @@ describe("#205: slot layout — one subdir per slot, granted to that slot alone"
     expect(() => slotFor({ boxSlots: 3 })).toThrow(/invariant.*boxSlot/);
   });
 
-  it("ensureRunNamespace with several slot accounts grants TRAVERSE only on the root and the worker dir — nothing inheritable, for anyone", async () => {
+  // card: protects=a slot's subdir is created worker-private (0750) and the call is idempotent across admissions; fails_when=the dir is missing, wider than 0750, or a second call throws; no_claim=what binds inside it
+  it("ensureSlotNamespace creates s<i>/ worker-private and is idempotent", async () => {
     const root = mkRoot();
-    const calls: string[][] = [];
-    await ensureRunNamespace({
-      root,
-      workerId: "w-1",
-      agentUser: "automata-agent",
-      agentUsers: ["automata-agent", "automata-agent-1"],
-      workerLogin: "automata",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "linux",
-    });
-    const dir = workerRunDir(root, "w-1");
-    expect(calls).toEqual([
-      ["-m", "u:automata-agent:--x", root],
-      ["-m", "u:automata-agent-1:--x", root],
-      ["-m", "u:automata-agent:--x", dir],
-      ["-m", "u:automata-agent-1:--x", dir],
-    ]);
-  });
-
-  it("ensureRunNamespace with ONE account is byte-identical to today's grants", async () => {
-    const root = mkRoot();
-    const calls: string[][] = [];
-    await ensureRunNamespace({
-      root,
-      workerId: "w-1",
-      agentUser: "automata-agent",
-      agentUsers: ["automata-agent"],
-      workerLogin: "automata",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "linux",
-    });
-    const dir = workerRunDir(root, "w-1");
-    expect(calls).toEqual([
-      ["-m", "u:automata-agent:--x", root],
-      ["-m", "u:automata-agent:rwx", dir],
-      ["-d", "-m", "u:automata-agent:rwx", dir],
-      ["-m", "u:automata:rwx", dir],
-      ["-d", "-m", "u:automata:rwx", dir],
-    ]);
-  });
-
-  it("ensureSlotNamespace creates s<i>/, strips inherited ACLs, then grants the slot account and the worker login inheritably", async () => {
-    const root = mkRoot();
-    const calls: string[][] = [];
-    const dir = await ensureSlotNamespace({
-      root,
-      workerId: "w-1",
-      slot: 1,
-      agentUser: "automata-agent-1",
-      workerLogin: "automata",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "linux",
-    });
+    const dir = await ensureSlotNamespace({ root, workerId: "w-1", slot: 1 });
     expect(dir).toBe(path.join(workerRunDir(root, "w-1"), "s1"));
-    expect(fs.statSync(dir).isDirectory()).toBe(true);
-    expect(calls).toEqual([
-      ["-b", dir],
-      ["-m", "u:automata-agent-1:rwx", dir],
-      ["-d", "-m", "u:automata-agent-1:rwx", dir],
-      ["-m", "u:automata:rwx", dir],
-      ["-d", "-m", "u:automata:rwx", dir],
-    ]);
-    // Idempotent: a second admission on the slot re-applies the same grants.
-    await ensureSlotNamespace({
-      root,
-      workerId: "w-1",
-      slot: 1,
-      agentUser: "automata-agent-1",
-      workerLogin: "automata",
-      exec: async (_f, a) => void calls.push(a),
-      platform: "linux",
-    });
-    expect(calls.length).toBe(10);
+    expect(fs.statSync(dir).mode & 0o777 & ~0o750).toBe(0);
+    await expect(
+      ensureSlotNamespace({ root, workerId: "w-1", slot: 1 }),
+    ).resolves.toBe(dir);
   });
 });

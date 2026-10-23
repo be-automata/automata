@@ -27,6 +27,11 @@ const TEST_NAMESPACE_ROOT = fs.mkdtempSync(
   path.join(os.tmpdir(), "workflow-cleanup-ns-"),
 );
 process.env.WORKER_RUN_NAMESPACE_ROOT = TEST_NAMESPACE_ROOT;
+// ADR-013 P3: every run is a container, so the image and the per-run ceiling
+// are required config (set at module load, like the namespace root).
+const TEST_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
+process.env.WORKER_BATTERIES_IMAGE = TEST_IMAGE;
+process.env.WORKER_RUN_MEMORY_MAX = "3G";
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { RunAsAgent } from "./agent-command";
@@ -83,17 +88,21 @@ const startEgressProxy = vi.fn();
 // egress proxy; per-case behavior set in beforeEach / the broker describe.
 const startGitBroker = vi.fn();
 const startGhBroker = vi.fn();
-// Ctor args of every DaemonProcess the run built (the broker handoff pin).
+// Ctor args of every (stand-in) ContainerDaemonProcess the run built:
+// (config, input, run, materialised, lane, deps).
 const daemonCtorArgs: unknown[][] = [];
+/** The deps (egress proxy URL, broker handoff, secrets, …) of daemon `i`. */
+function daemonDeps(i = 0): Record<string, unknown> {
+  return daemonCtorArgs[i]![5] as Record<string, unknown>;
+}
 // Phase 5: every message the run wrote to the daemon socket.
 const sendMessageCalls: unknown[] = [];
 
-// #152 Stage A: the admission reap scans the REAL namespace root and issues
-// real group-SIGKILLs for dead-sibling debris — on a box that also runs
-// production workers, a unit test must never do that (a recycled pgid could
-// be live work). Mocked like the other side-effectful collaborators, and the
-// mocks RECORD their order so the admission wiring (reclaim → reap → lock,
-// per the safety argument in workflow.ts) is asserted, not assumed.
+// The admission reclaim scans the REAL namespace root and removes dead
+// siblings' dirs — on a box that also runs production workers, a unit test
+// must never do that. Mocked like the other side-effectful collaborators, and
+// the mocks RECORD their order so the admission wiring (ensure-ns → reclaim →
+// lock) is asserted, not assumed.
 const admissionOrder: string[] = [];
 // #183 AC10: the main finally's teardown order (daemon teardown →
 // cleanupWorkdir → box-lock release) is recorded by the three mocks below and
@@ -107,10 +116,6 @@ vi.mock("./reclaim", () => ({
   reclaimDeadWorkerRuns: vi.fn(() => {
     admissionOrder.push("reclaim");
   }),
-  reapOwnThreadAttempts: vi.fn(() => {
-    admissionOrder.push("reap");
-    return 0;
-  }),
 }));
 // Same shared-root hazard as ./reclaim: the real acquireBoxLock spawns a
 // lockf/flock helper on the box's production namespace root during unit tests.
@@ -122,26 +127,22 @@ const acquireBoxSlotMock = vi.fn(async () => {
   return { release: releaseMock, lost: false, slot: 0 };
 });
 vi.mock("./box-lock", async (importOriginal) => ({
-  // The slot guards (assertSlotIndex & co) stay real: spawn-as-user and config
-  // call them at load time. Only the acquire is stubbed.
+  // The slot guards (assertSlotIndex & co) stay real. Only the acquire is
+  // stubbed.
   ...(await importOriginal<typeof import("./box-lock")>()),
   acquireBoxSlot: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
   acquireBoxLock: (...args: unknown[]) => acquireBoxSlotMock(...(args as [])),
 }));
-// Same hazard once more: with WORKER_AGENT_USER set (the #108 cases below),
-// the real ensureRunNamespace applies REAL ACLs (macOS chmod +a / Linux
-// setfacl) for that account on the box's production namespace root. That only
-// ever passed on machines where the agent account exists — on any other box
-// (CI runners included) the exec fails and takes the run down with it.
-// Recorded in admissionOrder so the wiring (grant re-asserted BEFORE anything
-// touches the namespace dir) stays asserted, not assumed. Everything else
-// run-namespace exports stays real.
+// Same hazard once more: the real ensureRunNamespace creates dirs under the
+// configured root. Recorded in admissionOrder so the wiring (the namespace
+// re-created BEFORE anything touches it) stays asserted, not assumed.
+// Everything else run-namespace exports stays real.
 const ensureRunNamespace = vi.fn(async (_opts: unknown) => {
   admissionOrder.push("ensure-ns");
   return "/tmp/automata-agent-run/test";
 });
-// #205: the slot subdir grant is a real mkdir + setfacl/chmod +a on the box's
-// namespace root — mocked for the same reason, and recorded in order.
+// #205: the slot subdir is a real mkdir — mocked for the same reason, and
+// recorded in order.
 const ensureSlotNamespace = vi.fn(async (_opts: unknown) => {
   admissionOrder.push("slot-ns");
   return "/tmp/automata-agent-run/test/s1";
@@ -150,31 +151,6 @@ vi.mock("./run-namespace", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./run-namespace")>()),
   ensureRunNamespace: (opts: unknown) => ensureRunNamespace(opts),
   ensureSlotNamespace: (opts: unknown) => ensureSlotNamespace(opts),
-}));
-// #184 (#152 Stage B2): the real reaper's default spawnKill is a REAL
-// `sudo kill -9 -- -1` as the agent uid — lethal to live work on the pilot
-// box. This mock is the ONLY fence and lands in the same edit as the workflow
-// import. It records both phases so the admission order (lock → uid-scan →
-// daemon start, AC11/AC15) and the finally order (teardown → uid-scan →
-// cleanupWorkdir → release, AC12) are asserted, not assumed.
-const reapAgentUidEscapees = vi.fn(async (opts: { phase: string }) => {
-  admissionOrder.push(`uid-reap:${opts.phase}`);
-  finallyOrder.push(`uid-reap:${opts.phase}`);
-  return {
-    skipped: false,
-    scanned: 0,
-    groups: 0,
-    helpers: 0,
-    killed: 0,
-    residual: 0,
-    failed: 0,
-    durationMs: 0,
-  };
-});
-vi.mock("./uid-reaper", () => ({
-  reapAgentUidEscapees: (...args: unknown[]) =>
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    reapAgentUidEscapees(...(args as [any])),
 }));
 vi.mock("./provision", () => ({
   // #205: recorded in the module wrapper (not the vi.fn, which cases reset)
@@ -190,7 +166,7 @@ vi.mock("./provision", () => ({
 }));
 
 // GATE-01 (09-10): the post-agent fix check and its report, recorded in the
-// finally order so the kill → reap → close → check → report sequence is
+// finally order so the removal → close → check → report sequence is
 // asserted, not assumed.
 const FIX_PUSHED = "a".repeat(40);
 const FIX_BASE = "b".repeat(40);
@@ -278,39 +254,8 @@ vi.mock("./revoke-installation-tokens", () => ({
   },
 }));
 
-let fakeRunCgroupDir: string | null = null;
 // #437: what the daemon's OOM signal reports (null = no kill).
 let fakeMemoryStarvation: unknown = null;
-const readMemoryAnon = vi.fn(
-  (_opts: { cgroupDir: string }): number | null => null,
-);
-vi.mock("./run-cgroup", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./run-cgroup")>()),
-  readMemoryAnon: (opts: { cgroupDir: string }) => readMemoryAnon(opts),
-}));
-
-vi.mock("./daemon-process", () => ({
-  DaemonProcess: class {
-    constructor(...args: unknown[]) {
-      daemonCtorArgs.push(args);
-    }
-    preflightGhAuth = vi.fn();
-    // #184 AC15: the daemon may only be spawned AFTER the admission uid-scan.
-    start = vi.fn(() => {
-      admissionOrder.push("daemon-start");
-    });
-    sendMessage = vi.fn(async (message: unknown) => {
-      sendMessageCalls.push(message);
-      return 42;
-    });
-    teardown = vi.fn(() => {
-      finallyOrder.push("teardown");
-    });
-    // #371: a test sets fakeRunCgroupDir to stand in for the ceiling's cgroup.
-    runCgroupDir = () => fakeRunCgroupDir;
-    memoryStarvation = () => fakeMemoryStarvation;
-  },
-}));
 
 // #437 Part B: the timeout salvage runs its git through runAsAgent. A case
 // that sets `agentCommandFake` scripts (and records) every call; otherwise
@@ -325,35 +270,36 @@ vi.mock("./agent-command", async (importOriginal) => {
   };
 });
 
-/** Constructor args of every stand-in container daemon (C3 wiring checks). */
-const containerCtorArgs: unknown[][] = [];
-
-// ADR-013 (dev-only) container path: a stand-in container daemon, so the
-// workflow's container branch runs without Docker. Its teardown is the
-// container removal (a promise the workflow awaits).
+// ADR-013: a stand-in container daemon, so the workflow runs without Docker.
+// Its teardown is the container removal (a promise the workflow awaits).
 vi.mock("./container-daemon-process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./container-daemon-process")>()),
   ContainerDaemonProcess: class {
     constructor(...args: unknown[]) {
-      containerCtorArgs.push(args);
+      daemonCtorArgs.push(args);
     }
     pid = 4242;
     preflightGhAuth = vi.fn(async () => {});
-    start = vi.fn(async () => {});
+    // The daemon may only be spawned after admission (lock, clone, brokers).
+    start = vi.fn(async () => {
+      admissionOrder.push("daemon-start");
+    });
     spawnedLine = () => "daemon spawned in container: id=fake";
-    runCgroupDir = () => null;
-    sendMessage = vi.fn(async () => 42);
+    sendMessage = vi.fn(async (message: unknown) => {
+      sendMessageCalls.push(message);
+      return 42;
+    });
     teardown = vi.fn(async () => {
-      finallyOrder.push("container-teardown");
+      finallyOrder.push("teardown");
     });
     agentFailure = () => null;
-    memoryStarvation = () => null;
+    memoryStarvation = () => fakeMemoryStarvation;
     refresh = vi.fn(async () => {
       finallyOrder.push("container-refresh");
     });
     // #437 Part B: the container's salvage hooks. The prepare stands in for
-    // the in-container freeze-and-bridge; each step goes to the same
-    // scripted git as the host path (agentCommandFake).
+    // the in-container freeze-and-bridge; each step goes to the scripted git
+    // (agentCommandFake).
     salvageWorkdir = "/workspace";
     prepareSalvage = vi.fn(async () => {
       finallyOrder.push("container-salvage-prepare");
@@ -495,6 +441,16 @@ beforeEach(() => {
   });
   startGhBroker.mockResolvedValue({
     socketPath: "/tmp/automata-agent-run/w-test/thr_leak_1-gh.sock",
+    close: vi.fn(async () => {}),
+  });
+  // ADR-013 C3: every run starts the egress proxy (its container's only
+  // route out); a working one by default.
+  startEgressProxy.mockResolvedValue({
+    url: "http://127.0.0.1:41234",
+    port: 41234,
+    mode: "observe",
+    observedHosts: () => new Map(),
+    unauthenticatedRequests: () => 0,
     close: vi.fn(async () => {}),
   });
   daemonCtorArgs.length = 0;
@@ -760,7 +716,8 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     expect(cleanupWorkdir).toHaveBeenCalledWith(WORKDIR, expect.anything());
   });
 
-  it("#108: no policy AND no agentUser: the proxy is never started (default-off proof)", async () => {
+  // card: protects=ADR-013 C3: a run with no repo policy still gets an OBSERVE proxy (its container's only route out) that audits every decision, and the container is pointed at it; N = 1 stays credential-less; fails_when=the proxy is skipped, enforces a deny-all, has a no-op onEvent, or the daemon gets another URL; no_claim=the in-container bridge (container-daemon-process tests)
+  it("no policy: every run starts an OBSERVE proxy that still audits", async () => {
     process.env.WORKER_BOX_TRUST = "shared";
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
@@ -771,92 +728,36 @@ describe("agent-run run task — egress proxy start failure and teardown (#66 sl
     await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
       outcome: "nothing-to-run",
     });
-
-    expect(startEgressProxy).not.toHaveBeenCalled();
-    expect(postEgressEvents).not.toHaveBeenCalled();
-    expect(assertEgressProxyReachable).not.toHaveBeenCalled();
+    const [opts] = startEgressProxy.mock.calls[0] as [Record<string, unknown>];
+    expect(opts.mode).toBe("observe");
+    expect(opts.policy).toEqual({ level: "none", allowlist: [] });
+    // #205: N = 1 stays credential-less (byte-identical proxy env).
+    expect(opts.credential).toBeUndefined();
+    // A1: allow-all is only defensible BECAUSE it is audited. onEvent must be
+    // the real batcher, never a no-op.
+    expect(typeof opts.onEvent).toBe("function");
+    expect(assertEgressProxyReachable).toHaveBeenCalledWith({
+      url: "http://127.0.0.1:41234",
+    });
+    // and the run's container is pointed at it
+    expect(daemonDeps().egressProxyUrl).toBe("http://127.0.0.1:41234");
+    expect(ensureRunNamespace).toHaveBeenCalledWith({
+      root: TEST_NAMESPACE_ROOT,
+      workerId: expect.any(String),
+    });
   });
 
-  it("#108: agentUser set with no policy starts an OBSERVE proxy that still audits", async () => {
+  it("a repo policy is ENFORCED", async () => {
     process.env.WORKER_BOX_TRUST = "shared";
-    process.env.WORKER_AGENT_USER = "_automata-agent";
-    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
       env: {},
       cleanup: vi.fn(async () => {}),
     });
-    const close = vi.fn(async () => {});
-    startEgressProxy.mockResolvedValue({
-      url: "http://127.0.0.1:41234",
-      port: 41234,
-      mode: "observe",
-      observedHosts: () => new Map(),
-      unauthenticatedRequests: () => 0,
-      close,
-    });
-
-    try {
-      await expect(runFn(INPUT, ctx())).resolves.toMatchObject({
-        outcome: "nothing-to-run",
-      });
-      const [opts] = startEgressProxy.mock.calls[0] as [
-        Record<string, unknown>,
-      ];
-      expect(opts.mode).toBe("observe");
-      expect(opts.policy).toEqual({ level: "none", allowlist: [] });
-      // #205: N = 1 stays credential-less (byte-identical proxy env).
-      expect(opts.credential).toBeUndefined();
-      // A1: allow-all is only defensible BECAUSE it is audited. onEvent must be
-      // the real batcher, never a no-op.
-      expect(typeof opts.onEvent).toBe("function");
-      expect(assertEgressProxyReachable).toHaveBeenCalledWith({
-        url: "http://127.0.0.1:41234",
-      });
-      // and the daemon child is pointed at it
-      expect(daemonCtorArgs[0]![4]).toBe("http://127.0.0.1:41234");
-      // The #108 grant repair got the agent account and the configured root —
-      // the mock (see top of file) stands in for real chmod +a / setfacl.
-      expect(ensureRunNamespace).toHaveBeenCalledWith(
-        expect.objectContaining({
-          agentUser: "_automata-agent",
-          root: TEST_NAMESPACE_ROOT,
-        }),
-      );
-    } finally {
-      delete process.env.WORKER_AGENT_USER;
-      delete process.env.WORKER_WORKDIR_ROOT;
-    }
-  });
-
-  it("#108: a repo policy stays ENFORCE even in agent-uid mode", async () => {
-    process.env.WORKER_BOX_TRUST = "shared";
-    process.env.WORKER_AGENT_USER = "_automata-agent";
-    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
-    materialiseAgentCredentials.mockResolvedValue({
-      delivered: false,
-      env: {},
-      cleanup: vi.fn(async () => {}),
-    });
-    startEgressProxy.mockResolvedValue({
-      url: "http://127.0.0.1:41234",
-      port: 41234,
-      mode: "enforce",
-      observedHosts: () => new Map(),
-      unauthenticatedRequests: () => 0,
-      close: vi.fn(async () => {}),
-    });
-    try {
-      await runFn(EGRESS_INPUT, ctx());
-      const [opts] = startEgressProxy.mock.calls[0] as [
-        Record<string, unknown>,
-      ];
-      expect(opts.mode).toBe("enforce");
-      expect(opts.policy).toEqual(EGRESS_INPUT.egressPolicy);
-    } finally {
-      delete process.env.WORKER_AGENT_USER;
-      delete process.env.WORKER_WORKDIR_ROOT;
-    }
+    await runFn(EGRESS_INPUT, ctx());
+    const [opts] = startEgressProxy.mock.calls[0] as [Record<string, unknown>];
+    expect(opts.mode).toBe("enforce");
+    expect(opts.policy).toEqual(EGRESS_INPUT.egressPolicy);
   });
 });
 
@@ -870,7 +771,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     });
   }
 
-  it("brokers start by default, the DaemonProcess gets the broker handoff, and both close exactly once", async () => {
+  it("brokers start by default, the container daemon gets the broker handoff, and both close exactly once", async () => {
     sharedBoxNoCredential();
     const gitClose = vi.fn(async () => {});
     const ghClose = vi.fn(async () => {});
@@ -907,8 +808,8 @@ describe("agent-run run task — credential brokers (#81)", () => {
         socketPath: expect.stringMatching(/thr_leak_1-gh\.sock$/),
       }),
     );
-    // The DaemonProcess ctor's broker opt carries the bearer, never the token.
-    const brokerArg = daemonCtorArgs[0]![5] as Record<string, string>;
+    // The container daemon's broker opt carries the bearer, never the token.
+    const brokerArg = daemonDeps().broker as Record<string, string>;
     expect(brokerArg).toMatchObject({
       gitUrl: "http://127.0.0.1:41999",
       bearer,
@@ -1014,7 +915,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
     expect(startGitBroker).not.toHaveBeenCalled();
   });
 
-  it("WORKER_CREDENTIAL_BROKER=legacy-direct: no brokers, and the DaemonProcess gets broker=null (rollback)", async () => {
+  it("WORKER_CREDENTIAL_BROKER=legacy-direct: no brokers, and the container daemon gets broker=null (rollback)", async () => {
     sharedBoxNoCredential();
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
 
@@ -1024,7 +925,7 @@ describe("agent-run run task — credential brokers (#81)", () => {
 
     expect(startGitBroker).not.toHaveBeenCalled();
     expect(startGhBroker).not.toHaveBeenCalled();
-    expect(daemonCtorArgs[0]![5]).toBeNull();
+    expect(daemonDeps().broker).toBeNull();
   });
 });
 
@@ -1478,39 +1379,12 @@ describe("#125 C4: queue-mode staleness self-check", () => {
   });
 });
 
-describe("#152 Stage A: admission wiring order", () => {
-  it("BOTH admission reaps run BEFORE the box-lock acquire — with the run's threadId and the namespace root (their relative order is not a contract)", async () => {
+describe("admission wiring order", () => {
+  // card: protects=admission re-creates the namespace dir first, removes dead siblings' dirs, then takes the slot BEFORE the clone, and the container daemon starts only after all of it; fails_when=the clone or the daemon precedes the lock, or a host uid scan comes back; no_claim=the predecessor container's removal by name (ContainerDaemonProcess.start tests)
+  it("ensure-ns → reclaim → lock → clone → daemon-start, nothing in between", async () => {
     admissionOrder.length = 0;
-    const { reapOwnThreadAttempts, reclaimDeadWorkerRuns } = await import(
-      "./reclaim"
-    );
-    vi.mocked(reapOwnThreadAttempts).mockClear();
+    const { reclaimDeadWorkerRuns } = await import("./reclaim");
     vi.mocked(reclaimDeadWorkerRuns).mockClear();
-    // Fail at the credential pull — everything at and before the lock has run.
-    pullAgentCredentials.mockRejectedValue(new Error("stop here"));
-    await expect(runFn({ ...INPUT }, ctx())).rejects.toThrow("stop here");
-    // The namespace grant is re-asserted before ANYTHING touches the dir.
-    expect(admissionOrder[0]).toBe("ensure-ns");
-    // The load-bearing invariant is set-before-lock, not reclaim-vs-reap
-    // order (either order yields the same end state — see reclaim.ts docs).
-    expect(admissionOrder.slice(1, 3).sort()).toEqual(["reap", "reclaim"]);
-    expect(admissionOrder[3]).toBe("lock");
-    // #205: the clone runs UNDER the slot (its ACL grant needs the slot's account).
-    expect(admissionOrder[4]).toBe("clone");
-    // #184 AC11: the uid-scan runs UNDER the lock, before the credential pull
-    // (which rejects here and stops the run right after).
-    expect(admissionOrder[5]).toBe("uid-reap:admission");
-    expect(vi.mocked(reapOwnThreadAttempts)).toHaveBeenCalledWith(
-      expect.objectContaining({ threadId: INPUT.threadId }),
-    );
-    expect(vi.mocked(reclaimDeadWorkerRuns)).toHaveBeenCalledWith(
-      expect.objectContaining({ root: expect.any(String) }),
-    );
-  });
-
-  it("#184 AC15: scan-then-spawn — the admission uid-scan runs after the lock and BEFORE the daemon starts, with the config's agentUser and the run's threadId", async () => {
-    admissionOrder.length = 0;
-    reapAgentUidEscapees.mockClear();
     process.env.WORKER_BOX_TRUST = "shared";
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
     materialiseAgentCredentials.mockResolvedValue({
@@ -1527,27 +1401,15 @@ describe("#152 Stage A: admission wiring order", () => {
     });
     postRunTerminal.mockReset().mockResolvedValue("applied");
     await runFn(INPUT, ctx());
-    expect(admissionOrder[0]).toBe("ensure-ns");
-    expect(admissionOrder.slice(1, 3).sort()).toEqual(["reap", "reclaim"]);
-    // The mock records BOTH phases here, so the teardown scan closes the list.
-    expect(admissionOrder.slice(3)).toEqual([
+    expect(admissionOrder).toEqual([
+      "ensure-ns",
+      "reclaim",
       "lock",
       "clone",
-      "uid-reap:admission",
       "daemon-start",
-      "uid-reap:teardown",
     ]);
-    const { loadWorkerConfig } = await import("./config");
-    expect(reapAgentUidEscapees).toHaveBeenCalledWith(
-      expect.objectContaining({
-        phase: "admission",
-        threadId: INPUT.threadId,
-        agentUser: loadWorkerConfig().agentUser,
-        runNamespaceRoot: loadWorkerConfig().runNamespaceRoot,
-      }),
-    );
-    expect(reapAgentUidEscapees).toHaveBeenCalledWith(
-      expect.objectContaining({ phase: "teardown", threadId: INPUT.threadId }),
+    expect(vi.mocked(reclaimDeadWorkerRuns)).toHaveBeenCalledWith(
+      expect.objectContaining({ root: expect.any(String) }),
     );
   });
 });
@@ -1653,12 +1515,10 @@ describe("#473: no egress audit batch is dropped at run end", () => {
  * proxy, brokers) release BEFORE cleanupWorkdir by design and are out of scope.
  */
 describe("#183: finally order — box lock released last, after teardown and cleanupWorkdir", () => {
-  // #184 AC12: the teardown uid-scan sits between the daemon teardown and
-  // cleanupWorkdir (before the proxy/broker closes — escapees are child
-  // traffic); the box-lock release stays last.
+  // ADR-013 I6: the container's removal comes first (every process of the
+  // run dies with it), the box-lock release stays last.
   const TEARDOWN_TOKENS = [
     "teardown",
-    "uid-reap:teardown",
     "token-revoke",
     "cleanupWorkdir",
     "release",
@@ -1693,50 +1553,21 @@ describe("#183: finally order — box lock released last, after teardown and cle
     });
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
-      "uid-reap:teardown",
       "token-revoke",
       "cleanupWorkdir",
       "release",
     ]);
     expect(releaseMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("#184: a LOST box lock skips the teardown uid-scan (another run may own the box) — logged, admission scan still ran, release still last", async () => {
-    reapAgentUidEscapees.mockClear();
-    acquireBoxSlotMock.mockImplementationOnce(async () => {
-      admissionOrder.push("lock");
-      return { release: releaseMock, lost: true, slot: 0 };
-    });
-    pullNextMessage.mockResolvedValue(null);
-    const c = ctx();
-    await expect(runFn(INPUT, c)).resolves.toMatchObject({
-      outcome: "nothing-to-run",
-    });
-    expect(reapAgentUidEscapees.mock.calls.map(([opts]) => opts.phase)).toEqual(
-      ["admission"],
-    );
-    expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
-      "teardown",
-      "token-revoke",
-      "cleanupWorkdir",
-      "release",
-    ]);
-    expect(releaseMock).toHaveBeenCalledTimes(1);
-    const skipped = c.log.mock.calls
-      .map((call) => String(call[0]))
-      .filter((l) => l.includes("box.escapees_scan_skipped"));
-    expect(skipped).toHaveLength(1);
-    expect(skipped[0]).toContain('"phase":"teardown"');
-    expect(skipped[0]).toContain('"reason":"lock lost"');
   });
 
   /**
-   * #380 card: protects=a throw INSIDE the teardown sequence (here the
-   * uid-scan, which by contract never throws — injected to prove the wrap)
-   * still reaches the token revoke, the credential wipe, cleanupWorkdir and
-   * the box-lock release, in that order; fails_when=the nested finally is
-   * flattened back so the throw skips them (a live ghs_ token and a held
-   * slot would outlive the run); no_claim=the real reaper's own behaviour.
+   * #380 card: protects=a throw INSIDE the teardown sequence (here the egress
+   * proxy's audit counter, after the container's removal — injected to prove
+   * the wrap) still reaches the token revoke, the credential wipe,
+   * cleanupWorkdir and the box-lock release, in that order; fails_when=the
+   * nested finally is flattened back so the throw skips them (a live ghs_
+   * token and a held slot would outlive the run); no_claim=the real proxy's
+   * own behaviour.
    */
   it("#380: a throw inside the teardown sequence still reaches token-revoke → credential wipe → cleanupWorkdir → release; the throw is not swallowed", async () => {
     const credentialWipe = vi.fn(async () => {
@@ -1747,35 +1578,22 @@ describe("#183: finally order — box lock released last, after teardown and cle
       env: {},
       cleanup: credentialWipe,
     });
-    // The admission scan is the first call (default impl); the second call
-    // is the teardown scan, which throws.
-    reapAgentUidEscapees
-      .mockImplementationOnce(async (opts) => {
-        finallyOrder.push(`uid-reap:${opts.phase}`);
-        return {
-          skipped: false,
-          scanned: 0,
-          groups: 0,
-          helpers: 0,
-          killed: 0,
-          residual: 0,
-          failed: 0,
-          durationMs: 0,
-        };
-      })
-      .mockImplementationOnce(async (opts) => {
-        finallyOrder.push(`uid-reap:${opts.phase}`);
-        throw new Error("reaper exploded");
-      });
+    startEgressProxy.mockResolvedValue({
+      url: "http://127.0.0.1:41234",
+      port: 41234,
+      unauthenticatedRequests: () => {
+        throw new Error("proxy audit exploded");
+      },
+      close: vi.fn(async () => {}),
+    });
     pullNextMessage.mockResolvedValue(null);
-    await expect(runFn(INPUT, ctx())).rejects.toThrow("reaper exploded");
+    await expect(runFn(INPUT, ctx())).rejects.toThrow("proxy audit exploded");
     expect(
       finallyOrder.filter((x) =>
         [...TEARDOWN_TOKENS, "credential-wipe"].includes(x),
       ),
     ).toEqual([
       "teardown",
-      "uid-reap:teardown",
       "token-revoke",
       "credential-wipe",
       "cleanupWorkdir",
@@ -1791,7 +1609,6 @@ describe("#183: finally order — box lock released last, after teardown and cle
     await expect(runFn(INPUT, ctx())).rejects.toThrow("poll blew up");
     expect(finallyOrder.filter((x) => TEARDOWN_TOKENS.includes(x))).toEqual([
       "teardown",
-      "uid-reap:teardown",
       "token-revoke",
       "cleanupWorkdir",
       "release",
@@ -1825,11 +1642,6 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     runTests: false,
     commandTimeoutMs: 60000,
   };
-  const SEEDED = {
-    ok: true as const,
-    packs: ["gstack-review"],
-    manifestHash: "abcdef012345".padEnd(64, "0"),
-  };
 
   beforeEach(() => {
     process.env.WORKER_BOX_TRUST = "shared";
@@ -1843,13 +1655,11 @@ describe("review agent wire + batteries line (Phase 5)", () => {
 
   async function run(
     reviewAgent: unknown,
-    batteries: unknown = undefined,
   ): Promise<{ lines: string[]; sent: Record<string, unknown> }> {
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
       env: {},
       cleanup: vi.fn(async () => {}),
-      batteries,
     });
     const c = ctx();
     // A real review dispatch always carries prKey + supersedePolicy, which
@@ -1878,26 +1688,18 @@ describe("review agent wire + batteries line (Phase 5)", () => {
   const batteriesLines = (lines: string[]) =>
     lines.filter((l) => /\] batteries: /.test(l));
 
+  // card: protects=an orchestrated review's daemon message carries exactly {mode, commandTimeoutMs, maxTurns}, its one batteries line names the image (ADR-013: packs are image contents, nothing is seeded), and a review gets no foreground-only guard; fails_when=the wire carries runTests/batteries, the line is missing or names packs, or the guard is installed; no_claim=the daemon honouring the wire (daemon tests)
   it("orchestrated: the daemon message carries exactly {mode, commandTimeoutMs, maxTurns}", async () => {
-    const { lines, sent } = await run(ORCHESTRATED, SEEDED);
+    const { lines, sent } = await run(ORCHESTRATED);
     expect(sent.reviewAgent).toEqual({
       mode: "orchestrated",
       commandTimeoutMs: 240000,
       maxTurns: 30,
     });
     expect(JSON.stringify(sent)).not.toMatch(/runTests|batteries/);
-    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { seed: unknown },
-    ];
-    expect(arg.seed).toEqual({
-      batteries: ORCHESTRATED.batteries,
-      hooksOff: true,
-    });
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
-    expect(bl[0]).toContain(
-      "batteries: mode=orchestrated packs=gstack-review manifest=abcdef012345",
-    );
+    expect(bl[0]).toMatch(/\] batteries: image=abababababab lane=review$/);
     expect(lines.some((l) => l.includes("foreground-only"))).toBe(false);
     expect(
       lines.some((l) =>
@@ -1912,7 +1714,7 @@ describe("review agent wire + batteries line (Phase 5)", () => {
     ["classic", CLASSIC],
     ["absent", undefined],
   ])(
-    "%s: the daemon message has no reviewAgent key and one classic batteries line",
+    "%s: the daemon message has no reviewAgent key and one batteries line",
     async (_label, reviewAgent) => {
       const { lines, sent } = await run(reviewAgent);
       expect("reviewAgent" in sent).toBe(false);
@@ -1922,27 +1724,19 @@ describe("review agent wire + batteries line (Phase 5)", () => {
       );
       const bl = batteriesLines(lines);
       expect(bl).toHaveLength(1);
-      expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+      expect(bl[0]).toMatch(/\] batteries: image=abababababab lane=review$/);
       expect(lines.some((l) => l.includes("review agent:"))).toBe(false);
       expect(lines.some((l) => l.includes("foreground-only"))).toBe(false);
     },
   );
 
-  it("out-of-bounds orchestrated: bounds-rejected BEFORE seeding, so it seeds, logs and runs classic", async () => {
+  it("out-of-bounds orchestrated: bounds-rejected before the credential step, logged, runs classic", async () => {
     const { lines, sent } = await run({ ...ORCHESTRATED, commandTimeoutMs: 5 });
     expect("reviewAgent" in sent).toBe(false);
-    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { seed: unknown },
-    ];
-    expect(arg.seed).toBeUndefined();
     const rejected = lines.filter((l) => l.includes("bounds-rejected"));
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toContain("commandTimeoutMs");
     expect(rejected[0]).toContain("→ classic");
-    const bl = batteriesLines(lines);
-    expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
-    // The bounds check runs before materialise (seeding), not at send time.
     const rejectIdx = lines.findIndex((l) => l.includes("bounds-rejected"));
     const credIdx = lines.findIndex((l) => l.includes("agent credential:"));
     expect(rejectIdx).toBeLessThan(credIdx);
@@ -1953,12 +1747,12 @@ describe("review agent wire + batteries line (Phase 5)", () => {
       ...REVIEW_MESSAGE,
       permissionMode: "allowAll",
     });
-    const { sent } = await run(ORCHESTRATED, SEEDED);
+    const { sent } = await run(ORCHESTRATED);
     expect("reviewAgent" in sent).toBe(false);
   });
 });
 
-describe("task agent packs + one batteries line per run (phase 7)", () => {
+describe("task agent packs + one batteries line per run (phase 7, ADR-013)", () => {
   const TASK_MESSAGE = {
     type: "claude",
     model: "sonnet",
@@ -1968,11 +1762,6 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     sessionId: null,
     permissionMode: "allowAll",
     featureFlags: {},
-  };
-  const SEEDED = {
-    ok: true as const,
-    packs: ["somnio-skills"],
-    manifestHash: "0123456789ab".padEnd(64, "f"),
   };
 
   beforeEach(() => {
@@ -1985,32 +1774,23 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     });
   });
 
-  async function run(
-    extra: Record<string, unknown>,
-    batteries: unknown = undefined,
-  ): Promise<{
+  async function run(extra: Record<string, unknown>): Promise<{
     lines: string[];
     sent: Record<string, unknown>;
-    arg: { seed?: unknown; foregroundOnly?: boolean };
   }> {
     materialiseAgentCredentials.mockResolvedValue({
       delivered: false,
       env: {},
       cleanup: vi.fn(async () => {}),
-      batteries,
     });
     const c = ctx();
     await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
       outcome: "completed",
     });
     expect(sendMessageCalls).toHaveLength(1);
-    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
-      { seed?: unknown; foregroundOnly?: boolean },
-    ];
     return {
       lines: c.log.mock.calls.map((call) => String(call[0])),
       sent: sendMessageCalls[0] as Record<string, unknown>,
-      arg,
     };
   }
 
@@ -2019,20 +1799,19 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
   const foregroundLines = (lines: string[]) =>
     lines.filter((l) => l.includes("foreground-only"));
 
-  it("task lane with packs: materialise gets the hooks-on task seed, one lane=task line after the credential line", async () => {
-    const { lines, sent, arg } = await run(
-      { taskAgent: { batteries: ["somnio-skills"] } },
-      SEEDED,
-    );
-    expect(arg.seed).toEqual({
-      batteries: ["somnio-skills"],
-      hooksOff: false,
+  // card: protects=a task run with packs logs ONE batteries line naming the image digest, its lane and the packs it asked for, right after the credential line, then the foreground-only line; the materialise step gets no seed (packs are image contents) and the daemon never sees the packs; fails_when=the line is missing, duplicated or misordered, a seed reaches materialise, or the wire carries taskAgent; no_claim=what the image contains (verify.sh)
+  it("task lane with packs: one image line with the requested packs, after the credential line", async () => {
+    const { lines, sent } = await run({
+      taskAgent: { batteries: ["somnio-skills"] },
     });
-    expect(arg.foregroundOnly).toBe(true);
+    const [arg] = materialiseAgentCredentials.mock.calls[0]! as [
+      Record<string, unknown>,
+    ];
+    expect(Object.keys(arg).sort()).toEqual(["agent", "credentials", "run"]);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
     expect(bl[0]).toMatch(
-      /\] batteries: lane=task packs=somnio-skills manifest=0123456789ab$/,
+      /\] batteries: image=abababababab lane=task task-packs=somnio-skills$/,
     );
     const credIdx = lines.findIndex((l) => l.includes("agent credential:"));
     expect(lines.indexOf(bl[0]!)).toBeGreaterThan(credIdx);
@@ -2040,254 +1819,78 @@ describe("task agent packs + one batteries line per run (phase 7)", () => {
     expect(fg).toHaveLength(1);
     expect(fg[0]).toMatch(/\] task agent: foreground-only hook installed$/);
     expect(lines.indexOf(fg[0]!)).toBe(lines.indexOf(bl[0]!) + 1);
-    // No wire change: the daemon never sees the task packs.
     expect(JSON.stringify(sent)).not.toMatch(/taskAgent|batteries/);
     expect(Object.keys(sent).sort()).toEqual(
       [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
     );
   });
 
-  it("task lane with an unavailable seed: unavailable lane=task reason=<r>", async () => {
-    const { lines } = await run(
-      { taskAgent: { batteries: ["somnio-skills"] } },
-      { ok: false, reason: "manifest-drift" },
-    );
-    const bl = batteriesLines(lines);
-    expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(
-      /\] batteries: unavailable lane=task reason=manifest-drift$/,
-    );
-    expect(foregroundLines(lines)).toHaveLength(1);
-  });
-
   it("a mention on a PR (prNumber only): lane=pr", async () => {
-    const { lines, arg } = await run(
-      { prNumber: 7, taskAgent: { batteries: ["somnio-skills"] } },
-      SEEDED,
-    );
-    expect(arg.seed).toEqual({
-      batteries: ["somnio-skills"],
-      hooksOff: false,
+    const { lines } = await run({
+      prNumber: 7,
+      taskAgent: { batteries: ["somnio-skills"] },
     });
-    expect(arg.foregroundOnly).toBe(true);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(/\] batteries: lane=pr packs=somnio-skills /);
+    expect(bl[0]).toMatch(/\] batteries: image=abababababab lane=pr /);
   });
 
-  it("a malformed taskAgent: rejected line (reason only), nothing seeded, task-agent-invalid", async () => {
-    const { lines, arg } = await run({
-      taskAgent: { batteries: ["Bad Id"] },
-    });
-    expect(arg.seed).toBeUndefined();
+  it("a malformed taskAgent: rejected line (reason only), task-packs=invalid", async () => {
+    const { lines } = await run({ taskAgent: { batteries: ["Bad Id"] } });
     const rejected = lines.filter((l) => l.includes("task agent: rejected"));
     expect(rejected).toHaveLength(1);
     expect(rejected[0]).toContain("batteries[0]");
     expect(lines.join("\n")).not.toContain("Bad Id");
     // Still a headless task run: the guard does not depend on packs.
-    expect(arg.foregroundOnly).toBe(true);
     expect(foregroundLines(lines)).toHaveLength(1);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(
-      /\] batteries: unavailable lane=task reason=task-agent-invalid$/,
-    );
+    expect(bl[0]).toMatch(/ lane=task task-packs=invalid$/);
   });
 
-  it("a review-lane run carrying taskAgent: ignored, nothing seeded, today's review line", async () => {
-    const { lines, arg } = await run({
+  it("a review-lane run carrying taskAgent: ignored, no guard, the plain review line", async () => {
+    const { lines } = await run({
       prNumber: 7,
       prKey: "org-1/o/r/7",
       supersedePolicy: "newest-wins",
       taskAgent: { batteries: ["somnio-skills"] },
     });
-    expect(arg.seed).toBeUndefined();
-    expect(arg.foregroundOnly).toBe(false);
     expect(
       lines.filter((l) => l.includes("task agent: ignored (review-lane)")),
     ).toHaveLength(1);
     expect(foregroundLines(lines)).toEqual([]);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+    expect(bl[0]).toMatch(/\] batteries: image=abababababab lane=review$/);
   });
 
-  it("no taskAgent: today's classic line, the foreground-only guard, today's message keys", async () => {
-    const { lines, sent, arg } = await run({});
-    expect(arg.seed).toBeUndefined();
-    expect(arg.foregroundOnly).toBe(true);
+  // card: protects=#380 + ADR-013: a read-only task token that arrives sealed never reaches the run's container (its daemon deps carry only the daemon token and repo env), whatever the packs; fails_when=the container deps or any log line carry the read token; no_claim=its revocation at run end (#380 tests)
+  it("a delivered read token never reaches the container or the journal", async () => {
+    const READ = "ghs_fake_read_token_value";
+    process.env.WORKER_CREDENTIAL_BROKER = "on";
+    const { lines } = await run({
+      taskAgent: { batteries: ["somnio-skills"] },
+      githubReadToken: READ,
+      githubReadTokenExpiresAt: new Date(
+        Date.now() + 30 * 60_000,
+      ).toISOString(),
+    });
+    expect(lines.join("\n")).not.toContain(READ);
+    expect(JSON.stringify(daemonDeps())).not.toContain(READ);
+    expect(daemonDeps().secrets).toEqual({ daemonToken: "daemon-tok" });
+  });
+
+  it("no taskAgent: the plain image line, the foreground-only guard, today's message keys", async () => {
+    const { lines, sent } = await run({});
     expect(lines.filter((l) => l.includes("task agent:"))).toEqual([
       expect.stringMatching(/\] task agent: foreground-only hook installed$/),
     ]);
     const bl = batteriesLines(lines);
     expect(bl).toHaveLength(1);
-    expect(bl[0]).toMatch(/\] batteries: mode=classic$/);
+    expect(bl[0]).toMatch(/\] batteries: image=abababababab lane=task$/);
     expect(Object.keys(sent).sort()).toEqual(
       [...Object.keys(TASK_MESSAGE), "useCredits"].sort(),
     );
-  });
-});
-
-describe("read-only task token wiring (phase 7, brokered run-fn)", () => {
-  const TASK_MESSAGE = {
-    type: "claude",
-    model: "sonnet",
-    agent: "claudeCode",
-    agentVersion: 1,
-    prompt: "audit",
-    sessionId: null,
-    permissionMode: "allowAll",
-    featureFlags: {},
-  };
-  const READ = "ghs_fake_read_token_value";
-  const SEEDED_REQUIRING = {
-    ok: true as const,
-    packs: ["somnio-skills"],
-    manifestHash: "0123456789ab".padEnd(64, "f"),
-    requires: ["github-read-token"],
-  };
-  const future = () => new Date(Date.now() + 30 * 60_000).toISOString();
-
-  beforeEach(() => {
-    process.env.WORKER_BOX_TRUST = "shared";
-    pullNextMessage.mockReset().mockResolvedValue({ ...TASK_MESSAGE });
-    pollUntilTerminal.mockReset().mockResolvedValue({
-      outcome: "completed",
-      finalStatus: "complete",
-    });
-  });
-
-  async function run(
-    extra: Record<string, unknown>,
-    batteries: unknown,
-  ): Promise<{ lines: string[]; options: unknown }> {
-    materialiseAgentCredentials.mockResolvedValue({
-      delivered: false,
-      env: {},
-      cleanup: vi.fn(async () => {}),
-      batteries,
-    });
-    const c = ctx();
-    await expect(runFn({ ...INPUT, ...extra }, c)).resolves.toMatchObject({
-      outcome: "completed",
-    });
-    const lines = c.log.mock.calls.map((call) => String(call[0]));
-    // Never logged, whatever happened.
-    expect(lines.join("\n")).not.toContain(READ);
-    return { lines, options: daemonCtorArgs[0]![6] };
-  }
-
-  const tokenLines = (lines: string[]) =>
-    lines.filter((l) => l.includes("read-token"));
-  /** The one fixed-format line, or nothing. */
-  const tokenLine = (lines: string[]) => {
-    const found = tokenLines(lines);
-    expect(found.length).toBeLessThanOrEqual(1);
-    return found[0]?.replace(/^.*\] /, "");
-  };
-
-  it("task lane + requiring seed + token + future expiry ⇒ DaemonProcess gets the token; one applied line after the brokers", async () => {
-    const { lines, options } = await run(
-      {
-        taskAgent: { batteries: ["somnio-skills"] },
-        githubReadToken: READ,
-        githubReadTokenExpiresAt: future(),
-      },
-      SEEDED_REQUIRING,
-    );
-    expect(options).toEqual({
-      secrets: { installationToken: "inst-secret", daemonToken: "daemon-tok" },
-      lane: "task",
-      githubReadToken: READ,
-    });
-    expect(tokenLine(lines)).toBe("task agent: read-token=applied");
-    const brokersIdx = lines.findIndex((l) =>
-      l.includes("credential brokers up"),
-    );
-    expect(brokersIdx).toBeGreaterThan(-1);
-    expect(lines.indexOf(tokenLines(lines)[0]!)).toBeGreaterThan(brokersIdx);
-  });
-
-  it.each<[string, Record<string, unknown>, unknown, string]>([
-    [
-      "expired",
-      {
-        githubReadToken: READ,
-        githubReadTokenExpiresAt: new Date(Date.now() - 1000).toISOString(),
-      },
-      SEEDED_REQUIRING,
-      "expired",
-    ],
-    ["requiring pack but no token", {}, SEEDED_REQUIRING, "not-delivered"],
-    [
-      "non-requiring pack + token",
-      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
-      { ok: true, packs: ["somnio-review"], manifestHash: "0".repeat(64) },
-      "no-requiring-pack",
-    ],
-    [
-      "seeding unavailable",
-      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
-      { ok: false, reason: "manifest-drift" },
-      "no-requiring-pack",
-    ],
-  ])(
-    "%s ⇒ no token passed; one skip line",
-    async (_name, extra, seeded, reason) => {
-      const { lines, options } = await run(
-        { taskAgent: { batteries: ["somnio-skills"] }, ...extra },
-        seeded,
-      );
-      expect(options).toMatchObject({ lane: "task" });
-      expect(options).not.toHaveProperty("githubReadToken");
-      expect(tokenLine(lines)).toBe(`task agent: read-token=skip=${reason}`);
-    },
-  );
-
-  it("legacy-direct (no broker) ⇒ no token passed; skip=no-broker", async () => {
-    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
-    const { lines, options } = await run(
-      {
-        taskAgent: { batteries: ["somnio-skills"] },
-        githubReadToken: READ,
-        githubReadTokenExpiresAt: future(),
-      },
-      SEEDED_REQUIRING,
-    );
-    expect(options).toMatchObject({ lane: "task" });
-    expect(options).not.toHaveProperty("githubReadToken");
-    expect(tokenLine(lines)).toBe("task agent: read-token=skip=no-broker");
-  });
-
-  it("REVIEW lane with a forged token ⇒ not passed, no line", async () => {
-    pullNextMessage.mockResolvedValue({
-      ...TASK_MESSAGE,
-      permissionMode: "review",
-    });
-    const { lines, options } = await run(
-      {
-        prNumber: 7,
-        prKey: "org-1/o/r/7",
-        supersedePolicy: "newest-wins",
-        taskAgent: { batteries: ["somnio-skills"] },
-        githubReadToken: READ,
-        githubReadTokenExpiresAt: future(),
-      },
-      SEEDED_REQUIRING,
-    );
-    expect(options).toMatchObject({ lane: "review" });
-    expect(options).not.toHaveProperty("githubReadToken");
-    expect(tokenLines(lines)).toEqual([]);
-  });
-
-  it("no taskAgent (an unconfigured repo), even with a forged token ⇒ not passed, no line", async () => {
-    const { lines, options } = await run(
-      { githubReadToken: READ, githubReadTokenExpiresAt: future() },
-      undefined,
-    );
-    expect(options).toMatchObject({ lane: "task" });
-    expect(options).not.toHaveProperty("githubReadToken");
-    expect(tokenLines(lines)).toEqual([]);
   });
 });
 
@@ -2366,7 +1969,8 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     );
   });
 
-  it("completed: teardown → reap → lastPushedSha → git close → gh close → check → report; then the finally sequence, lock last", async () => {
+  // card: protects=GATE-01 under ADR-013: the fix check runs only after the agent's container is removed (teardown, then the awaited removal) and the brokers it pushed through are closed, then reports; the finally repeats the (idempotent) removal and closes, revokes the tokens, cleans up and releases the lock last; fails_when=the check runs before the removal or the closes, or the lock goes earlier; no_claim=the real removal's idempotence (container-daemon-process tests)
+  it("completed: teardown → removal → lastPushedSha → git close → gh close → check → report; then the finally sequence, lock last", async () => {
     pullNextMessage.mockResolvedValue({ agent: "claudeCode", model: "m" });
     pollUntilTerminal.mockResolvedValue({
       outcome: "completed",
@@ -2376,17 +1980,19 @@ describe("GATE-01: the fix check runs after the agent is dead, then reports (09-
     await expect(runFn(FIX_RUN, c)).resolves.toMatchObject({
       outcome: "completed",
     });
-    expect(finallyOrder.filter((x) => x !== "uid-reap:admission")).toEqual([
+    expect(finallyOrder).toEqual([
+      // teardown() fire-and-forget, then reap() awaits the same removal
       "teardown",
-      "uid-reap:teardown",
+      "teardown",
       "lastPushedSha",
       "git-close",
       "gh-close",
       "runFixCheck",
       "postSelfHealFixCheck",
-      // the finally block: second teardown/reap/closes are no-ops
+      // the finally block: OOM refresh, then the (idempotent) removal and
+      // the no-op closes
+      "container-refresh",
       "teardown",
-      "uid-reap:teardown",
       "git-close",
       "gh-close",
       // #380: both ghs_ tokens die AFTER the fix check reported (it needed
@@ -2590,13 +2196,12 @@ describe("#380: sealed run secrets through the run fn", () => {
     expect(startGhBroker.mock.calls[0]![0]).toMatchObject({
       installationToken: SECRETS.installationToken,
     });
-    // The daemon's deps carry the two it needs; the input it sees carries none.
-    const [, daemonInput, , , , , deps] = daemonCtorArgs[0]!;
-    expect(deps).toMatchObject({
-      secrets: {
-        installationToken: SECRETS.installationToken,
-        daemonToken: SECRETS.daemonToken,
-      },
+    // The container daemon's deps carry the daemon token alone (the
+    // installation token stays with the brokers and the host preflight); the
+    // input it sees carries none.
+    const [, daemonInput, , , , deps] = daemonCtorArgs[0]!;
+    expect((deps as { secrets: unknown }).secrets).toEqual({
+      daemonToken: SECRETS.daemonToken,
     });
     for (const field of [
       "installationToken",
@@ -2619,7 +2224,7 @@ describe("#380: sealed run secrets through the run fn", () => {
       expect(transcript).not.toContain(value);
     }
     const ctorArgsMinusSecrets = daemonCtorArgs[0]!.map((a, i) =>
-      i === 6 ? { ...(a as object), secrets: undefined } : a,
+      i === 5 ? { ...(a as object), secrets: undefined } : a,
     );
     expect(JSON.stringify(ctorArgsMinusSecrets)).not.toContain(
       SECRETS.installationToken,
@@ -2735,25 +2340,21 @@ describe("#380: sealed run secrets through the run fn", () => {
 });
 
 /**
- * #205 (AC5 at the workflow level): once a slot is held, EVERYTHING per run —
- * the clone grant, the daemon, the admission and teardown reaps, the cleanup —
- * runs as that slot's own account, so a kill issued by this run reaches only
- * this slot's uid.
+ * #205 under ADR-013: once a slot is held, the run IS that slot — its
+ * container takes the slot's name (config.boxSlot) and its per-run artefacts
+ * live in the slot's own subdir.
  */
-describe("#205: a run on slot 1 executes as the slot-1 account end to end", () => {
+describe("#205: a run on slot 1 is slot 1 end to end", () => {
   const saved = { ...process.env };
   beforeEach(() => {
     process.env.WORKER_BOX_TRUST = "shared";
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
-    process.env.WORKER_AGENT_USER = "_automata-agent";
-    process.env.WORKER_WORKDIR_ROOT = "/usr/local/automata/runs";
     process.env.WORKER_BOX_SLOTS = "2";
     process.env.WORKER_GLOBAL_MAX_RUNS = "2"; // #372: the tuple moves together
     process.env.WORKER_RUN_MEMORY_MAX = "1500M";
     admissionOrder.length = 0;
     daemonCtorArgs.length = 0;
     ensureSlotNamespace.mockClear();
-    reapAgentUidEscapees.mockClear();
     cleanupWorkdir.mockClear();
     acquireBoxSlotMock.mockImplementationOnce(async () => {
       admissionOrder.push("lock");
@@ -2764,7 +2365,6 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
       env: {},
       cleanup: vi.fn(async () => {}),
     });
-    // agent-uid mode starts the egress proxy (observe mode) on every run.
     startEgressProxy.mockResolvedValue({
       url: "http://127.0.0.1:41998",
       port: 41998,
@@ -2779,28 +2379,22 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
     Object.assign(process.env, saved);
   });
 
-  it("grants the slot subdir, clones, spawns, reaps and cleans up as `_automata-agent-1`, never as the base account", async () => {
+  // card: protects=a run holding slot 1 creates slot 1's subdir before the clone, hands its container daemon the slot-1 config (its container name) and requires a per-run proxy credential at N > 1; fails_when=the slot subdir is skipped or late, the daemon gets another slot, or the N > 1 proxy is credential-less; no_claim=the container's own name derivation (container-argv tests)
+  it("creates the slot subdir, clones and spawns the container as slot 1", async () => {
     await runFn(INPUT, { cancelled: false, log: vi.fn() });
-    // ensure-ns (all accounts) → Stage A → lock → slot grant → clone → uid-reap → daemon.
-    expect(admissionOrder.slice(3, 7)).toEqual([
+    expect(admissionOrder).toEqual([
+      "ensure-ns",
+      "reclaim",
       "lock",
       "slot-ns",
       "clone",
-      "uid-reap:admission",
+      "daemon-start",
     ]);
     expect(ensureSlotNamespace).toHaveBeenCalledWith(
-      expect.objectContaining({ slot: 1, agentUser: "_automata-agent-1" }),
-    );
-    expect(ensureRunNamespace).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agentUsers: ["_automata-agent", "_automata-agent-1"],
-      }),
-    );
-    expect(provisionWorkdir).toHaveBeenCalledWith(
-      expect.objectContaining({ agentUser: "_automata-agent-1" }),
+      expect.objectContaining({ slot: 1 }),
     );
     // The cross-slot proxy fence: at N > 1 the run's proxy REQUIRES a per-run
-    // credential (a sibling slot can reach the loopback port).
+    // credential.
     const [proxyOpts] = startEgressProxy.mock.calls[0] as [
       { credential?: { user: string; secret: string } },
     ];
@@ -2809,24 +2403,11 @@ describe("#205: a run on slot 1 executes as the slot-1 account end to end", () =
       secret: expect.stringMatching(/^[0-9a-f]{48}$/),
     });
     const daemonConfig = daemonCtorArgs[0]?.[0] as {
-      agentUser: string;
       boxSlot?: number;
       boxSlots: number;
     };
-    expect(daemonConfig).toMatchObject({
-      agentUser: "_automata-agent-1",
-      boxSlot: 1,
-      boxSlots: 2,
-    });
-    const reapUsers = reapAgentUidEscapees.mock.calls.map(
-      (c) => (c[0] as { agentUser: string; phase: string }).agentUser,
-    );
-    expect(reapUsers.length).toBeGreaterThanOrEqual(2);
-    expect(new Set(reapUsers)).toEqual(new Set(["_automata-agent-1"]));
-    expect(cleanupWorkdir).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ agentUser: "_automata-agent-1" }),
-    );
+    expect(daemonConfig).toMatchObject({ boxSlot: 1, boxSlots: 2 });
+    expect(cleanupWorkdir).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3151,46 +2732,6 @@ Committed_AS:   12000000 kB
     ).toBe(true);
     expect(controller.reservedBytes()).toBe(0);
     admitSpy.mockRestore();
-  });
-
-  it("once the daemon is up the reservation shrinks by the run cgroup's anonymous memory and is whole again when the probe reads nothing; teardown frees it", async () => {
-    const { _setAdmissionControllerForTests } = await import("./workflow");
-    const { AdmissionController } = await import("./headroom");
-    const controller = new AdmissionController(POLICY, () => ROOMY);
-    _setAdmissionControllerForTests(controller);
-    fakeRunCgroupDir =
-      "/sys/fs/cgroup/system.slice/automata-worker.service/run-x";
-    const anon = 300 * 1024 ** 2;
-    readMemoryAnon.mockImplementation(() => anon);
-    const seen: Array<number | null> = [];
-    // The probe is attached after the daemon is up and read while the run
-    // polls, so the run must have a message to execute: a 204 would end it
-    // at next-message, before any poll. Set here, not inherited from
-    // whichever describe ran before (the #380 group resets it).
-    pullNextMessage.mockReset().mockResolvedValue({
-      agent: "claudeCode",
-      model: "m",
-    });
-    pollUntilTerminal.mockReset().mockImplementation(async () => {
-      seen.push(controller.reservedBytes());
-      readMemoryAnon.mockImplementation(() => null);
-      seen.push(controller.reservedBytes());
-      return { outcome: "completed", finalStatus: "complete" };
-    });
-    try {
-      await runFn(INPUT, { cancelled: false, log: vi.fn() });
-      expect(readMemoryAnon).toHaveBeenCalledWith({
-        cgroupDir: "/sys/fs/cgroup/system.slice/automata-worker.service/run-x",
-      });
-      expect(seen).toEqual([
-        POLICY.runCommitBytes - anon,
-        POLICY.runCommitBytes,
-      ]);
-      expect(controller.reservedBytes()).toBe(0);
-    } finally {
-      fakeRunCgroupDir = null;
-      readMemoryAnon.mockReset().mockImplementation(() => null);
-    }
   });
 
   it("a plain error after admission is final by registration (retries 0): it reaches the engine as-is, message intact, slot released", async () => {
@@ -3571,70 +3112,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
   afterEach(() => {
     agentCommandFake = null;
     delete process.env.WORKER_TIMEOUT_SALVAGE;
-    delete process.env.WORKER_DEV_CONTAINER_RUNS;
-    delete process.env.WORKER_BATTERIES_IMAGE;
-    delete process.env.WORKER_RUN_MEMORY_MAX;
     vi.restoreAllMocks();
-  });
-
-  it("a timeout with a salvage posts the branch, in order: reap → salvage → reap → post → broker close → cleanup → release (AC1/AC2)", async () => {
-    // protects=AC2's thread text and Part A2's order: the salvage runs after
-    // the agent is dead and reaped, BEFORE the post (which names the branch)
-    // and BEFORE the git broker closes (the push needs it); the agent uid is
-    // reaped again after the salvage's own git; fails_when=the post carries
-    // the plain limit line, any step moves, or the push targets another ref
-    // or carries the installation token; no_claim=real git (the git steps are
-    // scripted; abnormal-end-salvage.test.ts runs them against a real repo)
-    // and the uid reaper itself (mocked).
-    const c = timeoutCtx("run-ext-salvage");
-
-    const out = await runFn(TASK_INPUT, c);
-
-    expect(out.outcome).toBe("cancelled");
-    expect(postRunTerminal).toHaveBeenCalledTimes(1);
-    expect(postRunTerminal.mock.calls[0]![1]).toEqual({
-      runExternalId: "run-ext-salvage",
-      cause: "timeout",
-      info: `Unfinished work was saved to branch ${WORK_BRANCH} (commit c0ffee00).`,
-    });
-    const teardownOnward = finallyOrder.slice(finallyOrder.indexOf("teardown"));
-    expect(teardownOnward).toEqual([
-      "teardown",
-      "uid-reap:teardown",
-      "salvage:guard",
-      "salvage:check-ref-format",
-      "salvage:head-state",
-      "salvage:submodules",
-      "salvage:stale-locks",
-      "salvage:add",
-      "salvage:diff",
-      "salvage:commit",
-      "salvage:rev-list",
-      "salvage:log",
-      "salvage:push",
-      "uid-reap:teardown",
-      "post",
-      "git-broker-close",
-      "token-revoke",
-      "cleanupWorkdir",
-      "release",
-    ]);
-    // The push: the run's own repo by URL, HEAD to the work branch only.
-    const push = salvageCalls.find((a) => a.script.includes("git push"))!;
-    expect(push.args).toEqual(["https://github.com/o/r.git", WORK_BRANCH]);
-    expect(push.script).not.toMatch(/--force|\s-f\s|\+HEAD/);
-    // Every salvage git runs in the checkout, on a FRESH signal (the run's
-    // is aborted), with the broker's bearer auth and never the raw token.
-    for (const a of salvageCalls) {
-      expect(a.cwd).toBe(RUN.repo);
-      expect(a.signal?.aborted).toBe(false);
-      const env = JSON.stringify(a.env);
-      expect(env).toContain("url.http://127.0.0.1:41999/.insteadOf");
-      expect(env).not.toContain("inst-secret");
-    }
-    expect(logLines(c)).toContain(
-      `[agent-run thr_leak_1] salvage: pushed c0ffee00 to ${WORK_BRANCH}`,
-    );
   });
 
   it("a salvage that fails still posts `timeout` with the limit line, and the teardown finishes (AC5)", async () => {
@@ -3676,16 +3154,14 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: skipped (disabled)",
     );
-    expect(finallyOrder.filter((s) => s === "uid-reap:teardown")).toHaveLength(
-      1,
-    );
+    expect(finallyOrder).not.toContain("container-salvage-prepare");
   });
 
-  it("a lost box lock skips the salvage and the second reap (AC6)", async () => {
+  it("a lost box lock skips the salvage (AC6)", async () => {
     // protects=AC6 through the workflow: a lost lock means another run may
-    // own the box, so no git runs as the agent uid and no uid-wide kill;
-    // fails_when=any salvage git or any teardown reap runs; no_claim=how the
-    // lock is lost (box-lock tests).
+    // own the box slot, so the container is not frozen and no git runs;
+    // fails_when=any salvage prepare or git runs; no_claim=how the lock is
+    // lost (box-lock tests).
     acquireBoxSlotMock.mockImplementationOnce(async () => {
       admissionOrder.push("lock");
       return { release: releaseMock, lost: true, slot: 0 };
@@ -3695,42 +3171,13 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     await runFn(TASK_INPUT, c);
 
     expect(salvageCalls).toEqual([]);
-    expect(finallyOrder).not.toContain("uid-reap:teardown");
+    expect(finallyOrder).not.toContain("container-salvage-prepare");
     expect(logLines(c)).toContain(
       "[agent-run thr_leak_1] salvage: skipped (lock lost)",
     );
     expect((postRunTerminal.mock.calls[0]![1] as { cause: string }).cause).toBe(
       "timeout",
     );
-  });
-
-  it("a lock lost DURING the salvage skips the second reap and says so (review F3)", async () => {
-    // protects=ADR-007's lost-lock rule for the post-salvage reap: once the
-    // kernel freed the slot, another run may own the agent uid, and a
-    // uid-wide kill would take its live agent; fails_when=the second reap
-    // runs, or the skip is not journaled; no_claim=the reaper itself
-    // (mocked) and how a lock is lost (box-lock tests).
-    const lock = { release: releaseMock, lost: false, slot: 0 };
-    acquireBoxSlotMock.mockImplementationOnce(async () => {
-      admissionOrder.push("lock");
-      return lock;
-    });
-    agentCommandFake = async (a) => {
-      if (a.script.includes("git push")) lock.lost = true;
-      return scriptedGit(a);
-    };
-    const c = timeoutCtx("run-ext-salvage-lost-mid");
-
-    await runFn(TASK_INPUT, c);
-
-    expect(finallyOrder).toContain("salvage:push");
-    expect(finallyOrder.filter((s) => s === "uid-reap:teardown")).toEqual([
-      "uid-reap:teardown",
-    ]);
-    expect(logLines(c)).toContain(
-      `[agent-run thr_leak_1] box.escapees_scan_skipped ${JSON.stringify({ phase: "teardown", reason: "lock lost" })}`,
-    );
-    expect(releaseMock).toHaveBeenCalledTimes(1);
   });
 
   it("review and self-heal runs never salvage, even at the limit (AC10)", async () => {
@@ -3754,18 +3201,8 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     }
   });
 
-  // card: protects=the ADR-013 ordering: a container run's end is claimed (after an OOM-flag refresh) and its timeout salvaged INSIDE the container — prepare (freeze + bridge), then every git step through the container's runner in /workspace against the prepare's broker URL — all BEFORE the container's removal; then the post names the branch, then the broker closes, the token is revoked, the workdir cleaned and the lock released; no host uid reap runs; fails_when=git runs on the host or after the removal, the push uses the host broker URL or the host checkout, the post carries the plain limit line, or any step moves; no_claim=a live container (ContainerDaemonProcess is a stand-in; container-daemon-process tests and the PR's drill cover the real one)
-  it("the container path (ADR-013) salvages inside the container before its removal, then posts the branch", async () => {
-    process.env.WORKER_DEV_CONTAINER_RUNS = "1";
-    process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
-    process.env.WORKER_RUN_MEMORY_MAX = "3G";
-    // C3: a container run always gets an egress proxy (its only route out).
-    startEgressProxy.mockResolvedValue({
-      url: "http://127.0.0.1:41234",
-      port: 41234,
-      unauthenticatedRequests: () => 0,
-      close: vi.fn(async () => {}),
-    });
+  // card: protects=AC1/AC2 + the ADR-013 ordering: a run's end is claimed (after an OOM-flag refresh) and its timeout salvaged INSIDE the container — prepare (freeze + bridge), then every git step through the container's runner in /workspace against the prepare's broker URL on a fresh signal — all BEFORE the container's removal; then the post names the branch, then the broker closes, the token is revoked, the workdir cleaned and the lock released; the push targets the run's own repo and work branch only; fails_when=git runs after the removal, the push uses the host broker URL, another ref or the raw token, the post carries the plain limit line, or any step moves; no_claim=a live container (ContainerDaemonProcess is a stand-in; container-daemon-process tests and the PR's drill cover the real one) and real git (abnormal-end-salvage.test.ts)
+  it("a timeout salvages inside the container before its removal, then posts the branch", async () => {
     const c = timeoutCtx("run-ext-salvage-container");
 
     const out = await runFn(TASK_INPUT, c);
@@ -3776,7 +3213,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     );
     // C3 (#430): the container gets this run's proxy (and the broker handoff
     // the workflow built), never a fresh route of its own.
-    const deps = containerCtorArgs.at(-1)?.[5] as {
+    const deps = daemonCtorArgs.at(-1)?.[5] as {
       egressProxyUrl?: string | null;
       broker?: unknown;
     };
@@ -3803,7 +3240,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
       "salvage:rev-list",
       "salvage:log",
       "salvage:push",
-      "container-teardown",
+      "teardown",
       "post",
       "git-broker-close",
       "token-revoke",
@@ -3812,8 +3249,12 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     ]);
     // Every step in the container's checkout, through the prepare's bridge,
     // with the run's bearer and never the host broker URL or the raw token.
+    const push = salvageCalls.find((a) => a.script.includes("git push"))!;
+    expect(push.args).toEqual(["https://github.com/o/r.git", WORK_BRANCH]);
+    expect(push.script).not.toMatch(/--force|\s-f\s|\+HEAD/);
     for (const a of salvageCalls) {
       expect(a.cwd).toBe("/workspace");
+      expect(a.signal?.aborted).toBe(false);
       const env = JSON.stringify(a.env);
       expect(env).toContain("url.http://127.0.0.1:3139/.insteadOf");
       expect(env).not.toContain("41999");
@@ -3824,15 +3265,6 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
 
   // card: protects=a container run that ends normally (or whose lane owns no abnormal terminal) never freezes its container or runs any salvage git, and its removal still comes first in the teardown; fails_when=a normal end prepares a salvage or runs git; no_claim=the review lane's container (same rule: abnormal.owns is false)
   it("a container run that ends normally never prepares a salvage", async () => {
-    process.env.WORKER_DEV_CONTAINER_RUNS = "1";
-    process.env.WORKER_BATTERIES_IMAGE = `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`;
-    process.env.WORKER_RUN_MEMORY_MAX = "3G";
-    startEgressProxy.mockResolvedValue({
-      url: "http://127.0.0.1:41234",
-      port: 41234,
-      unauthenticatedRequests: () => 0,
-      close: vi.fn(async () => {}),
-    });
     pollUntilTerminal.mockResolvedValue({
       outcome: "completed",
       finalStatus: "complete",
@@ -3844,7 +3276,7 @@ describe("#437 Part B: the timeout salvage runs between the claim and the post",
     expect(out.outcome).toBe("completed");
     expect(salvageCalls).toEqual([]);
     expect(finallyOrder).not.toContain("container-salvage-prepare");
-    expect(finallyOrder).toContain("container-teardown");
+    expect(finallyOrder).toContain("teardown");
     expect(postRunTerminal).not.toHaveBeenCalled();
     expect(logLines(c).some((l) => l.includes("salvage:"))).toBe(false);
   });

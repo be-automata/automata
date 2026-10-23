@@ -107,14 +107,13 @@ export type EgressDecisionEvent = {
  * denied.
  *
  * "observe" — every destination is ALLOWED, and every decision is still POSTED.
- * This is the agent-uid default for a repo with no policy. Under the PF anchor
- * the agent has NO direct route to 80/443, so a proxy must exist on every run
- * or the agent CLI's own api.anthropic.com call dies; but a box that has no
- * policy must not silently acquire a deny-all fence either.
+ * This is the default for a repo with no policy. A run container has
+ * `--network none` (ADR-013), so this proxy is its only route out and must
+ * exist on every run or the agent CLI's own api.anthropic.com call dies; but a
+ * box that has no policy must not silently acquire a deny-all fence either.
  *
  * Allow-all WITHOUT audit was rejected outright: this proxy is loopback-only
- * with no client auth, the anchor passes lo0 unconditionally, and the agent is
- * HANDED the proxy URL — that combination is an unaudited open relay egressing
+ * with no client auth at N = 1, and the agent is HANDED the proxy URL — that combination is an unaudited open relay egressing
  * as the operator's uid. Auditing it is what makes it defensible, and it is
  * also the only way to earn a tighter default: one trivial `claude -p` run on
  * the pilot box reached api.anthropic.com, mcp-proxy.anthropic.com,
