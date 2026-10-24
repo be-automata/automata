@@ -359,13 +359,14 @@ this box left behind (label `automata.box`).
 | `WORKER_CONTAINER_RUN_GID`       | unset (no hand-over)               | The rootless daemon user's primary gid: the run dir is handed to it (setgid, group rw).            |
 
 The slot tuple (`WORKER_BOX_SLOTS=3`, `WORKER_GLOBAL_MAX_RUNS=3`, `WORKER_PER_ORG_MAX_RUNS=2`)
-works unchanged; with containers on it does not need `WORKER_AGENT_USER`. A container run gets no
-network (`--network none`) and, until C3 (#430) bridges the egress proxy and brokers over unix
-sockets, no route to the control plane either: this path is for proving the container lifecycle,
-not for serving real runs.
+works unchanged, and `WORKER_AGENT_USER` is ignored: every run is a container. A container gets no
+network (`--network none`); its only exits are the unix sockets the worker forwards into
+`<runDir>/sock` (C3, #430), bridged inside the container to `127.0.0.1`: the egress proxy (every
+lane, `:3128`), the git and gh brokers (non-review lanes, `:3129` and `http_unix_socket`) and the
+box's test Postgres (opted-in repos, `:25432`). The daemon reaches www through the proxy.
 
-Install the rootless daemon on the throwaway box (root; idempotent). On production it is installed
-only through `deploy/provision-execution-box.sh --prepare-only` (below), which calls this installer:
+The rootless daemon is installed by `deploy/provision-execution-box.sh` (below), which calls this
+installer; run it directly only to inspect or re-check a box (root; idempotent):
 
 ```bash
 packages/worker/deploy/linux/install-rootless-docker.sh --worker-user automata
