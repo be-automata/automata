@@ -240,10 +240,13 @@ export async function executeReviewIntent(
   }
   let existing: GitHubReview | null = null;
   try {
+    // ONE listing answers both "what is in force at HEAD?" and, with
+    // `isSameReview`, "is any of it this review?" (no second round trip).
+    const reviews = yieldTo ? [] : await github.listReviews(repo, prNumber);
     existing = yieldTo
       ? null
       : await findBotReviewAtHead({
-          github,
+          github: { listReviews: async () => reviews },
           repo,
           prNumber,
           headSha,
@@ -256,7 +259,7 @@ export async function executeReviewIntent(
         : // Every bot review in force at HEAD, not only the first: an earlier
           // review of a different change that could not be dismissed (a
           // COMMENT) must not hide a redelivery of this one.
-          (await github.listReviews(repo, prNumber)).some(
+          reviews.some(
             (r) =>
               r.user?.login === botLogin &&
               r.commitId === headSha &&

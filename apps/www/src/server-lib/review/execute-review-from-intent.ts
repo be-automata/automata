@@ -165,11 +165,13 @@ export interface ExecuteReviewFromIntentOpts {
   isDraft?: boolean;
   /**
    * The draft state the run's prompt stated (#504), stamped at dispatch from
-   * the same `pulls.get` read. Consulted ONLY by the no-verdict rule: a bare
-   * `comment` from a run told "this is a draft" is its draft verdict even when
-   * the PR left draft mid-run. The floor cap keeps following the live
-   * `isDraft`. Ignored for an abandoned run, so a superseded draft-era run
-   * cannot occupy HEAD with a COMMENT review. Absent = today's behaviour.
+   * the PR read the prompt was built from. A bare `comment` about live HEAD
+   * from a run told "draft" is its draft verdict even when the PR left draft
+   * mid-run: it is not the no-verdict notice, and it posts as a marked
+   * draft-era note that yields to any review in force at HEAD, never
+   * supersedes one, never retires a notice. The floor cap keeps following the
+   * live `isDraft`. Ignored for an abandoned run and for a comment about an
+   * older commit. Absent = today's behaviour.
    */
   draftAtDispatch?: boolean;
   /**
@@ -453,7 +455,8 @@ export async function executeReviewFromIntent(
     // fixed at the replay guard); counting it as a NEWER verdict here drops a real
     // verdict that merely arrived late. Same defect, two guards, and only one was
     // fixed. They share a single `const` now so they cannot drift apart again —
-    // do not re-inline either filter.
+    // do not re-inline either filter. A draft-era note (#504) is filtered for
+    // the same reason: it answers the PR as it was, never a verdict at a commit.
     const verdicts = reviews.filter((r) => !isNotAVerdict(r));
 
     const alreadyAtIntentCommit = await findAnyBotReviewAtCommit({
@@ -500,7 +503,7 @@ export async function executeReviewFromIntent(
       );
       return { outcome: "skipped_superseded" };
     }
-    const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${execIntent.body}`;
+    const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${withoutDraftEraMarker(execIntent.body)}`;
     try {
       await github.submitReviewWithComments(
         repoFullName,
@@ -581,12 +584,15 @@ export async function executeReviewFromIntent(
         body: `${postedIntent.body.trimEnd()}\n\n${reviewBaseMarker(reviewBase)}`,
       }
     : postedIntent;
-  const finalIntent = draftEraNote
-    ? {
-        ...markedIntent,
-        body: `${markedIntent.body.trimEnd()}\n\n${DRAFT_ERA_NOTE_MARKER}`,
-      }
-    : markedIntent;
+  // Agent text never carries the marker: only the server appends it, so a
+  // steered summary cannot make a real verdict read as a draft-era note.
+  const cleanBody = withoutDraftEraMarker(markedIntent.body);
+  const finalIntent = {
+    ...markedIntent,
+    body: draftEraNote
+      ? `${cleanBody.trimEnd()}\n\n${DRAFT_ERA_NOTE_MARKER}`
+      : cleanBody,
+  };
 
   const outcome = await runExecutor({
     github,
@@ -673,8 +679,9 @@ export async function executeReviewFromIntent(
 }
 
 /**
- * An agent-chosen `comment` that carries no findings, on a PR that is ready for
- * review and was ready when the run's prompt was built (#504). The skill
+ * An agent-chosen `comment` that carries no findings, unless the caller treats
+ * the run as a draft (a live draft, or a draft-at-dispatch run commenting on
+ * live HEAD, #504). The skill
  * reserves `comment` for drafts and for findings surfaced below the block
  * floor; with neither, it can only mean "I could not reach a verdict" — the
  * review #228 received when the agent had no git access. That is a
@@ -894,6 +901,31 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
 }
 
 /**
+ * The hidden last line of a draft-era note (#504): a bare `comment` posted as a
+ * review only because the run's prompt said "draft" and the PR left draft
+ * mid-run. It answers the PR as it was, so it is never the verdict a later run
+ * looks for at a commit. Same author caveat as `isDegradedComment`.
+ */
+export const DRAFT_ERA_NOTE_MARKER = "<!-- automata:draft-era-note -->";
+
+/** A review whose body ends with `DRAFT_ERA_NOTE_MARKER`. */
+export function isDraftEraNote(review: GitHubReview): boolean {
+  return review.body.trimEnd().endsWith(DRAFT_ERA_NOTE_MARKER);
+}
+
+/**
+ * Reviews no guard may count as a delivered verdict at a commit. No author
+ * check: callers filter by the bot login, as for `isDegradedComment`.
+ */
+export function isNotAVerdict(review: GitHubReview): boolean {
+  return isDegradedComment(review) || isDraftEraNote(review);
+}
+
+function withoutDraftEraMarker(body: string): string {
+  return body.split(DRAFT_ERA_NOTE_MARKER).join("");
+}
+
+/**
  * LEGACY (pre-ADR-009) reviews only — see `DEGRADED_INTENT_MARKER`.
  *
  * A degraded COMMENT is a run's CONFESSION that it produced no parseable verdict —
@@ -909,23 +941,6 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * in practice `findBotReviewAtHead`'s `r.user?.login === botLogin`, applied AFTER
  * this one.
  */
-/**
- * The hidden last line of a draft-era note (#504): a bare `comment` posted as a
- * review only because the run's prompt said "draft" and the PR left draft
- * mid-run. It answers the PR as it was, so it is never the verdict a later run
- * looks for at a commit. Same author caveat as `isDegradedComment`.
- */
-export const DRAFT_ERA_NOTE_MARKER = "<!-- automata:draft-era-note -->";
-
-export function isDraftEraNote(review: GitHubReview): boolean {
-  return review.body.trimEnd().endsWith(DRAFT_ERA_NOTE_MARKER);
-}
-
-/** Reviews no guard may count as a delivered verdict at a commit. */
-export function isNotAVerdict(review: GitHubReview): boolean {
-  return isDegradedComment(review) || isDraftEraNote(review);
-}
-
 export function isDegradedComment(review: GitHubReview): boolean {
   // STRUCTURAL, NOT A SUBSTRING SEARCH. The retired emission site always built
   // the body as `${MARKER}\n\n_Reason: …`, so the marker is a PREFIX by

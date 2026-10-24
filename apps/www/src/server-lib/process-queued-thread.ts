@@ -28,6 +28,10 @@ import {
   getPrHeadState,
 } from "@/server-lib/review/octokit-review-client";
 import { publishReviewNotice } from "@/server-lib/review/review-notice";
+import {
+  isNotAVerdict,
+  snapshotOf,
+} from "@/server-lib/review/execute-review-from-intent";
 import { isReviewThread } from "@/server-lib/review/review-single-writer-finish";
 
 /** Queued tasks older than this are RETIRED (archived, not run) on promotion. */
@@ -208,8 +212,11 @@ async function postQueueRetiredReviewNotice({
     }
     const github = createOctokitReviewClient(octokit);
     const botLogin = resolveBotLogin();
+    // The same filter as every other "verdict at this commit?" guard: a
+    // degraded comment or a draft-era note (#504) is not a delivered verdict.
+    const reviews = await github.listReviews(repoFullName, prNumber);
     const existing = await findAnyBotReviewAtCommit({
-      github,
+      github: snapshotOf(reviews.filter((r) => !isNotAVerdict(r))),
       repo: repoFullName,
       prNumber,
       headSha: sha,

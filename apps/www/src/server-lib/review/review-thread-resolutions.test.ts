@@ -310,6 +310,34 @@ describe("executeReviewFromIntent — resolutions + verify-before-block", () => 
     expect(client.findThreadByCommentId).not.toHaveBeenCalled();
   });
 
+  it("a draft-era note that yielded to another COMMENT → nothing is resolved", async () => {
+    const github = makeGithub([
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "COMMENTED",
+        submittedAt: "t",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: "One thing worth a look.",
+      },
+    ]);
+    const client = makeThreadClient([openThread()]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      draftAtDispatch: true,
+      terminalText: intent({ verdict: "comment", summary: "Draft: fine." }),
+      threadResolutions: { client, claim: async () => true },
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(client.findThreadByCommentId).not.toHaveBeenCalled();
+  });
+
   it("a redelivered draft-era note that already posted still finishes its resolutions", async () => {
     // First delivery posts the note, then "crashes" before resolutions.
     const first = makeGithub([]);

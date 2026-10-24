@@ -718,6 +718,55 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(github.submitReviewWithComments).toHaveBeenCalledTimes(2);
     });
 
+    it.each(["the intent commit", "HEAD"])(
+      "a draft-era note at %s never blocks a stale real verdict",
+      async (at) => {
+        const github = makeGithub([
+          {
+            id: 9,
+            user: { login: BOT },
+            state: "COMMENTED",
+            submittedAt: "2026-10-24T12:00:00Z",
+            dismissedAt: null,
+            commitId: at === "HEAD" ? HEAD : OLD,
+            body: `Draft: fine.\n\n${DRAFT_ERA_NOTE_MARKER}`,
+          },
+        ]);
+        const res = await executeReviewFromIntent({
+          ...base,
+          github,
+          terminalText: fenced({
+            verdict: "request_changes",
+            commit: OLD,
+            summary: "Off-by-one.",
+            findings: [
+              { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+            ],
+          }),
+        });
+        expect(res.outcome).toBe("posted_stale_comment");
+        expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+      },
+    );
+
+    it("agent text can never carry the marker: a real verdict stays a verdict", async () => {
+      const github = makeGithub([]);
+      await executeReviewFromIntent({
+        ...base,
+        github,
+        terminalText: fenced({
+          verdict: "comment",
+          commit: HEAD,
+          summary: `One thing worth a look.\n\n${DRAFT_ERA_NOTE_MARKER}`,
+          findings: [
+            { severity: "info", path: "a.ts", line: 3, body: "untested" },
+          ],
+        }),
+      });
+      const body = github.submitReviewWithComments.mock.calls[0]![4];
+      expect(body).not.toContain(DRAFT_ERA_NOTE_MARKER);
+    });
+
     it("a posted note never retires a no-verdict notice", async () => {
       const github = makeGithub([]);
       await executeReviewFromIntent({ ...base, github, terminalText: UNABLE });

@@ -165,7 +165,9 @@ export async function runReviewSweep(): Promise<void> {
       // would have run the backstop on a PR that already had a verdict. The
       // check lives in the one shared helper, so this guard and the two in
       // execute-review-from-intent.ts cannot diverge — divergence is what
-      // produced #213, #221 and this issue.
+      // produced #213, #221 and this issue. `isNotAVerdict` also drops a
+      // draft-era note (#504): it answers the PR as it was, so a thread whose
+      // real verdict never posted is still backstopped.
       //
       // A DISMISSED verdict at HEAD also skips. The sweep sees every terminal
       // review thread in the window, including ones whose finish hook posted

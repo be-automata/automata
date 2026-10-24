@@ -95,6 +95,7 @@ import {
   botAuthoredVerdictLine,
   executeReviewFromIntent,
   DEGRADED_INTENT_MARKER,
+  DRAFT_ERA_NOTE_MARKER,
 } from "./execute-review-from-intent";
 
 import {
@@ -343,6 +344,19 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     // sweep matched A's silence and skipped, and B's verdict was lost forever.
     prReviews.rows = [
       review({ body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: x._` }),
+    ];
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+  });
+
+  // #504: a draft-era note answers the PR as it was; it is not the verdict
+  // this candidate owed the ready PR.
+  it("a DRAFT-ERA note at HEAD does NOT skip the candidate — the backstop runs", async () => {
+    prReviews.rows = [
+      review({ body: `Draft: fine.\n\n${DRAFT_ERA_NOTE_MARKER}` }),
     ];
     selected.rows = [candidate({ terminalCause: "timeout" })];
 
