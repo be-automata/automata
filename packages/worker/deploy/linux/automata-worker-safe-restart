@@ -1,0 +1,54 @@
+#!/bin/bash
+# Restart the execution-plane worker WITHOUT interrupting a run (#386).
+#
+# Install: install -m 0755 -o root -g root automata-worker-safe-restart /usr/local/sbin/
+# Use it for every planned restart, instead of `systemctl restart automata-worker`:
+#
+#   automata-worker-safe-restart [--timeout-s N]
+#
+# A bare `systemctl restart` SIGTERMs a busy worker; the SDK's drain stops the
+# engine heartbeat first, and a drain that outlasts the heartbeat window hands
+# the run to another worker while this one is still running it. This script
+# pauses the worker in the engine instead (no new assignments, runs in flight
+# keep going), waits until every slot is free, and only then restarts. It never
+# restarts a worker that still holds a run: on timeout, an unreadable engine,
+# or Ctrl-C, the worker is unpaused and keeps running (exit non-zero).
+#
+# Env: WORKER_USER (default automata), AUTOMATA_REPO (default /opt/automata-platform).
+set -uo pipefail
+
+WORKER_USER="${WORKER_USER:-automata}"
+AUTOMATA_REPO="${AUTOMATA_REPO:-/opt/automata-platform}"
+UNIT=automata-worker
+
+if [ "$(id -u)" != 0 ]; then
+  echo "automata-worker-safe-restart: run as root" >&2
+  exit 1
+fi
+home="$(getent passwd "$WORKER_USER" | cut -d: -f6)"
+env_file="$home/.automata/worker-box.env"
+[ -r "$env_file" ] || {
+  echo "automata-worker-safe-restart: $env_file not readable" >&2
+  exit 1
+}
+
+if systemctl is-active --quiet "$UNIT"; then
+  # Ctrl-C reaches the drain too, which unpauses the worker before it exits.
+  trap '' INT
+  runuser -u "$WORKER_USER" -- env -C "$AUTOMATA_REPO/packages/worker" \
+    PATH=/usr/local/bin:/usr/bin:/bin bash -c '
+      set -a; . "$1"; set +a; shift
+      exec node --import tsx scripts/drain-for-restart.ts "$@"
+    ' drain "$env_file" "$@"
+  rc=$?
+  trap - INT
+  if [ "$rc" != 0 ]; then
+    echo "automata-worker-safe-restart: drain did not finish (exit $rc); $UNIT left running, NOT restarted" >&2
+    exit "$rc"
+  fi
+else
+  echo "automata-worker-safe-restart: $UNIT is not active; nothing to drain"
+fi
+
+systemctl restart "$UNIT"
+echo "automata-worker-safe-restart: $UNIT restarted at $(date -u +%FT%TZ)"

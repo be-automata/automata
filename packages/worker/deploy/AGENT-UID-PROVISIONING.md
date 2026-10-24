@@ -388,8 +388,7 @@ sed 's#__USER__#automata#g; s#__HOME__#/home/automata#g; s#__REPO__#/opt/automat
 sed 's#__USER__#automata#g; s#__HOME__#/home/automata#g; s#__REPO__#/opt/automata-platform#g' automata-worker.service \
   | sudo install -m 0644 /dev/stdin /etc/systemd/system/automata-worker.service
 sudo systemctl daemon-reload
-ls /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null   # nothing in flight?
-sudo systemctl restart automata-worker.service
+sudo automata-worker-safe-restart          # drains (pause + wait idle), then restarts
 journalctl -u automata-worker -n 30 --no-pager | grep nft-loopback-load     # the OK line, once per start
 
 # 4. Prove it: structure + the live probe matrix, as every slot uid, from inside

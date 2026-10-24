@@ -2687,6 +2687,32 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     );
   });
 
+  it("the safe restart drains before it restarts, and never restarts after a failed drain (#386)", () => {
+    // A bare `systemctl restart` SIGTERMs a busy worker; with two boxes the
+    // engine hands the drained run to the other box mid-run. The wrapper must
+    // run the drain FIRST and exit before `systemctl restart` when it fails.
+    const script = deployFile("linux", "automata-worker-safe-restart");
+    expect(script.startsWith("#!/bin/bash\n")).toBe(true);
+    const drain = script.indexOf("scripts/drain-for-restart.ts");
+    const bail = script.search(/if \[ "\$rc" != 0 \]; then[\s\S]*?exit "\$rc"/);
+    const restart = script.lastIndexOf('systemctl restart "$UNIT"');
+    expect(drain).toBeGreaterThan(-1);
+    expect(bail).toBeGreaterThan(drain);
+    expect(restart).toBeGreaterThan(bail);
+    const restartLines = script
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .filter((l) => l.includes("systemctl restart"));
+    expect(restartLines).toHaveLength(1);
+    // The drain runs as the service account with the box env, never as root.
+    expect(script).toMatch(/runuser -u "\$WORKER_USER" --/);
+    expect(script).toMatch(/\. "\$1"/);
+    const mode = fs.statSync(
+      path.join(workerRoot, "deploy", "linux", "automata-worker-safe-restart"),
+    ).mode;
+    expect(mode & 0o111).not.toBe(0);
+  });
+
   it("the unit signals only MainPID, so the SDK owns the drain", () => {
     // KillMode=control-group SIGTERMs the agent and its daemon directly and
     // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
