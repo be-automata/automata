@@ -103,7 +103,9 @@ const SECTION_END = /^<!-- automata:endif -->[ \t]*\r?$/;
  * Control-plane context a review agent cannot fetch itself: it holds no GitHub
  * credential (ADR-004), so the PR view, the prior reviews and the unresolved
  * review threads are read by the control plane with the App token when the
- * thread is created (prefetch-review-context.ts).
+ * thread is created (prefetch-review-context.ts). It holds no tracker
+ * credential either (ADR-008), so `ticket` — the tickets the PR delivers, for
+ * the pre-merge acceptance-criteria check — is read the same way.
  *
  * A skill asks for them with ONE whole-line directive,
  * `<!-- automata:context <fetcher> [<fetcher> …] -->`; the rendered blocks
@@ -116,6 +118,7 @@ export const REVIEW_CONTEXT_FETCHERS = [
   "pr-view",
   "prior-reviews",
   "review-threads",
+  "ticket",
 ] as const;
 
 export type ReviewContextFetcher = (typeof REVIEW_CONTEXT_FETCHERS)[number];

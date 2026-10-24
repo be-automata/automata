@@ -233,9 +233,13 @@ export function renderReviewThreads(
   return lines.join("\n");
 }
 
-/** One fetched block, or why it could not be fetched. */
+/**
+ * One fetched block, or why it could not be fetched. `maxChars` overrides the
+ * shared cap for a block whose middle must survive (a ticket's criteria sit
+ * between its summary and its UAT rows).
+ */
 export type ReviewContextBlock =
-  | { name: string; content: string }
+  | { name: string; content: string; maxChars?: number }
   | { name: string; unavailable: string };
 
 /**
@@ -255,9 +259,10 @@ export function renderReviewContext(
           block.name,
         );
       }
-      const { text, truncated } = capHeadTail(block.content, maxChars);
+      const cap = block.maxChars ?? maxChars;
+      const { text, truncated } = capHeadTail(block.content, cap);
       const body = truncated
-        ? `${text}\n[block "${block.name}" truncated to ${maxChars} chars]`
+        ? `${text}\n[block "${block.name}" truncated to ${cap} chars]`
         : text;
       return wrapUntrusted(body, block.name);
     })

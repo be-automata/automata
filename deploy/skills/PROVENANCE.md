@@ -107,6 +107,22 @@ block, which holds the deploy-order warning below.
   The save surfaces refuse a body that breaks this
   (`assertSkillBodyNamesPrBase`).
 
+- **B13. Ticket acceptance criteria** (both skills). The context directive
+  adds `ticket` (`pr-view prior-reviews review-threads ticket`); the control
+  plane renders it as a `<ticket_context>` block holding the tickets the PR
+  delivers, read from the org's tracker (the agent still holds no tracker
+  credential). Both intro variants name `<ticket_context>` among the Trigger
+  Context blocks; "Your job" says to check the ticket's acceptance criteria
+  alongside the verdict; a `## Ticket acceptance criteria (before merge)`
+  section before `## Body format` carries the post-merge audit's criteria
+  table, verdicts, conscious-acceptance and split rules, judged against the
+  PR diff; and `## Body format` gains a bullet for the checklist group. The
+  check is advisory: an unmet criterion never changes the verdict on its own;
+  a changed line that contradicts a criterion is an ordinary finding. The
+  section text is identical in both files on purpose (no shared partial).
+  Deploy www before pushing either skill: an older www rejects the unknown
+  `ticket` fetcher and keeps serving the previous version.
+
 The partials still call the review text `body` and the findings `comments`
 (the legacy names). The intent parser accepts both as aliases
 (`parse-review-intent.ts`, `withLegacyKeyAliases`), so following that wording

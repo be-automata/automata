@@ -27,15 +27,18 @@ import {
  * ran before its review-mode sections were added, plus two blank lines the
  * dropped orchestrated blocks leave behind: PORT_SHA256 is the classic render
  * with blank-line runs collapsed. That port replaced the vendor's own review
- * skill (pinned here before as 47b019a8…), so the pin moved with it. NEVER
+ * skill (pinned here before as 47b019a8…), so the pin moved with it. It moved
+ * again for PROVENANCE B13 (the pre-merge ticket acceptance-criteria check:
+ * the `ticket` fetcher, the `<ticket_context>` intro mention, the criteria
+ * section and its body-format bullet; was 330fdae9… / 78a5faf8…). NEVER
  * update these to "make the test pass": a mismatch means the classic prompt
  * every onboarded repo receives has changed.
  */
 const CLASSIC_SHA256 =
-  "330fdae9b1510d5cd8eaf32c799a0774b47691a994ffc92a316da558b6904c75";
-const CLASSIC_LENGTH = 19952;
+  "0adc59a564bd31138eeb24557a3cdb4b2598ff035b04a227d8a6378bdc5e46c9";
+const CLASSIC_LENGTH = 24663;
 const PORT_SHA256 =
-  "78a5faf89a8f25cd9a41468dc34aa55fa3c24c4f3dda2046517cf249b20f5276";
+  "12a6d35410ab2e1174eabcbb1ea126ac30b01bace7efdb66ae260d11480584c6";
 
 /** The read-only-git lines the orchestrated render swaps for its own. */
 const CLASSIC_ONLY = [

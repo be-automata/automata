@@ -387,7 +387,7 @@ describe("the tracked ported skills flatten completely", () => {
     assert.doesNotMatch(body, /<!-- include/);
     assert.equal(
       body.match(
-        /^<!-- automata:context pr-view prior-reviews review-threads -->$/gm,
+        /^<!-- automata:context pr-view prior-reviews review-threads ticket -->$/gm,
       )?.length,
       1,
     );
