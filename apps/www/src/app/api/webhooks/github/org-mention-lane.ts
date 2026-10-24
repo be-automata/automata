@@ -407,6 +407,7 @@ export async function handleOrgLaneMention(
         baseSha: pr.base.sha,
         headRef: pr.head.ref,
         headSha: pr.head.sha,
+        isDraft: pr.draft,
       });
     } else {
       const { data } = await octokit.rest.repos.get({ owner, repo });

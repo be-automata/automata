@@ -12,6 +12,11 @@
  * but each stacked PR has its own focused diff against its direct base; the
  * stack base only matters for policy, never as a diff base.
  *
+ * The PR's draft state is stated too, from the same read. A skill's draft rule
+ * ("`comment` is your verdict on a draft") is otherwise applied to whatever the
+ * agent infers, and a description that says "Draft:" read as a GitHub draft:
+ * a ready PR got a bare `comment` and so no verdict (PR #498, 2026-10-24).
+ *
  * Branch names are user-controlled. A fork PR's head ref is chosen by whoever
  * opened it, and git allows backticks, `$`, quotes and other prompt-breaking
  * characters in a ref name. Every ref rendered here goes through `safeGitRef`:
@@ -53,6 +58,17 @@ export interface PrDiffContextInput {
   headRef: string | null | undefined;
   /** `pull_request.head.sha`. */
   headSha: string | null | undefined;
+  /** `pull_request.draft`. Absent ⇒ the draft state is not stated. */
+  isDraft?: boolean | null;
+}
+
+/** The draft-state sentence, leading space included; empty when unknown. */
+function renderDraftState(isDraft: boolean | null | undefined): string {
+  if (isDraft === true) return " On GitHub this pull request is a draft.";
+  if (isDraft === false) {
+    return " On GitHub this pull request is ready for review, not a draft, whatever its title or description says.";
+  }
+  return "";
 }
 
 /**
@@ -61,12 +77,19 @@ export interface PrDiffContextInput {
  *   PR #481: base `feat/parent`, head `feat/child` at <sha>. The change under
  *   review is `git diff origin/feat/parent...HEAD` (origin/feat/parent is
  *   pre-fetched). Diff against this base, not the repository's default
- *   branch: a stacked PR's base is another pull request's branch.
+ *   branch: a stacked PR's base is another pull request's branch. On GitHub
+ *   this pull request is ready for review, not a draft, whatever its title
+ *   or description says.
  *
  * Wording agrees with skills that already render `{{baseBranch}}` (they name
  * the same `origin/<base>...HEAD`), so the two never point different ways.
  */
 export function renderPrDiffContext(input: PrDiffContextInput): string {
+  return renderBaseAndHead(input) + renderDraftState(input.isDraft);
+}
+
+/** The base, head and diff-command sentences of `renderPrDiffContext`. */
+function renderBaseAndHead(input: PrDiffContextInput): string {
   const base = safeGitRef(input.baseRef);
   const head = safeGitRef(input.headRef);
   const headSha = safeSha(input.headSha);

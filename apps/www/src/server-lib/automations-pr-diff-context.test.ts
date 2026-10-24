@@ -36,13 +36,14 @@ vi.mock("@/app/api/webhooks/github/utils", async (importOriginal) => {
 const HEAD = "a".repeat(40);
 const BASE_SHA = "b".repeat(40);
 
-function mockPull(headRef: string, baseRef: string) {
+function mockPull(headRef: string, baseRef: string, draft = false) {
   return {
     rest: {
       pulls: {
         get: vi.fn().mockResolvedValue({
           data: {
             state: "open",
+            draft,
             head: {
               ref: headRef,
               sha: HEAD,
@@ -83,10 +84,11 @@ describe("PR-event prompt names the base (stacked PRs)", () => {
     extra: {
       prEventAction?: "synchronize" | "edited";
       baseChangedFrom?: string;
+      draft?: boolean;
     } = {},
   ) {
     vi.mocked(getOctokitForBackground).mockResolvedValue(
-      mockPull(headRef, baseRef) as any,
+      mockPull(headRef, baseRef, extra.draft) as any,
     );
     const automation = await createTestAutomation({
       db,
@@ -112,7 +114,8 @@ describe("PR-event prompt names the base (stacked PRs)", () => {
       'The "pull_request.synchronize" event was triggered for PR #481.\n' +
         `PR #481: base \`feat/parent\`, head \`feat/child\` at ${HEAD}. ` +
         "The change under review is `git diff origin/feat/parent...HEAD` (origin/feat/parent is pre-fetched). " +
-        "Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch.",
+        "Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch. " +
+        "On GitHub this pull request is ready for review, not a draft, whatever its title or description says.",
     );
   });
 
@@ -126,6 +129,20 @@ describe("PR-event prompt names the base (stacked PRs)", () => {
       'The "pull_request.edited" event was triggered for PR #481. Its base branch changed from `feat/parent`',
     );
     expect(text).toContain("`git diff origin/main...HEAD`");
+  });
+
+  it("#498: a ready PR's prompt says it is not a draft", async () => {
+    await runFor("feat/x", "main", { draft: false });
+    expect(firstPromptPart()).toContain(
+      "On GitHub this pull request is ready for review, not a draft",
+    );
+  });
+
+  it("#498: a draft PR's prompt says it is a draft", async () => {
+    await runFor("feat/x", "main", { draft: true });
+    expect(firstPromptPart()).toContain(
+      "On GitHub this pull request is a draft.",
+    );
   });
 
   it("a hostile head ref never reaches the prompt", async () => {
