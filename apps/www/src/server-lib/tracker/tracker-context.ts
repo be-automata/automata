@@ -84,11 +84,21 @@ export function trackerContextNotice(reason: string): string {
   return `${TRACKER_CONTEXT_HEADER}\n\n${reason} Emit an intent with an empty \`tickets\` array.`;
 }
 
-function roleOf(key: string, extraction: TicketKeyExtraction): string {
+export function roleOf(key: string, extraction: TicketKeyExtraction): string {
   return key === extraction.primary ? "primary" : "closed by this PR";
 }
 
-function renderIssue(issue: TrackerIssue, role: string): string {
+/**
+ * One ticket as a context section. The post-merge lane wraps the ticket text
+ * in its own `<user_content>` tags; the review lane renders it inside a
+ * context block that is already wrapped (render.ts), so it passes
+ * `wrap: false`. `cutNote` is the lane's instruction for a cut description.
+ */
+export function renderTicketSection(
+  issue: TrackerIssue,
+  role: string,
+  { wrap, cutNote }: { wrap: boolean; cutNote: string },
+): string {
   const links = issue.links.flatMap((link) =>
     link.issues.map(
       (linked) =>
@@ -102,15 +112,11 @@ function renderIssue(issue: TrackerIssue, role: string): string {
     `- Stage: ${issue.stage ?? "unknown"}${issue.resolved ? " (resolved)" : ""}`,
     `- Links: ${links.length > 0 ? fence(links.join("; ")) : "none"}`,
     "",
-    "<user_content>",
+    ...(wrap ? ["<user_content>"] : []),
     `summary: ${fence(issue.summary)}`,
     "description:",
     fence(clip(issue.description, MAX_DESCRIPTION_CHARS)),
-    ...(issue.description.length > MAX_DESCRIPTION_CHARS
-      ? [
-          "(The description above was cut. Audit what is visible and say in `remaining` that the ticket was truncated.)",
-        ]
-      : []),
+    ...(issue.description.length > MAX_DESCRIPTION_CHARS ? [cutNote] : []),
     ...(comments.length > 0
       ? [
           "",
@@ -120,8 +126,16 @@ function renderIssue(issue: TrackerIssue, role: string): string {
           ),
         ]
       : []),
-    "</user_content>",
+    ...(wrap ? ["</user_content>"] : []),
   ].join("\n");
+}
+
+function renderIssue(issue: TrackerIssue, role: string): string {
+  return renderTicketSection(issue, role, {
+    wrap: true,
+    cutNote:
+      "(The description above was cut. Audit what is visible and say in `remaining` that the ticket was truncated.)",
+  });
 }
 
 /**

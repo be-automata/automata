@@ -284,6 +284,12 @@ export async function runAutomation({
                     prNumber: options.prNumber,
                     fetchers: contextFetchers,
                     pullRequest: options.pullRequest,
+                    // The org owner's tracker, as the post-merge lane reads it.
+                    ticket: {
+                      organizationId: automation.organizationId,
+                      ownerUserId: automation.userId,
+                      shadow,
+                    },
                   })
                 : NO_PR_REVIEW_CONTEXT,
             )
