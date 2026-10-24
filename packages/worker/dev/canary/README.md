@@ -7,7 +7,7 @@ end to end with **no production service involved**:
 ```
 dispatch.mts ──seal+trigger──▶ local hatchet-lite (127.0.0.1:7077/8888)
                                    │
-                    real worker (systemd, WORKER_DEV_CONTAINER_RUNS=1)
+                    real worker (systemd, container path)
                                    │  worker ⇄ daemonCallbackUrl (direct)
                                    │  container daemon ⇄ egress proxy ⇄ daemonCallbackUrl
                                    ▼
@@ -97,8 +97,7 @@ would call `<callback>/api/proxy/anthropic`. The stub answers that path with
 ## Box recipe (run as root on the throwaway box)
 
 ```bash
-# 0. Worker env (in its systemd env file): WORKER_DEV_CONTAINER_RUNS=1 and
-#    WORKER_BOX_TRUST=owner; it already holds HATCHET_CLIENT_TOKEN for the
+# 0. Worker env (in its systemd env file): WORKER_BOX_TRUST=owner; it already holds HATCHET_CLIENT_TOKEN for the
 #    local engine and the seal ring at /etc/automata/payload-seal.key.
 install -d -m 0700 /var/lib/automata-canary /etc/automata-canary
 install -m 0600 /dev/null /etc/automata-canary/anthropic.key   # then write the key into it

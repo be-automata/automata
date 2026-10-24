@@ -431,7 +431,8 @@ install_if_changed() {
 
 # The base bring-up the worker itself needs (cloud-init.yaml): checked, never
 # installed here.
-# The floor is the worker's own (node-floor.ts NODE_ENV_PROXY_FLOOR):
+# The floor is Node's built-in env-proxy support (NODE_USE_ENV_PROXY), which
+# the worker's host-side tools rely on behind the egress proxy:
 # >=22.21.0 on 22.x, or >=24.0.0.
 step_worker_runtime() {
   local version major minor

@@ -115,7 +115,7 @@ CommitLimit` (fraction default `0.9`; `1.0` = inert on that arm; run commit
   failure that ends the drain is redelivered to the next worker and re-executed.
   Before restarting: `systemctl list-jobs` (a pending stop = a drain in
   progress), the engine worker row (paused), and the journal for a `Task run
-  starting` without a `completed`/`failed` in the last 30 minutes or a
+starting` without a `completed`/`failed` in the last 30 minutes or a
   `box.headroom_deferred_wait` in the last 12.
   Rollback without a deploy: `WORKER_HEADROOM_FLOOR=0` and
   `WORKER_HEADROOM_COMMIT_FRACTION=1.0`.
@@ -430,8 +430,11 @@ Options: `--worker-user` (default `automata`), `--repo` (default: the checkout h
   touched, and the host path keeps running. The installer does add the worker account to
   `automata-docker` and to `automata-runner`'s group; a running worker picks those up only at its
   next restart, which it does not need before the release.
-- **Full mode** also checks the base bring-up (`node` 24 and `pnpm`, from `cloud-init.yaml`: checked,
-  not installed), renders `linux/run-worker.sh.template` to `~/.automata/run-worker.sh` and
+- **Full mode** also drops the host-uid fence's `/proc` hidepid (backs up `/etc/fstab`, removes the
+  line, remounts `/proc`): under it the runner's user manager cannot see a container's
+  subordinate-uid processes and no container starts. `--prepare-only` reports it and skips
+  `verify.sh` instead. Full mode also checks the base bring-up (`node` >=22.21 on 22.x or >=24, and
+  `pnpm`, from `cloud-init.yaml`: checked, not installed), renders `linux/run-worker.sh.template` to `~/.automata/run-worker.sh` and
   `linux/automata-worker.service` to `/etc/systemd/system/` (enabled, **never started or restarted**:
   restart the worker yourself at an idle moment), and sets three keys in
   `~/.automata/worker-box.env`, keeping every other line: `WORKER_BATTERIES_IMAGE`,
@@ -440,8 +443,8 @@ Options: `--worker-user` (default `automata`), `--repo` (default: the checkout h
   hand. Where the #367 loopback fence is provisioned (`/etc/automata/loopback-nft.conf` and its
   loader), the rendered unit keeps its `ExecStartPre=+…nft-loopback-load.sh`; where it is not, the
   line is left out of the render (it would fail every start, and a container has its own loopback).
-- **Never, in any mode:** `WORKER_DEV_CONTAINER_RUNS` (set by hand on the throwaway box only), and
-  nothing host-path is removed (accounts, sudoers, nft tables, drop-ins, battery trees: that is P4).
+- **Never, in any mode:** nothing host-path is removed (accounts, sudoers, nft tables, drop-ins,
+  battery trees: that is P4). The one host-fence change is `/proc` hidepid, full mode only (see Full mode).
 - **No `gh` on the box:** the attestation step prints `skip` and a `WARNING` block on stderr saying
   provenance was **not** verified. Install `gh` and re-run before the first run uses the digest.
   `gh attestation verify` needs a token (`GH_TOKEN`; any read-only one).
@@ -471,7 +474,7 @@ run path, which is larger than P2. The host-side driver below gets the same evid
 script inside the containers the worker itself built (preferred: real argv, real proxy, real broker
 sockets), or in a standalone container that mirrors `src/agent-run/container-argv.ts`.
 
-**Driver A, live runs (all seven).** On the throwaway box (`WORKER_DEV_CONTAINER_RUNS=1`), start a
+**Driver A, live runs (all seven).** On any container-path box (every box after the release), start a
 review run and a task run at the same time (two slots), then, while both containers are up:
 
 ```bash
