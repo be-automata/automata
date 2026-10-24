@@ -322,7 +322,7 @@ describe("executeReviewIntent — caller-owned isSameReview (retarget at an unch
   });
 });
 
-describe("executeReviewIntent — yieldToExisting (#504 draft-era comment)", () => {
+describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
   for (const state of ["APPROVED", "CHANGES_REQUESTED", "COMMENTED"] as const) {
     test(`a ${state} review in force at HEAD wins: skip, never dismiss`, async () => {
       const github = makeGithub([botReviewAtHead(state, 5)]);
@@ -333,7 +333,7 @@ describe("executeReviewIntent — yieldToExisting (#504 draft-era comment)", () 
         headSha: HEAD,
         botLogin: BOT,
         intent: { verdict: "comment", body: "draft note" },
-        yieldToExisting: true,
+        yieldTo: () => true,
       });
       assert.deepEqual(res, { outcome: "skipped_existing" });
       assert.equal(github.submitReviewWithComments.mock.calls.length, 0);
@@ -350,7 +350,23 @@ describe("executeReviewIntent — yieldToExisting (#504 draft-era comment)", () 
       headSha: HEAD,
       botLogin: BOT,
       intent: { verdict: "comment", body: "draft note" },
-      yieldToExisting: true,
+      yieldTo: () => true,
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+  });
+
+  test("a review the predicate rejects is not yielded to", async () => {
+    const github = makeGithub([
+      { ...botReviewAtHead("COMMENTED", 5), body: "degraded" },
+    ]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: (r) => r.body !== "degraded",
     });
     assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
   });

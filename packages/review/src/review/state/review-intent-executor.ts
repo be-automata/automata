@@ -89,12 +89,13 @@ export interface ExecuteReviewIntentOpts {
    */
   isSameReview?: (existing: GitHubReview) => boolean;
   /**
-   * Never supersede: ANY bot review in force at HEAD, whatever its state,
-   * means skip. For a note that must not replace a verdict the PR already has
-   * (a draft-era `comment` on a PR that has since left draft). Read at post
-   * time, so a verdict that landed after the caller's own check still wins.
+   * Never supersede: a bot review in force at HEAD that this predicate
+   * accepts, whatever its state, means skip. For a note that must not replace
+   * a review the PR already has (a draft-era `comment` on a PR that has since
+   * left draft); the caller excludes reviews that are not real reviews.
+   * Absent = today's supersede rules.
    */
-  yieldToExisting?: boolean;
+  yieldTo?: (existing: GitHubReview) => boolean;
 }
 
 const SUPERSEDE_AT_HEAD_REASON =
@@ -209,23 +210,48 @@ export async function executeReviewIntent(
       headSha,
       botLogin,
     });
+    if (existing && opts.yieldTo) {
+      const yieldTo = opts.yieldTo;
+      const inForce = (await github.listReviews(repo, prNumber)).find(
+        (r) =>
+          r.user?.login === botLogin &&
+          r.commitId === headSha &&
+          r.dismissedAt === null &&
+          yieldTo(r),
+      );
+      if (inForce) {
+        logger?.info(
+          "review-executor: a bot review is in force at HEAD; yielding to it (never superseded)",
+          {
+            repo,
+            prNumber,
+            headSha,
+            verdict: intent.verdict,
+            existingReviewId: inForce.id,
+            existingReviewState: inForce.state,
+          },
+        );
+        return { outcome: "skipped_existing" };
+      }
+    }
+    // A yielding note replaces nothing: what is left at HEAD is only reviews
+    // the caller rejected, and they are neither a redelivery nor superseded.
+    if (opts.yieldTo) existing = null;
     const alreadyPosted = !existing
       ? false
-      : opts.yieldToExisting
-        ? true
-        : !isSameReview
-          ? existing.state === wantedState
-          : // Every bot review in force at HEAD, not only the first: an earlier
-            // review of a different change that could not be dismissed (a
-            // COMMENT) must not hide a redelivery of this one.
-            (await github.listReviews(repo, prNumber)).some(
-              (r) =>
-                r.user?.login === botLogin &&
-                r.commitId === headSha &&
-                r.dismissedAt === null &&
-                r.state === wantedState &&
-                isSameReview(r),
-            );
+      : !isSameReview
+        ? existing.state === wantedState
+        : // Every bot review in force at HEAD, not only the first: an earlier
+          // review of a different change that could not be dismissed (a
+          // COMMENT) must not hide a redelivery of this one.
+          (await github.listReviews(repo, prNumber)).some(
+            (r) =>
+              r.user?.login === botLogin &&
+              r.commitId === headSha &&
+              r.dismissedAt === null &&
+              r.state === wantedState &&
+              isSameReview(r),
+          );
     if (alreadyPosted) {
       logger?.info(
         "review-executor: same-verdict bot review already at HEAD; skipping (idempotent)",

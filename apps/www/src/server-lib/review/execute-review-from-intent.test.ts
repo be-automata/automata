@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  DEGRADED_INTENT_MARKER,
   botAuthoredVerdictLine,
   executeReviewFromIntent,
   isDegradedComment,
@@ -573,6 +574,27 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
         expect(github.createConversationComment).not.toHaveBeenCalled();
       },
     );
+
+    it("a legacy degraded COMMENT at HEAD is silence, not a review to yield to", async () => {
+      const github = makeGithub([
+        {
+          id: 9,
+          user: { login: BOT },
+          state: "COMMENTED",
+          submittedAt: "2026-10-24T12:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: no JSON._`,
+        },
+      ]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+    });
 
     it("a failed review lookup posts the comment but dismisses nothing", async () => {
       const github = makeGithub([]);

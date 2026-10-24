@@ -534,7 +534,9 @@ export async function executeReviewFromIntent(
   // "draft" and the PR has since left draft. It is a draft-era note, so it must
   // never replace a review already in force at HEAD (the executor would post it
   // and dismiss a newer APPROVE / REQUEST_CHANGES from the ready-PR run). The
-  // executor checks at post time, so a verdict landing late still wins.
+  // executor checks right before it posts, which narrows the race with a
+  // concurrent verdict but cannot close it; even then nothing is dismissed.
+  // A degraded comment is evidence of silence, never a review to yield to.
   const draftEraNote =
     opts.isDraft !== true &&
     draftForNoVerdict &&
@@ -586,7 +588,9 @@ export async function executeReviewFromIntent(
     ...(reviewBase
       ? { isSameReview: sameReviewByBase(reviewBase, opts.liveBase) }
       : {}),
-    ...(draftEraNote ? { yieldToExisting: true } : {}),
+    ...(draftEraNote
+      ? { yieldTo: (r: GitHubReview) => !isDegradedComment(r) }
+      : {}),
     logger,
   });
   if (outcome.outcome === "posted") {
@@ -829,7 +833,7 @@ async function runExecutor(args: {
   execIntent: ReturnType<typeof toExecutorIntent>;
   postInlineComments?: boolean;
   isSameReview?: (existing: GitHubReview) => boolean;
-  yieldToExisting?: boolean;
+  yieldTo?: (existing: GitHubReview) => boolean;
   logger?: ReviewLogger;
 }): Promise<ReviewIntentOutcome> {
   return await executeReviewIntent({
@@ -841,7 +845,7 @@ async function runExecutor(args: {
     intent: args.execIntent,
     postInlineComments: args.postInlineComments,
     ...(args.isSameReview ? { isSameReview: args.isSameReview } : {}),
-    ...(args.yieldToExisting ? { yieldToExisting: true } : {}),
+    ...(args.yieldTo ? { yieldTo: args.yieldTo } : {}),
     logger: args.logger,
   });
 }
