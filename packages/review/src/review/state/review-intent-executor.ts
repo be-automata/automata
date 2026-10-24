@@ -88,6 +88,13 @@ export interface ExecuteReviewIntentOpts {
    * key below, unchanged).
    */
   isSameReview?: (existing: GitHubReview) => boolean;
+  /**
+   * Never supersede: ANY bot review in force at HEAD, whatever its state,
+   * means skip. For a note that must not replace a verdict the PR already has
+   * (a draft-era `comment` on a PR that has since left draft). Read at post
+   * time, so a verdict that landed after the caller's own check still wins.
+   */
+  yieldToExisting?: boolean;
 }
 
 const SUPERSEDE_AT_HEAD_REASON =
@@ -204,19 +211,21 @@ export async function executeReviewIntent(
     });
     const alreadyPosted = !existing
       ? false
-      : !isSameReview
-        ? existing.state === wantedState
-        : // Every bot review in force at HEAD, not only the first: an earlier
-          // review of a different change that could not be dismissed (a
-          // COMMENT) must not hide a redelivery of this one.
-          (await github.listReviews(repo, prNumber)).some(
-            (r) =>
-              r.user?.login === botLogin &&
-              r.commitId === headSha &&
-              r.dismissedAt === null &&
-              r.state === wantedState &&
-              isSameReview(r),
-          );
+      : opts.yieldToExisting
+        ? true
+        : !isSameReview
+          ? existing.state === wantedState
+          : // Every bot review in force at HEAD, not only the first: an earlier
+            // review of a different change that could not be dismissed (a
+            // COMMENT) must not hide a redelivery of this one.
+            (await github.listReviews(repo, prNumber)).some(
+              (r) =>
+                r.user?.login === botLogin &&
+                r.commitId === headSha &&
+                r.dismissedAt === null &&
+                r.state === wantedState &&
+                isSameReview(r),
+            );
     if (alreadyPosted) {
       logger?.info(
         "review-executor: same-verdict bot review already at HEAD; skipping (idempotent)",

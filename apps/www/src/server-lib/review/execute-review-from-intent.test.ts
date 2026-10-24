@@ -567,24 +567,24 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
           draftAtDispatch: true,
           terminalText: BARE_COMMENT,
         });
-        expect(res.outcome).toBe("skipped_superseded");
+        expect(res.outcome).toBe("skipped_existing");
         expect(github.dismissReview).not.toHaveBeenCalled();
         expectNoReview(github);
         expect(github.createConversationComment).not.toHaveBeenCalled();
       },
     );
 
-    it("a failed review lookup skips rather than risk dismissing a verdict", async () => {
+    it("a failed review lookup posts the comment but dismisses nothing", async () => {
       const github = makeGithub([]);
-      github.listReviews.mockRejectedValueOnce(new Error("502"));
+      github.listReviews.mockRejectedValue(new Error("502"));
       const res = await executeReviewFromIntent({
         ...base,
         github,
         draftAtDispatch: true,
         terminalText: BARE_COMMENT,
       });
-      expect(res.outcome).toBe("skipped_superseded");
-      expectNoReview(github);
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+      expect(github.dismissReview).not.toHaveBeenCalled();
     });
 
     // The PR also moved on: the draft-era run's comment is about an older

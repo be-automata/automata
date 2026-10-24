@@ -7,10 +7,7 @@ import {
   executeReviewIntent,
   type ReviewIntentOutcome,
 } from "@terragon/review/state/review-intent-executor";
-import {
-  findAnyBotReviewAtCommit,
-  findBotReviewAtHead,
-} from "@terragon/review/state/head-review-guard";
+import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-guard";
 import {
   applyApproveSeverityFloor,
   DEFAULT_APPROVE_SEVERITY_POLICY,
@@ -535,45 +532,13 @@ export async function executeReviewFromIntent(
 
   // #504: a bare `comment` posts as a review here ONLY because the run was told
   // "draft" and the PR has since left draft. It is a draft-era note, so it must
-  // never replace a review already in force at HEAD — the executor would post
-  // it and dismiss a newer APPROVE / REQUEST_CHANGES from the ready-PR run.
-  // A failed lookup skips too: dismissing a real verdict is the worse loss.
-  if (
+  // never replace a review already in force at HEAD (the executor would post it
+  // and dismiss a newer APPROVE / REQUEST_CHANGES from the ready-PR run). The
+  // executor checks at post time, so a verdict landing late still wins.
+  const draftEraNote =
     opts.isDraft !== true &&
     draftForNoVerdict &&
-    isBareCommentOnReadyPr(emitted, false)
-  ) {
-    let inForce: GitHubReview | null = null;
-    let lookupFailed = false;
-    try {
-      const reviews = await github.listReviews(repoFullName, prNumber);
-      inForce = await findBotReviewAtHead({
-        github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
-        repo: repoFullName,
-        prNumber,
-        headSha: currentHeadSha,
-        botLogin,
-      });
-    } catch (err) {
-      lookupFailed = true;
-      logger?.warn(
-        "review-from-intent: review lookup failed; skipping the draft-era comment rather than risk dismissing a verdict",
-        {
-          repoFullName,
-          prNumber,
-          currentHeadSha,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      );
-    }
-    if (inForce || lookupFailed) {
-      logger?.info(
-        "review-from-intent: draft-era comment superseded by a review at HEAD",
-        { repoFullName, prNumber, currentHeadSha },
-      );
-      return { outcome: "skipped_superseded" };
-    }
-  }
+    isBareCommentOnReadyPr(emitted, false);
 
   // SELF-AUTHORED PR. The floor above already ran, so `effectiveVerdict` is
   // the verdict we would have submitted; only the review EVENT changes. The
@@ -621,6 +586,7 @@ export async function executeReviewFromIntent(
     ...(reviewBase
       ? { isSameReview: sameReviewByBase(reviewBase, opts.liveBase) }
       : {}),
+    ...(draftEraNote ? { yieldToExisting: true } : {}),
     logger,
   });
   if (outcome.outcome === "posted") {
@@ -863,6 +829,7 @@ async function runExecutor(args: {
   execIntent: ReturnType<typeof toExecutorIntent>;
   postInlineComments?: boolean;
   isSameReview?: (existing: GitHubReview) => boolean;
+  yieldToExisting?: boolean;
   logger?: ReviewLogger;
 }): Promise<ReviewIntentOutcome> {
   return await executeReviewIntent({
@@ -874,6 +841,7 @@ async function runExecutor(args: {
     intent: args.execIntent,
     postInlineComments: args.postInlineComments,
     ...(args.isSameReview ? { isSameReview: args.isSameReview } : {}),
+    ...(args.yieldToExisting ? { yieldToExisting: true } : {}),
     logger: args.logger,
   });
 }
