@@ -103,6 +103,13 @@ export async function drainForRestart(opts: {
   sleep?: (ms: number) => Promise<void>;
   /** Aborts the wait (SIGINT): the workers are unpaused and the result is `timeout`. */
   signal?: AbortSignal;
+  /**
+   * At the deadline, leave the workers PAUSED (the unit's ExecStop=: the
+   * SIGTERM follows regardless, and unpausing first would let the engine hand
+   * the worker a new run in the instant before it). Default false: a restart
+   * that is refused must leave the worker taking work.
+   */
+  keepPausedOnTimeout?: boolean;
 }): Promise<DrainResult> {
   const { engine, workerName, timeoutMs, pollMs, log, signal } = opts;
   const now = opts.now ?? Date.now;
@@ -189,7 +196,11 @@ export async function drainForRestart(opts: {
       lastBusy = busy;
     }
     if (signal?.aborted || now() - startedAt >= timeoutMs) {
-      await unpause(paused);
+      if (opts.keepPausedOnTimeout) {
+        log(`drain: deadline with ${busy} run(s) still in flight; left paused`);
+      } else {
+        await unpause(paused);
+      }
       return { kind: "timeout", workerIds: paused, busySlots: busy };
     }
     await sleep(pollMs);

@@ -5,7 +5,12 @@
  * src/agent-run/safe-restart.ts for why.
  *
  *   node --import tsx scripts/drain-for-restart.ts [--timeout-s N] [--poll-s N]
- *     [--allow-no-worker]
+ *     [--allow-no-worker] [--for-stop]
+ *
+ * --for-stop: the unit's ExecStop= (every `systemctl stop`/`restart`, and
+ * shutdown). Best-effort — systemd SIGTERMs the worker when this returns,
+ * whatever it says — so it always exits 0, leaves the worker paused at the
+ * deadline, and never fails the unit's stop.
  *
  * Exit: 0 drained — restart now; 3 still busy at the deadline, or interrupted
  * (worker unpaused again); 4 not proven idle: the engine could not be read or
@@ -35,33 +40,55 @@ function flag(name: string, fallback: number): number {
 const timeoutS = flag("--timeout-s", 3000);
 const pollS = flag("--poll-s", 5);
 
-const hatchet = Hatchet.init();
-const workerName = resolveProbeWorkerName(
-  `automata-worker-${resolveBoxId(process.env.WORKER_BOX_ID)}`,
-  hatchet.config.namespace,
-);
+const forStop = process.argv.includes("--for-stop");
 const abort = new AbortController();
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => abort.abort());
 }
 
-const result = await drainForRestart({
-  engine: {
-    listWorkers: () => hatchet.workers.list(),
-    setPaused: async (id, paused) => {
-      await (paused ? hatchet.workers.pause(id) : hatchet.workers.unpause(id));
+async function main(): Promise<number> {
+  const hatchet = Hatchet.init();
+  const workerName = resolveProbeWorkerName(
+    `automata-worker-${resolveBoxId(process.env.WORKER_BOX_ID)}`,
+    hatchet.config.namespace,
+  );
+  const result = await drainForRestart({
+    engine: {
+      listWorkers: () => hatchet.workers.list(),
+      setPaused: async (id, paused) => {
+        await (paused
+          ? hatchet.workers.pause(id)
+          : hatchet.workers.unpause(id));
+      },
     },
-  },
-  workerName,
-  timeoutMs: timeoutS * 1000,
-  pollMs: pollS * 1000,
-  log: (m) => console.log(m),
-  signal: abort.signal,
-});
-console.log(`drain: ${JSON.stringify(result)}`);
-if (result.kind === "no-worker") {
+    workerName,
+    timeoutMs: timeoutS * 1000,
+    pollMs: pollS * 1000,
+    log: (m) => console.log(m),
+    signal: abort.signal,
+    keepPausedOnTimeout: forStop,
+  });
+  console.log(`drain: ${JSON.stringify(result)}`);
+  if (result.kind === "no-worker" && !forStop) {
+    console.log(
+      `drain: no active worker named ${workerName} while the unit runs — refusing to restart blind; check the name (WORKER_BOX_ID, namespace) or pass --allow-no-worker`,
+    );
+  }
+  return drainExitCode(result, process.argv.includes("--allow-no-worker"));
+}
+
+let code: number;
+try {
+  code = await main();
+} catch (err) {
   console.log(
-    `drain: no active worker named ${workerName} while the unit runs — refusing to restart blind; check the name (WORKER_BOX_ID, namespace) or pass --allow-no-worker`,
+    `drain: failed: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  code = 4;
+}
+if (forStop && code !== 0) {
+  console.log(
+    `drain: not proven idle (exit ${code}); the stop proceeds to SIGTERM — the SDK drain and the run-terminal ledger take over`,
   );
 }
-process.exit(drainExitCode(result, process.argv.includes("--allow-no-worker")));
+process.exit(forStop ? 0 : code);

@@ -2713,6 +2713,41 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     expect(mode & 0o111).not.toBe(0);
   });
 
+  it("every stop drains first: ExecStop= pauses the worker and waits before the SIGTERM (#386)", () => {
+    const unit = deployFile("linux", "automata-worker.service");
+    const stops = [...unit.matchAll(/^ExecStop=(.+)$/gm)].map((m) => m[1]!);
+    expect(stops).toHaveLength(1);
+    const cmd = stops[0]!;
+    expect(cmd).toContain("scripts/drain-for-restart.ts --for-stop");
+    // Nothing to drain when the worker already exited on its own.
+    expect(cmd).toMatch(/\[ -n "\$MAINPID" \] \|\| exit 0;/);
+    // The box env (engine token) the worker itself runs with.
+    expect(cmd).toContain(". __HOME__/.automata/worker-box.env;");
+    // systemd kills an ExecStop= at TimeoutStopSec: the drain's own deadline
+    // must come first, so it ends on its terms (worker left paused).
+    const drainS = Number(cmd.match(/--timeout-s (\d+)/)?.[1]);
+    const stopS = Number(unit.match(/^TimeoutStopSec=(\d+)$/m)?.[1]);
+    expect(drainS).toBeGreaterThan(0);
+    expect(drainS).toBeLessThan(stopS);
+  });
+
+  it("the stop-time drain never fails the stop, while the restart wrapper's drain fails closed", () => {
+    // Without an engine token the drain cannot even start: exit 4 normally,
+    // but 0 under --for-stop, so a broken engine never wedges a shutdown.
+    const env = { PATH: process.env.PATH ?? "", HOME: os.tmpdir() };
+    const run = (args: string[]) =>
+      spawnSync(
+        process.execPath,
+        ["--import", "tsx", "scripts/drain-for-restart.ts", ...args],
+        { cwd: workerRoot, env, encoding: "utf8", timeout: 60_000 },
+      );
+    const strict = run([]);
+    expect(strict.status, strict.stdout + strict.stderr).toBe(4);
+    const forStop = run(["--for-stop"]);
+    expect(forStop.status, forStop.stdout + forStop.stderr).toBe(0);
+    expect(forStop.stdout).toMatch(/the stop proceeds to SIGTERM/);
+  });
+
   it("the unit signals only MainPID, so the SDK owns the drain", () => {
     // KillMode=control-group SIGTERMs the agent and its daemon directly and
     // drops the in-flight review. `mixed` sends SIGTERM to MainPID alone and
