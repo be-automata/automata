@@ -16,7 +16,6 @@ import { DEFAULT_CONTAINER_DOCKER_SOCKET } from "./container-config";
 import { CONTAINER_BRIDGES } from "./container-entry";
 import { parsePinnedImage } from "./container-image";
 import { CONTAINER_GH_BROKER_SOCKET } from "./container-policy";
-import { NODE_ENV_PROXY_FLOOR } from "./node-floor";
 
 /**
  * The ADR-013 box assets: the rootless daemon installer, its user unit, the
@@ -96,7 +95,7 @@ describe("install-rootless-docker.sh + automata-runner-docker.service (ADR-013 D
   const script = read(linux("install-rootless-docker.sh"));
   const unit = read(linux("automata-runner-docker.service"));
 
-  // card: protects=the installer never turns the dev-only path on and never touches the worker unit, its env or the rootful daemon (production must not change); fails_when=it writes WORKER_DEV_CONTAINER_RUNS, edits automata-worker.service, or restarts docker.service; no_claim=what an operator does by hand
+  // card: protects=the installer never names the deleted dev-only switch (ADR-013 I7) and never touches the worker unit, its env or the rootful daemon (production must not change); fails_when=it writes WORKER_DEV_CONTAINER_RUNS, edits automata-worker.service, or restarts docker.service; no_claim=what an operator does by hand
   it("never switches container runs on or touches the worker / rootful daemon", () => {
     // Code only: the header comment states these guarantees in prose.
     const code = script
@@ -282,8 +281,8 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     );
   }
 
-  // card: protects=no mode of the script ever writes the dev-only container switch (ADR-013 Decision 6: only the throwaway box's env sets it, by hand); fails_when=any code line names WORKER_DEV_CONTAINER_RUNS; no_claim=what an operator types into the env file
-  it("never writes the dev-only container switch", () => {
+  // card: protects=no mode of the script names the dev-only container switch the release deleted (ADR-013 I7: one execution path, no switch); fails_when=any code line names WORKER_DEV_CONTAINER_RUNS; no_claim=what an operator types into the env file
+  it("never names the deleted dev-only container switch", () => {
     expect(code).not.toMatch(/WORKER_DEV_CONTAINER_RUNS/);
     expect(code).not.toMatch(/DEV_CONTAINER/);
   });
@@ -487,10 +486,9 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     );
   });
 
-  // card: protects=the host node floor in step_worker_runtime (22.x >= 22.21, or >= 24) matches the worker's own NODE_ENV_PROXY_FLOOR and fails closed; fails_when=the shell floor drifts from node-floor.ts, or a below-floor, 23.x or unparseable node passes; no_claim=the pnpm check or the report wording
+  // card: protects=the host node floor in step_worker_runtime (22.x >= 22.21, or >= 24) is the one the script documents and fails closed; fails_when=the stated floor and the check drift apart, or a below-floor, 23.x or unparseable node passes; no_claim=the pnpm check or the report wording
   describe("step_worker_runtime node floor", () => {
-    it("names the same floor as node-floor.ts", () => {
-      expect(NODE_ENV_PROXY_FLOOR).toBe(">=22.21.0 (22.x) or >=24.0.0");
+    it("states the floor it checks", () => {
       expect(script).toContain("# >=22.21.0 on 22.x, or >=24.0.0.");
       expect(bodies.get("step_worker_runtime")).toContain(
         "node >=22.21.0 (22.x) or >=24 is required",

@@ -38,7 +38,7 @@ import {
   serializeRunEnvFile,
 } from "./container-policy";
 import { ContainerRuntime, type ContainerState } from "./container-runtime";
-import { writeDaemonMessage } from "./daemon-process";
+import { writeDaemonMessage } from "./daemon-socket";
 import type { BrokerHandoff } from "./daemon-env";
 import { ghBrokerConfigYaml } from "./gh-broker";
 import {
@@ -59,41 +59,35 @@ import type { AgentRunInput, PulledDaemonMessage } from "./types";
 const execFileAsync = promisify(execFile);
 
 /**
- * What the workflow drives, on either path: the host-uid `DaemonProcess` and
- * this class both satisfy it. `teardown()` returns a promise here (a container
- * is removed through the daemon) and nothing on the host path; the workflow
- * awaits the promise, and the slot is released only after it settles
- * (ADR-007 I2, ADR-013 I6).
+ * What the workflow drives (ContainerDaemonProcess; a narrower surface keeps
+ * the workflow's tests on a fake). `teardown()` resolves once the container
+ * is gone; the workflow awaits it, and the slot is released only after it
+ * settles (ADR-007 I2, ADR-013 I6).
  */
 export interface RunDaemon {
   readonly pid: number | undefined;
   preflightGhAuth(): Promise<void>;
   start(): Promise<void>;
-  runCgroupDir(): string | null;
   sendMessage(pulled: PulledDaemonMessage): Promise<number>;
-  teardown(): void | Promise<void>;
+  teardown(): Promise<void>;
   agentFailure(): unknown | null;
   memoryStarvation(): unknown | null;
 }
 
 /**
- * The workflow's teardown step for either daemon. The host daemon's teardown
- * is synchronous and returns nothing, so this returns undefined and the
- * caller awaits nothing: the host path's ordering is unchanged. A container's
- * returns a promise that never rejects: a removal that kept failing is logged
- * (`container.teardown_failed`) and the run's teardown carries on. Holding
- * the slot forever would wedge the box, the brokers, proxy and credential
- * must still close, and the next run on this slot removes the leftover by
- * name before it creates its own (fail-closed), so the two never coexist.
+ * The workflow's teardown step: a promise that never rejects. A removal that
+ * kept failing is logged (`container.teardown_failed`) and the run's teardown
+ * carries on. Holding the slot forever would wedge the box, the brokers,
+ * proxy and credential must still close, and the next run on this slot
+ * removes the leftover by name before it creates its own (fail-closed), so
+ * the two never coexist.
  */
 export function settleDaemonTeardown(
   daemon: Pick<RunDaemon, "teardown">,
   threadId: string,
   log: (line: string) => void,
-): Promise<void> | undefined {
-  const pending = daemon.teardown();
-  if (!(pending instanceof Promise)) return undefined;
-  return pending.catch((err: unknown) => {
+): Promise<void> {
+  return daemon.teardown().catch((err: unknown) => {
     log(
       `container.teardown_failed ${JSON.stringify({ thread: threadId, error: err instanceof Error ? err.message : String(err) })}`,
     );
@@ -122,8 +116,7 @@ export interface ContainerDaemonDeps {
   runtime?: ContainerRuntime;
   /**
    * The bot-identity precondition (ADR-002 F3), run on the HOST against the
-   * brokers before the container exists. The workflow passes the host
-   * DaemonProcess's own check, so both paths prove the same thing.
+   * brokers before the container exists (gh-preflight.ts).
    */
   hostPreflight?: () => Promise<void>;
   /**
@@ -204,8 +197,8 @@ const DEFAULT_REMOVE_ATTEMPTS = 4;
 const DEFAULT_REMOVE_RETRY_MS = 2_000;
 
 /**
- * The container-run twin of `DaemonProcess` (ADR-013 "Run path" 2-7), behind
- * `WORKER_DEV_CONTAINER_RUNS=1` only. One instance per run:
+ * An agent run's daemon in its own container (ADR-013 "Run path" 2-7), the
+ * one execution path. One instance per run:
  *
  *   start():    socket dir + run-dir hand-over → remove any container still
  *               holding this slot's name → `docker create` (hardened argv) →
@@ -216,9 +209,9 @@ const DEFAULT_REMOVE_RETRY_MS = 2_000;
  *               the container is gone, retried with backoff. Idempotent;
  *               resolves only once it is, rejects after the last attempt.
  *
- * Container removal replaces the uid reaper for these runs: every process of
- * the run lives in the container's pid namespace under `--init`, so a
- * `setsid` escapee dies with it.
+ * Container removal is the run's kill: every process of the run lives in the
+ * container's pid namespace under `--init`, so a `setsid` escapee dies with
+ * it.
  */
 export class ContainerDaemonProcess
   implements RunDaemon, ContainerSalvageTarget
@@ -262,11 +255,6 @@ export class ContainerDaemonProcess
     private readonly lane: RunLane,
     private readonly deps: ContainerDaemonDeps,
   ) {
-    if (!config.containerRuns) {
-      throw new Error(
-        "ContainerDaemonProcess needs WORKER_DEV_CONTAINER_RUNS=1 (config.containerRuns is null)",
-      );
-    }
     this.cr = config.containerRuns;
     this.runtime =
       deps.runtime ??
@@ -294,11 +282,6 @@ export class ContainerDaemonProcess
   /** The step line for the journal: container id, name and the image digest it runs. */
   spawnedLine(): string {
     return `daemon spawned in container: id=${this.containerId?.slice(0, 12) ?? "none"} name=${this.name} image=${this.cr.image.digest} lane=${this.lane}`;
-  }
-
-  /** No host cgroup: the container's limits are Docker's (`--memory`, `--pids-limit`). */
-  runCgroupDir(): string | null {
-    return null;
   }
 
   async preflightGhAuth(): Promise<void> {
@@ -622,8 +605,7 @@ export class ContainerDaemonProcess
 
   /**
    * The run's failure once its container has exited without the thread
-   * reaching terminal, or null while it runs. Same contract as the host
-   * path's: a clean exit 0 is not a failure; a SIGKILL'd exit with the OOM
+   * reaching terminal, or null while it runs. A clean exit 0 is not a failure; a SIGKILL'd exit with the OOM
    * flag set is a ResourceLimitError.
    */
   agentFailure(): unknown | null {
@@ -745,8 +727,7 @@ export class ContainerDaemonProcess
     }
     return runAsAgent({
       ...args,
-      // The container's own user runs it; no sudo on this side.
-      agentUser: "",
+      // The container's own user runs it.
       spawn: (file, argv, opts) => {
         const env: Record<string, string> = {};
         for (const [key, value] of Object.entries(opts.env)) {

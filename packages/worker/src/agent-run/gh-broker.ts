@@ -32,13 +32,9 @@ import { HOP_BY_HOP, REQUEST_OWNED } from "./broker-common";
  * Fencing, per request and in order:
  *   - per-run bearer, timing-safe (`token <bearer>` — gh's scheme — or
  *     `Bearer <bearer>` for hand-rolled curls). Socket file permissions are NOT
- *     the fence, in EITHER uid mode. Without WORKER_AGENT_USER the agent runs
- *     as the same uid as this broker. With it (#108) the agent runs as a
- *     different uid and Darwin DOES enforce socket permissions (unix(4)) — but
- *     the run-namespace dir carries an inheritable ACE that deliberately
- *     re-opens this socket to the agent uid, because `gh` must reach it. The
- *     per-run bearer is the fence either way. On Linux that inherited grant is
- *     capped by the ACL mask, so the socket is chmod 0660 after listen.
+ *     the fence: the run's container reaches this socket through a worker-side
+ *     forwarder in its own run dir (ADR-013), and the per-run bearer is what
+ *     is checked. The socket is still chmod 0660 after listen.
  *   - Host must be `api.github.com` (uploads.github.com /
  *     objects.githubusercontent.com are out of scope — documented limitation).
  *   - method/path allowlist, v1 = read-only: GET/HEAD any path (reads cannot
@@ -146,9 +142,8 @@ export async function startGhBroker(
         `macOS bind silently truncates): ${socketPath}`,
     );
   }
-  // The socket dir normally exists (worker boot writes the lock file under it),
-  // but this broker starts BEFORE DaemonProcess.start()'s own mkdir — create it
-  // defensively rather than depend on boot ordering.
+  // The socket dir normally exists (admission creates it), but create it
+  // defensively rather than depend on that ordering.
   fs.mkdirSync(path.dirname(socketPath), { recursive: true });
   // A prior crashed run of the same threadId can leave the socket file behind;
   // bind would EADDRINUSE on a file no server owns.

@@ -291,37 +291,19 @@ describe("containerRunsBoot", () => {
     ...over,
   });
 
-  // card: protects=with the switch off, boot does nothing at all (no warning, no docker call); fails_when=a host-model boot touches docker or logs; no_claim=nothing
-  it("off: a silent no-op", async () => {
-    const rt = runtime();
-    const warn = vi.fn();
-    await expect(
-      containerRunsBoot({
-        config: { containerRuns: null, boxId: "b" },
-        workerId: "w",
-        log: vi.fn(),
-        warn,
-        runtime: rt as never,
-      }),
-    ).resolves.toBeNull();
-    expect(warn).not.toHaveBeenCalled();
-    expect(rt.ping).not.toHaveBeenCalled();
-  });
-
-  // card: protects=on: a dev-only WARNING is logged, a dead daemon or an image missing from the rootless store refuses boot (never a pull), and orphans are swept; fails_when=boot proceeds without the daemon/image or without the warning; no_claim=that the digest matches the published attestation (box step)
-  it("on: warns, refuses a dead daemon or a missing image, sweeps orphans", async () => {
-    const warn = vi.fn();
+  // card: protects=every boot (the container path is the only one, ADR-013 P3) refuses a dead rootless daemon or an image missing from its store (never a pull), sweeps orphans by label, and logs no dev-only warning; fails_when=boot proceeds without the daemon/image, skips the sweep, or still warns; no_claim=that the digest matches the published attestation (box step)
+  it("refuses a dead daemon or a missing image and sweeps orphans", async () => {
+    const log = vi.fn();
     const ok = runtime();
     await expect(
       containerRunsBoot({
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
-        log: vi.fn(),
-        warn,
+        log,
         runtime: ok as never,
       }),
     ).resolves.toEqual({ serverVersion: "29.8.1", removed: [] });
-    expect(warn.mock.calls[0]?.[0]).toMatch(/DEV\/TEST ONLY/);
+    expect(log.mock.calls.flat().join("\n")).not.toMatch(/DEV|ONLY/);
     expect(ok.listByLabel).toHaveBeenCalledWith("automata.box", "b");
 
     const dead = runtime({
@@ -334,7 +316,6 @@ describe("containerRunsBoot", () => {
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
         log: vi.fn(),
-        warn,
         runtime: dead as never,
       }),
     ).rejects.toThrow(/does not answer/);
@@ -345,7 +326,6 @@ describe("containerRunsBoot", () => {
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
         log: vi.fn(),
-        warn,
         runtime: noImage as never,
       }),
     ).rejects.toThrow(/never pulls/);

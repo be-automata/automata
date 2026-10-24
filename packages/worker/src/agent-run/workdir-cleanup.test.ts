@@ -1,85 +1,17 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   cleanupWorkdir,
   STALE_RUN_DIR_AGE_MS,
   SWEEP_BUDGET_MS,
   sweepStaleRunDirs,
-  type RunAsAgent,
 } from "./provision";
-import {
-  buildHandBackInvocation,
-  HAND_BACK_SCRIPT,
-  SH_BIN,
-  SUDO_BIN,
-} from "./spawn-as-user";
 
-const execFileAsync = promisify(execFile);
-
-const AGENT = "automata-agent";
 const RUN_A = "0b7c1f4e-1d2a-4c3b-9e8f-1a2b3c4d5e6f";
 const RUN_B = "9f8e7d6c-5b4a-4321-8fed-cba987654321";
-
-function handBackArgv(workdir: string): string[] {
-  return [
-    "-n",
-    "-u",
-    AGENT,
-    "--",
-    SH_BIN,
-    "-c",
-    HAND_BACK_SCRIPT,
-    "sh",
-    workdir,
-  ];
-}
-
-describe("buildHandBackInvocation", () => {
-  it("is sudo -n -u <agent> -- sh -c <fixed script> sh <workdir>, no -E", () => {
-    const inv = buildHandBackInvocation({
-      agentUser: AGENT,
-      workdir: "/usr/local/automata/runs/x",
-    });
-    expect(inv).toEqual({
-      file: SUDO_BIN,
-      args: handBackArgv("/usr/local/automata/runs/x"),
-      env: {},
-    });
-  });
-
-  it("never interpolates the workdir into the script", () => {
-    const workdir = '/runs/$(touch pwned)"; rm -rf /';
-    const inv = buildHandBackInvocation({ agentUser: AGENT, workdir });
-    expect(inv?.args[6]).toBe(HAND_BACK_SCRIPT);
-    expect(inv?.args.at(-1)).toBe(workdir);
-  });
-
-  it("is null without an agent user", () => {
-    expect(buildHandBackInvocation({ agentUser: "", workdir: "/x" })).toBe(
-      null,
-    );
-  });
-
-  it("refuses a relative workdir and the filesystem root", () => {
-    expect(() =>
-      buildHandBackInvocation({ agentUser: AGENT, workdir: "-delete" }),
-    ).toThrow(/absolute/);
-    expect(() =>
-      buildHandBackInvocation({ agentUser: AGENT, workdir: "/" }),
-    ).toThrow(/absolute/);
-  });
-
-  it("refuses an agent user that is not a plain login", () => {
-    expect(() =>
-      buildHandBackInvocation({ agentUser: "-u", workdir: "/x" }),
-    ).toThrow(/plain unix login/);
-  });
-});
 
 describe("cleanupWorkdir", () => {
   let root: string;
@@ -100,211 +32,23 @@ describe("cleanupWorkdir", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("linux + agent user: hands the files back as the agent BEFORE the rm", async () => {
-    let existedAtHandBack = false;
-    const runAsAgent = vi.fn<RunAsAgent>(async () => {
-      existedAtHandBack = !!(await fs.stat(workdir).catch(() => null));
-      return { code: 0, signal: null };
-    });
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(runAsAgent).toHaveBeenCalledTimes(1);
-    expect(runAsAgent).toHaveBeenCalledWith({
-      file: SUDO_BIN,
-      args: handBackArgv(workdir),
-      env: {},
-    });
-    expect(existedAtHandBack).toBe(true);
-    expect(gone).toBe(true);
+  // card: protects=a run dir (HOME staging included) is removed and reported gone, silently; fails_when=the dir survives, the result is false, or a line is logged; no_claim=the container's own workspace hand-back before removal
+  it("removes the run dir and reports it gone", async () => {
+    expect(await cleanupWorkdir(workdir, { log })).toBe(true);
     expect(await fs.stat(workdir).catch(() => null)).toBe(null);
     expect(lines).toEqual([]);
   });
 
-  it("#205 agentUsers: hands back as EACH slot account in order (a stale dir may belong to any slot), then rm", async () => {
-    const seen: string[] = [];
-    const runAsAgent = vi.fn<RunAsAgent>(async (inv) => {
-      seen.push(inv.args[2] ?? "");
-      return { code: 0, signal: null };
-    });
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      agentUsers: [AGENT, `${AGENT}-1`, `${AGENT}-2`],
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(seen).toEqual([AGENT, `${AGENT}-1`, `${AGENT}-2`]);
-    expect(gone).toBe(true);
-    expect(lines).toEqual([]);
-  });
-
-  it("#205 agentUsers: a non-owning account's refused pass is expected and silent once ANY account's pass succeeded; the others still run", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>(async (inv) =>
-      inv.args[2] === `${AGENT}-1`
-        ? { code: 0, signal: null }
-        : { code: 1, signal: null, stderrTail: "find: Permission denied" },
-    );
-    await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      agentUsers: [AGENT, `${AGENT}-1`, `${AGENT}-2`],
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(runAsAgent).toHaveBeenCalledTimes(3);
-    expect(lines).toEqual([]);
-  });
-
-  it("#205 agentUsers: when NO account's pass succeeds, every failure is logged naming its account", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>(async () => ({
-      code: 1,
-      signal: null,
-      stderrTail: "sudo: a password is required",
-    }));
-    await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      agentUsers: [AGENT, `${AGENT}-1`],
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(lines).toEqual([
-      expect.stringMatching(
-        new RegExp(
-          `workdir hand-back incomplete: .* \\(${AGENT}: exit 1: sudo: a password is required\\)`,
-        ),
-      ),
-      expect.stringMatching(
-        new RegExp(
-          `workdir hand-back incomplete: .* \\(${AGENT}-1: exit 1: sudo: a password is required\\)`,
-        ),
-      ),
-    ]);
-  });
-
-  it("darwin: no hand-back (a macOS allow-ACE survives 0700), rm only", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>();
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      log,
-      platform: "darwin",
-      runAsAgent,
-    });
-    expect(runAsAgent).not.toHaveBeenCalled();
-    expect(gone).toBe(true);
-  });
-
-  it("empty agent user: no hand-back, rm only", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>();
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: "",
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(runAsAgent).not.toHaveBeenCalled();
-    expect(gone).toBe(true);
-  });
-
-  it("an already-removed workdir: no hand-back, no warning", async () => {
-    await fs.rm(workdir, { recursive: true });
-    const runAsAgent = vi.fn<RunAsAgent>();
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(runAsAgent).not.toHaveBeenCalled();
-    expect(gone).toBe(true);
-    expect(lines).toEqual([]);
-  });
-
-  it("a hand-back that cannot start is logged, never thrown, and the rm still runs", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>(async () => {
-      throw new Error("spawn /usr/bin/sudo ENOENT");
-    });
-    const gone = await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(gone).toBe(true);
-    expect(lines).toEqual([
-      `workdir hand-back failed: ${workdir} (${AGENT}: spawn /usr/bin/sudo ENOENT)`,
-    ]);
-  });
-
-  it("a refused or failing hand-back logs its exit and stderr tail", async () => {
-    const runAsAgent = vi.fn<RunAsAgent>(async () => ({
-      code: 1,
-      signal: null,
-      stderrTail: "sudo: a password is required",
-    }));
-    await cleanupWorkdir(workdir, {
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(lines).toEqual([
-      `workdir hand-back incomplete: ${workdir} (${AGENT}: exit 1: sudo: a password is required)`,
-    ]);
-  });
-
+  // card: protects=a run dir that survives the rm is logged once with its errno and never thrown (a cleanup failure must not fail the run); fails_when=it throws, logs nothing or reports success; no_claim=why the rm failed
   it("a workdir that survives the rm is logged once with its errno, never thrown", async () => {
     if (process.getuid?.() === 0) return; // root ignores the mode bits
     const locked = path.join(workdir, "locked");
     await fs.mkdir(locked);
     await fs.writeFile(path.join(locked, "session.key"), "k");
     await fs.chmod(locked, 0o500);
-    const gone = await cleanupWorkdir(workdir, { log, platform: "darwin" });
+    const gone = await cleanupWorkdir(workdir, { log });
     expect(gone).toBe(false);
     expect(lines).toEqual([`workdir cleanup incomplete: ${workdir} (EACCES)`]);
-  });
-});
-
-describe("HAND_BACK_SCRIPT shape", () => {
-  it("leaves the worker's cwd before find (the agent uid cannot enter it; GNU find then aborts)", () => {
-    // Reproduced on the box: without `cd /`, find exits 1 with "Failed to
-    // restore initial working directory" and chmods nothing.
-    expect(HAND_BACK_SCRIPT.startsWith("cd / && find ")).toBe(true);
-  });
-});
-
-describe("HAND_BACK_SCRIPT (real sh, as the current user)", () => {
-  let root: string;
-
-  beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "hand-back-"));
-  });
-
-  afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
-  it("opens the group bits on owned dirs/files and never follows a symlink out", async () => {
-    const workdir = path.join(root, "run");
-    const sessions = path.join(workdir, "home", ".claude", "sessions");
-    await fs.mkdir(sessions, { recursive: true, mode: 0o700 });
-    await fs.chmod(sessions, 0o700);
-    const key = path.join(sessions, "1.abc.key");
-    await fs.writeFile(key, "k", { mode: 0o600 });
-    const outside = path.join(root, "outside.txt");
-    await fs.writeFile(outside, "x", { mode: 0o600 });
-    await fs.symlink(outside, path.join(workdir, "escape"));
-
-    await execFileAsync(SH_BIN, ["-c", HAND_BACK_SCRIPT, "sh", workdir]);
-
-    expect((await fs.stat(sessions)).mode & 0o070).toBe(0o070);
-    // X adds search only to directories: a 0600 file gains rw, not x.
-    expect((await fs.stat(key)).mode & 0o070).toBe(0o060);
-    expect((await fs.stat(outside)).mode & 0o777).toBe(0o600);
   });
 });
 
@@ -346,11 +90,7 @@ describe("sweepStaleRunDirs", () => {
     const link = path.join(root, "11111111-2222-4333-8444-555555555555");
     await fs.symlink(outside, link);
 
-    const result = await sweepStaleRunDirs({
-      workdirRoot: root,
-      agentUser: "",
-      log,
-    });
+    const result = await sweepStaleRunDirs({ workdirRoot: root, log });
 
     expect(result).toEqual({ removed: 2, kept: 3, failed: 0, deferred: 0 });
     expect(await fs.stat(stale).catch(() => null)).toBe(null);
@@ -365,28 +105,6 @@ describe("sweepStaleRunDirs", () => {
     ]);
   });
 
-  it("hands back each stale dir as the agent on linux, and only those", async () => {
-    const stale = await runDir(RUN_A, true);
-    await runDir(RUN_B, false);
-    const runAsAgent = vi.fn<RunAsAgent>(async () => ({
-      code: 0,
-      signal: null,
-    }));
-    await sweepStaleRunDirs({
-      workdirRoot: root,
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-    });
-    expect(runAsAgent).toHaveBeenCalledTimes(1);
-    expect(runAsAgent).toHaveBeenCalledWith({
-      file: SUDO_BIN,
-      args: handBackArgv(stale),
-      env: {},
-    });
-  });
-
   it("counts a dir it could not remove as failed and stops: the rest wait for the next boot", async () => {
     if (process.getuid?.() === 0) return; // root ignores the mode bits
     const stuck = await runDir(RUN_A, false);
@@ -395,11 +113,7 @@ describe("sweepStaleRunDirs", () => {
     await fs.utimes(stuck, OLD, OLD);
     await runDir(RUN_B, true);
     try {
-      const result = await sweepStaleRunDirs({
-        workdirRoot: root,
-        agentUser: "",
-        log,
-      });
+      const result = await sweepStaleRunDirs({ workdirRoot: root, log });
       // RUN_A sorts first, so the failure is hit before RUN_B is reached.
       expect(result).toEqual({ removed: 0, kept: 0, failed: 1, deferred: 1 });
       expect(lines).toEqual([
@@ -414,31 +128,25 @@ describe("sweepStaleRunDirs", () => {
   it("a missing root is a quiet no-op, never a throw", async () => {
     const result = await sweepStaleRunDirs({
       workdirRoot: path.join(root, "nope"),
-      agentUser: "",
       log,
     });
     expect(result).toEqual({ removed: 0, kept: 0, failed: 0, deferred: 0 });
     expect(lines).toEqual([]);
   });
 
+  // card: protects=the boot sweep stops at SWEEP_BUDGET_MS of wall clock and defers the rest (boot is never held past it); fails_when=a dir past the budget is still removed or the deferral is not counted; no_claim=how long a real rm takes
   it("stops at the total budget: boot is never held past SWEEP_BUDGET_MS", async () => {
     const first = await runDir(RUN_A, true);
     const second = await runDir(RUN_B, true);
+    // Every clock read advances a third of the budget: the first dir is
+    // reached 2/3 in, the second 4/3 in (past the budget).
     let t = Date.now();
-    // Every clean-up "takes" the whole budget.
-    const runAsAgent = vi.fn<RunAsAgent>(async () => {
-      t += SWEEP_BUDGET_MS;
-      return { code: 0, signal: null };
-    });
-    const result = await sweepStaleRunDirs({
-      workdirRoot: root,
-      agentUser: AGENT,
-      log,
-      platform: "linux",
-      runAsAgent,
-      now: () => t,
-    });
-    expect(runAsAgent).toHaveBeenCalledTimes(1);
+    const now = () => {
+      const v = t;
+      t += Math.ceil(SWEEP_BUDGET_MS / 3);
+      return v;
+    };
+    const result = await sweepStaleRunDirs({ workdirRoot: root, log, now });
     expect(result).toEqual({ removed: 1, kept: 0, failed: 0, deferred: 1 });
     expect(await fs.stat(first).catch(() => null)).toBe(null);
     expect(await fs.stat(second)).toBeTruthy();

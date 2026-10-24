@@ -4,9 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { INHERITABLE_ACE_RIGHTS } from "./agent-uid-fs";
 import { ensureBaseDiffable, gitExec, provisionWorkdir } from "./provision";
-import type { RunPaths } from "./run-owned-paths";
 
 const execFileAsync = promisify(execFile);
 
@@ -149,186 +147,34 @@ describe("git failures never echo the auth header", () => {
   });
 });
 
-/**
- * #108: the per-run ACE must be applied BEFORE the clone. macOS applies ACL
- * inheritance at create time, so anything cloned first would not carry the
- * grant — this is a correctness constraint, asserted as call ordering.
- */
-describe("provisionWorkdir — agent-uid ACEs", () => {
+describe("provisionWorkdir — the run dir", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-dir-"));
   });
   afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  function recorder() {
+  // card: protects=the run dir is private to the worker (0700, a pre-existing world-readable dir included) and provisioning runs the clone and nothing else (no host ACL, no run tmp dir); fails_when=the mode is wider than 0700, an extra command runs, or a tmp/ dir appears; no_claim=the container hand-over that opens it by search to the rootless daemon's group (container-daemon-process tests)
+  it("is private (0700) and provisioning runs only the clone", async () => {
     const calls: string[] = [];
-    return {
-      calls,
-      aceExec: async (_file: string, args: string[]) => {
-        calls.push(`ace:${args[1]}`);
-      },
-      runGit: async (args: string[]) => {
-        calls.push(`git:${args.find((a) => a === "clone") ?? "other"}`);
-        return { stdout: "", stderr: "" };
-      },
-    };
-  }
-
-  it("touches no ACLs at all when agentUser is empty (default-off proof)", async () => {
-    const r = recorder();
+    await fs.mkdir(path.join(root, "thr_1"), { recursive: true, mode: 0o755 });
     await provisionWorkdir({
       repoFullName: "o/r",
       branch: "main",
       installationToken: "ghs_x",
       workdirRoot: root,
       runId: "thr_1",
-      aceExec: r.aceExec,
-      runGit: r.runGit,
-    });
-    expect(r.calls).toEqual(["git:clone"]);
-    // and no run tmp dir is created either
-    await expect(fs.stat(path.join(root, "thr_1", "tmp"))).rejects.toThrow();
-  });
-
-  it("#205: the run dir is private (no group/other bits) with and without an agent account — a sibling slot with traverse on the root must not read another run's clone", async () => {
-    for (const [runId, agentUser] of [
-      ["thr_plain", ""],
-      ["thr_agent", "_automata-agent"],
-    ] as const) {
-      const r = recorder();
-      // A pre-existing, world-readable dir from an earlier layout is fixed too.
-      await fs.mkdir(path.join(root, runId), { recursive: true, mode: 0o755 });
-      await provisionWorkdir({
-        repoFullName: "o/r",
-        branch: "main",
-        installationToken: "ghs_x",
-        workdirRoot: root,
-        runId,
-        agentUser,
-        workerLogin: "the-operator",
-        aceExec: r.aceExec,
-        runGit: r.runGit,
-      });
-      const mode = (await fs.stat(path.join(root, runId))).mode & 0o777;
-      expect(mode, `${runId}: ${mode.toString(8)}`).toBe(0o700);
-    }
-  });
-
-  it.skipIf(process.platform !== "darwin")(
-    "applies the shared-root traverse ACE and the per-run ACE BEFORE the clone",
-    async () => {
-      const r = recorder();
-      await provisionWorkdir({
-        repoFullName: "o/r",
-        branch: "main",
-        installationToken: "ghs_x",
-        workdirRoot: root,
-        runId: "thr_1",
-        agentUser: "_automata-agent",
-        // pinned so the assertion does not depend on whose machine runs the suite
-        workerLogin: "the-operator",
-        aceExec: r.aceExec,
-        runGit: r.runGit,
-      });
-      // Shared root: traverse ONLY, agent only — an inheritable ACE there would
-      // expose every other run. Per-run dir: inheritable, for BOTH the agent and
-      // the worker, the latter so cleanup can delete agent-created files.
-      // All of it BEFORE the clone (macOS inherits at create time).
-      expect(r.calls).toEqual([
-        "ace:_automata-agent allow search",
-        `ace:_automata-agent allow ${INHERITABLE_ACE_RIGHTS}`,
-        `ace:the-operator allow ${INHERITABLE_ACE_RIGHTS}`,
-        "git:clone",
-      ]);
-      // The run's own TMPDIR exists and inherits the grant.
-      expect(
-        (await fs.stat(path.join(root, "thr_1", "tmp"))).isDirectory(),
-      ).toBe(true);
-    },
-  );
-});
-
-/**
- * The regression that broke every agent-uid run on the pilot box.
- *
- * provisionWorkdir has to apply the inheritable ACE BEFORE the clone (macOS
- * applies inheritance at create time). It used to also create the run's `tmp/`
- * there — and `git clone` REFUSES a destination that exists and is non-empty,
- * so provisioning died with "destination path ... already exists and is not an
- * empty directory" on every run with WORKER_AGENT_USER set.
- *
- * CI could not catch it: the ACE tests inject a fake `runGit`, so the real
- * emptiness rule was never exercised. This one runs a REAL `git clone` against
- * a local remote with agentUser set, and a fake aceExec so it stays pure and
- * runs on Linux.
- */
-describe("provisionWorkdir — a real clone with agentUser set", () => {
-  let root: string;
-  let origin: string;
-
-  beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-clone-"));
-    origin = path.join(root, "origin");
-    await fs.mkdir(origin, { recursive: true });
-    const git = (args: string[]) =>
-      execFileAsync("git", ["-C", origin, ...args]);
-    await git(["init", "-q", "-b", "main"]);
-    await git(["config", "user.email", "t@t"]);
-    await git(["config", "user.name", "t"]);
-    await fs.writeFile(path.join(origin, "app.txt"), "hello\n");
-    await git(["add", "app.txt"]);
-    await git(["commit", "-q", "-m", "init"]);
-  });
-
-  afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
-  it("clones successfully — the run's tmp/ must not pre-empty the destination", async () => {
-    const aceCalls: string[][] = [];
-    const run = await provisionWorkdir({
-      repoFullName: "irrelevant/local",
-      branch: "main",
-      installationToken: "unused-for-a-local-remote",
-      workdirRoot: path.join(root, "runs"),
-      runId: "thr_clone",
-      agentUser: "_automata-agent",
-      aceExec: async (file, args) => {
-        aceCalls.push([file, ...args]);
+      runGit: async (args: string[]) => {
+        calls.push(`git:${args.find((a) => a === "clone") ?? "other"}`);
+        return { stdout: "", stderr: "" };
       },
-      // local remote: no auth header, no github.com
-      runGit: (args) =>
-        execFileAsync(
-          "git",
-          args.map((a) => (a.startsWith("https://github.com/") ? origin : a)),
-          { maxBuffer: 16 * 1024 * 1024 },
-        ),
     });
-
-    // the clone actually produced a working tree
-    await expect(
-      fs.readFile(path.join(run.repo, "app.txt"), "utf8"),
-    ).resolves.toBe("hello\n");
-    // ...and the run's TMPDIR exists beside it, not in it (#302)
-    const tmpStat = await fs.stat(run.tmp);
-    expect(tmpStat.isDirectory()).toBe(true);
-    expect(await fs.readdir(run.runDir)).toEqual(
-      expect.arrayContaining(["repo", "tmp"]),
-    );
-    await expect(fs.stat(path.join(run.repo, "tmp"))).rejects.toThrow();
-    // The ACE assertions are darwin-only: applyAces is a hard no-op elsewhere
-    // (agent-uid-fs.ts) and provisionWorkdir passes no platform override, so
-    // aceCalls stays empty on Linux. The CLONE behaviour above is the point of
-    // this test and is platform-independent, so the test itself must stay
-    // cross-platform — only these two lines are gated.
-    if (process.platform === "darwin") {
-      expect(aceCalls.length).toBeGreaterThanOrEqual(2);
-      expect(aceCalls.every((c) => c[0] === "/bin/chmod")).toBe(true);
-    }
+    expect(calls).toEqual(["git:clone"]);
+    expect((await fs.stat(path.join(root, "thr_1"))).mode & 0o777).toBe(0o700);
+    await expect(fs.stat(path.join(root, "thr_1", "tmp"))).rejects.toThrow();
   });
 });
 
@@ -415,46 +261,6 @@ describe("provisionWorkdir — a task run's work branch", () => {
 });
 
 /**
- * The run's workdir must grant the ACE to BOTH the agent and the worker's own
- * login. With the agent alone, every directory the agent creates inside the run
- * is agent-owned, deleting a file needs write on its containing directory, and
- * cleanupWorkdir (uid 501) fails with EACCES — leaving the run's HOME, and any
- * credential delivered into it, on disk after the run. Observed on the pilot
- * box before this was fixed.
- */
-describe("provisionWorkdir — the workdir ACE must include the worker login", () => {
-  it.skipIf(process.platform !== "darwin")(
-    "grants BOTH the agent user and the worker login, inheritably",
-    async () => {
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-ace-"));
-      const calls: string[][] = [];
-      await provisionWorkdir({
-        repoFullName: "o/r",
-        branch: "main",
-        installationToken: "t",
-        workdirRoot: path.join(root, "runs"),
-        runId: "thr_ace",
-        agentUser: "_automata-agent",
-        workerLogin: "the-operator",
-        aceExec: async (file, args) => {
-          calls.push([file, ...args]);
-        },
-        runGit: async () => ({ stdout: "", stderr: "" }),
-      });
-      const inheritable = calls.filter((c) =>
-        c.some((a) => a.includes("file_inherit")),
-      );
-      const granted = inheritable.map(
-        (c) => c.find((a) => a.includes("allow"))?.split(" ")[0] ?? "",
-      );
-      expect(granted).toContain("_automata-agent");
-      expect(granted).toContain("the-operator");
-      await fs.rm(root, { recursive: true, force: true });
-    },
-  );
-});
-
-/**
  * Production, 2026-09-28: a review that had been working for five minutes was
  * redelivered by the engine; the new attempt tried to clear the previous
  * attempt's workdir while that attempt was still writing into it, and threw
@@ -475,7 +281,6 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
   });
 
   const noop = {
-    aceExec: async () => {},
     runGit: async () => ({ stdout: "", stderr: "" }),
   };
 
@@ -591,74 +396,6 @@ describe("provisionWorkdir — a stale workdir is renamed, never removed in plac
   });
 });
 
-/**
- * LINUX ACL MASK TRAP on the run's TMPDIR. `<runDir>/tmp` is created 0700, and
- * on Linux a 0700 creation mode zeroes the POSIX ACL mask — the grant inherited
- * from the workdir's default ACL is born `#effective:---`, so the agent cannot
- * use its own TMPDIR. The run HOME and gh-config re-grant after mkdir for the
- * same reason; tmp never did.
- */
-describe("provisionWorkdir — the run TMPDIR is re-granted on Linux", () => {
-  let root: string;
-
-  beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), "provision-tmp-grant-"));
-  });
-  afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
-  });
-
-  async function provisionOn(
-    platform: NodeJS.Platform,
-    agentUser: string,
-  ): Promise<{ calls: string[][]; run: RunPaths }> {
-    const calls: string[][] = [];
-    const run = await provisionWorkdir({
-      repoFullName: "o/r",
-      branch: "main",
-      installationToken: "t",
-      workdirRoot: root,
-      runId: "thr_tmp",
-      agentUser,
-      workerLogin: "the-operator",
-      platform,
-      aceExec: async (file, args) => {
-        calls.push([file, ...args]);
-      },
-      runGit: async (args) => {
-        calls.push(["git", args.includes("clone") ? "clone" : "other"]);
-        return { stdout: "", stderr: "" };
-      },
-    });
-    return { calls, run };
-  }
-
-  it("restores the agent's access entry on tmp AFTER creating it", async () => {
-    const { calls, run } = await provisionOn("linux", "automata-agent");
-    const tmp = run.tmp;
-    const regrant = calls.findIndex(
-      (c) =>
-        c[0] === "/usr/bin/setfacl" &&
-        c[1] === "-m" &&
-        c[2] === "u:automata-agent:rwx" &&
-        c[3] === tmp,
-    );
-    expect(regrant).toBeGreaterThan(calls.findIndex((c) => c[0] === "git"));
-    expect((await fs.stat(tmp)).isDirectory()).toBe(true);
-  });
-
-  it("no re-grant on macOS (the inherited ACE survives the mode)", async () => {
-    const { calls, run } = await provisionOn("darwin", "automata-agent");
-    const tmp = run.tmp;
-    expect(calls.some((c) => c.includes(tmp))).toBe(false);
-  });
-
-  it("no ACL call at all when agentUser is empty", async () => {
-    const { calls } = await provisionOn("linux", "");
-    expect(calls).toEqual([["git", "clone"]]);
-  });
-});
-
 describe("provisionWorkdir — run-owned dirs sit outside the checkout (#302)", () => {
   let root: string;
   let origin: string;
@@ -680,22 +417,15 @@ describe("provisionWorkdir — run-owned dirs sit outside the checkout (#302)", 
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it.each([
-    ["default mode", ""],
-    ["agent-uid mode", "_automata-agent"],
-  ])(
+  it.each([["a real local clone"]])(
     "%s: home/, gh-config/ and tmp/ are not in the clone at all",
-    async (_label, agentUser) => {
+    async () => {
       const run = await provisionWorkdir({
         repoFullName: "irrelevant/local",
         branch: "main",
         installationToken: "unused",
         workdirRoot: path.join(root, "runs"),
         runId: "thr_x",
-        agentUser,
-        // Pinned off-Linux/off-macOS: this test is about git, not ACLs.
-        platform: "freebsd",
-        aceExec: async () => {},
         runGit: (args) =>
           execFileAsync(
             "git",

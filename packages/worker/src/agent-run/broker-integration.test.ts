@@ -58,7 +58,6 @@ function brokeredEnv(ghConfigDir: string, gitUrl: string): NodeJS.ProcessEnv {
   return buildDaemonEnv({
     baseEnv: process.env,
     anthropicApiKey: "",
-    claudeBinDir: "",
     installationToken: TOKEN,
     ghConfigDir,
     botLogin: "automata-ai-bot[bot]",
@@ -93,7 +92,7 @@ describe.skipIf(!hasGh)("gh through the gh broker (the preflight path)", () => {
         });
       }) as unknown as typeof fetch,
     });
-    // What DaemonProcess.ensureEnv() writes into the isolated gh config dir.
+    // What the host gh preflight (gh-preflight.ts) writes into its isolated gh config dir.
     fs.writeFileSync(
       path.join(ghConfigDir, "config.yml"),
       `version: 1\nhttp_unix_socket: ${ghBroker.socketPath}\n`,
@@ -151,7 +150,6 @@ describe.skipIf(!hasGh)(
       const env = buildDaemonEnv({
         baseEnv: process.env,
         anthropicApiKey: "",
-        claudeBinDir: "",
         installationToken: TOKEN,
         ghConfigDir,
         botLogin: "automata-ai-bot[bot]",

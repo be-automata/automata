@@ -24,6 +24,13 @@
   leak found in that run was closed — both inform the rules below. Core split and credential
   placement (Decision §3) remain unchanged; §4's write-time rule is unchanged, its scope is
   clarified.
+- **Revision 4 (on release of ADR-013):** on the Linux execution box, an agent run no longer
+  executes as a host uid. Every run is a fresh container from one pinned image on a dedicated
+  rootless Docker daemon, with no network but unix-socket bridges to the worker's egress proxy and
+  brokers. The control/execution split and the credential-placement rules (Decision §3, §4, R3.4)
+  are unchanged: the GitHub token stays in the worker, and a review container holds no write
+  credential. Layer 3 customization packs (R3.1, R3.3) become image contents, bumped by a reviewed
+  PR to the image, not packs linked into a HOME.
 
 ## Context
 

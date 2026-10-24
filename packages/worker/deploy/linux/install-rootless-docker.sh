@@ -4,9 +4,8 @@ umask 022
 #
 # install-rootless-docker.sh — the DEDICATED rootless Docker daemon agent-run
 # containers execute on (ADR-013 Decision 2, plan P0/P1). Root required.
-# Ubuntu 24.04, cgroup v2. For the THROWAWAY box: nothing here touches the
-# worker unit, its env or the rootful daemon that runs the engine stack, and it
-# never sets WORKER_DEV_CONTAINER_RUNS.
+# Ubuntu 24.04, cgroup v2. Nothing here touches the worker unit, its env or the
+# rootful daemon that runs the engine stack.
 #
 # What it does (idempotent: every step checks before it changes, so a second
 # run changes nothing and restarts nothing):

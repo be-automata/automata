@@ -10,9 +10,9 @@ import type { SelfHealRunShape } from "./types";
 /**
  * GATE-01 / FENCE-01, execution-plane half (phase 9).
  *
- * After a fix agent is dead (daemon group killed, agent-uid escapees reaped,
- * git and gh brokers closed) the worker runs ONLY the finding's deterministic
- * check (plus, #277, the checks of recently resolved findings), as the agent uid, on a clean checkout of exactly the commit the
+ * After a fix agent is dead (its container removed, git and gh brokers
+ * closed) the worker runs ONLY the finding's deterministic check (plus, #277,
+ * the checks of recently resolved findings) on a clean checkout of exactly the commit the
  * broker saw pushed, and lists the files that commit changed against the base
  * so www can refuse a fix that touched a denied path. No LLM, no build, no
  * test suite: those run on the repo's own CI on the draft PR.
@@ -163,8 +163,6 @@ export interface RunFixCheckArgs {
   /** origin/<baseBranch>, pinned by the worker BEFORE the agent ran. */
   baseSha: string | null;
   workdir: string;
-  /** Sudo target; "" runs as the current user (dev). */
-  agentUser: string;
   run: RunAsAgent;
   /** PATH/LANG/proxy/safe.directory; HOME and TMPDIR are replaced. */
   env: NodeJS.ProcessEnv;
@@ -243,7 +241,6 @@ export async function runFixCheck(
   const env = hardenGitEnv(args.env);
   const git = async (script: string, scriptArgs: string[]) =>
     args.run({
-      agentUser: args.agentUser,
       cwd: args.workdir,
       script,
       args: scriptArgs,
@@ -336,7 +333,6 @@ export async function runFixCheck(
         : await runSelfHealChecks({
             checks: [...own, ...regression],
             run: args.run,
-            agentUser: args.agentUser,
             workdir: args.workdir,
             env: checkEnv,
             budgetMs: remaining,
