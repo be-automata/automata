@@ -613,9 +613,12 @@ export async function executeReviewFromIntent(
   // posted by an earlier execution of this same intent (so a crash between the
   // post and the resolutions is finished by the redelivered run). Never on the
   // stale path above, never on a notice. Best effort: never changes `outcome`.
+  // A draft-era note that yielded stood down for the review in force at HEAD;
+  // that review's open threads are its own to keep (#504).
   if (
     opts.threadResolutions &&
-    (outcome.outcome === "posted" || outcome.outcome === "skipped_existing")
+    (outcome.outcome === "posted" ||
+      (outcome.outcome === "skipped_existing" && !draftEraNote))
   ) {
     try {
       await applyThreadResolutions({

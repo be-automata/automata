@@ -280,6 +280,36 @@ describe("executeReviewFromIntent — resolutions + verify-before-block", () => 
     expect(client.resolveThread).toHaveBeenCalledTimes(1);
   });
 
+  // #504: a draft-era bare comment that yields to the ready-PR verdict at
+  // HEAD leaves that verdict's open threads alone.
+  it("a draft-era note that yielded to a verdict at HEAD → nothing is resolved", async () => {
+    const github = makeGithub([
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "t",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: "fix the guard",
+      },
+    ]);
+    const client = makeThreadClient([openThread()]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      draftAtDispatch: true,
+      terminalText: intent({ verdict: "comment", summary: "Draft: fine." }),
+      threadResolutions: { client, claim: async () => true },
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(client.findThreadByCommentId).not.toHaveBeenCalled();
+  });
+
   it("stale intent → nothing is resolved", async () => {
     const github = makeGithub([]);
     const client = makeThreadClient([openThread()]);
