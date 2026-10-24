@@ -60,7 +60,11 @@ export interface ReviewIntent {
 
 export type ReviewIntentOutcome =
   | { outcome: "posted"; verdict: ReviewVerdict }
-  | { outcome: "skipped_existing" }
+  /**
+   * `yieldedTo` is set only on a `yieldTo` skip: the review in force at HEAD
+   * this note stood down for. Absent = this intent was already posted.
+   */
+  | { outcome: "skipped_existing"; yieldedTo?: GitHubReview }
   | { outcome: "post_failed"; failureReason: string };
 
 export interface ExecuteReviewIntentOpts {
@@ -225,7 +229,7 @@ export async function executeReviewIntent(
             existingReviewState: inForce.state,
           },
         );
-        return { outcome: "skipped_existing" };
+        return { outcome: "skipped_existing", yieldedTo: inForce };
       }
     } catch (err) {
       logger?.warn(

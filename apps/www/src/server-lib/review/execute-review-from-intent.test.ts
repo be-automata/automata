@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   DEGRADED_INTENT_MARKER,
+  DRAFT_ERA_NOTE_MARKER,
   botAuthoredVerdictLine,
   executeReviewFromIntent,
   isDegradedComment,
@@ -621,6 +622,31 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(res).toEqual({ outcome: "posted", verdict: "comment" });
     });
 
+    it("an unknown live draft state still yields to a verdict at HEAD", async () => {
+      const github = makeGithub([
+        {
+          id: 9,
+          user: { login: BOT },
+          state: "APPROVED",
+          submittedAt: "2026-10-24T12:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: "Ready-PR verdict.",
+        },
+      ]);
+      const res = await executeReviewFromIntent({
+        github,
+        repoFullName: REPO,
+        prNumber: PR,
+        botLogin: BOT,
+        currentHeadSha: HEAD,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res.outcome).toBe("skipped_existing");
+      expect(github.dismissReview).not.toHaveBeenCalled();
+    });
+
     it("a failed review lookup posts the comment but dismisses nothing", async () => {
       const github = makeGithub([]);
       github.listReviews.mockRejectedValue(new Error("502"));
@@ -634,9 +660,9 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(github.dismissReview).not.toHaveBeenCalled();
     });
 
-    // The PR also moved on: the draft-era run's comment is about an older
-    // commit, so it posts there, marked stale — as it would on a still-draft PR.
-    it("a bare `comment` at an older commit posts as a stale COMMENT there", async () => {
+    // The PR also moved on: a draft-era comment about an older commit says
+    // nothing about the ready PR at HEAD, so it stays a withheld no-verdict.
+    it("a bare `comment` at an older commit stays a withheld no-verdict", async () => {
       const github = makeGithub([]);
       const res = await executeReviewFromIntent({
         ...base,
@@ -648,12 +674,62 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
           summary: "Draft: the approach looks right so far.",
         }),
       });
-      expect(res).toMatchObject({
-        outcome: "posted_stale_comment",
-        intendedVerdict: "comment",
-      });
-      expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+      expect(res.outcome).toBe("skipped_stale_degrade");
+      expectNoReview(github);
       expect(github.createConversationComment).not.toHaveBeenCalled();
+    });
+
+    it("the note is marked, and a later COMMENT with findings still posts over it", async () => {
+      const github = makeGithub([]);
+      await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      const noteBody = github.submitReviewWithComments.mock.calls[0]![4];
+      expect(noteBody.trimEnd().endsWith(DRAFT_ERA_NOTE_MARKER)).toBe(true);
+      // The ready-PR run's review, with the note in force at HEAD.
+      github.listReviews.mockResolvedValue([
+        {
+          id: 9,
+          user: { login: BOT },
+          state: "COMMENTED",
+          submittedAt: "2026-10-24T12:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: noteBody,
+        },
+      ]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: false,
+        terminalText: fenced({
+          verdict: "comment",
+          commit: HEAD,
+          summary: "One thing worth a look.",
+          findings: [
+            { severity: "info", path: "a.ts", line: 3, body: "untested" },
+          ],
+        }),
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+      expect(github.submitReviewWithComments).toHaveBeenCalledTimes(2);
+    });
+
+    it("a posted note never retires a no-verdict notice", async () => {
+      const github = makeGithub([]);
+      await executeReviewFromIntent({ ...base, github, terminalText: UNABLE });
+      expect(github.comments).toHaveLength(1);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+      expect(github.comments).toHaveLength(1);
     });
 
     it("an abandoned run keeps today's rule: no review at HEAD, no notice", async () => {

@@ -17,7 +17,7 @@ import {
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import {
   executeReviewFromIntent,
-  isDegradedComment,
+  isNotAVerdict,
   snapshotOf,
 } from "./execute-review-from-intent";
 import {
@@ -174,7 +174,7 @@ export async function runReviewSweep(): Promise<void> {
       // person's decision; a delivered verdict is never delivered twice.
       const reviews = await github.listReviews(c.repoFullName, c.prNumber);
       const existing = await findAnyBotReviewAtCommit({
-        github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
+        github: snapshotOf(reviews.filter((r) => !isNotAVerdict(r))),
         repo: c.repoFullName,
         prNumber: c.prNumber,
         headSha: currentHeadSha,

@@ -345,9 +345,14 @@ export async function executeReviewFromIntent(
   }
 
   const emitted = parsed.intent;
+  // The dispatch stamp counts only for a comment about live HEAD: a draft-era
+  // comment about an older commit stays a no-verdict (withheld below), never a
+  // stale COMMENT on a PR that is ready now.
   const draftForNoVerdict =
     opts.isDraft === true ||
-    (opts.draftAtDispatch === true && !opts.runAbandoned);
+    (opts.draftAtDispatch === true &&
+      !opts.runAbandoned &&
+      emitted.commit === currentHeadSha);
   if (isBareCommentOnReadyPr(emitted, draftForNoVerdict)) {
     return await reportNoVerdict(opts, {
       cause: "agent_comment_without_findings",
@@ -449,7 +454,7 @@ export async function executeReviewFromIntent(
     // verdict that merely arrived late. Same defect, two guards, and only one was
     // fixed. They share a single `const` now so they cannot drift apart again —
     // do not re-inline either filter.
-    const verdicts = reviews.filter((r) => !isDegradedComment(r));
+    const verdicts = reviews.filter((r) => !isNotAVerdict(r));
 
     const alreadyAtIntentCommit = await findAnyBotReviewAtCommit({
       github: snapshotOf(verdicts),
@@ -537,10 +542,10 @@ export async function executeReviewFromIntent(
   // executor checks right before it posts, which narrows the race with a
   // concurrent verdict but cannot close it; even then nothing is dismissed.
   // A degraded comment is evidence of silence, never a review to yield to.
+  // The note carries DRAFT_ERA_NOTE_MARKER, so no later run mistakes it for
+  // its own review at HEAD (`isNotAVerdict`).
   const draftEraNote =
-    opts.isDraft !== true &&
-    draftForNoVerdict &&
-    isBareCommentOnReadyPr(emitted, false);
+    opts.isDraft !== true && draftForNoVerdict && isBareComment(emitted);
 
   // SELF-AUTHORED PR. The floor above already ran, so `effectiveVerdict` is
   // the verdict we would have submitted; only the review EVENT changes. The
@@ -576,6 +581,12 @@ export async function executeReviewFromIntent(
         body: `${postedIntent.body.trimEnd()}\n\n${reviewBaseMarker(reviewBase)}`,
       }
     : postedIntent;
+  const finalIntent = draftEraNote
+    ? {
+        ...markedIntent,
+        body: `${markedIntent.body.trimEnd()}\n\n${DRAFT_ERA_NOTE_MARKER}`,
+      }
+    : markedIntent;
 
   const outcome = await runExecutor({
     github,
@@ -583,11 +594,13 @@ export async function executeReviewFromIntent(
     prNumber,
     botLogin,
     headSha: currentHeadSha,
-    execIntent: markedIntent,
+    execIntent: finalIntent,
     postInlineComments: opts.postInlineComments,
-    ...(reviewBase
-      ? { isSameReview: sameReviewByBase(reviewBase, opts.liveBase) }
-      : {}),
+    // A draft-era note at HEAD is never this run's own review, whatever its
+    // state: without this, a later COMMENT would be skipped as its redelivery.
+    isSameReview: (r: GitHubReview) =>
+      !isDraftEraNote(r) &&
+      (!reviewBase || sameReviewByBase(reviewBase, opts.liveBase)(r)),
     ...(draftEraNote
       ? {
           // Yield only to a real review of the same base: after a retarget
@@ -599,8 +612,9 @@ export async function executeReviewFromIntent(
       : {}),
     logger,
   });
-  if (outcome.outcome === "posted") {
+  if (outcome.outcome === "posted" && !draftEraNote) {
     // A verdict now sits at HEAD, so a notice saying there is none is false.
+    // A draft-era note is not a verdict on the ready PR: notices stay.
     await retireReviewNotices({
       github,
       repoFullName,
@@ -613,12 +627,21 @@ export async function executeReviewFromIntent(
   // posted by an earlier execution of this same intent (so a crash between the
   // post and the resolutions is finished by the redelivered run). Never on the
   // stale path above, never on a notice. Best effort: never changes `outcome`.
-  // A draft-era note that yielded stood down for the review in force at HEAD;
-  // that review's open threads are its own to keep (#504).
+  // A draft-era note that yielded to ANOTHER review stood down for it, and
+  // that review's open threads are its own to keep (#504); yielding to its
+  // own earlier post is a replay and finishes the resolutions as above.
+  const yieldedTo =
+    outcome.outcome === "skipped_existing" ? outcome.yieldedTo : undefined;
+  const yieldedToAnother =
+    yieldedTo !== undefined &&
+    !(
+      yieldedTo.state === "COMMENTED" &&
+      yieldedTo.body.trim() === finalIntent.body.trim()
+    );
   if (
     opts.threadResolutions &&
     (outcome.outcome === "posted" ||
-      (outcome.outcome === "skipped_existing" && !draftEraNote))
+      (outcome.outcome === "skipped_existing" && !yieldedToAnother))
   ) {
     try {
       await applyThreadResolutions({
@@ -665,11 +688,12 @@ function isBareCommentOnReadyPr(
   emitted: EmittedReviewIntent,
   treatAsDraft: boolean,
 ): boolean {
-  return (
-    emitted.verdict === "comment" &&
-    !treatAsDraft &&
-    (emitted.findings?.length ?? 0) === 0
-  );
+  return isBareComment(emitted) && !treatAsDraft;
+}
+
+/** An agent-chosen `comment` that carries no findings. */
+function isBareComment(emitted: EmittedReviewIntent): boolean {
+  return emitted.verdict === "comment" && (emitted.findings?.length ?? 0) === 0;
 }
 
 /**
@@ -885,6 +909,23 @@ function mapOutcome(o: ReviewIntentOutcome): ReviewFromIntentOutcome {
  * in practice `findBotReviewAtHead`'s `r.user?.login === botLogin`, applied AFTER
  * this one.
  */
+/**
+ * The hidden last line of a draft-era note (#504): a bare `comment` posted as a
+ * review only because the run's prompt said "draft" and the PR left draft
+ * mid-run. It answers the PR as it was, so it is never the verdict a later run
+ * looks for at a commit. Same author caveat as `isDegradedComment`.
+ */
+export const DRAFT_ERA_NOTE_MARKER = "<!-- automata:draft-era-note -->";
+
+export function isDraftEraNote(review: GitHubReview): boolean {
+  return review.body.trimEnd().endsWith(DRAFT_ERA_NOTE_MARKER);
+}
+
+/** Reviews no guard may count as a delivered verdict at a commit. */
+export function isNotAVerdict(review: GitHubReview): boolean {
+  return isDegradedComment(review) || isDraftEraNote(review);
+}
+
 export function isDegradedComment(review: GitHubReview): boolean {
   // STRUCTURAL, NOT A SUBSTRING SEARCH. The retired emission site always built
   // the body as `${MARKER}\n\n_Reason: …`, so the marker is a PREFIX by

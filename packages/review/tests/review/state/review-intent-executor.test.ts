@@ -335,8 +335,59 @@ describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
         intent: { verdict: "comment", body: "draft note" },
         yieldTo: () => true,
       });
-      assert.deepEqual(res, { outcome: "skipped_existing" });
+      assert.deepEqual(res, {
+        outcome: "skipped_existing",
+        yieldedTo: botReviewAtHead(state, 5),
+      });
       assert.equal(github.submitReviewWithComments.mock.calls.length, 0);
+      assert.equal(github.dismissReview.mock.calls.length, 0);
+    });
+  }
+
+  test("the yield returns the review it stood down for", async () => {
+    const github = makeGithub([botReviewAtHead("APPROVED", 5)]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: () => true,
+    });
+    assert.equal(res.outcome, "skipped_existing");
+    assert.equal(
+      res.outcome === "skipped_existing" ? res.yieldedTo?.id : undefined,
+      5,
+    );
+  });
+
+  for (const [label, review] of [
+    [
+      "dismissed",
+      {
+        ...botReviewAtHead("APPROVED", 5),
+        dismissedAt: "2026-10-24T00:00:00Z",
+      },
+    ],
+    ["older-commit", { ...botReviewAtHead("APPROVED", 5), commitId: "old" }],
+    [
+      "another user's",
+      { ...botReviewAtHead("APPROVED", 5), user: { login: "alice" } },
+    ],
+  ] as const) {
+    test(`a ${label} review is not in force: posts`, async () => {
+      const github = makeGithub([review]);
+      const res = await executeReviewIntent({
+        github,
+        repo: REPO,
+        prNumber: PR,
+        headSha: HEAD,
+        botLogin: BOT,
+        intent: { verdict: "comment", body: "draft note" },
+        yieldTo: () => true,
+      });
+      assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
       assert.equal(github.dismissReview.mock.calls.length, 0);
     });
   }
