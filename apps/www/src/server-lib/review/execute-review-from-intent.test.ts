@@ -545,6 +545,48 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
     });
 
+    // A late draft-era comment (the sweep, a slow finish) must not dismiss
+    // the verdict the ready-PR run already posted at the same HEAD.
+    it.each(["APPROVED", "CHANGES_REQUESTED"] as const)(
+      "never replaces a %s review already in force at HEAD",
+      async (state) => {
+        const github = makeGithub([
+          {
+            id: 9,
+            user: { login: BOT },
+            state,
+            submittedAt: "2026-10-24T12:00:00Z",
+            dismissedAt: null,
+            commitId: HEAD,
+            body: "Ready-PR verdict.",
+          },
+        ]);
+        const res = await executeReviewFromIntent({
+          ...base,
+          github,
+          draftAtDispatch: true,
+          terminalText: BARE_COMMENT,
+        });
+        expect(res.outcome).toBe("skipped_superseded");
+        expect(github.dismissReview).not.toHaveBeenCalled();
+        expectNoReview(github);
+        expect(github.createConversationComment).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a failed review lookup skips rather than risk dismissing a verdict", async () => {
+      const github = makeGithub([]);
+      github.listReviews.mockRejectedValueOnce(new Error("502"));
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res.outcome).toBe("skipped_superseded");
+      expectNoReview(github);
+    });
+
     // The PR also moved on: the draft-era run's comment is about an older
     // commit, so it posts there, marked stale — as it would on a still-draft PR.
     it("a bare `comment` at an older commit posts as a stale COMMENT there", async () => {
