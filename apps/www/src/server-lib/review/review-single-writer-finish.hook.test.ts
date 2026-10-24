@@ -141,6 +141,32 @@ describe("handleReviewEffectAtFinish — terminal-text selection (phase 6)", () 
   });
 });
 
+// #504: the bare-comment rule judges by the draft state the prompt stated.
+describe("handleReviewEffectAtFinish — dispatch-time draft stamp", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    chatMessages.value = F2;
+  });
+
+  it.each([true, false])(
+    "hands the executor the stamped draft state (reviewIsDraft=%s) beside the live one",
+    async (reviewIsDraft) => {
+      threadRow.value = thread({ ...UNSTAMPED_METADATA, reviewIsDraft });
+      await runHook();
+      const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+      expect(args.draftAtDispatch).toBe(reviewIsDraft);
+      expect(args.isDraft).toBe(false);
+    },
+  );
+
+  it("an unstamped thread passes no dispatch draft state (today's behaviour)", async () => {
+    threadRow.value = thread(UNSTAMPED_METADATA);
+    await runHook();
+    const args = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+    expect(args.draftAtDispatch).toBeUndefined();
+  });
+});
+
 describe("handleReviewEffectAtFinish — a PR the bot opened itself", () => {
   beforeEach(() => {
     vi.clearAllMocks();

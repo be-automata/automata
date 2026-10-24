@@ -430,6 +430,8 @@ async function runMentionReview({
     terminalText: reviewIntentText,
     approveFloorPolicy,
     isDraft,
+    // The draft state the mention's prompt stated (#504).
+    draftAtDispatch: stamp.isDraft,
     prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),
     readFileAtCommit: createFileAtCommitReader(octokit, repoFullName),
     threadResolutions: {

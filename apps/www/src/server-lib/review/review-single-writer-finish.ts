@@ -178,6 +178,20 @@ export function reviewBaseOfThread(
 }
 
 /**
+ * The draft state a PR-event run's prompt stated, stamped at dispatch (#504).
+ * Absent (an older thread, or a non-skill one) is `undefined`: the finish then
+ * judges by the live read alone, exactly as before.
+ */
+export function reviewIsDraftOfThread(
+  thread: { sourceMetadata?: ThreadSourceMetadata | null } | null | undefined,
+): boolean | undefined {
+  const metadata = thread?.sourceMetadata;
+  return metadata?.type === "automation-skill"
+    ? metadata.reviewIsDraft
+    : undefined;
+}
+
+/**
  * THE terminal-text decision for a review thread — one pure function used by
  * BOTH the finish hook and the hourly sweep, so the two paths cannot diverge
  * (the #213/#221/#224 lesson).
@@ -474,6 +488,7 @@ export async function handleReviewEffectAtFinish({
         preferTaggedIntent,
         approveFloorPolicy,
         isDraft,
+        draftAtDispatch: reviewIsDraftOfThread(thread),
         // A self-heal fix PR is opened by this same App, and GitHub refuses a
         // formal verdict from a PR's author: post it as a COMMENT instead.
         prAuthoredByBot: isPrAuthoredByBot(authorLogin, botLogin),

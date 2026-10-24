@@ -164,6 +164,15 @@ export interface ExecuteReviewFromIntentOpts {
    */
   isDraft?: boolean;
   /**
+   * The draft state the run's prompt stated (#504), stamped at dispatch from
+   * the same `pulls.get` read. Consulted ONLY by the no-verdict rule: a bare
+   * `comment` from a run told "this is a draft" is its draft verdict even when
+   * the PR left draft mid-run. The floor cap keeps following the live
+   * `isDraft`. Ignored for an abandoned run, so a superseded draft-era run
+   * cannot occupy HEAD with a COMMENT review. Absent = today's behaviour.
+   */
+  draftAtDispatch?: boolean;
+  /**
    * The head SHA this run was dispatched to review (thread.reviewedSha, #125 C5).
    * Consulted ONLY on the NO-VERDICT path: a run that produced no verdict
    * has nothing to anchor its notice to except the commit it was pointed at, so
@@ -336,7 +345,10 @@ export async function executeReviewFromIntent(
   }
 
   const emitted = parsed.intent;
-  if (isBareCommentOnReadyPr(emitted, opts.isDraft)) {
+  const draftForNoVerdict =
+    opts.isDraft === true ||
+    (opts.draftAtDispatch === true && !opts.runAbandoned);
+  if (isBareCommentOnReadyPr(emitted, draftForNoVerdict)) {
     return await reportNoVerdict(opts, {
       cause: "agent_comment_without_findings",
       reason: emitted.summary,
@@ -615,10 +627,11 @@ export async function executeReviewFromIntent(
 
 /**
  * An agent-chosen `comment` that carries no findings, on a PR that is ready for
- * review. The skill reserves `comment` for drafts and for findings surfaced
- * below the block floor; with neither, it can only mean "I could not reach a
- * verdict" — the review #228 received when the agent had no git access. That
- * is a non-verdict and must not be posted as a review.
+ * review and was ready when the run's prompt was built (#504). The skill
+ * reserves `comment` for drafts and for findings surfaced below the block
+ * floor; with neither, it can only mean "I could not reach a verdict" — the
+ * review #228 received when the agent had no git access. That is a
+ * non-verdict and must not be posted as a review.
  *
  * Keyed on the EMITTED verdict, before the approve floor: a server-side
  * downgrade of `approve` to `comment` always carries the findings that caused
@@ -626,11 +639,11 @@ export async function executeReviewFromIntent(
  */
 function isBareCommentOnReadyPr(
   emitted: EmittedReviewIntent,
-  isDraft: boolean | undefined,
+  treatAsDraft: boolean,
 ): boolean {
   return (
     emitted.verdict === "comment" &&
-    isDraft !== true &&
+    !treatAsDraft &&
     (emitted.findings?.length ?? 0) === 0
   );
 }

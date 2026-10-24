@@ -489,6 +489,99 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
     expect(github.createConversationComment).not.toHaveBeenCalled();
   });
 
+  // #504: the prompt said "draft" (stamped at dispatch), the PR left draft
+  // before finish. The agent's bare `comment` answered the PR it was shown.
+  describe("draft at dispatch, ready at finish", () => {
+    const base = {
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+    };
+    const BARE_COMMENT = fenced({
+      verdict: "comment",
+      commit: HEAD,
+      summary: "Draft: the approach looks right so far.",
+    });
+
+    it("a bare `comment` posts as a review, never a notice", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+      expect(github.submitReviewWithComments).toHaveBeenCalledTimes(1);
+      expect(github.createConversationComment).not.toHaveBeenCalled();
+    });
+
+    it("ready at dispatch AND at finish is still the ADR-009 notice", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: false,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res).toMatchObject({
+        outcome: "degraded_comment",
+        cause: "agent_comment_without_findings",
+      });
+      expectNoReview(github);
+    });
+
+    it("the floor cap follows the LIVE state: request_changes stays formal", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: RC_AT_HEAD,
+      });
+      expect(res.outcome).toBe("posted");
+      expect(github.submitReview.mock.calls[0]![2]).toBe("REQUEST_CHANGES");
+    });
+
+    // The PR also moved on: the draft-era run's comment is about an older
+    // commit, so it posts there, marked stale — as it would on a still-draft PR.
+    it("a bare `comment` at an older commit posts as a stale COMMENT there", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        terminalText: fenced({
+          verdict: "comment",
+          commit: OLD,
+          summary: "Draft: the approach looks right so far.",
+        }),
+      });
+      expect(res).toMatchObject({
+        outcome: "posted_stale_comment",
+        intendedVerdict: "comment",
+      });
+      expect(github.submitReviewWithComments.mock.calls[0]![2]).toBe(OLD);
+      expect(github.createConversationComment).not.toHaveBeenCalled();
+    });
+
+    it("an abandoned run keeps today's rule: no review at HEAD, no notice", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        runAbandoned: true,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res.outcome).toBe("skipped_stale_degrade");
+      expectNoReview(github);
+      expect(github.createConversationComment).not.toHaveBeenCalled();
+    });
+  });
+
   it("a `comment` WITH findings on a ready PR stays a review — it surfaces them", async () => {
     // The finding sits BELOW the block threshold: a blocking one would be
     // raised to request_changes by the floor (covered in

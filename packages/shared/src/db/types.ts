@@ -159,6 +159,11 @@ export type ThreadSourceMetadata =
       // idempotency on it, so a retarget at an unchanged head is a new
       // review, not a replay. Absent on threads written before it existed.
       reviewBase?: string;
+      // PR-event runs: the PR's GitHub draft state when the run was
+      // dispatched, i.e. what its prompt stated (#504). The no-verdict rule
+      // reads it: a bare `comment` from a run told "draft" is its draft
+      // verdict even if the PR left draft mid-run. Absent on older threads.
+      reviewIsDraft?: boolean;
     };
 
 /**
@@ -189,6 +194,11 @@ export type MentionLaneStamp = {
   /** issue = an issue / PR conversation comment; review_comment = inline. */
   commentKind: "issue" | "review_comment";
   commenterLogin: string;
+  /**
+   * PR mentions only: the PR's GitHub draft state at intake, i.e. what the
+   * prompt stated (#504). Read by the no-verdict rule of a mention review.
+   */
+  isDraft?: boolean;
   /** Review comments only: the anchor and the (clipped) diff hunk. */
   path?: string;
   line?: number | null;

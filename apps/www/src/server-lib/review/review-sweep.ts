@@ -23,6 +23,7 @@ import {
 import {
   isReviewThread,
   reviewBaseOfThread,
+  reviewIsDraftOfThread,
   selectReviewTerminalText,
 } from "./review-single-writer-finish";
 import { isPrAuthoredByBot } from "./bot-login";
@@ -205,6 +206,8 @@ export async function runReviewSweep(): Promise<void> {
         // The same draft state the finish hook passes: it caps the floor at
         // `comment` and decides whether a bare `comment` is a verdict at all.
         isDraft,
+        // ...and the same dispatch-time draft stamp (#504).
+        draftAtDispatch: reviewIsDraftOfThread(c),
         // The same author check the finish hook makes: on a PR the bot opened
         // a formal verdict 422s, so without it this backstop would fail the
         // same post again every hour for the whole lookback window.

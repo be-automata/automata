@@ -192,6 +192,28 @@ describe("runReviewSweep — which terminal runs it may speak for", () => {
     },
   );
 
+  // #504: the same dispatch-time draft stamp the finish hook passes.
+  it.each([true, false, undefined])(
+    "hands the executor the thread's dispatch draft stamp (reviewIsDraft=%s)",
+    async (reviewIsDraft) => {
+      selected.rows = [
+        candidate({
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName: "github-ops",
+            contentSha: "sha",
+            source: "db-version",
+            ...(reviewIsDraft === undefined ? {} : { reviewIsDraft }),
+          },
+        }),
+      ];
+      await runReviewSweep();
+      expect(
+        vi.mocked(executeReviewFromIntent).mock.calls[0]![0].draftAtDispatch,
+      ).toBe(reviewIsDraft);
+    },
+  );
+
   it("hands the executor the repo's tolerance and a quote reader, like the finish hook", async () => {
     selected.rows = [candidate()];
     await runReviewSweep();

@@ -386,6 +386,9 @@ export async function handleOrgLaneMention(
   let prBaseBranchName: string | undefined;
   // PR mentions only: the base/head facts every PR-event prompt carries.
   let prContext: string | undefined;
+  // PR mentions only: the draft state prContext states, stamped so the
+  // finish judges a bare `comment` against what the agent was told (#504).
+  let prIsDraft: boolean | undefined;
   try {
     if (input.isPullRequest) {
       const { data: pr } = await octokit.rest.pulls.get({
@@ -401,6 +404,7 @@ export async function handleOrgLaneMention(
       }
       branchName = pr.head.ref;
       prBaseBranchName = pr.base.ref;
+      prIsDraft = pr.draft;
       prContext = renderPrDiffContext({
         prNumber: input.issueOrPrNumber,
         baseRef: pr.base.ref,
@@ -448,7 +452,10 @@ export async function handleOrgLaneMention(
             prContext ? prependPrContext(message, prContext) : message,
             mentionBlock,
           ),
-        stampExtra: { mention: stamp },
+        stampExtra: {
+          mention:
+            prIsDraft === undefined ? stamp : { ...stamp, isDraft: prIsDraft },
+        },
       },
     });
     threadId = result?.threadId;
