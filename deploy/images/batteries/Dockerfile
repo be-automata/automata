@@ -62,7 +62,9 @@ ARG CHROMIUM_SHA256=ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9
 ARG CHROMIUM_HEADLESS_SHA256=3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
 
 # be-automata/vendor-runtime-skills: vendor skills, agents and commands prepared
-# for this runtime (public; its catalog.json says what to link).
+# for this runtime (public; its catalog.json says what to link). The commit sha
+# pins every file of it; the upstream vendor's own pins (commit, tree ids) are
+# recorded in vendors/<vendor>/VENDOR.json, checked when the catalog imports.
 ARG VENDOR_SKILLS_SHA=24c77e7d2f178e9074514a8405f6d375dc7ec704
 # ruflo's planner and refinement agents (dev-execution spawns them), as
 # harness.json `agentFiles` pins them.
