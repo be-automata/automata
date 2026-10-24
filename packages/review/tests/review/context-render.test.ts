@@ -234,4 +234,19 @@ describe("untrusted wrapping", () => {
       parts[2]?.includes('[block "prior-reviews" truncated to 24000 chars]'),
     );
   });
+
+  test("a block's own maxChars overrides the shared cap", () => {
+    const out = renderReviewContext([
+      {
+        name: "ticket",
+        content: `${"t".repeat(30_000)}TAIL`,
+        maxChars: 60_000,
+      },
+      { name: "short", content: "s".repeat(500), maxChars: 100 },
+    ]);
+    const [ticket, short] = out.split("\n\n---\n\n");
+    assert.ok(ticket?.includes("TAIL"));
+    assert.ok(!ticket?.includes("truncated to"));
+    assert.ok(short?.includes('[block "short" truncated to 100 chars]'));
+  });
 });

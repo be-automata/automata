@@ -10,6 +10,10 @@ import {
   type ReviewThreadData,
 } from "@terragon/review/context/render";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import {
+  buildReviewTicketContext,
+  type ReviewTicketScope,
+} from "@/server-lib/tracker/review-ticket-context";
 import type { ReviewContextFetcher } from "./review-skill";
 import { fetchReviewThreads } from "./octokit-review-client";
 
@@ -86,8 +90,41 @@ async function fetchThreadsBlock(
   );
 }
 
+/**
+ * The ticket block's cap: a hardened ticket runs to ~25k characters and its
+ * acceptance criteria sit in the middle, which the shared head + tail cap
+ * would drop. Matches the post-merge lane's description cap.
+ */
+const TICKET_BLOCK_MAX_CHARS = 60_000;
+
+/**
+ * The `ticket` block reads the tracker, not GitHub: the PR's title, body and
+ * head branch name the ticket. The caller's PR is used when it has one (the
+ * PR-event path); the mention lane passes none, so it is read here.
+ */
+async function fetchTicketBlock(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  ticket: ReviewTicketScope | undefined,
+  pullRequest: RestPullRequestLike | undefined,
+): Promise<string> {
+  if (!ticket) {
+    throw new Error("this run has no tracker scope");
+  }
+  const pr =
+    pullRequest ??
+    (await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+  return buildReviewTicketContext({
+    scope: ticket,
+    repoFullName: `${owner}/${repo}`,
+    pullRequest: { title: pr.title, body: pr.body, headBranch: pr.head.ref },
+  });
+}
+
 const FETCHERS: Record<
-  ReviewContextFetcher,
+  Exclude<ReviewContextFetcher, "ticket">,
   (
     octokit: Octokit,
     owner: string,
@@ -110,6 +147,7 @@ export async function prefetchReviewContext({
   prNumber,
   fetchers,
   pullRequest,
+  ticket,
 }: {
   octokit: Octokit;
   repoFullName: string;
@@ -117,11 +155,27 @@ export async function prefetchReviewContext({
   fetchers: readonly ReviewContextFetcher[];
   /** The PR the caller already read: pr-view renders from it, no fetch. */
   pullRequest?: RestPullRequestLike;
+  /** Whose tracker the `ticket` block reads; without it that block is unavailable. */
+  ticket?: ReviewTicketScope;
 }): Promise<string> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const blocks = await Promise.all(
     fetchers.map(async (name): Promise<ReviewContextBlock> => {
       try {
+        if (name === "ticket") {
+          return {
+            name,
+            content: await fetchTicketBlock(
+              octokit,
+              owner,
+              repo,
+              prNumber,
+              ticket,
+              pullRequest,
+            ),
+            maxChars: TICKET_BLOCK_MAX_CHARS,
+          };
+        }
         return {
           name,
           content:
@@ -154,12 +208,15 @@ export async function prefetchReviewContextForPr({
   prNumber,
   fetchers,
   pullRequest,
+  ticket,
 }: {
   repoFullName: string;
   prNumber: number;
   fetchers: readonly ReviewContextFetcher[];
   /** The PR the caller already read: pr-view renders from it, no fetch. */
   pullRequest?: RestPullRequestLike;
+  /** Whose tracker the `ticket` block reads; without it that block is unavailable. */
+  ticket?: ReviewTicketScope;
 }): Promise<string> {
   let octokit: Octokit;
   try {
@@ -182,6 +239,7 @@ export async function prefetchReviewContextForPr({
     prNumber,
     fetchers,
     pullRequest,
+    ticket,
   });
 }
 

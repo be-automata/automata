@@ -1082,6 +1082,11 @@ describe("runAutomation — skill_message model + review context directive", () 
       repoFullName: automation.repoFullName,
       prNumber: 41,
       fetchers: ["pr-view", "prior-reviews", "review-threads"],
+      ticket: {
+        organizationId: orgId,
+        ownerUserId: automation.userId,
+        shadow: false,
+      },
     });
     const { text } = sentMessage();
     expect(text).toContain("## Trigger Context\nPREFETCHED-CONTEXT\n");

@@ -4,6 +4,20 @@ import {
   REVIEW_THREAD_PAGE_LIMIT,
 } from "./prefetch-review-context";
 
+const buildReviewTicketContext = vi.hoisted(() =>
+  vi.fn(
+    async ({
+      pullRequest,
+    }: {
+      pullRequest: { title: string; headBranch: string };
+    }) =>
+      `<ticket_context tickets="1">\n${pullRequest.title} @ ${pullRequest.headBranch}\n${"x".repeat(30_000)}AC-TAIL\n</ticket_context>`,
+  ),
+);
+vi.mock("@/server-lib/tracker/review-ticket-context", () => ({
+  buildReviewTicketContext,
+}));
+
 /**
  * The control-plane prefetch behind `<!-- automata:context … -->`.
  *
@@ -218,5 +232,51 @@ describe("prefetchReviewContext", () => {
     expect(octokit.rest.pulls.get).not.toHaveBeenCalled();
     expect(out).toContain("title:\tAlready read");
     expect(octokit.paginate).toHaveBeenCalledTimes(1);
+  });
+
+  describe("ticket", () => {
+    const ticket = {
+      organizationId: "org-1",
+      ownerUserId: "user-1",
+      shadow: false,
+    };
+
+    it("reads the PR when the caller has none and keeps the block's middle", async () => {
+      const octokit = makeOctokit({});
+      const out = await prefetchReviewContext({
+        octokit,
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        fetchers: ["pr-view", "ticket"],
+        ticket,
+      });
+      expect(octokit.rest.pulls.get).toHaveBeenCalled();
+      expect(buildReviewTicketContext).toHaveBeenLastCalledWith({
+        scope: ticket,
+        repoFullName: "acme/widgets",
+        pullRequest: {
+          title: "Add widgets",
+          body: "Body",
+          headBranch: "feat/w",
+        },
+      });
+      const parts = out.split("\n\n---\n\n");
+      expect(parts[1]).toContain('<user_content source="ticket">');
+      // Past the shared 24k cap, under the ticket block's own.
+      expect(parts[1]).toContain("AC-TAIL");
+      expect(parts[1]).not.toContain("truncated to");
+    });
+
+    it("without a tracker scope the block renders unavailable", async () => {
+      const out = await prefetchReviewContext({
+        octokit: makeOctokit({}),
+        repoFullName: "acme/widgets",
+        prNumber: 7,
+        fetchers: ["ticket"],
+      });
+      expect(out).toContain(
+        '<ticket unavailable="true" reason="this run has no tracker scope" />',
+      );
+    });
   });
 });
