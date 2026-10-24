@@ -884,6 +884,7 @@ export async function runPullRequestAutomation({
                   baseSha: pr.base?.sha,
                   headRef: branchName,
                   headSha,
+                  isDraft: pr.draft,
                 })}`,
               },
               ...message.parts,

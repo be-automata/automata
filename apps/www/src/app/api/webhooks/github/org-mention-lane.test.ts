@@ -175,6 +175,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
         pulls: {
           get: vi.fn(async () => ({
             data: {
+              draft: false,
               head: { ref: "feature/x", repo: { full_name: "acme/same" } },
               base: { ref: "main", repo: { full_name: "acme/same" } },
             },
@@ -334,6 +335,11 @@ describe("routing: org lane vs the legacy per-user path", () => {
         /^PR #7: base `main`, head `feature\/x`\. The change under review is `git diff origin\/main\.\.\.HEAD`/,
       ),
     });
+    // #498: the PR's real draft state, so a "Draft:" description is not
+    // mistaken for one.
+    expect(text).toContain(
+      "On GitHub this pull request is ready for review, not a draft",
+    );
     expect(sent.parts[1]).toEqual({ type: "text", text: "SKILL BODY" });
     expect(text).toContain("## Mention");
     expect(text).toContain('<user_content source="github_issue_comment">');
