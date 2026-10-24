@@ -4,7 +4,11 @@
 # Install: install -m 0755 -o root -g root automata-worker-safe-restart /usr/local/sbin/
 # Use it for every planned restart, instead of `systemctl restart automata-worker`:
 #
-#   automata-worker-safe-restart [--timeout-s N]
+#   automata-worker-safe-restart [--timeout-s N] [--allow-no-worker]
+#
+# --allow-no-worker: proceed when the engine shows no active worker under this
+# box's name. Refused by default — a name mismatch or a worker still
+# registering reads the same, and restarting then could SIGTERM a busy worker.
 #
 # A bare `systemctl restart` SIGTERMs a busy worker; the SDK's drain stops the
 # engine heartbeat first, and a drain that outlasts the heartbeat window hands

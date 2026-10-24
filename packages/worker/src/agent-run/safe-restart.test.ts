@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { drainForRestart, type DrainEngine } from "./safe-restart";
+import {
+  drainExitCode,
+  drainForRestart,
+  type DrainEngine,
+} from "./safe-restart";
 
 const NAME = "automata-worker-box-1";
 
@@ -194,5 +198,21 @@ describe("drainForRestart", () => {
     const { result } = await run(engine);
     expect(result.kind).toBe("unreadable");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("drainExitCode", () => {
+  it("restarts only on a proven drain; no matching worker is refused unless explicitly allowed", () => {
+    expect(
+      drainExitCode({ kind: "drained", workerIds: ["w"], waitedMs: 0 }, false),
+    ).toBe(0);
+    // A name mismatch or a worker still registering reads as no-worker: the
+    // wrapper must not SIGTERM a worker it could not see (review on #500).
+    expect(drainExitCode({ kind: "no-worker" }, false)).toBe(4);
+    expect(drainExitCode({ kind: "no-worker" }, true)).toBe(0);
+    expect(
+      drainExitCode({ kind: "timeout", workerIds: ["w"], busySlots: 1 }, true),
+    ).toBe(3);
+    expect(drainExitCode({ kind: "unreadable", reason: "x" }, true)).toBe(4);
   });
 });

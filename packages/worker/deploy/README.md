@@ -273,7 +273,10 @@ queued meanwhile wait (`REQUEUED_NO_WORKER`) and go to the relaunched worker.
 
 It never restarts a worker that still holds a run: on timeout, an unreadable
 engine, or Ctrl-C it unpauses the worker, leaves it running, and exits non-zero
-(3 = still busy, 4 = engine unreadable). Proven against hatchet-lite in
+(3 = still busy, 4 = not proven idle). Finding no active worker under this
+box's name while the unit runs is also exit 4 — a `WORKER_BOX_ID` or namespace
+mismatch, or a worker still registering right after a restart, reads the same.
+Check the name, or pass `--allow-no-worker` when you know the worker is down. Proven against hatchet-lite in
 `safe-restart.integration.test.ts`. This is what keeps a second box safe: with
 two boxes the engine would hand a drained run to the OTHER box while this one
 is still running it, which no ledger entry written at the end of a run can stop.

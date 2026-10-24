@@ -5,16 +5,19 @@
  * src/agent-run/safe-restart.ts for why.
  *
  *   node --import tsx scripts/drain-for-restart.ts [--timeout-s N] [--poll-s N]
+ *     [--allow-no-worker]
  *
- * Exit: 0 drained (or no active worker: nothing to interrupt) — restart now;
- * 3 still busy at the deadline, or interrupted (worker unpaused again);
- * 4 the engine could not be read or written (worker unpaused again).
+ * Exit: 0 drained — restart now; 3 still busy at the deadline, or interrupted
+ * (worker unpaused again); 4 not proven idle: the engine could not be read or
+ * written (worker unpaused again), or no active worker carries this box's name
+ * — a name mismatch or a worker still registering reads the same, so it is
+ * refused unless `--allow-no-worker` says the operator checked.
  */
 import { Hatchet } from "@hatchet-dev/typescript-sdk";
 
 import { resolveBoxId } from "../src/agent-run/config";
 import { resolveProbeWorkerName } from "../src/agent-run/engine-liveness";
-import { drainForRestart } from "../src/agent-run/safe-restart";
+import { drainExitCode, drainForRestart } from "../src/agent-run/safe-restart";
 
 function flag(name: string, fallback: number): number {
   const i = process.argv.indexOf(name);
@@ -56,10 +59,9 @@ const result = await drainForRestart({
   signal: abort.signal,
 });
 console.log(`drain: ${JSON.stringify(result)}`);
-process.exit(
-  result.kind === "drained" || result.kind === "no-worker"
-    ? 0
-    : result.kind === "timeout"
-      ? 3
-      : 4,
-);
+if (result.kind === "no-worker") {
+  console.log(
+    `drain: no active worker named ${workerName} while the unit runs — refusing to restart blind; check the name (WORKER_BOX_ID, namespace) or pass --allow-no-worker`,
+  );
+}
+process.exit(drainExitCode(result, process.argv.includes("--allow-no-worker")));

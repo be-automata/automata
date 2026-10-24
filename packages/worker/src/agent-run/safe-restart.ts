@@ -29,7 +29,11 @@ export interface DrainEngine {
 export type DrainResult =
   /** Every target worker is paused with all slots free: restart now. */
   | { kind: "drained"; workerIds: string[]; waitedMs: number }
-  /** No ACTIVE worker under this name: nothing can be interrupted. */
+  /**
+   * No ACTIVE worker under this name. NOT proof the box is idle: a name that
+   * does not match the running process (namespace, WORKER_BOX_ID) or a worker
+   * still registering after a restart reads the same, so callers fail closed.
+   */
   | { kind: "no-worker" }
   /** Still busy at the deadline; the workers were unpaused again. */
   | { kind: "timeout"; workerIds: string[]; busySlots: number }
@@ -189,5 +193,26 @@ export async function drainForRestart(opts: {
       return { kind: "timeout", workerIds: paused, busySlots: busy };
     }
     await sleep(pollMs);
+  }
+}
+
+/**
+ * The drain script's exit code: 0 restart now; 3 still busy (or interrupted),
+ * worker unpaused; 4 not proven idle — engine unreadable, or no worker under
+ * this name while the unit runs (unless the operator allows it explicitly).
+ */
+export function drainExitCode(
+  result: DrainResult,
+  allowNoWorker: boolean,
+): number {
+  switch (result.kind) {
+    case "drained":
+      return 0;
+    case "no-worker":
+      return allowNoWorker ? 0 : 4;
+    case "timeout":
+      return 3;
+    case "unreadable":
+      return 4;
   }
 }
