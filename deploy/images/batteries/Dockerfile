@@ -66,8 +66,7 @@ ARG CHROMIUM_HEADLESS_SHA256=3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a77
 # pins every file of it; the upstream vendor's own pins (commit, tree ids) are
 # recorded in vendors/<vendor>/VENDOR.json, checked when the catalog imports.
 ARG VENDOR_SKILLS_SHA=24c77e7d2f178e9074514a8405f6d375dc7ec704
-# ruflo's planner and refinement agents (dev-execution spawns them), as
-# harness.json `agentFiles` pins them.
+# ruflo's planner and refinement agents (dev-execution spawns them), by sha256.
 ARG RUFLO_PLANNER_SHA256=3746140c2bdfb38b3a26827e6c13745dff0999a5cd54767aaa984372f2573f89
 ARG RUFLO_REFINEMENT_SHA256=67ca9278c63971268226cc1096646459d78f6cad58274adfb6eda8d24a846862
 
@@ -340,7 +339,7 @@ RUN node /opt/automata/gsd/node_modules/@opengsd/gsd-core/bin/install.js \
 
 # The vendor runtime skills, linked into the agent's Claude config as
 # catalog.json lists them (a name the Somnio catalog or GSD already installed
-# wins, as first-wins does on the host). Then ruflo's planner and refinement
+# wins: first come, first linked). Then ruflo's planner and refinement
 # agents, sha256-checked, with their frontmatter `hooks` dropped (upstream
 # shells out to unpinned `npx claude-flow@alpha` there).
 # shellcheck disable=SC2016 # jq programs, not shell expansions
