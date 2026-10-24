@@ -535,14 +535,15 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
 });
 
 describe("github-mention skill validator", () => {
+  const tracked = readFileSync(
+    new URL(
+      "../../../../../deploy/skills/github-mention/SKILL.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
   it("accepts the tracked skill and rejects a body without the block", () => {
-    const tracked = readFileSync(
-      new URL(
-        "../../../../../deploy/skills/github-mention/SKILL.md",
-        import.meta.url,
-      ),
-      "utf8",
-    );
     expect(() =>
       validateSkillBody(MENTION_SKILL_NAME, tracked, "tracked"),
     ).not.toThrow();
@@ -558,6 +559,17 @@ describe("github-mention skill validator", () => {
     ).toThrow(/mention-reply/);
     expect(() =>
       validateSkillBody(MENTION_SKILL_NAME, "Reply with mention-reply.", "v2"),
+    ).toThrow(/mention-reply/);
+  });
+
+  it("checks the contract on the classic render the lane receives (#492)", () => {
+    const wrap = (condition: string) =>
+      `Intro.\n<!-- automata:if ${condition} -->\n${tracked}\n<!-- automata:endif -->`;
+    expect(() =>
+      validateSkillBody(MENTION_SKILL_NAME, wrap("classic"), "classic"),
+    ).not.toThrow();
+    expect(() =>
+      validateSkillBody(MENTION_SKILL_NAME, wrap("orchestrated"), "orch"),
     ).toThrow(/mention-reply/);
   });
 });

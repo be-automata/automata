@@ -4,20 +4,16 @@
 name: batteries-image
 
 on:
+  # The build context is deploy/images/batteries (the Dockerfile, verify.sh
+  # and the gsd/, ruflo/ and somnio-cli/ lockfiles), so one glob covers it.
   push:
     branches: [main]
     paths:
       - "deploy/images/batteries/**"
-      - "packages/worker/deploy/batteries/gsd/**"
-      - "packages/worker/deploy/batteries/ruflo/**"
-      - "packages/worker/deploy/batteries/somnio-cli/**"
       - ".github/workflows/batteries-image.yml"
   pull_request:
     paths:
       - "deploy/images/batteries/**"
-      - "packages/worker/deploy/batteries/gsd/**"
-      - "packages/worker/deploy/batteries/ruflo/**"
-      - "packages/worker/deploy/batteries/somnio-cli/**"
       - ".github/workflows/batteries-image.yml"
   workflow_dispatch:
 
@@ -57,8 +53,8 @@ jobs:
           persist-credentials: false
 
       # No secret may enter the image: scan everything the build reads (the
-      # Dockerfile dir and the build context) with the same pinned gitleaks
-      # the image ships.
+      # Dockerfile dir is the build context) with the same pinned gitleaks the
+      # image ships.
       - name: Secret scan of the build inputs
         env:
           GITLEAKS_VERSION: 8.30.1
@@ -69,7 +65,6 @@ jobs:
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c --quiet -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" dir --redact --no-banner deploy/images/batteries
-          "$RUNNER_TEMP/gitleaks" dir --redact --no-banner packages/worker/deploy
 
       # buildx with the default `docker` driver: the image lands straight in
       # the local image store (no second copy from a builder container), which
@@ -79,7 +74,7 @@ jobs:
           docker buildx build --platform linux/amd64 \
             -f deploy/images/batteries/Dockerfile \
             -t automata-batteries:ci --load \
-            packages/worker/deploy
+            deploy/images/batteries
           docker image inspect automata-batteries:ci --format 'size {{.Size}} bytes'
 
       - name: Verify

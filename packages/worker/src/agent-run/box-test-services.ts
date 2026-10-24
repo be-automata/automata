@@ -7,8 +7,8 @@ import type { AgentRunInput } from "./types";
  * Where install-test-postgres.sh writes the box's test-service URLs
  * (root:<worker group> 0640). The values are SECRET: never logged.
  *
- * Self-heal: a FIX run's agent gets them (through DaemonProcess, like any
- * run), so a fix for a DB-backed finding can run the repo's DB suites. An
+ * Self-heal: a FIX run's agent gets them (through its container's
+ * test-postgres bridge, like any run), so a fix for a DB-backed finding can run the repo's DB suites. An
  * AUDIT run's agent does not: it inspects and reports, it fixes nothing.
  * The two worker-built check envs (workflow.ts runSelfHealAuditStep and the
  * fix-check step) deliberately do NOT get them: they run only the

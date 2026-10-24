@@ -56,9 +56,10 @@ import {
   listSkillVersions,
 } from "../packages/shared/src/model/repo-skills";
 import { loadReviewSkillBody } from "./lib/review-skill-file";
+import { buildSeedSkillBodies } from "./lib/seed-skill-bodies";
 // Key-order-insensitive (jsonb-round-trip-stable) comparison of actions.
 import { stableStringify } from "./lib/onboard-review-repo-args";
-import { validateSkillBody } from "../apps/www/src/server-lib/review/review-skill";
+import { validateSkillBodyForSave } from "../apps/www/src/server-lib/review/skill-save-checks";
 
 // Dogfooding pilot defaults (BeAutomata org, our own platform repo).
 const DEFAULT_ORG_SLUG = "beautomata";
@@ -109,55 +110,32 @@ console.log(
 
 const db = createDb(databaseUrl);
 
-// Load BEFORE touching the DB: seeding a review automation whose instruction is
-// missing its methodology degrades every subsequent review, so a bad/absent
-// skill must abort the seed rather than write a half-formed action.
-const reviewSkillBody = loadReviewSkillBody();
-
 /**
- * Initial skill-version bodies (#54 C3). These are what the automations now
- * REFERENCE instead of inlining: runAutomation resolves the current version at
- * thread creation and renders `{{repoFullName}}`/`{{baseBranch}}` — so the
- * bodies below carry placeholders, never a concrete repo or branch (that is
- * what lets one skill row serve every repo the org onboards, and what fixed
- * the hardcoded `origin/main` for non-main-default repos).
+ * Load the tracked methodology and compose every seed body (built by
+ * deploy/lib/seed-skill-bodies.ts), then validate each one BEFORE any DB
+ * access. Seeding a review automation whose instruction is missing its
+ * methodology degrades every subsequent review, so a bad/absent skill aborts
+ * the seed rather than writing a half-formed version.
  *
- * github-ops = the PR-review preamble (wire contract + delta instructions)
- * with the tracked methodology appended — the exact text the old inline
- * user_message carried, now versioned, editable from dashboard/CLI, and
- * traceable per thread via contentSha.
+ * Validator-enforced write surface, same as skill-push/API/dashboard: the
+ * dispatch-time contract (`validateSkillBody`) plus the save-time-only rules
+ * (`validateSkillBodyForSave`: the PR diff base is `origin/{{baseBranch}}`).
+ * The resolver's dispatch-time re-validation is a backstop, not the boundary.
  */
-const SKILL_BODIES: Record<string, string> = {
-  "github-ops":
-    `A pull request was opened or updated in {{repoFullName}}. Perform a substantive PR review.\n\n` +
-    `You are running as a REVIEW agent: you have NO gh and NO GitHub token, so you cannot post to GitHub. You deliver your verdict by EMITTING it as your FINAL message — a single fenced \`\`\`json block with EXACTLY this shape:\n` +
-    `{ "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from \`git rev-parse HEAD\`>", "summary": "<verdict rationale>", "findings": [ { "severity": "info" | "warning" | "error" | "critical", "path": "<file>", "line": <number>, "body": "<one concrete finding>", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD>" } ] }\n` +
-    `The control plane posts your review exactly once from that block.\n\n` +
-    `Compute the PR delta with \`git diff origin/{{baseBranch}}...HEAD\` (the base branch is \`{{baseBranch}}\`; its ref is pre-fetched + deepened to the merge-base so this resolves OFFLINE) and Read/Grep/Glob to inspect files at HEAD. Do NOT use \`git diff HEAD~1...HEAD\` (the clone is shallow) and do NOT run gh. Emit the fenced-json block exactly once, then stop.\n\n` +
-    `Follow the review methodology below in full (verify-before-block quote rules, severity→verdict mapping, the six review dimensions).\n\n` +
-    `----- BEGIN REVIEW METHODOLOGY -----\n${reviewSkillBody}\n----- END REVIEW METHODOLOGY -----`,
-  "github-deep-research":
-    "An issue was opened in {{repoFullName}}. Research it (prod skill: github-deep-research).",
-  // The mention lane's validator requires the emit-only reply contract; the
-  // full skill is deploy/skills/github-mention/SKILL.md (push it with
-  // skill-push.ts for a repo onboarded onto the org mention lane).
-  "github-mention":
-    "Respond to the GitHub mention. Your final message ends with exactly one block:\n" +
-    '```json mention-reply\n{ "kind": "mention-reply", "reply": "<your reply>" }\n```',
-};
-
-// Validator-enforced write surface, same as skill-push/API/dashboard: every
-// composed body must pass its skill's validator BEFORE any DB access — the
-// resolver's dispatch-time re-validation is a backstop, not the boundary.
-for (const [skillName, body] of Object.entries(SKILL_BODIES)) {
-  try {
-    validateSkillBody(skillName, body, `seed body for '${skillName}'`);
-  } catch (err) {
-    console.error(
-      `Skill body validation failed — aborting before any DB access:\n  ${(err as Error).message}`,
-    );
-    process.exit(1);
+async function loadSkillBodies(): Promise<Record<string, string>> {
+  const reviewSkillBody = await loadReviewSkillBody();
+  const bodies = buildSeedSkillBodies(reviewSkillBody);
+  for (const [skillName, body] of Object.entries(bodies)) {
+    try {
+      validateSkillBodyForSave(skillName, body, `seed body for '${skillName}'`);
+    } catch (err) {
+      console.error(
+        `Skill body validation failed — aborting before any DB access:\n  ${(err as Error).message}`,
+      );
+      process.exit(1);
+    }
   }
+  return bodies;
 }
 
 const PR_AUTOMATION_NAME = "Mirror: PR review (github-ops)";
@@ -166,6 +144,7 @@ const MENTION_AUTOMATION_NAME =
   "Mirror: GitHub mention (github-mention-respond)";
 
 async function main() {
+  const SKILL_BODIES = await loadSkillBodies();
   const org = await getOrganizationBySlug({ db, slug: orgSlug });
   if (!org) {
     console.error(

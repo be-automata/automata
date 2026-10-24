@@ -4,9 +4,10 @@ import path from "node:path";
  * The layout of one run's directory, `<workdirRoot>/<runId>/`:
  *
  *   repo/       the clone — the agent's cwd
- *   home/       per-run HOME (agent-credentials.ts) — carries the credential
- *   gh-config/  agent-uid gh config dir (daemon-process.ts createGhConfigDir)
- *   tmp/        agent-uid TMPDIR (provision.ts)
+ *   home/       per-run HOME staging dir (agent-credentials.ts), copied into
+ *               the run container's HOME — carries the credential
+ *   gh-config/  reserved (the host-uid gh config dir before ADR-013)
+ *   tmp/        reserved (the host-uid TMPDIR before ADR-013)
  *   fix-check/  self-heal fix-check scratch HOME/TMPDIR (self-heal-fix-check.ts)
  *
  * The worker's dirs sit BESIDE the clone, never in it (#302). Nested inside
@@ -15,8 +16,7 @@ import path from "node:path";
  * walked into `home/.cache`, ran out of memory, and reported 1146 errors that
  * were all the run's own HOME — so the agent pushed with `--no-verify`.
  *
- * They still inherit the per-run grant: provisioning puts it on the run dir,
- * the common parent of all of them. The names are defined once, here.
+ * The names are defined once, here.
  */
 const RUN_REPO_DIR = "repo";
 const RUN_HOME_DIR = "home";

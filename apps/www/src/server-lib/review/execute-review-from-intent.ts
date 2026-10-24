@@ -238,7 +238,67 @@ export interface ExecuteReviewFromIntentOpts {
     client: ReviewThreadClient;
     claim: (commit: string) => Promise<boolean>;
   };
+  /**
+   * The PR base ref this run was dispatched against (the thread's
+   * `reviewBase` stamp). When set, a fresh verdict carries a hidden base
+   * marker, and a same-verdict review already at HEAD is "this review" only
+   * when it was written for the same base: a retarget at an unchanged head
+   * changed the diff, so its review is not a replay of the earlier one.
+   * Absent (a thread from before the stamp) = the `(headSha, verdict)` key.
+   */
+  reviewBase?: string | null;
+  /**
+   * The PR's base ref NOW (the same pulls.get as `currentHeadSha`). A run
+   * whose `reviewBase` is no longer the live base reviewed a stale diff and
+   * never supersedes a review already at HEAD.
+   */
+  liveBase?: string | null;
   logger?: ReviewLogger;
+}
+
+/**
+ * The hidden base marker a fresh verdict carries when the run knows its base.
+ * URI-encoded, so whatever the (user-controlled) branch name holds, the marker
+ * cannot close the HTML comment or render as text.
+ */
+const REVIEW_BASE_MARKER_PREFIX = "<!-- automata:review-base ";
+const REVIEW_BASE_MARKER_RE = /<!-- automata:review-base ([^\s>]*) -->/;
+
+export function reviewBaseMarker(base: string): string {
+  return `${REVIEW_BASE_MARKER_PREFIX}${encodeURIComponent(base)} -->`;
+}
+
+/** The base a review body's marker names, or null for an unmarked review. */
+export function parseReviewBaseMarker(body: string): string | null {
+  const match = REVIEW_BASE_MARKER_RE.exec(body);
+  if (!match || match[1] === undefined) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    // A malformed escape is not a marker this module wrote.
+    return null;
+  }
+}
+
+/**
+ * The same-review judgement the executor asks for, when the run knows its
+ * base. A review at HEAD is a DIFFERENT review (post, then supersede it) only
+ * when it names another base AND this run's base is still the PR's base. An
+ * unmarked review (posted before markers existed) counts as the same, so a
+ * redelivery straddling the deploy never double-posts; a run that reviewed a
+ * base the PR has since left never supersedes anything.
+ */
+function sameReviewByBase(
+  reviewBase: string,
+  liveBase: string | null | undefined,
+): (existing: GitHubReview) => boolean {
+  return (existing) => {
+    const marked = parseReviewBaseMarker(existing.body);
+    if (marked === null) return true;
+    if (liveBase !== undefined && liveBase !== null && liveBase !== reviewBase)
+      return true;
+    return marked === reviewBase;
+  };
 }
 
 /** Post the emitted review intent as the single writer. Never silent-drops. */
@@ -483,6 +543,15 @@ export async function executeReviewFromIntent(
           .join("\n\n"),
       }
     : execIntent;
+  // A run that knows its base stamps it on the review (hidden), and keys
+  // same-review idempotency on it: see `sameReviewByBase`.
+  const reviewBase = opts.reviewBase ?? null;
+  const markedIntent = reviewBase
+    ? {
+        ...postedIntent,
+        body: `${postedIntent.body.trimEnd()}\n\n${reviewBaseMarker(reviewBase)}`,
+      }
+    : postedIntent;
 
   const outcome = await runExecutor({
     github,
@@ -490,8 +559,11 @@ export async function executeReviewFromIntent(
     prNumber,
     botLogin,
     headSha: currentHeadSha,
-    execIntent: postedIntent,
+    execIntent: markedIntent,
     postInlineComments: opts.postInlineComments,
+    ...(reviewBase
+      ? { isSameReview: sameReviewByBase(reviewBase, opts.liveBase) }
+      : {}),
     logger,
   });
   if (outcome.outcome === "posted") {
@@ -732,6 +804,7 @@ async function runExecutor(args: {
   headSha: string;
   execIntent: ReturnType<typeof toExecutorIntent>;
   postInlineComments?: boolean;
+  isSameReview?: (existing: GitHubReview) => boolean;
   logger?: ReviewLogger;
 }): Promise<ReviewIntentOutcome> {
   return await executeReviewIntent({
@@ -742,6 +815,7 @@ async function runExecutor(args: {
     botLogin: args.botLogin,
     intent: args.execIntent,
     postInlineComments: args.postInlineComments,
+    ...(args.isSameReview ? { isSameReview: args.isSameReview } : {}),
     logger: args.logger,
   });
 }

@@ -56,7 +56,6 @@ function exec(
   return runSelfHealChecks({
     checks,
     run,
-    agentUser: "automata-agent",
     workdir: "/wd",
     env: { PATH: "/usr/bin" },
     ...extra,
@@ -155,7 +154,6 @@ describe("npm-audit-clean", () => {
     await runSelfHealChecks({
       checks: [chk("npm-audit-clean", "npm:lodash")],
       run,
-      agentUser: "",
       workdir: "/wd",
       env: {},
       pnpmPath: "/opt/pnpm",
@@ -172,7 +170,6 @@ describe("npm-audit-clean", () => {
     const out = await runSelfHealChecks({
       checks: [chk("npm-audit-clean", "npm:lodash")],
       run,
-      agentUser: "",
       workdir: "/wd",
       env: {},
       note: (m) => notes.push(m),

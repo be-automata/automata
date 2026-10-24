@@ -1,8 +1,9 @@
-import { HARNESS_ENV_KEY } from "./harness-manifest";
-
 /**
- * Builds the environment for the agent/daemon child process on the execution box
- * (ADR-002 customer-box model). The worker runs on the operator's own machine, so
+ * Builds the sanitized HOST-side GitHub env of a run (ADR-002 customer-box
+ * model). Since ADR-013 the agent runs in a container whose env
+ * container-policy.ts builds; this env is what the worker's own fail-closed
+ * `gh auth status` preflight runs with on the host (gh-preflight.ts), against
+ * the same brokers the container reaches. The worker runs on the operator's own machine, so
  * `process.env` carries the operator's AMBIENT credentials — GitHub tokens, a gh
  * config dir with their personal OAuth, an ssh-agent socket, git credential helpers,
  * and (on a real customer box) AWS creds, npm tokens, arbitrary API keys. If
@@ -58,24 +59,6 @@ export const SAFE_ENV_KEYS = new Set([
   // it. Revert: re-add the string literal to this set.
 ]);
 
-/**
- * Whitelisted keys that are additionally dropped when the child runs as a
- * DIFFERENT uid (#108). NODE_OPTIONS is the dangerous one: `sudo -E` carries it
- * across, and `--require <path the agent uid can write>` executes before the
- * daemon. The rest point at operator-owned 0700 directories the agent uid
- * cannot traverse, or would override the per-run HOME.
- */
-export const CROSS_UID_UNSAFE_KEYS = [
-  "NODE_OPTIONS",
-  "TMPDIR",
-  "TMP",
-  "TEMP",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_RUNTIME_DIR",
-] as const;
-
 /** Defense-in-depth: a whitelisted key is still dropped if it looks like a secret. */
 const SECRET_KEY_PATTERN = /TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i;
 
@@ -121,7 +104,6 @@ export type BrokerHandoff = {
 export interface BuildDaemonEnvOpts {
   baseEnv: NodeJS.ProcessEnv;
   anthropicApiKey: string;
-  claudeBinDir: string;
   installationToken: string;
   /** Isolated EMPTY dir for gh config (no operator hosts.yml). Caller creates it. */
   ghConfigDir: string;
@@ -189,59 +171,6 @@ export interface BuildDaemonEnvOpts {
    * runtime itself are dropped first (see {@link isReservedRepoEnvKey}).
    */
   repoEnv?: Record<string, string> | null;
-  /**
-   * The seeded harness packs' env (harnessRunEnv: manifest `env` with
-   * {{packDir}} resolved, e.g. PLAYWRIGHT_BROWSERS_PATH, MCP_TIMEOUT). Applied
-   * right AFTER repoEnv, and only keys under a battery prefix the repo env can
-   * never set (HARNESS_ENV_KEY), so neither can shadow the other. Null/empty
-   * = today's env, byte for byte.
-   */
-  batteryEnv?: Record<string, string> | null;
-  /**
-   * The seeded harness packs' PATH dirs (harnessRunEnv: manifest `pathDirs`
-   * resolved and verified root-owned, e.g. gstack's `<pack>/bin` holding the
-   * bun its browse CLI spawns). Handed to the daemon as
-   * {@link AGENT_PATH_PREPEND_ENV}, which the daemon prepends to the agent's
-   * PATH: setting PATH here would not survive agent-uid mode, where sudo's
-   * `secure_path` replaces PATH even under `-E`. Null/empty = today's env,
-   * byte for byte.
-   */
-  batteryPathDirs?: readonly string[] | null;
-  /**
-   * gstack was seeded: point its browse server's Chromium at the run's egress
-   * proxy via BROWSE_PROXY_URL, which gstack's browse server passes to
-   * chromium.launch({ proxy }). Chromium ignores HTTPS_PROXY, so without this
-   * a browse call would leave the box directly. No-op without a proxy.
-   */
-  browseProxy?: boolean;
-  /**
-   * #108: the unix account the child will actually run as. Empty (the default)
-   * = nothing below happens and the built env is byte-for-byte today's.
-   *
-   * When set, three things change, all of them because the child is a DIFFERENT
-   * uid than this process:
-   *  - NODE_OPTIONS is NOT forwarded. `sudo -E` carries it into the uid-300
-   *    process, and a `--require` at any uid-300-writable path would execute
-   *    before the daemon does (adversarial review, #108).
-   *  - the operator's TMPDIR/TMP/TEMP and every XDG_* dir are dropped. macOS
-   *    TMPDIR is /var/folders/<...>/T — mode 0700, owned by the operator's uid,
-   *    untraversable by the agent uid; the XDG dirs would likewise point back
-   *    at the operator's home and override the per-run HOME.
-   *  - USER/LOGNAME name the agent account, so anything that shells out and
-   *    asks who it is gets a consistent answer.
-   */
-  agentUser?: string;
-  /**
-   * The run's own TMPDIR (in the run dir beside the clone, so it inherits the
-   * run's ACE).
-   * Only consulted when `agentUser` is set.
-   */
-  runTmpDir?: string | null;
-  /**
-   * The run's checkout. Used only to mark it `safe.directory` for the agent uid,
-   * which git otherwise refuses to operate in.
-   */
-  workdir?: string | null;
 }
 
 /**
@@ -334,32 +263,6 @@ export function proxyUrlHasCredential(url: string): boolean {
 }
 
 /**
- * gstack's browse server hands BROWSE_PROXY_URL to chromium.launch({ proxy })
- * — a `server` string Chromium takes NO credentials from, and which lands in
- * Chromium's argv (readable by every account via `ps`). #205: at N > 1 the
- * run proxy's URL carries the per-run credential in its userinfo, so the
- * browse URL is the credential-less form and the credential travels as
- * BROWSE_PROXY_USER / BROWSE_PROXY_PASS, which gstack maps to Playwright's
- * proxy.username / proxy.password (its policy: creds in the URL OR the env,
- * never both). A credential-less proxy (N = 1) sets the URL alone, as before.
- */
-export function buildBrowseProxyEnv(egressProxyUrl: string): NodeJS.ProcessEnv {
-  const u = new URL(egressProxyUrl);
-  if (!u.username && !u.password) {
-    return { BROWSE_PROXY_URL: egressProxyUrl };
-  }
-  const user = decodeURIComponent(u.username);
-  const pass = decodeURIComponent(u.password);
-  u.username = "";
-  u.password = "";
-  return {
-    BROWSE_PROXY_URL: u.toString().replace(/\/$/, ""),
-    BROWSE_PROXY_USER: user,
-    BROWSE_PROXY_PASS: pass,
-  };
-}
-
-/**
  * The proxy subset of the run env: HTTP(S)_PROXY (both cases), a loopback
  * NO_PROXY and node's env-proxy switch. Shared by the daemon env and the
  * self-heal check env so both route through the same per-run egress proxy.
@@ -414,9 +317,8 @@ const RESERVED_REPO_ENV_KEYS = new Set([
   "HTTPS_PROXY",
   "ALL_PROXY",
   "NO_PROXY",
-  // The somnio-engineering pack's ytctl shim (HARNESS_ENV_KEY): a repo value
-  // would swap the tracker CLI its skills run. CLAUDE_PLUGIN_ROOT, the pack's
-  // other key, is already under CLAUDE_.
+  // The somnio-engineering pack's ytctl shim: a repo value would swap the
+  // tracker CLI its skills run.
   "YTCTL",
 ]);
 const RESERVED_REPO_ENV_PREFIXES = [
@@ -429,23 +331,16 @@ const RESERVED_REPO_ENV_PREFIXES = [
   "AUTOMATA_",
   "TERRAGON_",
   "XDG_",
-  // The harness battery packs' env (batteryEnv; HARNESS_ENV_KEY) and the
-  // browse proxy: a repo value would redirect a pack (its Chromium, its MCP
-  // timeout) or route browse around the egress proxy. CLAUDE_FLOW_ is
-  // already under CLAUDE_; listed so the battery set reads whole.
+  // The image's battery runtimes (ADR-013) and gstack's browse proxy: a repo
+  // value would redirect a battery (its Chromium, its MCP timeout) or route
+  // browse around the egress proxy. CLAUDE_FLOW_ is already under CLAUDE_;
+  // listed so the battery set reads whole.
   "GSTACK_",
   "PLAYWRIGHT_",
   "MCP_",
   "CLAUDE_FLOW_",
   "BROWSE_",
 ];
-
-/**
- * Dirs the daemon prepends to the agent's PATH (packages/daemon/src/daemon.ts
- * withAgentPathPrepend), `:`-joined. Under the reserved AUTOMATA_ prefix, so a
- * repo env can never set it.
- */
-export const AGENT_PATH_PREPEND_ENV = "AUTOMATA_AGENT_PATH_PREPEND";
 
 export function isReservedRepoEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
@@ -458,7 +353,6 @@ export function isReservedRepoEnvKey(key: string): boolean {
 export function buildDaemonEnv({
   baseEnv,
   anthropicApiKey,
-  claudeBinDir,
   installationToken,
   ghConfigDir,
   botLogin,
@@ -469,12 +363,6 @@ export function buildDaemonEnv({
   broker = null,
   githubReadToken = null,
   repoEnv = null,
-  batteryEnv = null,
-  batteryPathDirs = null,
-  browseProxy = false,
-  agentUser = "",
-  runTmpDir = null,
-  workdir = null,
 }: BuildDaemonEnvOpts): NodeJS.ProcessEnv {
   // 1. Whitelist: forward ONLY known-safe, non-secret ambient keys.
   const env: NodeJS.ProcessEnv = {};
@@ -484,31 +372,10 @@ export function buildDaemonEnv({
     }
   }
 
-  // 1b. #108: keys that are safe to forward to a child of OUR uid but not to a
-  // child of a different one. See BuildDaemonEnvOpts.agentUser.
-  if (agentUser) {
-    for (const key of CROSS_UID_UNSAFE_KEYS) {
-      delete env[key];
-    }
-    if (runTmpDir) {
-      env.TMPDIR = runTmpDir;
-    }
-    env.USER = agentUser;
-    env.LOGNAME = agentUser;
-  }
-
   // 1c. The owner's repo environment (task runs). Before everything the
   // platform sets below, so none of it can be shadowed; reserved keys dropped.
   for (const [key, value] of Object.entries(repoEnv ?? {})) {
     if (!isReservedRepoEnvKey(key)) {
-      env[key] = value;
-    }
-  }
-
-  // 1d. The seeded harness packs' env, after repoEnv. Battery-prefixed keys
-  // only (defense in depth: the manifest guard already enforces it).
-  for (const [key, value] of Object.entries(batteryEnv ?? {})) {
-    if (HARNESS_ENV_KEY.test(key)) {
       env[key] = value;
     }
   }
@@ -541,39 +408,14 @@ export function buildDaemonEnv({
   // so it can never be shadowed by — or confused with — an ambient proxy var
   // (those are not whitelisted and stay stripped either way). NO_PROXY keeps
   // loopback direct: the daemon socket, the git broker, and the proxy itself
-  // all live there. Honesty: env-var proxying is cooperative — the PF anchor
-  // (deploy/egress-pf.conf) is the bypass backstop, not this injection.
+  // all live there. For the agent itself the backstop is structural: its
+  // container has no network but the bridged proxy (ADR-013 I3).
   if (egressProxyUrl) {
     Object.assign(env, buildRunProxyEnv(egressProxyUrl, {}));
-    // #108 F5: the DAEMON's own control-plane callback moves onto the proxy
-    // ONLY in agent-uid mode, where the PF anchor makes the direct route
-    // unusable. A run that merely carries an egress policy (#66 slice 2, live
-    // since before this ticket) keeps the direct callback it has always had —
-    // routing it through the proxy would hand it new syscalls, new timeout and
-    // error behaviour, and a new dependency on the allowlist carrying the
-    // callback host, none of which anyone opted into. Consumed by
-    // packages/daemon/src/proxy-fetch.ts (CALLBACK_VIA_PROXY_ENV).
-    if (agentUser) {
-      env.AUTOMATA_DAEMON_CALLBACK_VIA_PROXY = "1";
-    }
-    if (browseProxy) {
-      Object.assign(env, buildBrowseProxyEnv(egressProxyUrl));
-    }
   }
   // Credential env (Amp). After the whitelist so SECRET_KEY_PATTERN cannot drop it.
   for (const [key, value] of Object.entries(credentialEnv)) {
     env[key] = value;
-  }
-  if (claudeBinDir) {
-    env.PATH = `${claudeBinDir}:${baseEnv.PATH ?? ""}`;
-  }
-  // The seeded packs' runtimes (gstack's bun). Absolute dirs only, never one
-  // that could split into more PATH entries than it names.
-  const pathDirs = (batteryPathDirs ?? []).filter(
-    (dir) => dir.startsWith("/") && !dir.includes(":"),
-  );
-  if (pathDirs.length > 0) {
-    env[AGENT_PATH_PREPEND_ENV] = pathDirs.join(":");
   }
 
   // 3. gh: brokered (#81) → the per-run bearer is the "token" (the gh broker
@@ -623,23 +465,6 @@ export function buildDaemonEnv({
     ...gitAuthConfig,
     ["credential.helper", ""], // reset inherited helpers (osxkeychain, gh, …)
     ...identity.config,
-    // #108 agent-uid mode: the WORKER clones the checkout, the AGENT runs in it,
-    // and git refuses a repository owned by someone else —
-    //
-    //   fatal: detected dubious ownership in repository at '<workdir>'
-    //
-    // Every git command then fails, including the `git diff origin/main...HEAD`
-    // a review agent opens with, so the agent reports it cannot review rather
-    // than producing a verdict. Observed in production the first time a run got
-    // far enough to try.
-    //
-    // Scoped to THIS run's workdir, never `*`: the agent should be trusted with
-    // the checkout it was given and nothing else on the box. Harmless when
-    // agentUser is empty, where owner and runner are the same uid anyway — but
-    // still omitted there, so the default-mode env stays byte-for-byte.
-    ...(agentUser && workdir
-      ? ([["safe.directory", workdir]] as Array<[string, string]>)
-      : []),
     ...gitProxyAuthConfig(egressProxyUrl),
   ];
   env.GIT_CONFIG_COUNT = String(gitConfig.length);

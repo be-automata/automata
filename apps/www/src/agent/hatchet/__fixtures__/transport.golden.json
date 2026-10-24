@@ -20,7 +20,10 @@
     },
     "additionalMetadata": {
       "threadId": "__THREAD_ID__",
-      "threadChatId": "__THREAD_CHAT_ID__"
+      "threadChatId": "__THREAD_CHAT_ID__",
+      "orgId": "__ORG_ID__",
+      "lane": "task",
+      "repoFullName": "be-automata/automata"
     }
   },
   "review": {

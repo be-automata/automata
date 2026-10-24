@@ -17,7 +17,7 @@ tag.
 | apt packages              | Ubuntu snapshot `20261015T000000Z`  | `APT_SNAPSHOT`                                                 |
 | Node                      | 24.21.0                             | tarball sha256                                                 |
 | pnpm                      | 10.14.0                             | binary sha256                                                  |
-| Claude Code CLI           | 2.1.284                             | exact npm version (same as `cloud-init.yaml`)                  |
+| Claude Code CLI           | 2.1.284                             | exact npm version                                              |
 | gh                        | 2.102.0                             | tarball sha256                                                 |
 | Flutter SDK (+ its Dart)  | 3.47.7 (bundles Dart 3.13.5)        | tarball sha256                                                 |
 | Somnio CLI + all skills   | v3.1.1 @ `aa53f071…`                | commit sha + `pubspec.lock` overlay sha256                     |
@@ -31,8 +31,9 @@ tag.
 | gitleaks                  | 8.30.1                              | tarball sha256                                                 |
 | shellcheck                | 0.11.0                              | tarball sha256                                                 |
 
-Most pins are copied from `packages/worker/deploy/batteries.json`, `harness.json` and
-`linux/cloud-init.yaml`, so the host model and the image run the same builds during the migration.
+The pins were first copied from the host-model battery manifests, which the ADR-013 release PR
+deleted with the host path; the Dockerfile is now their only source. The npm lockfiles (GSD, ruflo)
+and the Somnio CLI `pubspec.lock` overlay live beside it in `gsd/`, `ruflo/` and `somnio-cli/`.
 
 Runtime user: `agent`, uid 10001, HOME `/home/agent`, workdir `/workspace`. Batteries that install
 into a HOME (Somnio skills, gstack, GSD) were installed as that user, never as root.
@@ -44,14 +45,14 @@ the worker to merge per lane.
 
 ## Build
 
-From the repo root. The build context is `packages/worker/deploy`, which holds the lockfiles the
-image reuses:
+From the repo root. The build context is this directory, which holds the lockfiles the image
+reuses:
 
 ```bash
 docker buildx build --platform linux/amd64 \
   -f deploy/images/batteries/Dockerfile \
   -t automata-batteries:dev --load \
-  packages/worker/deploy
+  deploy/images/batteries
 ```
 
 Needs network access to the Ubuntu snapshot archive, nodejs.org, GitHub, Google Cloud Storage
@@ -72,8 +73,8 @@ own `CLAUDE.md` (the checkout must end clean). Exits non-zero on any failure.
 
 ## Publish
 
-`.github/workflows/batteries-image.yml` runs on changes to this directory, the lockfile dirs the
-build copies (`packages/worker/deploy/batteries/{gsd,ruflo,somnio-cli}`) or the workflow. Pull
+`.github/workflows/batteries-image.yml` runs on changes to this directory (the Dockerfile, its
+lockfile dirs and `verify.sh`) or the workflow. Pull
 requests build and verify. `main` also pushes `:sha-<commit>`, attests build provenance, and
 writes `WORKER_BATTERIES_IMAGE=ghcr.io/be-automata/automata-batteries@sha256:…` to the job summary.
 It authenticates with `GITHUB_TOKEN` (`packages: write`) only.

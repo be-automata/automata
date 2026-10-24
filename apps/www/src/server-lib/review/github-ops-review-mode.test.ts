@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { loadReviewSkillBody } from "../../../../../deploy/lib/review-skill-file";
 import {
   REVIEW_INTENT_FENCE_INFO,
+  emittedReviewIntentSchema,
   hasTaggedReviewIntentOpener,
   parseReviewIntent,
 } from "./parse-review-intent";
@@ -16,22 +17,35 @@ import {
 
 /**
  * Phase 6: the tracked github-ops skill carries an ORCHESTRATED branch in
- * review-mode sections, while its CLASSIC render stays today's bytes.
+ * review-mode sections, while its CLASSIC render stays the reviewer body the
+ * live store already serves.
  *
- * CLASSIC_SHA256 / CLASSIC_LENGTH are the stripFrontmatter of
- * deploy/skills/github-ops/SKILL.md at origin/main @846c598 (unchanged through
- * e0445d7). NEVER update them to "make the test pass": a mismatch means the
- * classic prompt every onboarded repo receives has changed.
+ * CLASSIC_SHA256 / CLASSIC_LENGTH pin the classic render of the tracked body
+ * (flattened contentSha 6be9d3ea…, the version the live store serves). Its
+ * text is the ported legacy reviewer (`deploy/skills/github-ops-ported/SKILL.md`
+ * at origin/main @fb6e9a16, flattened sha PORT_SHA256), the body `github-ops`
+ * ran before its review-mode sections were added, plus two blank lines the
+ * dropped orchestrated blocks leave behind: PORT_SHA256 is the classic render
+ * with blank-line runs collapsed. That port replaced the vendor's own review
+ * skill (pinned here before as 47b019a8…), so the pin moved with it. NEVER
+ * update these to "make the test pass": a mismatch means the classic prompt
+ * every onboarded repo receives has changed.
  */
 const CLASSIC_SHA256 =
-  "47b019a8ba7afbd1b7772373075f301958a4eefebb9704425737b8985da0c13e";
-const CLASSIC_LENGTH = 9940;
+  "330fdae9b1510d5cd8eaf32c799a0774b47691a994ffc92a316da558b6904c75";
+const CLASSIC_LENGTH = 19952;
+const PORT_SHA256 =
+  "78a5faf89a8f25cd9a41468dc34aa55fa3c24c4f3dda2046517cf249b20f5276";
+
+/** The read-only-git lines the orchestrated render swaps for its own. */
+const CLASSIC_ONLY = [
+  "`Bash` is for read-only git only",
+  "run no shell command but the read-only git above",
+];
 
 const CLASSIC = { mode: "classic", runTests: false } as const;
 const ORCH_TESTS = { mode: "orchestrated", runTests: true } as const;
 const ORCH_NO_TESTS = { mode: "orchestrated", runTests: false } as const;
-
-const EXAMPLE_COMMIT = "fb15616abc1234def5678901234567890abcdef0";
 
 const sha256 = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
@@ -39,7 +53,7 @@ const sha256 = (text: string): string =>
 const countOccurrences = (text: string, needle: string): number =>
   text.split(needle).length - 1;
 
-const raw = loadReviewSkillBody();
+const raw = await loadReviewSkillBody();
 const classicDefault = renderReviewModeSections(raw);
 const classic = renderReviewModeSections(raw, CLASSIC);
 const orchTests = renderReviewModeSections(raw, ORCH_TESTS);
@@ -71,8 +85,14 @@ describe("github-ops SKILL.md classic render (byte-identical to today)", () => {
     expect(classic.length).toBe(CLASSIC_LENGTH);
   });
 
-  it("the classic render keeps the no-sub-agents rule", () => {
-    expect(classic).toContain("Do not spawn sub-agents");
+  it("the classic render is the ported reviewer, up to blank-line runs", () => {
+    expect(sha256(classic.replace(/\n{3,}/g, "\n\n"))).toBe(PORT_SHA256);
+  });
+
+  it("the classic render keeps the read-only-git rules and no sub-agents", () => {
+    for (const needle of CLASSIC_ONLY) expect(classic).toContain(needle);
+    expect(classic).toContain("Run dimensions 7–10 inline yourself.");
+    expect(classic).not.toContain("`Agent`");
   });
 });
 
@@ -107,9 +127,11 @@ describe("github-ops SKILL.md orchestrated renders", () => {
   ] as const) {
     it(`${name}: differs from classic, has no markers and carries every rule`, () => {
       expect(render).not.toBe(classic);
-      expect(render).not.toContain("<!-- automata:");
+      // The `<!-- automata:context … -->` directive stays (the control plane
+      // substitutes it later); no section marker may survive a render.
+      expect(render).not.toMatch(/^<!-- automata:(?:if |endif)/m);
       for (const needle of REQUIRED) expect(render).toContain(needle);
-      expect(render).not.toContain("Do not spawn sub-agents");
+      for (const needle of CLASSIC_ONLY) expect(render).not.toContain(needle);
     });
   }
 
@@ -132,22 +154,57 @@ describe("github-ops SKILL.md drift safety", () => {
     }
   });
 
-  it("the raw body and every render parse to the verdict contract example", () => {
+  it("the raw body and every render end on the unable_to_review example", () => {
+    // parseReviewIntent reads the LAST json block. In this body that is the
+    // unable_to_review example, which must parse as the agent's no-verdict
+    // report (ADR-009), never as a verdict or a parser failure.
     for (const body of [raw, classic, orchTests, orchNoTests]) {
-      const res = parseReviewIntent(body);
-      expect(res.ok).toBe(true);
-      if (res.ok) {
-        expect(res.intent.verdict).toBe("request_changes");
-        expect(res.intent.commit).toBe(EXAMPLE_COMMIT);
-      }
+      expect(parseReviewIntent(body)).toMatchObject({
+        ok: false,
+        source: "agent",
+      });
     }
   });
 
-  it("the two contract headings occur exactly once everywhere", () => {
-    for (const body of [raw, classic, orchTests, orchNoTests]) {
-      expect(countOccurrences(body, "## If you cannot review")).toBe(1);
-      expect(countOccurrences(body, "## How you deliver your verdict")).toBe(1);
+  it("the verdict example names only fields the parser reads", () => {
+    const delivery = raw.slice(raw.indexOf("## How you deliver your verdict"));
+    const sketch = /```json\n([\s\S]*?)\n```/.exec(delivery)?.[1] ?? "";
+    expect(sketch).toContain(
+      '"verdict": "approve" | "request_changes" | "comment"',
+    );
+    const known = new Set<string>([
+      ...Object.keys(emittedReviewIntentSchema.shape),
+      "path",
+      "line",
+      "body",
+      "severity",
+      "quote",
+      "inlineCommentId",
+      "reply",
+    ]);
+    const keys = [...sketch.matchAll(/"(\w+)":/g)].map((m) => m[1]);
+    expect(keys.length).toBeGreaterThan(5);
+    for (const key of keys) expect(known).toContain(key);
+    for (const verdict of emittedReviewIntentSchema.shape.verdict.options) {
+      expect(sketch).toContain(`"${verdict}"`);
     }
+  });
+
+  it("the contract headings occur exactly once everywhere", () => {
+    for (const body of [raw, classic, orchTests, orchNoTests]) {
+      expect(countOccurrences(body, "## How you deliver your verdict")).toBe(1);
+      expect(countOccurrences(body, "## Hard rules")).toBe(1);
+    }
+  });
+
+  it("every render diffs against the PR base, never a fixed branch", () => {
+    for (const body of [raw, classic, orchTests, orchNoTests]) {
+      expect(body).toContain("git diff origin/{{baseBranch}}...HEAD");
+      expect(body).not.toContain("origin/<base>");
+      expect(body).not.toMatch(/origin\/(?:main|master)\b/);
+    }
+    expect(orchTests).toContain("the base ref `origin/{{baseBranch}}`");
+    expect(classic).not.toContain("the base ref `origin/{{baseBranch}}`");
   });
 
   it("the tracked body has sections and passes the github-ops validator", () => {

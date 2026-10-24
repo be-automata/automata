@@ -4,18 +4,18 @@
 # execution box starts from. Everything is installed the normal way, as on a
 # developer laptop. Isolation is the container boundary, not uid fences.
 #
-# Build (from the repo root; the context is the worker's deploy dir, which
-# holds the pinned lockfiles reused below):
+# Build (from the repo root; the context is this directory, which holds the
+# pinned lockfiles reused below under gsd/, ruflo/ and somnio-cli/):
 #
 #   docker buildx build --platform linux/amd64 \
 #     -f deploy/images/batteries/Dockerfile \
-#     -t automata-batteries:dev packages/worker/deploy
+#     -t automata-batteries:dev deploy/images/batteries
 #
 # Pinning rule: every download is fixed by version AND sha256 (or by commit
 # sha), every npm closure by a committed lockfile, the base by digest, apt by
 # an Ubuntu snapshot id. Bumping any of them is a reviewed change to this file.
-# Most pins are copied from packages/worker/deploy/{batteries,harness}.json and
-# cloud-init.yaml so the host model and this image run the same builds.
+# The pins were first copied from the host-model battery manifests, deleted
+# with the host path in the ADR-013 release PR; this file is now their source.
 #
 # No secrets: nothing here reads a token, and no build arg is a credential.
 # The image is safe to publish.
@@ -37,7 +37,6 @@ ARG NODE_VERSION=24.21.0
 ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
 ARG PNPM_VERSION=10.14.0
 ARG PNPM_SHA256=b61ab8922a7d82794623460345964597d264c862a579b814eaa3468ac7b80375
-# cloud-init.yaml CLAUDE_CODE_VERSION: the box and the image run the same agent.
 ARG CLAUDE_CODE_VERSION=2.1.284
 ARG GH_VERSION=2.102.0
 ARG GH_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
@@ -47,7 +46,7 @@ ARG GH_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 ARG FLUTTER_VERSION=3.47.7
 ARG FLUTTER_SHA256=af7455f540df951184c7953fbe3cf884766e7541dacf8571f9f582db03dd6230
 
-# somnio-ai-tools: the commit batteries.json already pins (CLI v3.1.1). The
+# somnio-ai-tools: CLI v3.1.1. The
 # operator's reference ref aa91cefe... is 5 commits BEHIND this one.
 ARG SOMNIO_REF=aa53f071128a32bdafe4fbf77a7b0e0940b33db9
 ARG SOMNIO_LOCK_SHA256=382a7234b0a98fd98ee5622193fe5632ef83d5ac3bd91056b080b423787e349d
@@ -106,7 +105,8 @@ echo "${sha}  ${out}" | sha256sum -c --quiet -
 EOF
 
 # ── system packages ─────────────────────────────────────────────────────────
-# Chromium's runtime libraries are cloud-init.yaml's CHROMIUM_RUNTIME_PACKAGES.
+# Chromium's runtime libraries: Playwright's `install-deps chromium` list for
+# ubuntu24.04-x64, plus fonts.
 # socat bridges the run's unix sockets (egress proxy, git broker, test Postgres)
 # to the loopback ports the agent's tools expect (ADR-013 "egress").
 #
@@ -160,7 +160,7 @@ RUN fetch-verified "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSI
     chown root:root /usr/local/bin/actionlint /usr/local/bin/gitleaks; \
     rm -rf /tmp/*
 
-# ── Claude Code CLI (exact version; same install line as cloud-init.yaml) ───
+# ── Claude Code CLI (exact version) ─────────────────────────────────────────
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     npm cache clean --force
 
@@ -197,7 +197,7 @@ RUN fetch-verified "https://storage.googleapis.com/flutter_infra_release/release
 # "walk up from the cwd" root lookup, which would otherwise trust a checkout
 # that plants skills/ + agent-rules/ + cli/pubspec.yaml.
 ENV SOMNIO_ROOT=/opt/somnio-ai-tools
-COPY batteries/somnio-cli/pubspec.lock /tmp/somnio-pubspec.lock
+COPY somnio-cli/pubspec.lock /tmp/somnio-pubspec.lock
 RUN echo "${SOMNIO_LOCK_SHA256}  /tmp/somnio-pubspec.lock" | sha256sum -c --quiet -; \
     git init -q "${SOMNIO_ROOT}"; \
     git -C "${SOMNIO_ROOT}" -c protocol.version=2 fetch -q --depth 1 \
@@ -211,13 +211,12 @@ RUN echo "${SOMNIO_LOCK_SHA256}  /tmp/somnio-pubspec.lock" | sha256sum -c --quie
     ln -s "${SOMNIO_ROOT}/somnio" /usr/local/bin/somnio
 
 # ── npm-locked harness closures: GSD and ruflo ──────────────────────────────
-# The same package.json + package-lock.json the host batteries install from,
-# checksum-verified, installed into root-owned, read-only dirs. `npm install`
-# against the lock, not `npm ci`: ruflo's lock omits optional platform packages
-# never published for other platforms, which `npm ci` refuses (the host
-# install-batteries.sh does the same). The lock is re-checked afterwards.
-COPY batteries/gsd/package.json batteries/gsd/package-lock.json /opt/automata/gsd/
-COPY batteries/ruflo/package.json batteries/ruflo/package-lock.json /opt/automata/ruflo/
+# The committed package.json + package-lock.json, checksum-verified, installed
+# into root-owned, read-only dirs. `npm install` against the lock, not
+# `npm ci`: ruflo's lock omits optional platform packages never published for
+# other platforms, which `npm ci` refuses. The lock is re-checked afterwards.
+COPY gsd/package.json gsd/package-lock.json /opt/automata/gsd/
+COPY ruflo/package.json ruflo/package-lock.json /opt/automata/ruflo/
 RUN echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -c --quiet -; \
     echo "${RUFLO_LOCK_SHA256}  /opt/automata/ruflo/package-lock.json" | sha256sum -c --quiet -; \
     (cd /opt/automata/gsd && npm install --ignore-scripts --no-save --no-audit --no-fund); \
@@ -281,7 +280,7 @@ RUN fetch-verified "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_
     rm -rf /tmp/bun*
 
 # ── everything that installs INTO the agent's HOME runs as the agent ────────
-# No upstream setup code runs as root (the same rule install-batteries.sh keeps).
+# No upstream setup code runs as root.
 USER ${AGENT_USER}
 WORKDIR /home/${AGENT_USER}
 ENV HOME=/home/${AGENT_USER} \
@@ -296,8 +295,7 @@ RUN flutter config --no-analytics --no-cli-animations >/dev/null; \
 # catalog skill globally for Claude. AOT, not `pub global activate`: an
 # activated binstub re-resolves dependencies at start and fails offline (the
 # run has --network none); the compiled CLI finds its content via SOMNIO_ROOT,
-# like the host battery (batteries.json `dart-aot`, `rootEnv`), so the pub
-# cache it resolved into is emptied afterwards. Agent rules are per-project
+# so the pub cache it resolved into is emptied afterwards. Agent rules are per-project
 # only for Claude (the CLI refuses --global): every run installs them into its
 # checkout (ADR-013 "run path").
 RUN cd "${SOMNIO_ROOT}/cli"; \

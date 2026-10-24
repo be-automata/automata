@@ -2,7 +2,7 @@
 
 The review skills below are ported from the legacy orchestrator repository
 `orch-agents` at commit `b337099`. Each file was copied verbatim and then
-changed ONLY by the edits listed for it (B1–B10 of the cutover spec). Any
+changed ONLY by the edits listed for it (B1–B12 of the cutover spec). Any
 other difference from the legacy text is a defect. Check with:
 
 ```sh
@@ -16,15 +16,30 @@ and storing the body), so the agent reads one self-contained text.
 
 | Ported file                           | Legacy file (`orch-agents@b337099`)          | Pushed as skill     |
 | ------------------------------------- | -------------------------------------------- | ------------------- |
-| `github-ops-ported/SKILL.md`          | `skills/github-ops/SKILL.md`                 | `github-ops`        |
+| `github-ops/SKILL.md`                 | `skills/github-ops/SKILL.md`                 | `github-ops`        |
 | `flutter-pr-review/SKILL.md`          | `skills/flutter-pr-review/SKILL.md`          | `flutter-pr-review` |
 | `_shared/review-finding-contract.md`  | `skills/_shared/review-finding-contract.md`  | (partial)           |
 | `_shared/review-verdict-contract.md`  | `skills/_shared/review-verdict-contract.md`  | (partial)           |
 | `_shared/simplify-lenses.md`          | `skills/_shared/simplify-lenses.md`          | (partial)           |
 | `_shared/somnio-flutter-standards.md` | `skills/_shared/somnio-flutter-standards.md` | (partial)           |
 
-`deploy/skills/github-ops/SKILL.md` (the vendor's own review skill and its
-byte-pin) is NOT one of these files and is unchanged.
+`github-ops/SKILL.md` used to be the vendor's own review skill, with this
+port kept beside it as `github-ops-ported/SKILL.md`. The port is now the
+canonical `github-ops` body: `github-ops/SKILL.md` is the port plus a
+frontmatter block (B1 dropped the legacy one; the skill-store stripper removes
+this one too) and the B12 review-mode sections, and `github-ops-ported/` is
+gone. `flutter-pr-review/SKILL.md` likewise carries a stripped frontmatter
+block, which holds the deploy-order warning below.
+
+> **Deploy order: do not push `flutter-pr-review` with review-mode sections
+> before #493 is merged AND deployed.** Until then www renders
+> `<!-- automata:if … -->` sections only for `github-ops`. A marker-bearing
+> `flutter-pr-review` body reaches the agent raw, the agent emits a tagged
+> `json review-intent` block the classic parser cannot read, and every Flutter
+> review posts a no-verdict notice. `deploy/skill-push.ts` refuses that live
+> write unless `--allow-review-mode-sections` is passed. Nothing pushes it
+> automatically: the seed (`deploy/seed-pilot-mirror.ts`) seeds only
+> `github-ops`, `github-deep-research` and `github-mention`.
 
 ## Edits
 
@@ -79,6 +94,18 @@ byte-pin) is NOT one of these files and is unchanged.
   `gh pr diff` output in Trigger Context tells you both"; there is no diff block
   here, so it now names the PR view's `additions`, `deletions` and
   `changedFiles`, which carry the same counts. (Added after the first port.)
+
+- **B12. Review-mode sections** (both skills). `<!-- automata:if classic -->`
+  / `<!-- automata:if orchestrated … -->` blocks add the lead-reviewer and
+  sub-agent section for orchestrated runs, and swap the "read-only git only"
+  intro and the "Emit exactly one json block … run no shell command" line for
+  orchestrated variants. The classic render is byte-identical to the port
+  above. Without these sections an orchestrated run falls back to classic.
+  Every diff instruction names the base as `origin/{{baseBranch}}`, which the
+  control plane renders to the PR's real base ref on every run; never
+  `origin/main` or a prose `<base>` (stacked PRs target another PR's branch).
+  The save surfaces refuse a body that breaks this
+  (`assertSkillBodyNamesPrBase`).
 
 The partials still call the review text `body` and the findings `comments`
 (the legacy names). The intent parser accepts both as aliases

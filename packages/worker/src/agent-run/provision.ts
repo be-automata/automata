@@ -1,18 +1,10 @@
 import { execFile } from "node:child_process";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { redactSecrets } from "@terragon/utils/redact";
-import {
-  applyInheritableAces,
-  applyTraverseAce,
-  reapplyPathGrant,
-  type AceExec,
-} from "./agent-uid-fs";
 import { runPaths, type RunPaths } from "./run-owned-paths";
-import { buildHandBackInvocation, type Invocation } from "./spawn-as-user";
 
 const execFileAsync = promisify(execFile);
 
@@ -93,10 +85,6 @@ export async function provisionWorkdir({
   installationToken,
   workdirRoot,
   runId,
-  agentUser = "",
-  workerLogin = os.userInfo().username,
-  aceExec,
-  platform,
   runGit = gitExec,
 }: {
   repoFullName: string;
@@ -118,21 +106,6 @@ export async function provisionWorkdir({
   workdirRoot: string;
   /** Unique per-run directory key — pass threadId, NOT the shared legacy sentinel. */
   runId: string;
-  /**
-   * #108: the unix account the agent child runs as. Empty (the default) = no
-   * ACLs are touched at all — byte-for-byte today's provisioning.
-   */
-  agentUser?: string;
-  /**
-   * The worker's own login, granted alongside the agent so it can still delete
-   * agent-created files at cleanup. Defaults to the current user; injectable
-   * for tests.
-   */
-  workerLogin?: string;
-  /** Injectable ACE runner (tests only). */
-  aceExec?: AceExec;
-  /** Injectable platform for the ACL calls (tests only) — defaults to the host's. */
-  platform?: NodeJS.Platform;
   /** Injectable git runner (tests only) — defaults to the real gitExec. */
   runGit?: typeof gitExec;
 }): Promise<RunPaths> {
@@ -178,54 +151,14 @@ export async function provisionWorkdir({
   }
   await sweepTombstones(workdirRoot);
 
-  // #205: the run dir is PRIVATE (0700) before any grant. With `other::r-x`
-  // left from the default 0755 (the unit sets no UMask), every slot account —
-  // which at N > 1 holds traverse on the workdir root — could read a sibling
-  // run's clone, and a threadId is easy to learn (the per-run cgroup names).
-  // chmod as well, for a dir that already existed. The named ACL entries below
-  // then carry the agent and the worker (setfacl -m recomputes the mask), and
-  // the default ACL copies `other::---` into everything created beneath.
-  // Ordered BEFORE the grants: a chmod after them would zero the ACL mask.
+  // #205: the run dir is PRIVATE (0700); chmod as well, for a dir that already
+  // existed. A run container reaches only the dirs handOverRunDir opens to the
+  // rootless daemon's group (ADR-013 "Daemon socket"), by search, never read.
   await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
   await fs.chmod(runDir, 0o700);
 
-  // #108: open THIS run's dir to the agent uid, and the shared root by traverse
-  // ONLY (namei needs search on every component; an inheritable ACE on the root
-  // would expose every OTHER run's credentials to the same uid).
-  //
-  // ORDERING IS A CORRECTNESS CONSTRAINT, not a style choice: macOS applies
-  // inheritance at create time, so anything cloned BEFORE this call would not
-  // carry the grant. It must precede the clone.
-  if (agentUser) {
-    await applyTraverseAce({
-      dir: workdirRoot,
-      users: [agentUser],
-      exec: aceExec,
-      platform,
-    });
-    // BOTH users, exactly as claimRunNamespace does for the rendezvous dir
-    // (agent-uid-fs.ts). Granting the agent alone is not enough: every
-    // directory the AGENT creates inside the run is owned by the agent uid, and
-    // deleting a file needs write on its containing directory — so the worker
-    // (uid 501) could not remove them and cleanupWorkdir failed with EACCES.
-    // The run's HOME then SURVIVES the run, carrying whatever credential was
-    // delivered into it — the precise residue a per-run HOME exists to prevent.
-    // Observed on the pilot box: `.claude/projects/...` left undeletable after
-    // an otherwise-successful review run.
-    await applyInheritableAces({
-      dir: runDir,
-      users: [agentUser, workerLogin],
-      exec: aceExec,
-      platform,
-    });
-  }
-
-  // The clone goes in `<runDir>/repo`, beside the run's HOME, gh-config and
-  // tmp (#302). Created HERE, not by `git clone`: under the run dir's default
-  // ACL a directory's POSIX mask comes from its creation mode, and git creates
-  // the destination 0755 — `r-x` would deny the agent writes at the repo root.
-  // mkdir's default 0777 keeps the mask `rwx`, exactly as the run dir had it
-  // when it was the clone. git clone accepts an existing EMPTY destination.
+  // The clone goes in `<runDir>/repo`, beside the run's HOME staging dir and
+  // socket dir (#302). git clone accepts an existing EMPTY destination.
   const workdir = paths.repo;
   await fs.mkdir(workdir);
 
@@ -299,34 +232,6 @@ export async function provisionWorkdir({
       branch,
       baseBranch,
       authConfigArgs,
-    });
-  }
-
-  // The run's own TMPDIR — the operator's /var/folders/<...>/T is 0700 and
-  // untraversable by the agent uid.
-  //
-  // AFTER the clone, and this ordering is load-bearing in the opposite
-  // direction to the ACEs above: `git clone` REFUSES a destination that exists
-  // and is non-empty ("fatal: destination path ... already exists and is not an
-  // empty directory"), so creating this beforehand broke EVERY agent-uid run at
-  // provisioning. Found on the pilot box, not in CI — the unit tests inject a
-  // fake `runGit`, so the real emptiness rule was never exercised.
-  //
-  // Creating it here still inherits the ACE: macOS applies inheritance at
-  // create time, and the grant is already on the run dir.
-  if (agentUser) {
-    const tmp = paths.tmp;
-    await fs.mkdir(tmp, { recursive: true, mode: 0o700 });
-    // LINUX: the 0700 creation mode zeroes the POSIX ACL mask, so the grant
-    // inherited from the run dir's default ACL is born `#effective:---` and
-    // the agent cannot use its own TMPDIR. Same trap, same remedy as the run
-    // HOME (agent-credentials.ts) and gh-config. No-op on macOS.
-    await reapplyPathGrant({
-      target: tmp,
-      kind: "directory",
-      users: [agentUser],
-      exec: aceExec,
-      platform,
     });
   }
 
@@ -408,64 +313,9 @@ async function mergeBaseResolves(
   }
 }
 
-/** How the hand-back process ended. `stderrTail` is its last ≤ 200 chars. */
-export interface HandBackExit {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  stderrTail?: string;
-}
-
-/** Runs one agent-uid invocation to completion; rejects only when it cannot start. */
-export type RunAsAgent = (inv: Invocation) => Promise<HandBackExit>;
-
-/**
- * Bound on the hand-back. It walks only the run's own tree and chmods only the
- * agent's inodes, so seconds is the norm; a hung sudo/PAM hop must not hold the
- * run's finally (and with it the box lock) open.
- */
-const HAND_BACK_TIMEOUT_MS = 30_000;
-const HAND_BACK_STDERR_TAIL_CHARS = 200;
-
-/** The default runner: execFile, bounded, SIGKILLed on expiry. */
-const runAsAgentViaSudo: RunAsAgent = async (inv) => {
-  try {
-    await execFileAsync(inv.file, inv.args, {
-      timeout: HAND_BACK_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-      maxBuffer: 1024 * 1024,
-    });
-    return { code: 0, signal: null };
-  } catch (error) {
-    const e = error as { code?: unknown; signal?: unknown; stderr?: unknown };
-    // A string code (ENOENT, EACCES) is a spawn failure: nothing ran.
-    if (typeof e.code === "string") throw error;
-    const stderr = typeof e.stderr === "string" ? e.stderr.trim() : "";
-    return {
-      code: typeof e.code === "number" ? e.code : null,
-      signal:
-        typeof e.signal === "string" ? (e.signal as NodeJS.Signals) : null,
-      stderrTail: stderr.slice(-HAND_BACK_STDERR_TAIL_CHARS),
-    };
-  }
-};
-
 export interface CleanupWorkdirOpts {
-  /** #108: the agent account. Empty (the default) ⇒ no hand-back, rm only. */
-  agentUser?: string;
-  /**
-   * #205: hand back as EACH of these accounts instead of `agentUser` alone. A
-   * dir whose owner is unknown (the boot sweep: the run that made it may have
-   * executed on any slot) is handed back by every slot account in turn — each
-   * `find -user "$(id -un)"` touches only its own inodes, so the passes are
-   * independent and the union covers the dir. Omitted ⇒ `[agentUser]`.
-   */
-  agentUsers?: string[];
-  /** Where the hand-back failure / incomplete-cleanup lines go. */
+  /** Where the incomplete-cleanup line goes. */
   log?: (line: string) => void;
-  /** Injectable platform (tests only) — defaults to the host's. */
-  platform?: NodeJS.Platform;
-  /** Injectable agent-uid runner (tests only) — defaults to bounded sudo. */
-  runAsAgent?: RunAsAgent;
 }
 
 function errorMessage(e: unknown): string {
@@ -473,75 +323,20 @@ function errorMessage(e: unknown): string {
 }
 
 /**
- * Agent-uid mode on Linux: chmod every agent-owned inode under `workdir` back
- * into the worker's reach (see HAND_BACK_SCRIPT for the ACL-mask mechanism).
- * Never throws — a failure is logged and the rm that follows reports whatever
- * it then could not remove. No-op without an agent user, off Linux (a macOS
- * allow-ACE survives a 0700/0600 creation mode), or when the dir is gone.
- */
-async function handBackAgentFiles(
-  workdir: string,
-  opts: CleanupWorkdirOpts,
-  log: (line: string) => void,
-): Promise<void> {
-  const platform = opts.platform ?? process.platform;
-  const users = (
-    opts.agentUsers?.length ? opts.agentUsers : [opts.agentUser ?? ""]
-  ).filter(Boolean);
-  if (users.length === 0 || platform !== "linux") return;
-  if (!(await fs.lstat(workdir).catch(() => null))) return;
-  // Each pass touches only its own account's inodes, so the passes are
-  // independent and run concurrently: N slots cost one tree walk of wall time.
-  // A run dir is granted to ONE slot account, so with several accounts (#205:
-  // the boot sweep, live + retired slots) every non-owning pass is refused
-  // (EACCES on the tree) and that is expected: those exits are reported only
-  // when NO account's pass succeeded, so a real hand-back failure is not
-  // buried under N − 1 lines of noise. One account ⇒ every failure is logged.
-  const failures: string[] = [];
-  let succeeded = 0;
-  await Promise.all(
-    users.map(async (agentUser) => {
-      try {
-        const inv = buildHandBackInvocation({ agentUser, workdir });
-        if (!inv) return;
-        const exit = await (opts.runAsAgent ?? runAsAgentViaSudo)(inv);
-        if (exit.code === 0) {
-          succeeded += 1;
-        } else {
-          failures.push(
-            `workdir hand-back incomplete: ${workdir} (${agentUser}: exit ${String(exit.code)}${
-              exit.signal ? ` ${exit.signal}` : ""
-            }${exit.stderrTail ? `: ${exit.stderrTail}` : ""})`,
-          );
-        }
-      } catch (e) {
-        failures.push(
-          `workdir hand-back failed: ${workdir} (${agentUser}: ${errorMessage(e)})`,
-        );
-      }
-    }),
-  );
-  if (users.length === 1 || succeeded === 0) {
-    for (const line of failures) log(line);
-  }
-}
-
-/**
- * Remove a run's dir — the clone and the HOME, gh-config and tmp beside it.
- * Best-effort — a cleanup failure must not fail the run, so this never throws;
- * but it is no longer SILENT: a run dir that survives the rm is logged once,
+ * Remove a run's dir — the clone and the HOME staging and socket dirs beside
+ * it. Best-effort — a cleanup failure must not fail the run, so this never
+ * throws; but it is not SILENT: a run dir that survives the rm is logged once,
  * with the errno. Resolves true when the run dir is gone.
  *
- * In agent-uid mode on Linux the agent first hands its files back (see
- * HAND_BACK_SCRIPT). Without that step every run's HOME — session keys
- * included — outlived the run, and the swallowed EACCES hid it for a week.
+ * What a run container wrote into the bind-mounted checkout belongs to its
+ * mapped uid; the container hands it back to the worker's group before its
+ * removal (ContainerDaemonProcess.handBackWorkspace), so the rm here reaches it.
  */
 export async function cleanupWorkdir(
   runDir: string,
   opts: CleanupWorkdirOpts = {},
 ): Promise<boolean> {
   const log = opts.log ?? ((line: string) => console.warn(line));
-  await handBackAgentFiles(runDir, opts, log);
   let rmError: unknown = null;
   try {
     await fs.rm(runDir, { recursive: true, force: true });
@@ -576,7 +371,7 @@ export const STALE_RUN_DIR_AGE_MS = 24 * 60 * 60 * 1000;
  * Total time the boot sweep may spend. The worker awaits the sweep before it
  * registers, and each hand-back may take up to its own timeout, so the sweep is
  * bounded as a whole: past the budget, or after the first dir that could not be
- * removed (a hung sudo/PAM, a broken grant), the rest wait for the next boot.
+ * removed, the rest wait for the next boot.
  */
 export const SWEEP_BUDGET_MS = 60_000;
 
@@ -589,13 +384,11 @@ export interface SweepStaleRunDirsResult {
 }
 
 /**
- * Boot-time sweep of run dirs earlier teardowns could not remove (the hand-back
- * above did not exist yet, or a worker died mid-run and never reached its
- * finally). Same hand-back + rm path as a run's own teardown.
+ * Boot-time sweep of run dirs earlier teardowns could not remove (a worker died
+ * mid-run and never reached its finally). Same rm path as a run's own teardown.
  *
- * WHY AGE ALONE IS SAFE. The box runs one agent at a time and every run is
- * hard-capped at 30 minutes, so a dir whose mtime is older than 24h cannot
- * belong to a live run. Only DIRECT children of the root are considered, only
+ * WHY AGE ALONE IS SAFE. Every run is hard-capped at 30 minutes, so a dir whose
+ * mtime is older than 24h cannot belong to a live run. Only DIRECT children of the root are considered, only
  * real directories (a symlink is never followed or removed) whose name is a run
  * dir name; the root itself is never touched.
  *
@@ -604,16 +397,10 @@ export interface SweepStaleRunDirsResult {
  */
 export async function sweepStaleRunDirs(opts: {
   workdirRoot: string;
-  agentUser: string;
-  /** #205: every slot's account — a stale dir may belong to any slot. */
-  agentUsers?: string[];
   log: (line: string) => void;
   now?: () => number;
-  platform?: NodeJS.Platform;
-  runAsAgent?: RunAsAgent;
 }): Promise<SweepStaleRunDirsResult> {
-  const { workdirRoot, agentUser, agentUsers, log, platform, runAsAgent } =
-    opts;
+  const { workdirRoot, log } = opts;
   const now = opts.now ?? Date.now;
   const result: SweepStaleRunDirsResult = {
     removed: 0,
@@ -651,13 +438,7 @@ export async function sweepStaleRunDirs(opts: {
       result.deferred += 1;
       continue;
     }
-    const gone = await cleanupWorkdir(target, {
-      agentUser,
-      agentUsers,
-      log,
-      platform,
-      runAsAgent,
-    });
+    const gone = await cleanupWorkdir(target, { log });
     if (gone) {
       result.removed += 1;
     } else {

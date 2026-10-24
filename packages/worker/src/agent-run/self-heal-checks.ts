@@ -8,9 +8,9 @@ import type { SelfHealCheckShape } from "./types";
  *
  * Injection posture: every script below is a module constant. Agent-derived
  * values (subject, key) reach a command ONLY as positional arguments and are
- * re-validated first. Every read and command runs through the agent uid
- * (the worker uid may not read agent-owned files). An inability to run a check
- * is "error", never "pass".
+ * re-validated first. Every read and command runs through the caller's runner
+ * (runAsAgent, on the host as the worker, against a hardened git env). An
+ * inability to run a check is "error", never "pass".
  */
 export const SELF_HEAL_CHECK_KINDS = [
   "npm-audit-clean",
@@ -46,17 +46,18 @@ const UNTRACKED_SCRIPT = 'git ls-files --error-unmatch -- "$1" >/dev/null 2>&1';
 // status is observed.
 const GITLEAKS_SCRIPT =
   'gitleaks detect --no-git --no-banner --redact --source "$1" --exit-code 1 >/dev/null 2>&1';
-// pnpm is the pinned standalone binary the batteries installer provisions at
-// a root-owned path that is NOT on the agent's PATH (the box's pnpm is a
-// Corepack shim that tries to download the repo's pinned pnpm and fails). The
-// path is a positional argument; the script stays a constant. An absent binary
-// exits EXIT_ABSENT so it is distinguishable from an audit that failed.
+// pnpm is a pinned standalone binary at a root-owned host path that is NOT on
+// PATH (the box's pnpm is a Corepack shim that tries to download the repo's
+// pinned pnpm and fails). The path is a positional argument; the script stays
+// a constant. An absent binary exits EXIT_ABSENT so it is distinguishable from
+// an audit that failed (reported as "error", never "pass").
 const PNPM_AUDIT_SCRIPT = `test -x "$1" || exit ${EXIT_ABSENT}; exec "$1" audit --prod --json 2>/dev/null`;
 const NPM_AUDIT_SCRIPT = "npm audit --omit=dev --json 2>/dev/null";
 
 /**
- * Where install-batteries.sh puts the pinned pnpm (manifest tool "pnpm",
- * kind static-bin). A drift test pins this to the manifest version.
+ * The host's pinned pnpm (10.14.0, the image's PNPM_VERSION). The host
+ * battery tree that provides it stays on the box until ADR-013 P4; moving the
+ * self-heal checks into the run container is follow-up work.
  */
 export const AUDIT_PNPM_PATH =
   "/usr/local/lib/automata-batteries/pnpm@10.14.0/bin/pnpm";
@@ -154,8 +155,6 @@ export function workflowHasPermissions(yaml: string): boolean {
 export interface RunSelfHealChecksArgs {
   checks: SelfHealCheckShape[];
   run: RunAsAgent;
-  /** Sudo target; "" runs as the current user (dev). */
-  agentUser: string;
   workdir: string;
   env: NodeJS.ProcessEnv;
   /** Absolute path of the pinned pnpm; defaults to AUDIT_PNPM_PATH. */
@@ -188,7 +187,6 @@ export async function runSelfHealChecks(
     env: NodeJS.ProcessEnv = args.env,
   ): Promise<AgentCommandResult> =>
     args.run({
-      agentUser: args.agentUser,
       cwd: args.workdir,
       script,
       args: scriptArgs,

@@ -326,7 +326,15 @@ describe("routing: org lane vs the legacy per-user path", () => {
     const text = sent.parts
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("");
-    expect(text.startsWith("SKILL BODY")).toBe(true);
+    // A PR mention leads with the control-plane PR facts (base, head, diff
+    // command), then the skill body, then the mention block.
+    expect(sent.parts[0]).toMatchObject({
+      type: "text",
+      text: expect.stringMatching(
+        /^PR #7: base `main`, head `feature\/x`\. The change under review is `git diff origin\/main\.\.\.HEAD`/,
+      ),
+    });
+    expect(sent.parts[1]).toEqual({ type: "text", text: "SKILL BODY" });
     expect(text).toContain("## Mention");
     expect(text).toContain('<user_content source="github_issue_comment">');
     expect(text).toContain("Commenter: @alice");

@@ -444,6 +444,13 @@ export interface EgressEventWire {
 }
 
 /**
+ * #473: each egress POST is bounded. The run's status poll awaits the batch
+ * before every read (beforeStatusRead), so an unbounded hang here would stall
+ * every poll pass.
+ */
+export const EGRESS_POST_TIMEOUT_MS = 10_000;
+
+/**
  * POST a batch of egress proxy decisions to the audit sink
  * (/api/daemon/egress-event, #66 §3.3). Same X-Daemon-Token custody as the
  * sibling endpoints; the run identity comes from the token server-side, so the
@@ -471,6 +478,7 @@ export async function postEgressEvents(
         method: "POST",
         headers: headers(opts),
         body: JSON.stringify({ events }),
+        signal: AbortSignal.timeout(EGRESS_POST_TIMEOUT_MS),
       });
       // A refusal at token verification wrote nothing, so the batch can be
       // re-sent without duplicating audit rows (AUTH_ERROR_CONFIRM_ATTEMPTS).
@@ -604,6 +612,17 @@ export interface PollContext {
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
   memoryStarvation?: () => unknown | null;
+  /**
+   * #473: awaited before EVERY status read. The read that serves terminal=true
+   * also revokes the daemon token, so anything that must still reach www with
+   * that token (the egress audit batch) is delivered here. What arrives while
+   * the terminal read is in flight still misses the token. Must
+   * not throw, and must return once `signal` aborts so a cancel is answered
+   * promptly.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  beforeStatusRead?: (signal?: AbortSignal) => Promise<void>;
 }
 
 export interface PollResult {
@@ -678,6 +697,11 @@ export async function pollUntilTerminal(
     const starved = ctx.memoryStarvation?.() ?? null;
     if (starved !== null) {
       throw starved;
+    }
+
+    await ctx.beforeStatusRead?.(ctx.signal);
+    if (ctx.cancelled || ctx.signal?.aborted) {
+      return { outcome: "cancelled", finalStatus: lastStatus };
     }
 
     let poll: ThreadStatusPoll;

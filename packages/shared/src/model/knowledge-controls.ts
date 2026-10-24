@@ -239,6 +239,9 @@ export async function updateKnowledgeControls({
     const tx = rawTx as unknown as DB;
     const row = await readOrgRow(tx, organizationId, true);
     if (expectedUpdatedAt !== undefined) {
+      // Compared in JS on the locked row: the read already truncated the
+      // stored stamp to milliseconds, so a raw-SQL stamp carrying
+      // microseconds still matches what the caller read.
       const stamp = row?.knowledgeUpdatedAt ?? null;
       const matches =
         expectedUpdatedAt === null

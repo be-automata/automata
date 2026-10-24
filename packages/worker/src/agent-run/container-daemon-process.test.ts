@@ -11,6 +11,8 @@ import { assertHardenedArgv } from "./container-argv";
 import {
   ContainerDaemonProcess,
   handOverRunDir,
+  SALVAGE_BRIDGE_PORTS,
+  SALVAGE_PREPARE_SCRIPT,
   settleDaemonTeardown,
 } from "./container-daemon-process";
 import type { ContainerRuntime, ContainerState } from "./container-runtime";
@@ -91,10 +93,31 @@ function fakeRuntime(
       calls.push(`copyIn ${dest}`);
       copied.push(snapshot(src));
     }),
-    exec: vi.fn(async (_id: string, argv: readonly string[]) => {
-      calls.push(`exec ${argv.join(" ")}`);
-      return { code: 0, stdout: "", stderr: "" };
-    }),
+    exec: vi.fn(
+      async (
+        _id: string,
+        argv: readonly string[],
+        _timeoutMs?: number,
+      ): Promise<{ code: number; stdout: string; stderr: string }> => {
+        calls.push(`exec ${argv.join(" ")}`);
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    ),
+    /** #437 Part B: a child that prints `out` and closes with `code`. */
+    spawnExec: vi.fn(
+      (
+        _id: string,
+        _argv: readonly string[],
+        _opts: { workdir: string; env: Record<string, string> },
+      ) => {
+        const c = new FakeChild();
+        setImmediate(() => {
+          c.stdout.write("exec-out\n");
+          setImmediate(() => c.emit("close", 3));
+        });
+        return c as never;
+      },
+    ),
     startAttached: vi.fn(() => {
       calls.push("start");
       return child as never;
@@ -140,7 +163,6 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     config = {
       ...loadWorkerConfig({
         WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
-        WORKER_DEV_CONTAINER_RUNS: "1",
         WORKER_BATTERIES_IMAGE: IMAGE,
         WORKER_RUN_MEMORY_MAX: "2G",
         WORKER_DAEMON_DIST: path.join(root, "daemon.js"),
@@ -435,7 +457,6 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
     config = {
       ...loadWorkerConfig({
         WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
-        WORKER_DEV_CONTAINER_RUNS: "1",
         WORKER_BATTERIES_IMAGE: IMAGE,
         WORKER_RUN_MEMORY_MAX: "2G",
         WORKER_DAEMON_DIST: path.join(root, "daemon.js"),
@@ -569,21 +590,118 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
       await new Promise<void>((r) => pg.close(() => r()));
     }
   });
+
+  // card: protects=#437 Part B: a task container's salvage prepare runs the constant freeze-and-bridge script INSIDE the container (bash, the forwarded git broker socket and the candidate ports as arguments only) and hands back the loopback URL of the port the script printed; fails_when=the script is not SALVAGE_PREPARE_SCRIPT, run-derived text enters it, the socket path or ports differ, or the URL is not the printed port's; no_claim=the script's behaviour in a real container (manual drill in the PR, box proof)
+  it("salvage prepare: the freeze-and-bridge script in the container, its port as the broker URL", async () => {
+    const rt = fakeRuntime();
+    const lines: string[] = [];
+    const d = make("task", rt, { log: (l: string) => lines.push(l) });
+    await d.start();
+    rt.exec.mockImplementationOnce(async () => ({
+      code: 0,
+      stdout: "3140\n",
+      stderr: "",
+    }));
+    expect(await d.prepareSalvage(5_000)).toBe("http://127.0.0.1:3140");
+    expect(rt.exec).toHaveBeenLastCalledWith(
+      "c".repeat(64),
+      [
+        "/bin/bash",
+        "-c",
+        SALVAGE_PREPARE_SCRIPT,
+        "bash",
+        "/run/automata/git-broker.sock",
+        ...SALVAGE_BRIDGE_PORTS.map(String),
+      ],
+      5_000,
+    );
+    expect(lines).toContain(
+      'container.salvage_prepare {"thread":"thr_c3","code":0,"port":3140}',
+    );
+    expect(d.salvageWorkdir).toBe("/workspace");
+  });
+
+  // card: protects=#437 Part B: a prepare that fails (non-zero exit, a port outside the candidate list, a throwing runtime) is null and logged, never thrown, and its stderr is redacted; fails_when=a failure yields a URL, throws, or logs the bearer; no_claim=which failure the script hit inside a real container
+  it("salvage prepare: a failed exec, a foreign port or a throw is null, logged, never thrown", async () => {
+    const rt = fakeRuntime();
+    const lines: string[] = [];
+    const d = make("task", rt, { log: (l: string) => lines.push(l) });
+    await d.start();
+    rt.exec.mockImplementationOnce(async () => ({
+      code: 21,
+      stdout: "",
+      stderr: "socat: Authorization: Bearer run-bearer",
+    }));
+    expect(await d.prepareSalvage(5_000)).toBeNull();
+    rt.exec.mockImplementationOnce(async () => ({
+      code: 0,
+      stdout: "22\n",
+      stderr: "",
+    }));
+    expect(await d.prepareSalvage(5_000)).toBeNull();
+    rt.exec.mockImplementationOnce(async () => {
+      throw new Error("daemon gone");
+    });
+    expect(await d.prepareSalvage(5_000)).toBeNull();
+    const prepared = lines.filter((l) =>
+      l.startsWith("container.salvage_prepare"),
+    );
+    expect(prepared).toHaveLength(3);
+    expect(prepared.join("\n")).not.toContain("run-bearer");
+    expect(prepared[2]).toContain('"error":"daemon gone"');
+  });
+
+  // card: protects=#437 Part B: a review container (no broker socket) and a container whose teardown began never exec a salvage prepare; fails_when=either execs anything for the salvage; no_claim=the review lane's own skip in salvageWorkBranch (broker null)
+  it("salvage prepare: no broker socket (review) or a teardown under way execs nothing", async () => {
+    const review = fakeRuntime();
+    const r = make("review", review);
+    await r.start();
+    review.exec.mockClear();
+    expect(await r.prepareSalvage(5_000)).toBeNull();
+    expect(review.exec).not.toHaveBeenCalled();
+
+    const rt = fakeRuntime();
+    const d = make("task", rt);
+    await d.start();
+    await d.teardown();
+    rt.exec.mockClear();
+    expect(await d.prepareSalvage(5_000)).toBeNull();
+    expect(rt.exec).not.toHaveBeenCalled();
+  });
+
+  // card: protects=#437 Part B: a salvage step runs through `docker exec` in the run's container (runAsAgent's /bin/sh -c argv, the step's workdir and env handed to spawnExec), and its exit code and stdout come back as runAsAgent reports them; fails_when=the step runs on the host, in another container or dir, or loses its env; no_claim=docker itself (spawnExec's own test)
+  it("runInContainer: a salvage step is a docker exec of runAsAgent's argv", async () => {
+    const rt = fakeRuntime();
+    const d = make("task", rt);
+    await d.start();
+    const r = await d.runInContainer({
+      cwd: "/workspace",
+      script: 'exec git check-ref-format "refs/heads/$1"',
+      args: ["automata/task-1"],
+      env: { GIT_CONFIG_COUNT: "0", UNSET: undefined },
+      timeoutMs: 5_000,
+    });
+    expect(r).toEqual({
+      exitCode: 3,
+      stdout: "exec-out\n",
+      timedOut: false,
+      truncated: false,
+    });
+    expect(rt.spawnExec).toHaveBeenCalledWith(
+      "c".repeat(64),
+      [
+        "/bin/sh",
+        "-c",
+        'exec git check-ref-format "refs/heads/$1"',
+        "sh",
+        "automata/task-1",
+      ],
+      { workdir: "/workspace", env: { GIT_CONFIG_COUNT: "0" } },
+    );
+  });
 });
 
 describe("settleDaemonTeardown (the workflow's teardown step)", () => {
-  // card: protects=switch OFF: the host daemon's synchronous teardown runs once and NOTHING is returned to await, so the host path's finally keeps its exact ordering; fails_when=a promise (an extra await tick) is returned for the host daemon or teardown is skipped; no_claim=the rest of the finally block
-  it("host daemon: teardown runs synchronously, nothing to await", () => {
-    let calls = 0;
-    const out = settleDaemonTeardown(
-      { teardown: () => void calls++ },
-      "thr_1",
-      () => {},
-    );
-    expect(out).toBeUndefined();
-    expect(calls).toBe(1);
-  });
-
   // card: protects=a container whose removal kept failing is LOGGED and the teardown carries on (brokers, credential wipe and slot release still run), never thrown out of the finally; fails_when=the rejection propagates or goes unlogged; no_claim=the next admission's by-name removal (start() tests)
   it("container daemon: a failed removal is logged, never thrown", async () => {
     const lines: string[] = [];

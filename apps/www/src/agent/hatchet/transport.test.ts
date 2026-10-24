@@ -7,11 +7,14 @@ import {
   POLICY_TO_WORKFLOW,
   workflowNameForPolicy,
   validateRunMetadata,
+  buildRunMetadata,
+  buildReviewRunMetadata,
 } from "./transport";
 import {
   SUPERSEDE_POLICIES,
   type SupersedePolicy,
 } from "@terragon/shared/model/repo-review-settings";
+import { resolveRunDisplayLane } from "@terragon/utils/run-lane";
 
 const CONFIG = {
   apiUrl: "https://tunnel.example.com/",
@@ -27,6 +30,7 @@ const INPUT = {
   daemonCallbackUrl: "https://www.example.com",
   installationToken: "inst-tok",
   daemonToken: "daemon-tok",
+  orgId: "org_1",
 };
 
 describe("triggerAgentRun (Hatchet REST v1)", () => {
@@ -55,10 +59,69 @@ describe("triggerAgentRun (Hatchet REST v1)", () => {
     const body = JSON.parse(init.body);
     expect(body.workflowName).toBe("agent-run");
     expect(body.input).toEqual(INPUT);
+    // #373 OD-0: no opts metadata → the non-review metadata derived from the input.
     expect(body.additionalMetadata).toEqual({
       threadId: "thr_1",
       threadChatId: "tc_1",
+      orgId: "org_1",
+      lane: "task",
+      repoFullName: "be-automata/automata",
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("derives the default lane from the input (pr, self-heal)", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ run: { metadata: { id: "r" } } }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await triggerAgentRun({ ...INPUT, prNumber: 42 }, CONFIG);
+    await triggerAgentRun(
+      { ...INPUT, selfHeal: { kind: "fix" as const }, prNumber: 42 },
+      CONFIG,
+    );
+    const metas = fetchMock.mock.calls.map(
+      ([, init]) => JSON.parse(init.body).additionalMetadata,
+    );
+    expect(metas[0]).toMatchObject({ lane: "pr", prNumber: "42" });
+    expect(metas[1]).toMatchObject({ lane: "self-heal-fix", prNumber: "42" });
+    vi.unstubAllGlobals();
+  });
+
+  it("a review-shaped input WITHOUT opts gets lane review and only the default keys (review metadata comes only through the review plan's triggerOpts)", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ run: { metadata: { id: "r" } } }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const reviewShaped = [
+      { ...INPUT, prNumber: 7, prKey: "be-automata/automata#7" },
+      { ...INPUT, prNumber: 7, supersedePolicy: "newest-wins" },
+    ];
+    for (const input of reviewShaped) {
+      expect(resolveRunDisplayLane(input)).toBe("review");
+      await triggerAgentRun(input, CONFIG);
+    }
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(init.body);
+      // No opts → the legacy workflow and the non-review metadata builder: no
+      // metaVersion, prKey or policy keys, which only buildReviewRunMetadata adds.
+      expect(body.workflowName).toBe("agent-run");
+      expect(body.additionalMetadata).toEqual({
+        threadId: "thr_1",
+        threadChatId: "tc_1",
+        orgId: "org_1",
+        lane: "review",
+        repoFullName: "be-automata/automata",
+        prNumber: "7",
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });
 
@@ -223,6 +286,106 @@ describe("POLICY_TO_WORKFLOW / workflowNameForPolicy (#125/#127)", () => {
       threadId: "thr_1",
     });
     vi.unstubAllGlobals();
+  });
+});
+
+describe("non-review run metadata (#373 OD-0)", () => {
+  const IDS = { threadId: "thr_1", threadChatId: "tc_1" };
+
+  it("task: org, lane and the normalized repo; no PR key", () => {
+    expect(
+      buildRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        lane: "task",
+        repoFullName: " Be-Automata/Automata ",
+      }),
+    ).toEqual({
+      ...IDS,
+      orgId: "org_1",
+      lane: "task",
+      repoFullName: "be-automata/automata",
+    });
+  });
+
+  it("mention on a PR: lane pr, prNumber as a string", () => {
+    expect(
+      buildRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        lane: resolveRunDisplayLane({ prNumber: 200 }),
+        repoFullName: "be-automata/automata",
+        prNumber: 200,
+      }),
+    ).toEqual({
+      ...IDS,
+      orgId: "org_1",
+      lane: "pr",
+      repoFullName: "be-automata/automata",
+      prNumber: "200",
+    });
+  });
+
+  it("self-heal audit and fix, including a personal-scope (null org) id", () => {
+    for (const kind of ["audit", "fix"] as const) {
+      for (const orgId of ["org_1", "u:user_1"]) {
+        expect(
+          buildRunMetadata({
+            ...IDS,
+            orgId,
+            lane: resolveRunDisplayLane({ selfHeal: { kind } }),
+            repoFullName: "be-automata/automata",
+          }),
+        ).toEqual({
+          ...IDS,
+          orgId,
+          lane: `self-heal-${kind}`,
+          repoFullName: "be-automata/automata",
+        });
+      }
+    }
+  });
+
+  it("omits unknown values instead of sending empty strings", () => {
+    const meta = buildRunMetadata({
+      ...IDS,
+      orgId: "",
+      lane: "task",
+      repoFullName: "  ",
+    });
+    expect(meta).toEqual({ ...IDS, lane: "task" });
+    expect(Object.values(meta)).not.toContain("");
+  });
+
+  it("rejects an over-limit value through validateRunMetadata", () => {
+    expect(() =>
+      buildRunMetadata({
+        ...IDS,
+        orgId: "x".repeat(257),
+        lane: "task",
+      }),
+    ).toThrow(/exceeds 256 chars/);
+  });
+
+  it("review metadata is unchanged (lane review, versioned)", () => {
+    expect(
+      buildReviewRunMetadata({
+        ...IDS,
+        orgId: "org_1",
+        repoFullName: "be-automata/automata",
+        prNumber: 77,
+        snapshot: { policy: "newest-wins", recheckOnComplete: false },
+      }),
+    ).toEqual({
+      metaVersion: "1",
+      ...IDS,
+      orgId: "org_1",
+      repoFullName: "be-automata/automata",
+      prNumber: "77",
+      lane: "review",
+      supersedePolicy: "newest-wins",
+      recheckOnComplete: "false",
+    });
   });
 });
 

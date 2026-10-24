@@ -164,8 +164,7 @@ export type AgentRunInput = {
   egressPolicy?: EgressPolicyShape;
   /**
    * Phase 4 resolution, consumed by Phase 5: bounds-checked first
-   * (review-agent-wire.ts), then orchestrated runs seed battery packs into the
-   * per-run HOME (batteries-seed.ts) and stamp the daemon wire
+   * (review-agent-wire.ts), then orchestrated runs stamp the daemon wire
    * (PulledDaemonMessage.reviewAgent). runTests is prompt-level and is NOT
    * forwarded (Phase 6). PR-review runs only; old workers ignore it.
    */

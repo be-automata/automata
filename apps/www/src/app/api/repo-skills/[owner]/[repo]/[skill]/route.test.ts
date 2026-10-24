@@ -201,6 +201,19 @@ describe("GET/PUT /api/repo-skills/[owner]/[repo]/[skill]", () => {
     expect(createRepoSkillVersion).not.toHaveBeenCalled();
   });
 
+  it("422 when a PR-review body diffs against a fixed branch (save-time check) — NO write happens", async () => {
+    const res = await PUT(
+      putReq("github-ops", {
+        body: "Run `git diff origin/main...HEAD`.\n" + VALID_OPS_BODY,
+      }),
+      { params: params("github-ops") },
+    );
+    expect(res.status).toBe(422);
+    const json = (await res.json()) as { error: string };
+    expect(json.error).toMatch(/origin\/\{\{baseBranch\}\}/);
+    expect(createRepoSkillVersion).not.toHaveBeenCalled();
+  });
+
   it("422 when a non-registry skill body is empty (default validator)", async () => {
     const res = await PUT(putReq("github-deep-research", { body: "   \n" }), {
       params: params("github-deep-research"),

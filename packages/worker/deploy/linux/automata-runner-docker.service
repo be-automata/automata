@@ -9,9 +9,8 @@
 #
 # The socket is /run/automata-docker/docker.sock (dir 0750
 # automata-runner:automata-docker, tmpfiles.d), group `automata-docker`, mode
-# 0660: the worker reaches it through that group, without sudo. The worker sets
-# WORKER_CONTAINER_DOCKER_SOCKET to it only on a box running the dev-only
-# container path (WORKER_DEV_CONTAINER_RUNS=1).
+# 0660: the worker reaches it through that group, without sudo (it is the
+# worker's default WORKER_CONTAINER_DOCKER_SOCKET).
 #
 # Resource limits (--memory, --pids-limit, --cpus) need the user manager's
 # cgroup delegation (user@<uid>.service.d/10-automata-delegate.conf); Delegate=

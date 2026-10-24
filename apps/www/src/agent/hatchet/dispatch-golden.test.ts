@@ -24,10 +24,11 @@ import {
  * input, and additionalMetadata compared literally against a versioned
  * fixture, not an exclusion list. Since #165 the review case is the VARIANT
  * payload (engine-owned supersession; the flag and legacy review path are
- * gone); the plain-thread case remains the legacy `agent-run` payload,
- * byte-identical for non-review lanes.
+ * gone); the plain-thread case remains the legacy `agent-run` workflow,
+ * whose metadata since #373 OD-0 also carries orgId, lane and repoFullName.
  *
- * The fixture was captured from the pre-change dispatch path. Run-specific
+ * The fixture was captured from the pre-change dispatch path and regenerated
+ * for #373 OD-0 (the plain-thread additionalMetadata). Run-specific
  * values (ids, the traceparent, and since #380 the three random envelope
  * fields epk/iv/ct) are stored as __PLACEHOLDER__ strings and substituted
  * with the live values before comparison — every key is still compared,

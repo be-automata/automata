@@ -264,7 +264,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
     const linux = box.indexOf('[ "$(uname -s)" = "Linux" ]');
     expect(guard).toBeGreaterThan(-1);
     expect(linux).toBeGreaterThan(-1);
-    for (const read of ["manifest.sha256", "journalctl", "git_ro", "stat "]) {
+    for (const read of ["journalctl", "git_ro"]) {
       expect(box.indexOf(read), read).toBeGreaterThan(Math.max(guard, linux));
     }
   });
@@ -289,7 +289,6 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
   it("is read-only: no restarts, installs, git writes or schema pushes", () => {
     const c = code(script);
     expect(c).not.toMatch(/systemctl\s+(restart|stop|start)/);
-    expect(c).not.toMatch(/install-batteries\.sh/);
     expect(c).not.toMatch(/rm -rf \//);
     expect(c).not.toMatch(
       /\bgit(_ro)?\s+(fetch|merge|pull|push|commit|checkout|switch|reset)\b/,
@@ -344,15 +343,17 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
     expect(script).not.toMatch(CUSTOMER_NAME);
   });
 
-  it("box mode checks the install, the gsd agent file and the journal", () => {
+  // card: protects=box mode checks the staged daemon and the journal and reads nothing of the deleted host battery tree (ADR-013: the batteries are image contents); fails_when=a check of manifest.sha256, the batteries manifest or a linked agent file comes back, or the daemon/journal checks go; no_claim=the image's own verify.sh
+  it("box mode checks the staged daemon and the journal, not a host battery tree", () => {
     const box = fnBody(script, "box_mode");
-    for (const token of [
+    for (const gone of [
       "manifest.sha256",
-      "manifest.sha256.invalid",
-      "cat-file blob HEAD:packages/worker/deploy/batteries.json",
-      "gsd-reviewers",
-      "agents/gsd-code-reviewer.md",
-      "stat -c",
+      "batteries.json",
+      "gsd-reviewers@",
+    ]) {
+      expect(script, gone).not.toContain(gone);
+    }
+    for (const token of [
       'analyse_daemon_bundle "$DAEMON_BUNDLE"',
       "journalctl -u automata-worker.service",
       "--no-pager -o short-unix",
@@ -368,7 +369,6 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "Agent/Task and Skill",
       "gstack-review and security-audit",
       "gsd-code-reviewer and gsd-security-auditor",
-      "06-04 Task 2",
       "parent_tool_use_id",
       "shellcheck/actionlint/gitleaks",
       "json review-intent",
@@ -398,7 +398,7 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
   it("keeps the CHECK names stable", () => {
     for (const name of [
       "SC2 one review run per push",
-      "SC2 orchestrated batteries seeded",
+      "SC2 review batteries from the image",
       "SC2 orchestrated wire stamped",
       "SC2 latency within budget",
       "SC3 classic run",
@@ -406,8 +406,6 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
       "SC2 zero bot comments",
       "SC2 zero commits from the run",
       "SC2 review latency within budget",
-      "box install manifest",
-      "box gsd agent file",
       "box staged daemon",
     ]) {
       expect(script, name).toContain(name);
@@ -416,7 +414,6 @@ describe("orchestrated-review-acceptance.sh (phase 6): contract", () => {
 });
 
 describe("analyse_review_journal (sourced, fixture journal)", () => {
-  const PREFIX = "0123456789ab";
   const T0 = 1759550000;
   const REPO = "o/r";
 
@@ -428,7 +425,8 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
       tid,
       `run start: lane=${lane} pr=${pr} repo=${repo} branch=f policy=newest-wins`,
     );
-  const ORCH_BATT = `batteries: mode=orchestrated packs=gstack-review,somnio-review,gsd-reviewers manifest=${PREFIX}`;
+  /** ADR-013: every review's one batteries line names the pinned image. */
+  const ORCH_BATT = "batteries: image=0123456789ab lane=review";
   const AGENT_LINE =
     "review agent: orchestrated → daemon (bashTimeoutMs=300000, maxTurns=unset)";
 
@@ -447,7 +445,7 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
     return withFiles({ "journal.txt": `${journal}\n` }, (p) =>
       callAnalyser(
         "analyse_review_journal",
-        [p["journal.txt"]!, REPO, "7", expectMode, PREFIX],
+        [p["journal.txt"]!, REPO, "7", expectMode],
         awk,
       ),
     );
@@ -460,7 +458,7 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
     const out = analyse(orchestratedRun("thr_1"), "orchestrated");
     expect(out).toContain("FAILURES=0");
     expect(checkLine(out, "SC2 one review run per push")).toContain("PASS");
-    expect(checkLine(out, "SC2 orchestrated batteries seeded")).toContain(
+    expect(checkLine(out, "SC2 review batteries from the image")).toContain(
       "PASS",
     );
     expect(checkLine(out, "SC2 orchestrated wire stamped")).toContain("PASS");
@@ -480,30 +478,25 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
     expect(out).not.toContain("FAILURES=0");
   });
 
+  // card: protects=a review whose batteries line does not name the pinned image (a pre-ADR-013 host seeding line, a non-review lane, a malformed digest) fails the batteries check with the line as its reason; fails_when=any of them passes; no_claim=which digest is pinned (the worker's boot line)
   it.each<[string, string, RegExp]>([
-    ["classic batteries", "batteries: mode=classic", /FAIL/],
     [
-      "packs=none",
-      `batteries: mode=orchestrated packs=none manifest=${PREFIX}`,
-      /FAIL/,
+      "a host-model seeding line",
+      "batteries: mode=orchestrated packs=gstack-review manifest=0123456789ab",
+      /FAIL .*mode=orchestrated/,
     ],
-    [
-      "a manifest mismatch",
-      "batteries: mode=orchestrated packs=gstack-review manifest=ffffffffffff",
-      /FAIL/,
-    ],
-    [
-      "unavailable batteries",
-      "batteries: unavailable mode=orchestrated reason=manifest-drift",
-      /FAIL .*manifest-drift/,
-    ],
-  ])("orchestrated expected but %s fails seeding", (_name, batt, verdict) => {
-    const out = analyse(orchestratedRun("thr_1", { batt }), "orchestrated");
-    expect(checkLine(out, "SC2 orchestrated batteries seeded")).toMatch(
-      verdict,
-    );
-    expect(out).not.toContain("FAILURES=0");
-  });
+    ["a task lane line", "batteries: image=0123456789ab lane=task", /FAIL/],
+    ["a short digest", "batteries: image=0123 lane=review", /FAIL/],
+  ])(
+    "orchestrated expected but %s fails the batteries check",
+    (_name, batt, verdict) => {
+      const out = analyse(orchestratedRun("thr_1", { batt }), "orchestrated");
+      expect(checkLine(out, "SC2 review batteries from the image")).toMatch(
+        verdict,
+      );
+      expect(out).not.toContain("FAILURES=0");
+    },
+  );
 
   it("orchestrated expected but no review-agent line fails the wire check", () => {
     const out = analyse(
@@ -526,7 +519,7 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
   it("classic-ok passes; classic with an orchestrated wire line fails", () => {
     const classic = [
       start("thr_c"),
-      line(5, "thr_c", "batteries: mode=classic"),
+      line(5, "thr_c", "batteries: image=0123456789ab lane=review"),
       line(300, "thr_c", "run finished: complete"),
     ].join("\n");
     const ok = analyse(classic, "classic");
@@ -556,7 +549,7 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
       line(
         5,
         "thr_task",
-        `batteries: lane=task packs=somnio-skills manifest=${PREFIX}`,
+        "batteries: image=0123456789ab lane=task task-packs=somnio-skills",
       ),
     ].join("\n");
     const withRun = analyse(
@@ -614,7 +607,7 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
     if (alternates.length === 0) ctx.skip();
     const classic = [
       start("thr_c"),
-      line(5, "thr_c", "batteries: mode=classic"),
+      line(5, "thr_c", "batteries: image=0123456789ab lane=review"),
       line(300, "thr_c", "run finished: complete"),
     ].join("\n");
     const traced = orchestratedRun("thr_1").replaceAll(
@@ -641,12 +634,12 @@ describe("analyse_review_journal (sourced, fixture journal)", () => {
           "FAIL (2 review runs: thr_1 thr_2)",
         ],
         [
-          "unavailable batteries",
+          "a host-model seeding line",
           orchestratedRun("thr_1", {
-            batt: "batteries: unavailable mode=orchestrated reason=manifest-drift",
+            batt: "batteries: mode=classic",
           }),
-          "SC2 orchestrated batteries seeded",
-          "FAIL (unavailable: reason=manifest-drift)",
+          "SC2 review batteries from the image",
+          "FAIL (batteries line: batteries: mode=classic)",
         ],
         [
           "span 1900 s",

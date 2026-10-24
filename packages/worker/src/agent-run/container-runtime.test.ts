@@ -71,6 +71,68 @@ describe("ContainerRuntime: the CLI against ONE configured socket", () => {
     ]);
   });
 
+  // card: protects=#437 Part B in a container: spawnExec's env crosses as bare `-e NAME` (the value rides the CLI's own env, never its argv, which `ps` shows to every account), PATH/HOME cross literally so the CLI keeps its own, and the exec runs in the given workdir as the container's own user; fails_when=a secret value appears in the argv, the CLI runs with the container's HOME, a --user flag appears, or a non-identifier name is accepted; no_claim=docker's own `-e NAME` lookup (box/IT proof)
+  it("spawnExec: env by name only, values in the CLI's env, never in its argv", () => {
+    const spawned: Array<{
+      file: string;
+      args: readonly string[];
+      env: NodeJS.ProcessEnv;
+      stdio: unknown;
+    }> = [];
+    const spawnFn = vi.fn((file: string, args: readonly string[], o) => {
+      spawned.push({ file, args, env: o.env, stdio: o.stdio });
+      return {} as never;
+    });
+    const rt = new ContainerRuntime({
+      socketPath: SOCK,
+      dockerBin: "/usr/bin/docker",
+      exec: fakeExec(() => ({})).exec,
+      spawnFn: spawnFn as never,
+    });
+    const header = "Authorization: Bearer SECRET_BEARER_1";
+    rt.spawnExec("c1", ["/bin/sh", "-c", "exec git add -A", "sh"], {
+      workdir: "/workspace",
+      env: {
+        HOME: "/dev/null",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.http://127.0.0.1:3139/.extraheader",
+        GIT_CONFIG_VALUE_0: header,
+      },
+    });
+    const s = spawned[0]!;
+    expect(s.file).toBe("/usr/bin/docker");
+    expect(s.args).toEqual([
+      "-H",
+      `unix://${SOCK}`,
+      "exec",
+      "-w",
+      "/workspace",
+      "-e",
+      "HOME=/dev/null",
+      "-e",
+      "GIT_CONFIG_COUNT",
+      "-e",
+      "GIT_CONFIG_KEY_0",
+      "-e",
+      "GIT_CONFIG_VALUE_0",
+      "c1",
+      "/bin/sh",
+      "-c",
+      "exec git add -A",
+      "sh",
+    ]);
+    expect(s.args.join(" ")).not.toContain("SECRET_BEARER_1");
+    expect(s.env.GIT_CONFIG_VALUE_0).toBe(header);
+    expect(s.env.HOME).toBe(process.env.HOME);
+    expect(s.stdio).toEqual(["ignore", "pipe", "ignore"]);
+    expect(() =>
+      rt.spawnExec("c1", ["true"], {
+        workdir: "/workspace",
+        env: { "BAD NAME": "x" },
+      }),
+    ).toThrow(ContainerRuntimeError);
+  });
+
   it("remove: absent is fine, any other failure throws", async () => {
     const absent = new ContainerRuntime({
       socketPath: SOCK,
@@ -229,37 +291,19 @@ describe("containerRunsBoot", () => {
     ...over,
   });
 
-  // card: protects=with the switch off, boot does nothing at all (no warning, no docker call); fails_when=a host-model boot touches docker or logs; no_claim=nothing
-  it("off: a silent no-op", async () => {
-    const rt = runtime();
-    const warn = vi.fn();
-    await expect(
-      containerRunsBoot({
-        config: { containerRuns: null, boxId: "b" },
-        workerId: "w",
-        log: vi.fn(),
-        warn,
-        runtime: rt as never,
-      }),
-    ).resolves.toBeNull();
-    expect(warn).not.toHaveBeenCalled();
-    expect(rt.ping).not.toHaveBeenCalled();
-  });
-
-  // card: protects=on: a dev-only WARNING is logged, a dead daemon or an image missing from the rootless store refuses boot (never a pull), and orphans are swept; fails_when=boot proceeds without the daemon/image or without the warning; no_claim=that the digest matches the published attestation (box step)
-  it("on: warns, refuses a dead daemon or a missing image, sweeps orphans", async () => {
-    const warn = vi.fn();
+  // card: protects=every boot (the container path is the only one, ADR-013 P3) refuses a dead rootless daemon or an image missing from its store (never a pull), sweeps orphans by label, and logs no dev-only warning; fails_when=boot proceeds without the daemon/image, skips the sweep, or still warns; no_claim=that the digest matches the published attestation (box step)
+  it("refuses a dead daemon or a missing image and sweeps orphans", async () => {
+    const log = vi.fn();
     const ok = runtime();
     await expect(
       containerRunsBoot({
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
-        log: vi.fn(),
-        warn,
+        log,
         runtime: ok as never,
       }),
     ).resolves.toEqual({ serverVersion: "29.8.1", removed: [] });
-    expect(warn.mock.calls[0]?.[0]).toMatch(/DEV\/TEST ONLY/);
+    expect(log.mock.calls.flat().join("\n")).not.toMatch(/DEV|ONLY/);
     expect(ok.listByLabel).toHaveBeenCalledWith("automata.box", "b");
 
     const dead = runtime({
@@ -272,7 +316,6 @@ describe("containerRunsBoot", () => {
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
         log: vi.fn(),
-        warn,
         runtime: dead as never,
       }),
     ).rejects.toThrow(/does not answer/);
@@ -283,7 +326,6 @@ describe("containerRunsBoot", () => {
         config: { containerRuns: cr, boxId: "b" },
         workerId: "w",
         log: vi.fn(),
-        warn,
         runtime: noImage as never,
       }),
     ).rejects.toThrow(/never pulls/);

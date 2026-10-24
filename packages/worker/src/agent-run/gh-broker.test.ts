@@ -136,7 +136,7 @@ describe("startGhBroker — construction fences", () => {
     ).rejects.toThrow(/sun_path/);
   });
 
-  it("creates a missing socket directory (broker starts before DaemonProcess's own mkdir)", async () => {
+  it("creates a missing socket directory (the socket dir may not exist yet)", async () => {
     const dir = fs.mkdtempSync("/tmp/gh-broker-t-");
     tmpDirs.push(dir);
     const socketPath = path.join(dir, "nested", "gh.sock");

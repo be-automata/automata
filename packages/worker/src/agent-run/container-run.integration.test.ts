@@ -235,7 +235,6 @@ describe.skipIf(!itEnabled)(
                 agent: "claude",
                 run,
                 trustWorkdir: CONTAINER_WORKSPACE,
-                batteries: { log: () => {} },
               });
               const counting = Object.assign(
                 Object.create(
@@ -456,7 +455,6 @@ describe.skipIf(!itEnabled)(
       fs.writeFileSync(path.join(root, "daemon-bundle.js"), "// stand-in\n");
       const env = {
         WORKER_PAYLOAD_SEAL_KEY_FILE: "/nonexistent",
-        WORKER_DEV_CONTAINER_RUNS: "1",
         WORKER_BATTERIES_IMAGE: IMAGE,
         WORKER_CONTAINER_DOCKER_SOCKET: SOCKET,
         WORKER_RUN_MEMORY_MAX: "2G",
