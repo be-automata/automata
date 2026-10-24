@@ -48,32 +48,19 @@ describe("renderPrDiffContext", () => {
     );
   });
 
-  it("states a draft PR is a draft, on every base branch of the text", () => {
-    const named = renderPrDiffContext({
+  it.each([
+    ["a named base", { baseRef: "main" }],
+    ["a withheld base with its sha", { baseRef: "bad`ref", baseSha: BASE_SHA }],
+    ["a withheld base without a sha", { baseRef: "bad`ref" }],
+  ])("states a draft PR is a draft, with %s", (_label, base) => {
+    const text = renderPrDiffContext({
       prNumber: 1,
-      baseRef: "main",
+      ...base,
       headRef: "feat/x",
       headSha: HEAD,
       isDraft: true,
     });
-    const shaOnly = renderPrDiffContext({
-      prNumber: 1,
-      baseRef: "bad`ref",
-      baseSha: BASE_SHA,
-      headRef: "feat/x",
-      headSha: HEAD,
-      isDraft: true,
-    });
-    const neither = renderPrDiffContext({
-      prNumber: 1,
-      baseRef: "bad`ref",
-      headRef: "feat/x",
-      headSha: HEAD,
-      isDraft: true,
-    });
-    for (const text of [named, shaOnly, neither]) {
-      expect(text).toMatch(/ On GitHub this pull request is a draft\.$/);
-    }
+    expect(text).toMatch(/ On GitHub this pull request is a draft\.$/);
   });
 
   it("states nothing about drafts when the read carried no draft flag", () => {

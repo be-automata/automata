@@ -85,31 +85,32 @@ function renderDraftState(isDraft: boolean | null | undefined): string {
  * the same `origin/<base>...HEAD`), so the two never point different ways.
  */
 export function renderPrDiffContext(input: PrDiffContextInput): string {
+  return renderBaseAndHead(input) + renderDraftState(input.isDraft);
+}
+
+/** The base, head and diff-command sentences of `renderPrDiffContext`. */
+function renderBaseAndHead(input: PrDiffContextInput): string {
   const base = safeGitRef(input.baseRef);
   const head = safeGitRef(input.headRef);
   const headSha = safeSha(input.headSha);
   const headPart = `${head ? `head \`${head}\`` : "head (branch name withheld)"}${headSha ? ` at ${headSha}` : ""}`;
-  const draft = renderDraftState(input.isDraft);
   if (base) {
     return (
       `PR #${input.prNumber}: base \`${base}\`, ${headPart}. ` +
       `The change under review is \`git diff origin/${base}...HEAD\` (origin/${base} is pre-fetched). ` +
-      `Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch.` +
-      draft
+      `Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch.`
     );
   }
   const baseSha = safeSha(input.baseSha);
   if (baseSha) {
     return (
       `PR #${input.prNumber}: base branch name withheld (${WITHHELD_NOTE}), base tip ${baseSha}, ${headPart}. ` +
-      `The change under review is \`git diff ${baseSha}...HEAD\` (the base is pre-fetched).` +
-      draft
+      `The change under review is \`git diff ${baseSha}...HEAD\` (the base is pre-fetched).`
     );
   }
   return (
     `PR #${input.prNumber}: base branch name withheld (${WITHHELD_NOTE}), ${headPart}. ` +
-    `The base is pre-fetched as a remote-tracking ref under refs/remotes/origin/; diff HEAD against its merge-base with that ref, not against the repository's default branch.` +
-    draft
+    `The base is pre-fetched as a remote-tracking ref under refs/remotes/origin/; diff HEAD against its merge-base with that ref, not against the repository's default branch.`
   );
 }
 

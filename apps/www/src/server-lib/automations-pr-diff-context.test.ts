@@ -130,13 +130,15 @@ describe("PR-event prompt names the base (stacked PRs)", () => {
     expect(text).toContain("`git diff origin/main...HEAD`");
   });
 
-  it("#498: a ready PR's prompt says it is not a draft; a draft's says it is", async () => {
+  it("#498: a ready PR's prompt says it is not a draft", async () => {
     await runFor("feat/x", "main", { draft: false });
     expect(firstPromptPart()).toContain(
       "On GitHub this pull request is ready for review, not a draft",
     );
-    vi.mocked(createNewThread).mockClear();
-    await runFor("feat/y", "main", { draft: true });
+  });
+
+  it("#498: a draft PR's prompt says it is a draft", async () => {
+    await runFor("feat/x", "main", { draft: true });
     expect(firstPromptPart()).toContain(
       "On GitHub this pull request is a draft.",
     );
