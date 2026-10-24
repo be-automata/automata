@@ -406,7 +406,9 @@ step_previous() {
   if ! (validate_image "$previous") 2>/dev/null; then
     fail previous-image "PREVIOUS in $STATE is not a digest reference"
   fi
-  if [ "$rootless_ok" -eq 1 ] && ! image_present "$previous" && ! previous_fits; then
+  # Measured against CURRENT, so only once it is in the store: a dry run has
+  # not pulled it yet and falls through to "would pull".
+  if image_present "$image" && ! image_present "$previous" && ! previous_fits; then
     report skip previous-image "WARNING not pulled: ${previous#*@} would leave under ${PREVIOUS_MIN_FREE_GB} GB free in the rootless store (an image rollback re-pulls it first)"
     return
   fi

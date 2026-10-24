@@ -427,7 +427,9 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     // pull would starve the disk the runs need.
     const previous = bodies.get("step_previous") ?? "";
     expect(previous).toContain('step_pull previous-image "$previous"');
-    expect(previous.indexOf("! previous_fits")).toBeGreaterThan(0);
+    expect(previous).toContain(
+      'if image_present "$image" && ! image_present "$previous" && ! previous_fits; then',
+    );
     expect(previous.indexOf("! previous_fits")).toBeLessThan(
       previous.indexOf("step_pull previous-image"),
     );
