@@ -529,6 +529,29 @@ describe("routing: org lane vs the legacy per-user path", () => {
     expect(handleAppMention).not.toHaveBeenCalled();
     expect(runAutomation).not.toHaveBeenCalled();
   });
+  it("#498: a draft PR mention states it is a draft", async () => {
+    const { repoFullName } = await repoWithLane();
+    octokit.rest.pulls.get.mockResolvedValueOnce({
+      data: {
+        draft: true,
+        head: { ref: "feature/x", repo: { full_name: "acme/same" } },
+        base: { ref: "main", repo: { full_name: "acme/same" } },
+      },
+    } as never);
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    const call = vi.mocked(runAutomation).mock.calls[0]![0];
+    const sent = call.options!.transformMessage!({
+      type: "user",
+      model: "opus",
+      parts: [{ type: "text", text: "SKILL BODY" }],
+      timestamp: "2026-10-20T00:00:00Z",
+    });
+    const first = sent.parts[0];
+    const text = first?.type === "text" ? first.text : "";
+    expect(text).toContain("On GitHub this pull request is a draft.");
+    expect(text).not.toContain("ready for review, not a draft");
+  });
+
   it("a fork PR: one short reply, no thread, no reaction", async () => {
     const { repoFullName } = await repoWithLane();
     for (const head of [

@@ -36,14 +36,14 @@ vi.mock("@/app/api/webhooks/github/utils", async (importOriginal) => {
 const HEAD = "a".repeat(40);
 const BASE_SHA = "b".repeat(40);
 
-function mockPull(headRef: string, baseRef: string, draft?: boolean) {
+function mockPull(headRef: string, baseRef: string, draft = false) {
   return {
     rest: {
       pulls: {
         get: vi.fn().mockResolvedValue({
           data: {
             state: "open",
-            ...(draft !== undefined ? { draft } : {}),
+            draft,
             head: {
               ref: headRef,
               sha: HEAD,
@@ -114,7 +114,8 @@ describe("PR-event prompt names the base (stacked PRs)", () => {
       'The "pull_request.synchronize" event was triggered for PR #481.\n' +
         `PR #481: base \`feat/parent\`, head \`feat/child\` at ${HEAD}. ` +
         "The change under review is `git diff origin/feat/parent...HEAD` (origin/feat/parent is pre-fetched). " +
-        "Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch.",
+        "Diff against this base, not the repository's default branch: a stacked PR's base is another pull request's branch. " +
+        "On GitHub this pull request is ready for review, not a draft, whatever its title or description says.",
     );
   });
 

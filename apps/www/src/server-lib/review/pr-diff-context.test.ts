@@ -63,15 +63,22 @@ describe("renderPrDiffContext", () => {
     expect(text).toMatch(/ On GitHub this pull request is a draft\.$/);
   });
 
-  it("states nothing about drafts when the read carried no draft flag", () => {
-    const text = renderPrDiffContext({
-      prNumber: 1,
-      baseRef: "main",
-      headRef: "feat/x",
-      headSha: HEAD,
-    });
-    expect(text).not.toContain("draft");
-  });
+  it.each([
+    ["absent", undefined],
+    ["null", null],
+  ])(
+    "states nothing about drafts when the draft flag is %s",
+    (_label, isDraft) => {
+      const text = renderPrDiffContext({
+        prNumber: 1,
+        baseRef: "main",
+        headRef: "feat/x",
+        headSha: HEAD,
+        isDraft,
+      });
+      expect(text).not.toContain("draft");
+    },
+  );
 
   it("withholds a hostile base name and diffs against the base sha instead", () => {
     const hostile =
