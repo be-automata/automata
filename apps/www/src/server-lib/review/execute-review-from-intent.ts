@@ -354,7 +354,8 @@ export async function executeReviewFromIntent(
     opts.isDraft === true ||
     (opts.draftAtDispatch === true &&
       !opts.runAbandoned &&
-      emitted.commit === currentHeadSha);
+      emitted.commit === currentHeadSha &&
+      !(opts.reviewedSha && opts.reviewedSha !== currentHeadSha));
   if (isBareCommentOnReadyPr(emitted, draftForNoVerdict)) {
     return await reportNoVerdict(opts, {
       cause: "agent_comment_without_findings",
@@ -503,14 +504,15 @@ export async function executeReviewFromIntent(
       );
       return { outcome: "skipped_superseded" };
     }
-    const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${withoutDraftEraMarker(execIntent.body)}`;
+    const staleBody = `_Intended verdict: **${effectiveVerdict}**, reviewed at \`${emitted.commit}\`; the PR has since advanced to \`${currentHeadSha}\`, so this is posted as a COMMENT rather than a formal verdict._\n\n${execIntent.body}`;
     try {
       await github.submitReviewWithComments(
         repoFullName,
         prNumber,
         emitted.commit,
         "COMMENT",
-        staleBody,
+        // A stale COMMENT is a real verdict: agent text must not mark it.
+        withoutDraftEraMarker(staleBody),
         [],
       );
       logger?.info(
@@ -585,13 +587,23 @@ export async function executeReviewFromIntent(
       }
     : postedIntent;
   // Agent text never carries the marker: only the server appends it, so a
-  // steered summary cannot make a real verdict read as a draft-era note.
+  // steered summary or finding (folded after the body) cannot make a real
+  // verdict read as a draft-era note.
   const cleanBody = withoutDraftEraMarker(markedIntent.body);
   const finalIntent = {
     ...markedIntent,
     body: draftEraNote
       ? `${cleanBody.trimEnd()}\n\n${DRAFT_ERA_NOTE_MARKER}`
       : cleanBody,
+    ...(markedIntent.comments
+      ? {
+          comments: markedIntent.comments.map((c) => ({
+            ...c,
+            path: withoutDraftEraMarker(c.path),
+            body: withoutDraftEraMarker(c.body),
+          })),
+        }
+      : {}),
   };
 
   const outcome = await runExecutor({
@@ -921,8 +933,19 @@ export function isNotAVerdict(review: GitHubReview): boolean {
   return isDegradedComment(review) || isDraftEraNote(review);
 }
 
-function withoutDraftEraMarker(body: string): string {
-  return body.split(DRAFT_ERA_NOTE_MARKER).join("");
+const DRAFT_ERA_NOTE_MARKER_LOOSE_RE = /<!--\s*automata:draft-era-note\s*-->/gi;
+
+/**
+ * Remove every marker-shaped comment from agent-supplied text, repeating until
+ * none is left, so a nested forgery cannot reassemble the marker.
+ */
+function withoutDraftEraMarker(text: string): string {
+  let out = text;
+  for (;;) {
+    const next = out.replace(DRAFT_ERA_NOTE_MARKER_LOOSE_RE, "");
+    if (next === out) return out;
+    out = next;
+  }
 }
 
 /**

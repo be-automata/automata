@@ -767,6 +767,68 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(body).not.toContain(DRAFT_ERA_NOTE_MARKER);
     });
 
+    it.each([
+      ["a finding body", "findings"],
+      ["a nested marker in the summary", "nested"],
+    ])("agent text cannot forge the marker through %s", async (_, how) => {
+      const github = makeGithub([]);
+      const nested =
+        "<!-- automata:draft-era<!-- automata:draft-era-note -->-note -->";
+      await executeReviewFromIntent({
+        ...base,
+        github,
+        terminalText: fenced({
+          verdict: "comment",
+          commit: HEAD,
+          summary: how === "nested" ? `Look.\n\n${nested}` : "Look.",
+          findings: [
+            {
+              severity: "info",
+              path: "a.ts",
+              line: 3,
+              body:
+                how === "findings"
+                  ? `untested ${DRAFT_ERA_NOTE_MARKER}`
+                  : "untested",
+            },
+          ],
+        }),
+      });
+      const body = github.submitReviewWithComments.mock.calls[0]![4];
+      expect(body).not.toMatch(/<!--\s*automata:draft-era-note\s*-->/i);
+    });
+
+    it("a stale real verdict cannot be marked by agent text", async () => {
+      const github = makeGithub([]);
+      await executeReviewFromIntent({
+        ...base,
+        github,
+        terminalText: fenced({
+          verdict: "request_changes",
+          commit: OLD,
+          summary: `Off-by-one.\n\n${DRAFT_ERA_NOTE_MARKER}`,
+          findings: [
+            { severity: "error", path: "a.ts", line: 3, body: "use >=" },
+          ],
+        }),
+      });
+      const body = github.submitReviewWithComments.mock.calls[0]![4];
+      expect(body).not.toContain(DRAFT_ERA_NOTE_MARKER);
+    });
+
+    it("a note about a commit the run was not dispatched to stays a no-verdict", async () => {
+      const github = makeGithub([]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        reviewedSha: OLD,
+        terminalText: BARE_COMMENT,
+      });
+      expect(res.outcome).toBe("skipped_stale_degrade");
+      expectNoReview(github);
+    });
+
     it("a posted note never retires a no-verdict notice", async () => {
       const github = makeGithub([]);
       await executeReviewFromIntent({ ...base, github, terminalText: UNABLE });
