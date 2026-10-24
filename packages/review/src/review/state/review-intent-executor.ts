@@ -201,17 +201,11 @@ export async function executeReviewIntent(
 
   const wantedState = reviewStateForVerdict(intent.verdict);
   const isSameReview = opts.isSameReview;
-  let existing: GitHubReview | null = null;
-  try {
-    existing = await findBotReviewAtHead({
-      github,
-      repo,
-      prNumber,
-      headSha,
-      botLogin,
-    });
-    if (existing && opts.yieldTo) {
-      const yieldTo = opts.yieldTo;
+  // A yielding note never supersedes: ONE snapshot decides, `existing` stays
+  // null below whatever happens, and a failed read posts dismissing nothing.
+  const yieldTo = opts.yieldTo;
+  if (yieldTo) {
+    try {
       const inForce = (await github.listReviews(repo, prNumber)).find(
         (r) =>
           r.user?.login === botLogin &&
@@ -233,10 +227,24 @@ export async function executeReviewIntent(
         );
         return { outcome: "skipped_existing" };
       }
+    } catch (err) {
+      logger?.warn(
+        "review-executor: yield check failed; posting without superseding",
+        { repo, prNumber, error: getErrorMessage(err) },
+      );
     }
-    // A yielding note replaces nothing: what is left at HEAD is only reviews
-    // the caller rejected, and they are neither a redelivery nor superseded.
-    if (opts.yieldTo) existing = null;
+  }
+  let existing: GitHubReview | null = null;
+  try {
+    existing = yieldTo
+      ? null
+      : await findBotReviewAtHead({
+          github,
+          repo,
+          prNumber,
+          headSha,
+          botLogin,
+        });
     const alreadyPosted = !existing
       ? false
       : !isSameReview

@@ -355,6 +355,28 @@ describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
     assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
   });
 
+  test("reads the reviews ONCE; a failed read posts and dismisses nothing", async () => {
+    const github = makeGithub([botReviewAtHead("APPROVED", 5)]);
+    let calls = 0;
+    github.listReviews.mock.mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw new Error("502");
+      return [botReviewAtHead("APPROVED", 5)];
+    });
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: () => true,
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+    assert.equal(calls, 1);
+    assert.equal(github.dismissReview.mock.calls.length, 0);
+  });
+
   test("a review the predicate rejects is not yielded to", async () => {
     const github = makeGithub([
       { ...botReviewAtHead("COMMENTED", 5), body: "degraded" },
