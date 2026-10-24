@@ -74,22 +74,10 @@ jobs:
       # buildx with the default `docker` driver: the image lands straight in
       # the local image store (no second copy from a builder container), which
       # verify.sh runs and `docker push` sends.
-      #
-      # The Somnio engineering plugin's repo is private: a fine-grained,
-      # read-only token for it reaches ONE build step as a BuildKit secret
-      # (never a build arg, never a layer). A fork PR has no secrets, so its
-      # build fails at that step rather than shipping an image without it.
       - name: Build (linux/amd64)
-        env:
-          SOMNIO_ENG_TOKEN: ${{ secrets.SOMNIO_ENGINEERING_READ_TOKEN }}
         run: |
-          if [ -z "$SOMNIO_ENG_TOKEN" ]; then
-            echo "::error::secret SOMNIO_ENGINEERING_READ_TOKEN is not set (read-only token for somnio-software/somnio-engineering-ai)"
-            exit 1
-          fi
           docker buildx build --platform linux/amd64 \
             -f deploy/images/batteries/Dockerfile \
-            --secret id=somnio_eng_token,env=SOMNIO_ENG_TOKEN \
             -t automata-batteries:ci --load \
             packages/worker/deploy
           docker image inspect automata-batteries:ci --format 'size {{.Size}} bytes'

@@ -7,10 +7,8 @@
 # Build (from the repo root; the context is the worker's deploy dir, which
 # holds the pinned lockfiles reused below):
 #
-#   SOMNIO_ENG_TOKEN=<read-only token for somnio-engineering-ai> \
 #   docker buildx build --platform linux/amd64 \
 #     -f deploy/images/batteries/Dockerfile \
-#     --secret id=somnio_eng_token,env=SOMNIO_ENG_TOKEN \
 #     -t automata-batteries:dev packages/worker/deploy
 #
 # Pinning rule: every download is fixed by version AND sha256 (or by commit
@@ -19,10 +17,8 @@
 # Most pins are copied from packages/worker/deploy/{batteries,harness}.json and
 # cloud-init.yaml so the host model and this image run the same builds.
 #
-# One secret: the Somnio engineering plugin's repo is private, so its fetch
-# reads a read-only token from the BuildKit secret `somnio_eng_token` (never a
-# build arg, never a layer). The plugin itself IS published in this image: the
-# operator decided so on 2026-10-23. Nothing else reads a token.
+# No secrets: nothing here reads a token, and no build arg is a credential.
+# The image is safe to publish.
 
 # ── base ────────────────────────────────────────────────────────────────────
 # ubuntu:24.04, the box's own distro, pinned by index digest (amd64 selected by
@@ -65,10 +61,9 @@ ARG CHROMIUM_VERSION=151.0.7922.34
 ARG CHROMIUM_SHA256=ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
 ARG CHROMIUM_HEADLESS_SHA256=3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
 
-# The Somnio engineering plugin: the commit and git tree ids harness.json pins
-# for the somnio-engineering pack (the host builds it from the same subtrees).
-ARG SOMNIO_ENG_SHA=510facec180a30205e9630956d76db344ba4d94b
-ARG SOMNIO_ENG_TREES="plugins/somnio-engineering-ai=2e03d408d41b169144ad5d904b653410f51d4932 skills=eb7ce2494313886e05e1a6fbf16ffde56b108ee9 templates=a1a6bd77fba3089de9d2b3c33340f04b95b67e2f"
+# be-automata/vendor-runtime-skills: vendor skills, agents and commands prepared
+# for this runtime (public; its catalog.json says what to link).
+ARG VENDOR_SKILLS_SHA=24c77e7d2f178e9074514a8405f6d375dc7ec704
 # ruflo's planner and refinement agents (dev-execution spawns them), as
 # harness.json `agentFiles` pins them.
 ARG RUFLO_PLANNER_SHA256=3746140c2bdfb38b3a26827e6c13745dff0999a5cd54767aaa984372f2573f89
@@ -243,41 +238,27 @@ RUN echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -
     chmod -R a+rX,go-w /opt/automata; \
     npm cache clean --force; rm -rf /tmp/*
 
-# ── Somnio engineering plugin (private repo; published here by decision) ────
-# Fetched by commit with a read-only token from the `somnio_eng_token` BuildKit
-# secret (a credential helper reads the file: the token is never in an argv, a
-# layer or the image), checked against the pinned commit AND each subtree's git
-# tree id, then trimmed to those subtrees. The plugin's own hooks and
-# .mcp.json are removed: its ruflo server would bypass the ruflo allowlist, and
-# the worker owns hooks per lane. `ytctl` is the host pack's shim: the agent
-# holds YOUTRACK_AGENT_TOKEN, the plugin's ytctl reads YOUTRACK_TOKEN.
-ENV SOMNIO_ENG_ROOT=/opt/somnio-engineering
-ENV CLAUDE_PLUGIN_ROOT=${SOMNIO_ENG_ROOT}/plugins/somnio-engineering-ai \
-    YTCTL=/usr/local/bin/ytctl
-# shellcheck disable=SC2016 # the credential helper and the shim expand at run time
-RUN --mount=type=secret,id=somnio_eng_token,required=true \
-    d="${SOMNIO_ENG_ROOT}"; \
+# ── Vendor runtime skills (be-automata/vendor-runtime-skills, by commit) ──
+# Plain runtime content: no plugin wiring, no hooks, no MCP servers. ENV cannot
+# be read from catalog.json at build time, so the vendor env is declared here
+# and the build fails if the catalog says otherwise. `ytctl` is the vendor's
+# shim: agents hold YOUTRACK_AGENT_TOKEN, the vendor's ytctl reads YOUTRACK_TOKEN.
+ENV VENDOR_SKILLS_ROOT=/opt/vendor-runtime-skills
+ENV CLAUDE_PLUGIN_ROOT=${VENDOR_SKILLS_ROOT}/vendors/somnio \
+    YTCTL=${VENDOR_SKILLS_ROOT}/vendors/somnio/bin/ytctl
+# shellcheck disable=SC2016 # jq programs, not shell expansions
+RUN d="${VENDOR_SKILLS_ROOT}"; \
     git init -q "$d"; \
     git -C "$d" -c core.hooksPath=/dev/null -c protocol.version=2 \
-      -c credential.helper='!f() { echo username=x-access-token; printf "password=%s\n" "$(cat /run/secrets/somnio_eng_token)"; }; f' \
-      fetch -q --depth 1 https://github.com/somnio-software/somnio-engineering-ai.git "${SOMNIO_ENG_SHA}"; \
+      fetch -q --depth 1 https://github.com/be-automata/vendor-runtime-skills.git "${VENDOR_SKILLS_SHA}"; \
     git -C "$d" -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD; \
-    test "$(git -C "$d" rev-parse HEAD)" = "${SOMNIO_ENG_SHA}"; \
-    keep=""; \
-    for pin in ${SOMNIO_ENG_TREES}; do \
-      test "$(git -C "$d" rev-parse "HEAD:${pin%%=*}")" = "${pin#*=}"; \
-      top="${pin%%=*}"; keep="$keep ${top%%/*}"; \
-    done; \
-    for e in "$d"/* "$d"/.[!.]*; do \
-      case " $keep " in *" ${e#"$d"/} "*) ;; *) rm -rf "$e" ;; esac; \
-    done; \
-    find "$d/plugins" -mindepth 1 -maxdepth 1 ! -name somnio-engineering-ai -exec rm -rf {} +; \
-    rm -rf "${CLAUDE_PLUGIN_ROOT}/hooks" "${CLAUDE_PLUGIN_ROOT}/.mcp.json"; \
-    test -x "$d/skills/youtrack/scripts/ytctl"; \
-    printf '%s\n' '#!/bin/sh' \
-      'if [ -n "${YOUTRACK_AGENT_TOKEN:-}" ]; then YOUTRACK_TOKEN="$YOUTRACK_AGENT_TOKEN"; export YOUTRACK_TOKEN; fi' \
-      "exec '$d/skills/youtrack/scripts/ytctl' \"\$@\"" >/usr/local/bin/ytctl; \
-    chmod 0755 /usr/local/bin/ytctl; \
+    test "$(git -C "$d" rev-parse HEAD)" = "${VENDOR_SKILLS_SHA}"; \
+    rm -rf "$d/.git"; \
+    c="$d/catalog.json"; \
+    test "$(jq -r '.vendors | keys | join(",")' "$c")" = somnio; \
+    test "$(jq -r '.vendors.somnio | .root, (.env | to_entries | map("\(.key)=\(.value)") | join(" ")), (.pathDirs | join(" "))' "$c" | paste -sd'|')" \
+      = 'vendors/somnio|CLAUDE_PLUGIN_ROOT={{root}} YTCTL={{root}}/bin/ytctl|{{root}}/bin'; \
+    test -x "${YTCTL}"; ln -s "${YTCTL}" /usr/local/bin/ytctl; \
     chown -R root:root "$d"; chmod -R a+rX,go-w "$d"
 
 # ── gstack's pinned Chromium builds (Playwright layout, marked complete) ────
@@ -355,20 +336,23 @@ RUN node /opt/automata/gsd/node_modules/@opengsd/gsd-core/bin/install.js \
     mv "$HOME/.claude/settings.json" "$HOME/.claude/settings.batteries.json"; \
     rm -f "$HOME/.claude.json"
 
-# The Somnio engineering plugin, linked like the host pack: its skills, agents
-# and commands into the agent's Claude config (a name the catalog or GSD
-# already installed wins, as first-wins does on the host), minus the laptop
-# bootstrap command. Not installed as a plugin, so nothing of it registers
-# hooks or MCP servers. Then ruflo's planner and refinement agents, sha256-
-# checked, with their frontmatter `hooks` dropped (upstream shells out to
-# unpinned `npx claude-flow@alpha` there).
-RUN for k in skills agents commands; do \
-      mkdir -p "$HOME/.claude/$k"; \
-      for e in "${CLAUDE_PLUGIN_ROOT}/$k"/*; do \
-        n="$(basename "$e")"; \
-        [ "$k/$n" = commands/install.md ] && continue; \
-        [ -e "$HOME/.claude/$k/$n" ] || [ -L "$HOME/.claude/$k/$n" ] && continue; \
-        ln -s "$e" "$HOME/.claude/$k/$n"; \
+# The vendor runtime skills, linked into the agent's Claude config as
+# catalog.json lists them (a name the Somnio catalog or GSD already installed
+# wins, as first-wins does on the host). Then ruflo's planner and refinement
+# agents, sha256-checked, with their frontmatter `hooks` dropped (upstream
+# shells out to unpinned `npx claude-flow@alpha` there).
+# shellcheck disable=SC2016 # jq programs, not shell expansions
+RUN c="${VENDOR_SKILLS_ROOT}/catalog.json"; \
+    for v in $(jq -r '.vendors | keys[]' "$c"); do \
+      r="${VENDOR_SKILLS_ROOT}/$(jq -r --arg v "$v" '.vendors[$v].root' "$c")"; \
+      for k in skills agents commands; do \
+        mkdir -p "$HOME/.claude/$k"; \
+        for n in $(jq -r --arg v "$v" --arg k "$k" '.vendors[$v][$k][]' "$c"); do \
+          e="$r/$k/$n"; [ "$k" = skills ] || e="$e.md"; \
+          t="$HOME/.claude/$k/${e##*/}"; \
+          if [ -e "$t" ] || [ -L "$t" ]; then continue; fi; \
+          test -e "$e"; ln -s "$e" "$t"; \
+        done; \
       done; \
     done; \
     a=/opt/automata/ruflo/node_modules/@claude-flow/cli/.claude/agents; \
