@@ -60,6 +60,15 @@ ARG CHROMIUM_VERSION=151.0.7922.34
 ARG CHROMIUM_SHA256=ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
 ARG CHROMIUM_HEADLESS_SHA256=3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
 
+# be-automata/vendor-runtime-skills: vendor skills, agents and commands prepared
+# for this runtime (public; its catalog.json says what to link). The commit sha
+# pins every file of it; the upstream vendor's own pins (commit, tree ids) are
+# recorded in vendors/<vendor>/VENDOR.json, checked when the catalog imports.
+ARG VENDOR_SKILLS_SHA=24c77e7d2f178e9074514a8405f6d375dc7ec704
+# ruflo's planner and refinement agents (dev-execution spawns them), by sha256.
+ARG RUFLO_PLANNER_SHA256=3746140c2bdfb38b3a26827e6c13745dff0999a5cd54767aaa984372f2573f89
+ARG RUFLO_REFINEMENT_SHA256=67ca9278c63971268226cc1096646459d78f6cad58274adfb6eda8d24a846862
+
 ARG GSD_VERSION=1.16.0
 ARG GSD_LOCK_SHA256=21f19d078cf65e51b422fe623bc9cf0d5d3d3eef917415c73b671b4cb98b75af
 ARG RUFLO_VERSION=3.56.7
@@ -229,6 +238,29 @@ RUN echo "${GSD_LOCK_SHA256}  /opt/automata/gsd/package-lock.json" | sha256sum -
     chmod -R a+rX,go-w /opt/automata; \
     npm cache clean --force; rm -rf /tmp/*
 
+# ── Vendor runtime skills (be-automata/vendor-runtime-skills, by commit) ──
+# Plain runtime content: no plugin wiring, no hooks, no MCP servers. ENV cannot
+# be read from catalog.json at build time, so the vendor env is declared here
+# and the build fails if the catalog says otherwise. `ytctl` is the vendor's
+# shim: agents hold YOUTRACK_AGENT_TOKEN, the vendor's ytctl reads YOUTRACK_TOKEN.
+ENV VENDOR_SKILLS_ROOT=/opt/vendor-runtime-skills
+ENV CLAUDE_PLUGIN_ROOT=${VENDOR_SKILLS_ROOT}/vendors/somnio \
+    YTCTL=${VENDOR_SKILLS_ROOT}/vendors/somnio/bin/ytctl
+# shellcheck disable=SC2016 # jq programs, not shell expansions
+RUN d="${VENDOR_SKILLS_ROOT}"; \
+    git init -q "$d"; \
+    git -C "$d" -c core.hooksPath=/dev/null -c protocol.version=2 \
+      fetch -q --depth 1 https://github.com/be-automata/vendor-runtime-skills.git "${VENDOR_SKILLS_SHA}"; \
+    git -C "$d" -c core.hooksPath=/dev/null checkout -q --detach FETCH_HEAD; \
+    test "$(git -C "$d" rev-parse HEAD)" = "${VENDOR_SKILLS_SHA}"; \
+    rm -rf "$d/.git"; \
+    c="$d/catalog.json"; \
+    test "$(jq -r '.vendors | keys | join(",")' "$c")" = somnio; \
+    test "$(jq -r '.vendors.somnio | .root, (.env | to_entries | map("\(.key)=\(.value)") | join(" ")), (.pathDirs | join(" "))' "$c" | paste -sd'|')" \
+      = 'vendors/somnio|CLAUDE_PLUGIN_ROOT={{root}} YTCTL={{root}}/bin/ytctl|{{root}}/bin'; \
+    test -x "${YTCTL}"; ln -s "${YTCTL}" /usr/local/bin/ytctl; \
+    chown -R root:root "$d"; chmod -R a+rX,go-w "$d"
+
 # ── gstack's pinned Chromium builds (Playwright layout, marked complete) ────
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN cft="https://cdn.playwright.dev/builds/cft/${CHROMIUM_VERSION}/linux64"; \
@@ -302,6 +334,38 @@ RUN node /opt/automata/gsd/node_modules/@opengsd/gsd-core/bin/install.js \
     rm -rf "$HOME/.claude/.gsd-source" "$HOME/.claude/.gsd-staging"; \
     mv "$HOME/.claude/settings.json" "$HOME/.claude/settings.batteries.json"; \
     rm -f "$HOME/.claude.json"
+
+# The vendor runtime skills, linked into the agent's Claude config as
+# catalog.json lists them (a name the Somnio catalog or GSD already installed
+# wins: first come, first linked). Then ruflo's planner and refinement
+# agents, sha256-checked, with their frontmatter `hooks` dropped (upstream
+# shells out to unpinned `npx claude-flow@alpha` there).
+# shellcheck disable=SC2016 # jq programs, not shell expansions
+RUN c="${VENDOR_SKILLS_ROOT}/catalog.json"; \
+    for v in $(jq -r '.vendors | keys[]' "$c"); do \
+      r="${VENDOR_SKILLS_ROOT}/$(jq -r --arg v "$v" '.vendors[$v].root' "$c")"; \
+      for k in skills agents commands; do \
+        mkdir -p "$HOME/.claude/$k"; \
+        for n in $(jq -r --arg v "$v" --arg k "$k" '.vendors[$v][$k][]' "$c"); do \
+          e="$r/$k/$n"; [ "$k" = skills ] || e="$e.md"; \
+          t="$HOME/.claude/$k/${e##*/}"; \
+          if [ -e "$t" ] || [ -L "$t" ]; then continue; fi; \
+          test -e "$e"; ln -s "$e" "$t"; \
+        done; \
+      done; \
+    done; \
+    a=/opt/automata/ruflo/node_modules/@claude-flow/cli/.claude/agents; \
+    echo "${RUFLO_PLANNER_SHA256}  $a/core/planner.md" | sha256sum -c --quiet -; \
+    echo "${RUFLO_REFINEMENT_SHA256}  $a/sparc/refinement.md" | sha256sum -c --quiet -; \
+    for f in core/planner sparc/refinement; do \
+      awk '{ line = $0; sub(/\r$/, "", line) } \
+        NR == 1 { if (line != "---") exit 3; fm = 1; print; next } \
+        fm && line ~ /^---[ \t]*$/ { fm = 0; skip = 0; print; next } \
+        fm && line ~ /^["\047]?[A-Za-z0-9_-]+["\047]?[ \t]*:/ { skip = (line ~ /^["\047]?hooks["\047]?[ \t]*:/) } \
+        fm && skip { next } { print } END { if (NR == 0 || fm) exit 4 }' \
+        "$a/$f.md" >"$HOME/.claude/agents/${f#*/}.md"; \
+      ! grep -q '^hooks:' "$HOME/.claude/agents/${f#*/}.md"; \
+    done
 
 # The pins verify.sh checks the installed tools against, so a bump is one edit
 # to the ARG lines above, not a second one to verify.sh.
