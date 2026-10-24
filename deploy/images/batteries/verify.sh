@@ -108,6 +108,24 @@ check actionlint       "${ACTIONLINT_VERSION}" actionlint -version
 check gitleaks         "${GITLEAKS_VERSION}" gitleaks version
 check shellcheck       "${SHELLCHECK_VERSION}" shellcheck --version
 
+# The vendor runtime skills: Somnio's skills and agents link into the catalog
+# checkout, none of it is plugin wiring, and ytctl is the env-aliasing shim.
+for skill in dev-execution harness-audit optimize-context-rules youtrack; do
+  assert "vendor-skill-$skill" "~/.claude/skills/$skill/SKILL.md resolves" \
+    test -f "$HOME/.claude/skills/$skill/SKILL.md"
+done
+assert vendor-agent-harness-analyzer "~/.claude/agents/harness-analyzer.md resolves" \
+  test -f "$HOME/.claude/agents/harness-analyzer.md"
+assert vendor-somnio-root "CLAUDE_PLUGIN_ROOT is the somnio vendor dir" test -f "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/VENDOR.json"
+assert vendor-no-wiring "no hooks/, .mcp.json or .claude-plugin" \
+  bash -c 'test -z "$(find "$VENDOR_SKILLS_ROOT" \( -name hooks -type d -o -name .mcp.json -o -name .claude-plugin \))"'
+assert vendor-no-install "no laptop install command" test ! -e "$HOME/.claude/commands/install.md"
+assert ytctl-shim "ytctl aliases YOUTRACK_AGENT_TOKEN" grep -q YOUTRACK_AGENT_TOKEN "$(command -v ytctl)"
+for agent in planner refinement; do
+  assert "ruflo-agent-$agent" "~/.claude/agents/$agent.md without frontmatter hooks" \
+    bash -c "test -s \"\$HOME/.claude/agents/$agent.md\" && ! grep -q '^hooks:' \"\$HOME/.claude/agents/$agent.md\""
+done
+
 # Every Somnio catalog skill is installed globally for Claude (25 at the pin).
 n="$(find "$HOME/.claude/skills" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l)"
 if [ "$n" -ge 25 ]; then

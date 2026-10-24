@@ -26,6 +26,7 @@ tag.
 | Chromium + headless shell | 151.0.7922.34 (Playwright rev 1234) | zip sha256                                                     |
 | GSD (`@opengsd/gsd-core`) | 1.16.0                              | committed `package-lock.json` sha256                           |
 | ruflo CLI + MCP server    | 3.56.7                              | committed `package-lock.json` sha256, prebuild + model sha256s |
+| Vendor runtime skills     | `24c77e7d…` (Somnio 0.9.43)         | commit sha of `be-automata/vendor-runtime-skills`              |
 | actionlint                | 1.7.12                              | tarball sha256                                                 |
 | gitleaks                  | 8.30.1                              | tarball sha256                                                 |
 | shellcheck                | 0.11.0                              | tarball sha256                                                 |
