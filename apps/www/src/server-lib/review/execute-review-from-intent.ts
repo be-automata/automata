@@ -589,7 +589,13 @@ export async function executeReviewFromIntent(
       ? { isSameReview: sameReviewByBase(reviewBase, opts.liveBase) }
       : {}),
     ...(draftEraNote
-      ? { yieldTo: (r: GitHubReview) => !isDegradedComment(r) }
+      ? {
+          // Yield only to a real review of the same base: after a retarget
+          // at an unchanged head, a review of the old diff is not this one.
+          yieldTo: (r: GitHubReview) =>
+            !isDegradedComment(r) &&
+            (!reviewBase || sameReviewByBase(reviewBase, opts.liveBase)(r)),
+        }
       : {}),
     logger,
   });

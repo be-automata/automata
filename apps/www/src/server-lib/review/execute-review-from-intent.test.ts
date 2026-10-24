@@ -4,6 +4,7 @@ import {
   botAuthoredVerdictLine,
   executeReviewFromIntent,
   isDegradedComment,
+  reviewBaseMarker,
 } from "./execute-review-from-intent";
 import type { GitHubReview } from "@terragon/review/state/review-github-client";
 import { reviewNoticeSha, type ReviewWriterClient } from "./review-notice";
@@ -574,6 +575,30 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
         expect(github.createConversationComment).not.toHaveBeenCalled();
       },
     );
+
+    it("after a retarget, a review of the OLD base is not one to yield to", async () => {
+      const github = makeGithub([
+        {
+          id: 9,
+          user: { login: BOT },
+          state: "APPROVED",
+          submittedAt: "2026-10-24T12:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: `LGTM.\n\n${reviewBaseMarker("feat/parent")}`,
+        },
+      ]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        draftAtDispatch: true,
+        reviewBase: "main",
+        liveBase: "main",
+        terminalText: BARE_COMMENT,
+      });
+      expect(res).toEqual({ outcome: "posted", verdict: "comment" });
+      expect(github.dismissReview).not.toHaveBeenCalled();
+    });
 
     it("a legacy degraded COMMENT at HEAD is silence, not a review to yield to", async () => {
       const github = makeGithub([
