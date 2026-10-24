@@ -73,6 +73,26 @@ ExecStartPre=+/usr/bin/env WORKER_USER=__USER__ /usr/local/sbin/nft-loopback-loa
 
 ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 
+# ── Drain BEFORE the signal (#386) ─────────────────────────────────────────
+#
+# Every stop — `systemctl stop`/`restart`, a reboot — first pauses this worker
+# in the engine and waits until it holds no run (scripts/drain-for-restart.ts),
+# and only then does systemd send KillSignal. The SDK's own SIGTERM drain stops
+# the engine heartbeat first, so a drain past the heartbeat window gets the run
+# REASSIGNED: on one box the run-terminal ledger catches it, on two the other
+# box would run it while this one still is. Pausing first means the SIGTERM
+# meets an idle worker.
+#
+# Best-effort by design: `--for-stop` always exits 0 (a failed ExecStop= must
+# not wedge a stop or a shutdown), and on its deadline it leaves the worker
+# paused and lets the SIGTERM drain take over, with the ledger behind it. The
+# deadline (1800 s) stays under TimeoutStopSec, which systemd applies to this
+# command and again to the SIGTERM phase. Skipped when the worker already
+# exited on its own ($MAINPID empty): there is nothing to drain.
+# automata-worker-safe-restart is still the way to restart on purpose: it
+# refuses to restart a worker that is still busy, where this cannot refuse.
+ExecStop=/bin/bash -c '[ -n "$MAINPID" ] || exit 0; set -a; . __HOME__/.automata/worker-box.env; set +a; exec node --import tsx scripts/drain-for-restart.ts --for-stop --timeout-s 1800'
+
 # ── Drain, not kill ────────────────────────────────────────────────────────
 #
 # The SDK's SIGTERM handler pauses assignment on the engine and then AWAITS the

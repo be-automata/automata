@@ -132,6 +132,27 @@ describe("drainForRestart", () => {
     expect(w.paused).toBe(false);
   });
 
+  it("keepPausedOnTimeout (the unit's ExecStop=) leaves the worker paused at the deadline: the SIGTERM follows anyway", async () => {
+    const w = worker({ used: 1 });
+    const { engine, calls } = fakeEngine([w], { usedByTick: [1] });
+    let t = 0;
+    const result = await drainForRestart({
+      engine,
+      workerName: NAME,
+      timeoutMs: 20_000,
+      pollMs: 5_000,
+      log: () => {},
+      now: () => t,
+      sleep: async (ms) => {
+        t += ms;
+      },
+      keepPausedOnTimeout: true,
+    });
+    expect(result).toMatchObject({ kind: "timeout", busySlots: 1 });
+    expect(calls).toEqual(["pause w-live"]);
+    expect(w.paused).toBe(true);
+  });
+
   it("an abort (Ctrl-C) unpauses the worker", async () => {
     const w = worker({ used: 1 });
     const { engine, calls } = fakeEngine([w], { usedByTick: [1] });

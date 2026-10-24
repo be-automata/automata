@@ -281,6 +281,17 @@ Check the name, or pass `--allow-no-worker` when you know the worker is down. Pr
 two boxes the engine would hand a drained run to the OTHER box while this one
 is still running it, which no ledger entry written at the end of a run can stop.
 
+**Every other stop drains too.** The unit's `ExecStop=` runs the same drain
+(`--for-stop`) before systemd sends the SIGTERM, so a bare `systemctl restart`
+or `stop`, a reboot, or a package upgrade restarting the unit no longer
+interrupts a run either. Unlike the wrapper it cannot refuse: it is best-effort
+by design. It always exits 0, so a broken engine never wedges a stop or a
+shutdown. At its 30-minute deadline it leaves the worker paused, and the
+SIGTERM drain and the run-terminal ledger take over. Its `drain:` lines appear
+in the unit's journal. A box whose installed unit predates this needs the unit
+re-rendered (`sed` over `__USER__`/`__HOME__`/`__REPO__`, as in
+AGENT-UID-PROVISIONING.md §7) and `systemctl daemon-reload`.
+
 ## Graceful restart (single unit) + deploy idle
 
 There is only one unit and no standby, so a deploy is a single drain-and-relaunch,
