@@ -423,9 +423,19 @@ describe("deploy/provision-execution-box.sh (ADR-013 Fleet, P2 #431)", () => {
     expect(dropAt).toBeGreaterThan(elseAt);
     expect(elseAt).toBeGreaterThan(fenceCheck);
     expect(code.match(/nft-loopback-load/g)).toHaveLength(2);
-    // The previous digest is pulled back if gone, never pruned.
-    expect(bodies.get("step_previous")).toContain(
-      'step_pull previous-image "$previous"',
+    // The previous digest is pulled back if gone, never pruned, unless the
+    // pull would starve the disk the runs need.
+    const previous = bodies.get("step_previous") ?? "";
+    expect(previous).toContain('step_pull previous-image "$previous"');
+    expect(previous.indexOf("! previous_fits")).toBeGreaterThan(0);
+    expect(previous.indexOf("! previous_fits")).toBeLessThan(
+      previous.indexOf("step_pull previous-image"),
+    );
+    expect(script).toContain(
+      'PREVIOUS_MIN_FREE_GB="${PREVIOUS_MIN_FREE_GB:-10}"',
+    );
+    expect(code).not.toMatch(
+      /docker[^\n]*\b(rmi|image rm|image prune|system prune)\b/,
     );
   });
 
