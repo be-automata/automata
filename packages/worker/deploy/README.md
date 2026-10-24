@@ -181,7 +181,7 @@ task run without its repo env is not a degraded run, it does not start. The priv
 # On the box, as root (the worker must be idle — no run in flight):
 cd /opt/automata-platform/packages/worker   # the checkout run-worker.sh uses
 pnpm exec tsx scripts/gen-payload-seal-key.ts          # prints <kid>:<base64url>
-systemctl restart automata-worker                      # boot log: "payload seal: 1 key(s) usable (<kid>)"
+automata-worker-safe-restart                          # boot log: "payload seal: 1 key(s) usable (<kid>)"
 # Then on www:
 wrangler secret put HATCHET_PAYLOAD_SEAL_KEY          # paste the printed line
 ```
@@ -249,6 +249,37 @@ done
 
 `launchctl kickstart -k` sends **SIGKILL** — it is the drop we are preventing. Do not
 use it on a unit that may be mid-run.
+
+## Safe restart (Linux box) — drain first, never SIGTERM a busy worker
+
+On the execution box every planned restart goes through
+`automata-worker-safe-restart` (`deploy/linux/`, installed as root with
+`install -m 0755 -o root -g root automata-worker-safe-restart /usr/local/sbin/`),
+never a bare `systemctl restart automata-worker`:
+
+```bash
+automata-worker-safe-restart              # default drain budget 50 min
+automata-worker-safe-restart --timeout-s 600
+```
+
+It pauses this box's worker in the engine (`scripts/drain-for-restart.ts`, the
+same `isPaused` flag the SDK's own exit sets, minus the signal): no new
+assignments, while runs in flight keep going and keep heartbeating. It waits
+until the engine reports every slot free (a run waiting on memory headroom still
+holds one), then runs `systemctl restart`. The SIGTERM then meets an idle worker,
+so no drain outlasts the heartbeat window and the engine has nothing to
+redeliver. The relaunched process registers a new worker row, unpaused. Runs
+queued meanwhile wait (`REQUEUED_NO_WORKER`) and go to the relaunched worker.
+
+It never restarts a worker that still holds a run: on timeout, an unreadable
+engine, or Ctrl-C it unpauses the worker, leaves it running, and exits non-zero
+(3 = still busy, 4 = not proven idle). Finding no active worker under this
+box's name while the unit runs is also exit 4 — a `WORKER_BOX_ID` or namespace
+mismatch, or a worker still registering right after a restart, reads the same.
+Check the name, or pass `--allow-no-worker` when you know the worker is down. Proven against hatchet-lite in
+`safe-restart.integration.test.ts`. This is what keeps a second box safe: with
+two boxes the engine would hand a drained run to the OTHER box while this one
+is still running it, which no ledger entry written at the end of a run can stop.
 
 ## Graceful restart (single unit) + deploy idle
 
