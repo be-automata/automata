@@ -65,7 +65,7 @@ export interface DrainDeps {
   listRuns: (
     hint: AgentRunLookupHint,
   ) => Promise<Array<{ externalId: string; status: AgentRunStatus }>>;
-  cancel: (externalIds: string[]) => Promise<void>;
+  cancel: (externalIds: string[], threadId: string) => Promise<void>;
   now: () => Date;
   log: (message: string, fields?: Record<string, unknown>) => void;
 }
@@ -224,7 +224,7 @@ export async function drainSelfHeal({
       continue;
     }
     try {
-      await cancel(live);
+      await cancel(live, t.id);
       cancelled.push(t.id);
       log("[self-heal-drain] cancelled runs", {
         threadId: t.id,

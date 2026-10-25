@@ -16,8 +16,12 @@ import {
 import { POST } from "./route";
 
 vi.mock("@/lib/auth-server", () => ({ getTenantContextOrNull: vi.fn() }));
-vi.mock("@/agent/hatchet/dispatch", () => ({
-  hatchetConfig: () => ({ apiUrl: "http://x", tenantId: "t", apiToken: "k" }),
+vi.mock("@/agent/hatchet/tenant-resolver", () => ({
+  resolveHatchetConfigForThread: async () => ({
+    apiUrl: "http://x",
+    tenantId: "t",
+    apiToken: "k",
+  }),
 }));
 vi.mock("@/agent/hatchet/transport", () => ({
   listAgentRunsForThread: vi.fn(async () => []),

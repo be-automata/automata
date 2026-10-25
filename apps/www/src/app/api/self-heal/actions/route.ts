@@ -5,7 +5,7 @@ import {
   type BreakerScopeKind,
 } from "@terragon/shared/model/self-heal-breaker";
 
-import { hatchetConfig } from "@/agent/hatchet/dispatch";
+import { resolveHatchetConfigForThread } from "@/agent/hatchet/tenant-resolver";
 import {
   cancelAgentRun,
   listAgentRunsForThread,
@@ -78,18 +78,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const input = body as Record<string, unknown>;
 
   if (input.action === "drain") {
-    const config = hatchetConfig();
     const result = await drainSelfHeal({
       db,
       organizationId,
       actorUserId: ctx.userId,
       deps: {
-        listRuns: (hint) =>
-          listAgentRunsForThread(hint, config, {
-            signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
-            maxPages: LOOKUP_MAX_PAGES,
-          }),
-        cancel: (externalIds) => cancelAgentRun(externalIds, config),
+        listRuns: async (hint) =>
+          listAgentRunsForThread(
+            hint,
+            await resolveHatchetConfigForThread({
+              db,
+              threadId: hint.threadId,
+            }),
+            {
+              signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+              maxPages: LOOKUP_MAX_PAGES,
+            },
+          ),
+        cancel: async (externalIds, threadId) =>
+          cancelAgentRun(
+            externalIds,
+            await resolveHatchetConfigForThread({ db, threadId }),
+          ),
         now: () => new Date(),
         log: (message, fields) => console.log(message, fields ?? {}),
       },

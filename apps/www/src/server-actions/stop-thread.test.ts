@@ -33,14 +33,18 @@ vi.mock("@/agent/hatchet/transport", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   cancelAgentRun: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@/agent/hatchet/dispatch", async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  hatchetConfig: vi.fn(() => ({
+vi.mock("@/agent/hatchet/tenant-resolver", async (importOriginal) => {
+  const config = {
     apiUrl: "http://hatchet.test",
     tenantId: "t",
     apiToken: "x",
-  })),
-}));
+  };
+  return {
+    ...(await importOriginal<object>()),
+    resolveHatchetConfigForRun: vi.fn(async () => config),
+    resolveHatchetConfigForThread: vi.fn(async () => config),
+  };
+});
 
 describe("stopThread", () => {
   let user: User;

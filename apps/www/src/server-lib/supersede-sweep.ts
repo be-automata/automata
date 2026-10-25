@@ -23,7 +23,12 @@ import {
   listAgentRunsForThread,
   type AgentRunLookupHint,
   type AgentRunStatus,
+  type HatchetTriggerConfig,
 } from "@/agent/hatchet/transport";
+import {
+  resolveHatchetConfigForRun,
+  resolveHatchetConfigForThread,
+} from "@/agent/hatchet/tenant-resolver";
 
 /**
  * #125 C4 supersede sweep — the state machine's backstop for HARD deaths the
@@ -86,11 +91,20 @@ export type SweepDeps = {
   readStatus?: (
     externalId: string,
     hint: AgentRunLookupHint,
+    config: HatchetTriggerConfig,
   ) => Promise<AgentRunStatus>;
   /** Rule (iii): the thread's runs by metadata; injected for tests. */
   listRuns?: (
     hint: AgentRunLookupHint,
+    config: HatchetTriggerConfig,
   ) => Promise<Array<{ externalId: string; status: AgentRunStatus }>>;
+  /** The engine config a claimed run row is read with (its bound tenant). */
+  resolveRunConfig?: (run: {
+    organizationId: string;
+    tenantId: string | null;
+  }) => Promise<HatchetTriggerConfig>;
+  /** The engine config rule (iii) lists a thread's runs with. */
+  resolveThreadConfig?: (threadId: string) => Promise<HatchetTriggerConfig>;
   cancelledAfterMs?: number;
   orphanAfterMs?: number;
 };
@@ -245,18 +259,28 @@ export async function runSupersedeSweep(
     deps.orphanAfterMs ??
     msFromEnv(env.SUPERSEDE_SWEEP_ORPHAN_AFTER_MS) ??
     SWEEP_ORPHAN_AFTER_MS_DEFAULT;
-  const hatchetConfig = {
-    apiUrl: env.HATCHET_API_URL,
-    tenantId: env.HATCHET_TENANT_ID,
-    apiToken: env.HATCHET_API_TOKEN,
-  };
   const listRuns =
     deps.listRuns ??
-    ((hint: AgentRunLookupHint) => listAgentRunsForThread(hint, hatchetConfig));
+    ((hint: AgentRunLookupHint, config: HatchetTriggerConfig) =>
+      listAgentRunsForThread(hint, config));
   const readStatus =
     deps.readStatus ??
-    ((externalId: string, hint: AgentRunLookupHint) =>
-      getAgentRunStatus(externalId, hatchetConfig, hint));
+    ((
+      externalId: string,
+      hint: AgentRunLookupHint,
+      config: HatchetTriggerConfig,
+    ) => getAgentRunStatus(externalId, config, hint));
+  const resolveRunConfig =
+    deps.resolveRunConfig ??
+    ((run: { organizationId: string; tenantId: string | null }) =>
+      resolveHatchetConfigForRun({
+        db,
+        organizationId: run.organizationId,
+        tenantId: run.tenantId,
+      }));
+  const resolveThreadConfig =
+    deps.resolveThreadConfig ??
+    ((threadId: string) => resolveHatchetConfigForThread({ db, threadId }));
 
   // Rule (i): claim the batch in ONE compare-and-set, then read the engine
   // with bounded concurrency; every terminal pair is idempotent.
@@ -274,10 +298,11 @@ export async function runSupersedeSweep(
   await mapLimit(claimed, ENGINE_READ_CONCURRENCY, async (run) => {
     let status: AgentRunStatus;
     try {
-      status = await readStatus(run.externalId, {
-        createdAt: run.createdAt,
-        threadId: run.threadId,
-      });
+      status = await readStatus(
+        run.externalId,
+        { createdAt: run.createdAt, threadId: run.threadId },
+        await resolveRunConfig(run),
+      );
     } catch (error) {
       console.error(
         "[supersede-sweep] engine status read failed (retry next tick)",
@@ -449,11 +474,14 @@ export async function runSupersedeSweep(
       // later bookkeeping write would move a ±10 min window off the real
       // dispatch, so the window is as wide as a thread can stay booting
       // before the stalled watchdog owns it.
-      runs = await listRuns({
-        createdAt: t.dispatchedAt,
-        threadId: t.id,
-        windowMs: RULE_III_LOOKUP_WINDOW_MS,
-      });
+      runs = await listRuns(
+        {
+          createdAt: t.dispatchedAt,
+          threadId: t.id,
+          windowMs: RULE_III_LOOKUP_WINDOW_MS,
+        },
+        await resolveThreadConfig(t.id),
+      );
     } catch (error) {
       console.error(
         "[supersede-sweep] rule (iii) engine list failed (retry next tick)",

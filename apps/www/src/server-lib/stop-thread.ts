@@ -7,10 +7,11 @@ import { db } from "@/lib/db";
 import { getThreadMinimal } from "@terragon/shared/model/threads";
 import { getLatestHatchetRunForThread } from "@terragon/shared/model/hatchet-run";
 import { cancelAgentRun } from "@/agent/hatchet/transport";
+import { hatchetDispatchEnabled } from "@/agent/hatchet/dispatch";
 import {
-  hatchetConfig,
-  hatchetDispatchEnabled,
-} from "@/agent/hatchet/dispatch";
+  resolveHatchetConfigForRun,
+  resolveHatchetConfigForThread,
+} from "@/agent/hatchet/tenant-resolver";
 
 /**
  * Remote-plane threads have no sandbox session to `stop` through: the daemon
@@ -32,12 +33,18 @@ async function cancelRemoteRunOnStop({
     const thread = await getThreadMinimal({ db, userId, threadId });
     if (!thread || !hatchetDispatchEnabled(thread)) return;
     const run = await getLatestHatchetRunForThread({ db, threadId });
+    const inFlight = run?.status === "in_flight" ? run : null;
     const externalId =
-      run?.status === "in_flight"
-        ? run.externalId
-        : (thread.activeRunExternalId ?? null);
+      inFlight?.externalId ?? thread.activeRunExternalId ?? null;
     if (!externalId) return;
-    await cancelAgentRun([externalId], hatchetConfig());
+    const config = inFlight
+      ? await resolveHatchetConfigForRun({
+          db,
+          organizationId: inFlight.organizationId,
+          tenantId: inFlight.tenantId,
+        })
+      : await resolveHatchetConfigForThread({ db, threadId });
+    await cancelAgentRun([externalId], config);
     console.log("[stop-thread] cancelled remote run", { threadId, externalId });
   } catch (error) {
     console.error("[stop-thread] remote run cancel failed (best-effort)", {
