@@ -18,7 +18,11 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
-import { deliveryMarker, renderMergeReady } from "./delivery-effects";
+import {
+  deliveryMarker,
+  parseUndeliveredCriteria,
+  renderMergeReady,
+} from "./delivery-effects";
 import {
   evaluateDeliveryPr,
   type EvaluateDeliveryDeps,
@@ -52,20 +56,24 @@ function fakeGithub({
   reviews = [],
   author = "User",
   comments = [],
+  pull = {},
 }: {
   draft: boolean;
   reviews?: unknown[];
   author?: string;
   comments?: FakeComment[];
+  pull?: Record<string, unknown>;
 }): FakeGithub {
   const store = [...comments];
   const graphql = vi.fn(async () => ({}));
   // Comments the loop posts are the App's, as on GitHub.
-  const createComment = vi.fn(async ({ body }: { body: string }) => {
-    const id = 1000 + store.length;
-    store.push({ id, body, user: { login: BOT } });
-    return { data: { id } };
-  });
+  const createComment = vi.fn(
+    async ({ body }: { body: string; issue_number: number }) => {
+      const id = 1000 + store.length;
+      store.push({ id, body, user: { login: BOT } });
+      return { data: { id } };
+    },
+  );
   const listComments = vi.fn();
   const octokit = {
     graphql,
@@ -88,6 +96,7 @@ function fakeGithub({
             head: { sha: "H1" },
             base: { ref: "main" },
             user: { type: author },
+            ...pull,
           },
         }),
         listReviews: async () => ({ data: reviews }),
@@ -288,6 +297,77 @@ describe("#509 delivery effects (mode on)", () => {
     expect(
       renderMergeReady({ prNumber: 5, headSha: "abcdef1234", approver: BOT }),
     ).toContain("`abcdef1`");
+  });
+
+  const mergedWith = (body: string) =>
+    fakeGithub({
+      draft: false,
+      pull: {
+        state: "closed",
+        merged_at: "2026-10-26T11:59:00Z",
+        body,
+      },
+    });
+
+  it("a merge ending `Refs #N` posts one follow-up on the ISSUE listing what is left", async () => {
+    const github = mergedWith(
+      [
+        "## Summary",
+        "x",
+        "## Acceptance criteria",
+        "- [x] login works — `pnpm test` → exit 0",
+        "- [ ] logout clears the session — not delivered: out of time",
+        "## Follow-up ideas",
+        "- [ ] not a criterion",
+        "",
+        "Refs #4",
+      ].join("\n"),
+    );
+    await evaluate(deps(github));
+    await evaluate(deps(github));
+    expect(github.createComment).toHaveBeenCalledTimes(1);
+    expect(
+      (github.createComment.mock.calls as unknown[][])[0]?.[0],
+    ).toMatchObject({ issue_number: 4 });
+    const body = github.comments[0]?.body ?? "";
+    expect(body).toContain("#12 merged without delivering every criterion");
+    expect(body).toContain("- [ ] logout clears the session");
+    expect(body).not.toContain("not a criterion");
+    expect(body).toContain(deliveryMarker("refs-followup", "H1"));
+    expect((await getDeliveryPr(db, deliveryPrId))?.phase).toBe("merged");
+  });
+
+  it("a merge ending `Closes #N` posts nothing", async () => {
+    const closes = mergedWith("## Acceptance criteria\n- [x] a\n\nCloses #4");
+    await evaluate(deps(closes));
+    expect(closes.createComment).not.toHaveBeenCalled();
+  });
+});
+
+describe("#509 parseUndeliveredCriteria", () => {
+  it("is null unless the last line is `Refs #<this issue>`", () => {
+    expect(parseUndeliveredCriteria("x\n\nCloses #4", 4)).toBeNull();
+    expect(parseUndeliveredCriteria("x\n\nRefs #5", 4)).toBeNull();
+    expect(parseUndeliveredCriteria(null, 4)).toBeNull();
+    expect(parseUndeliveredCriteria("Refs #4\n", 4)).toEqual([]);
+  });
+
+  it("returns only the unticked items of the Acceptance criteria section", () => {
+    expect(
+      parseUndeliveredCriteria(
+        [
+          "## Acceptance criteria",
+          "- [ ] one",
+          "* [ ] two",
+          "- [x] done",
+          "  - [ ] nested still counts as open",
+          "## Other",
+          "- [ ] three",
+          "Refs #4",
+        ].join("\n"),
+        4,
+      ),
+    ).toEqual(["one", "two", "nested still counts as open"]);
   });
 });
 
