@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import {
   enrollDeliveryPr,
+  listDeliveryPrsForSweep,
   transitionDeliveryPr,
 } from "@terragon/shared/model/delivery-loop";
 import {
@@ -13,6 +14,7 @@ import {
 } from "@terragon/shared/model/test-helpers";
 
 import { runDeliveryLoopSweep } from "./delivery-cron";
+import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
 import {
   handleDeliveryCiEvent,
   handleDeliveryPullRequestEvent,
@@ -172,5 +174,44 @@ describe("#509 delivery-loop webhooks and sweep", () => {
     });
     expect(evaluated).toBeGreaterThanOrEqual(1);
     expect(evaluate).toHaveBeenCalledWith({ deliveryPrId });
+  });
+
+  it("rows with the loop off never starve the rest: more off rows than the sweep limit are all swept in bounded ticks", async () => {
+    const userId = (await createTestUser({ db })).user.id;
+    const organizationId = await createTestOrg({ db });
+    const mine = new Set<string>([deliveryPrId]);
+    for (let i = 0; i < 6; i++) {
+      const threadId = (await createTestThread({ db, userId })).threadId;
+      const { row } = await enrollDeliveryPr(db, {
+        organizationId,
+        repoFullName: `Acme/Off-${nanoid(6)}`,
+        prNumber: 100 + i,
+        issueNumber: 4,
+        headRef: BRANCH,
+        baseRef: "main",
+        headSha: null,
+        deliveryThreadId: threadId,
+        automationId: "auto-1",
+        now: new Date(),
+      });
+      mine.add(row.id);
+    }
+    const limit = 2;
+    // Every open row in the database (other files' too) is off here, so the
+    // real evaluator skips each one; the cursor must still advance past them.
+    const open = (await listDeliveryPrsForSweep(db, 100_000)).length;
+    let clock = Date.now();
+    const seen = new Set<string>();
+    const evaluate = async ({ deliveryPrId: id }: { deliveryPrId: string }) => {
+      seen.add(id);
+      return await evaluateDeliveryPr({
+        deliveryPrId: id,
+        deps: { loadMode: async () => "off", now: () => new Date(++clock) },
+      });
+    };
+    for (let tick = 0; tick < Math.ceil(open / limit) + 1; tick++) {
+      await runDeliveryLoopSweep({ db, evaluate, limit });
+    }
+    expect([...mine].filter((id) => !seen.has(id))).toEqual([]);
   });
 });

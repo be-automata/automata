@@ -215,6 +215,22 @@ export async function releaseDeliveryLease(
     .where(eq(deliveryPullRequests.id, id));
 }
 
+/**
+ * Stamps `evaluated_at` without touching the lease: an evaluation that
+ * skipped before taking it (the loop is off for the repo) still moves the row
+ * to the back of the sweep, so rows with the loop off never starve the rest.
+ */
+export async function touchDeliveryEvaluated(
+  db: DB,
+  id: string,
+  now: Date,
+): Promise<void> {
+  await db
+    .update(deliveryPullRequests)
+    .set({ evaluatedAt: now })
+    .where(eq(deliveryPullRequests.id, id));
+}
+
 export type DeliveryPrPatch = Partial<
   Pick<
     DeliveryPullRequestRow,

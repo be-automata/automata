@@ -8,6 +8,7 @@ import {
   listDeliveryFixCycles,
   recordShadowFixCycle,
   releaseDeliveryLease,
+  touchDeliveryEvaluated,
   transitionDeliveryPr,
   type DeliveryPrPatch,
   type DeliveryPullRequestRow,
@@ -83,7 +84,11 @@ export async function evaluateDeliveryPr({
       organizationId: initial.organizationId,
       repoFullName: initial.repoFullName,
     });
-    if (mode === "off") return { status: "skipped", reason: "mode_off" };
+    if (mode === "off") {
+      // Back of the sweep queue, or off rows would starve enabled ones.
+      await touchDeliveryEvaluated(db, deliveryPrId, deps.now());
+      return { status: "skipped", reason: "mode_off" };
+    }
     if (!(await acquireDeliveryLease(db, deliveryPrId, deps.now()))) {
       return { status: "skipped", reason: "leased" };
     }

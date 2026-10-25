@@ -111,7 +111,7 @@ describe("#509 evaluateDeliveryPr (shadow)", () => {
     };
   }
 
-  it("mode off: nothing is read or written", async () => {
+  it("mode off: GitHub is not read and the loop state is untouched; the row only moves to the back of the sweep", async () => {
     const octokitFor = vi.fn();
     expect(
       await evaluateDeliveryPr({
@@ -120,7 +120,12 @@ describe("#509 evaluateDeliveryPr (shadow)", () => {
       }),
     ).toEqual({ status: "skipped", reason: "mode_off" });
     expect(octokitFor).not.toHaveBeenCalled();
-    expect((await getDeliveryPr(db, deliveryPrId))?.headSha).toBeNull();
+    expect(await getDeliveryPr(db, deliveryPrId)).toMatchObject({
+      headSha: null,
+      phase: "awaiting_ci",
+      leaseUntil: null,
+      evaluatedAt: NOW,
+    });
   });
 
   it("a fresh enrollment observes the head, then records the mark-ready it would do, with no GitHub write", async () => {
