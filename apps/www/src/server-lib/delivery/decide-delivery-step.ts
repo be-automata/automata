@@ -65,11 +65,16 @@ export type DeliveryStep =
       headSha: string;
       phase: "awaiting_ci" | "awaiting_review";
     }
-  /** A person flipped the draft state the loop expects; follow them. */
+  /**
+   * A person flipped the draft state the loop expects; follow them.
+   * `recordReadyAt`: the PR just went ready, so the evaluator stamps
+   * `ready_marked_at = now` and the review clock starts there.
+   */
   | {
       kind: "set_phase";
       phase: "awaiting_ci" | "awaiting_review" | "paused";
       reason: string;
+      recordReadyAt: boolean;
     }
   /** Draft head is green: mark ready (one review follows). */
   | { kind: "mark_ready"; noCi: boolean }
@@ -122,6 +127,16 @@ export function decideDeliveryStep({
       phase: pr.draft ? "awaiting_ci" : "awaiting_review",
     };
   }
+  // Paused = a person turned the loop's ready PR back into a draft; making it
+  // ready again resumes the loop at this head.
+  if (row.phase === "paused" && !pr.draft) {
+    return {
+      kind: "set_phase",
+      phase: "awaiting_review",
+      reason: "marked ready again by a person",
+      recordReadyAt: true,
+    };
+  }
   if (SETTLED_PHASES.includes(row.phase)) {
     return { kind: "noop", reason: `${row.phase} until a new head` };
   }
@@ -141,6 +156,7 @@ export function decideDeliveryStep({
           kind: "set_phase",
           phase: "awaiting_review",
           reason: "marked ready by a person",
+          recordReadyAt: true,
         };
       }
       return decideDraft(row, pr);
@@ -148,13 +164,13 @@ export function decideDeliveryStep({
       if (pr.draft) {
         // Back to draft after the loop marked this head ready: a person took
         // it. A draft the loop never marked waits for CI again.
-        return row.readyMarkedHeadSha === pr.headSha
-          ? { kind: "set_phase", phase: "paused", reason: "converted to draft" }
-          : {
-              kind: "set_phase",
-              phase: "awaiting_ci",
-              reason: "converted to draft",
-            };
+        return {
+          kind: "set_phase",
+          phase:
+            row.readyMarkedHeadSha === pr.headSha ? "paused" : "awaiting_ci",
+          reason: "converted to draft",
+          recordReadyAt: false,
+        };
       }
       return decideReady(row, pr, now);
     default:
@@ -239,7 +255,7 @@ function decideReady(
 
   // No formal verdict at this head (none yet, or a COMMENTED / no-verdict
   // notice): wait for the bot, then decide on CI alone.
-  if (!reviewWaitExpired(row, pr.headSha, now)) {
+  if (!reviewWaitExpired(row, now)) {
     return { kind: "noop", reason: "waiting for the bot's review" };
   }
   if (ci.state === "failure") {
@@ -252,13 +268,16 @@ function decideReady(
   return { kind: "needs_human", reason: "no_bot_review" };
 }
 
-/** The review clock starts at the later of the head and the ready mark. */
-function reviewWaitExpired(row: Row, headSha: string, now: Date): boolean {
+/**
+ * The review clock starts when the head became ready for review: the later
+ * of the head being seen and the last ready transition (the loop's mark or a
+ * person's). A ready time from an older head is earlier than this head's
+ * `headSeenAt`, so it never shortens the wait.
+ */
+function reviewWaitExpired(row: Row, now: Date): boolean {
   const since = Math.max(
     row.headSeenAt?.getTime() ?? 0,
-    row.readyMarkedHeadSha === headSha
-      ? (row.readyMarkedAt?.getTime() ?? 0)
-      : 0,
+    row.readyMarkedAt?.getTime() ?? 0,
   );
   return now.getTime() - since >= DELIVERY_REVIEW_WAIT_MS;
 }

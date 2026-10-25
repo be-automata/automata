@@ -103,13 +103,26 @@ describe("#509 decideDeliveryStep", () => {
       }
     });
 
-    it("needs_human and paused wait for a new head", () => {
+    it("needs_human waits for a new head; paused waits while it stays a draft", () => {
       expect(decide(row({ phase: "needs_human" }), pr({ ci: RED })).kind).toBe(
         "noop",
       );
+      expect(
+        decide(row({ phase: "needs_human" }), pr({ ci: RED, draft: false }))
+          .kind,
+      ).toBe("noop");
       expect(decide(row({ phase: "paused" }), pr({ ci: RED })).kind).toBe(
         "noop",
       );
+    });
+
+    it("a paused PR made ready again resumes at this head and starts the review clock", () => {
+      expect(decide(row({ phase: "paused" }), pr({ draft: false }))).toEqual({
+        kind: "set_phase",
+        phase: "awaiting_review",
+        reason: "marked ready again by a person",
+        recordReadyAt: true,
+      });
     });
 
     it("an App-authored PR goes to a human: the bot cannot review its own PR", () => {
@@ -302,6 +315,39 @@ describe("#509 decideDeliveryStep", () => {
       expect(
         decide(ready({ headSeenAt: LONG_AGO, readyMarkedAt: EARLIER }), open())
           .kind,
+      ).toBe("noop");
+    });
+
+    it("a person marking a long-seen draft ready records the ready time, and the bot then gets its full wait", () => {
+      const longSeenDraft = row({ headSeenAt: LONG_AGO });
+      expect(decide(longSeenDraft, open())).toEqual({
+        kind: "set_phase",
+        phase: "awaiting_review",
+        reason: "marked ready by a person",
+        recordReadyAt: true,
+      });
+      // What the evaluator writes for that step: phase + ready_marked_at=now,
+      // with the loop's own ready sha still unset.
+      const personReady = row({
+        phase: "awaiting_review",
+        headSeenAt: LONG_AGO,
+        readyMarkedHeadSha: null,
+        readyMarkedAt: EARLIER,
+      });
+      expect(decide(personReady, open()).kind).toBe("noop");
+      expect(decide(personReady, open({ ci: RED })).kind).toBe("noop");
+    });
+
+    it("a ready time left over from an older head never shortens this head's wait", () => {
+      expect(
+        decide(
+          ready({
+            headSeenAt: EARLIER,
+            readyMarkedHeadSha: "OLD",
+            readyMarkedAt: LONG_AGO,
+          }),
+          open(),
+        ).kind,
       ).toBe("noop");
     });
 
