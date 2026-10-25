@@ -748,8 +748,23 @@ async function handleThreadFinish({
             threadId,
             threadChatId,
           });
-          if (outcome.status !== "skipped") {
-            console.log("[remote-task-pr]", { threadId, ...outcome });
+          if (outcome.status === "skipped") return;
+          console.log("[remote-task-pr]", { threadId, ...outcome });
+          // #509: an issue-delivery run's PR enters the delivery loop. A
+          // failure here never touches the PR that was just opened.
+          const { enrollDeliveryAtPrOpen } = await import(
+            "@/server-lib/delivery/enroll"
+          );
+          const enrolled = await enrollDeliveryAtPrOpen({
+            userId,
+            threadId,
+            prNumber: outcome.prNumber,
+          }).catch((error: unknown) => ({
+            status: "failed" as const,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+          if (enrolled.status !== "skipped") {
+            console.log("[delivery-loop] enroll", { threadId, ...enrolled });
           }
         })
         .catch((error) =>

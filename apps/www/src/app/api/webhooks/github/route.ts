@@ -58,6 +58,11 @@ import { env } from "@terragon/env/apps-www";
 import { findWebhookSkip } from "./webhook-skip";
 import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
 import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
+import {
+  handleDeliveryCiEvent,
+  handleDeliveryPullRequestEvent,
+  handleDeliveryReviewEvent,
+} from "@/server-lib/delivery/webhooks";
 import { deferWebhookWork } from "./defer-webhook-work";
 
 export async function POST(request: NextRequest) {
@@ -129,6 +134,29 @@ export async function POST(request: NextRequest) {
   webhooks.on("pull_request_review.submitted", async ({ payload }) => {
     await handlePullRequestReviewMirror(payload);
   });
+  // #509 delivery loop: siblings of the handlers above, one indexed lookup
+  // each (only for automata/task-* heads), evaluation in waitUntil. Never throw.
+  webhooks.on("pull_request_review.submitted", async ({ payload }) => {
+    await handleDeliveryReviewEvent(payload);
+  });
+  webhooks.on(
+    [
+      "pull_request.synchronize",
+      "pull_request.ready_for_review",
+      "pull_request.converted_to_draft",
+      "pull_request.closed",
+      "pull_request.reopened",
+    ],
+    async ({ payload }) => {
+      await handleDeliveryPullRequestEvent(payload);
+    },
+  );
+  webhooks.on(
+    ["check_suite.completed", "workflow_run.completed"],
+    async ({ payload }) => {
+      await handleDeliveryCiEvent(payload);
+    },
+  );
   webhooks.on("workflow_run.completed", async ({ payload }) => {
     await handleWorkflowRunEvent(payload);
   });
