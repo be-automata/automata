@@ -647,7 +647,9 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
       expect(github.dismissReview).not.toHaveBeenCalled();
     });
 
-    it("a failed review lookup posts the comment but dismisses nothing", async () => {
+    // No read, no post: the note has no other idempotency check, so the run
+    // fails loud and the hourly sweep retries once GitHub answers.
+    it("a failed review lookup posts nothing and fails the run", async () => {
       const github = makeGithub([]);
       github.listReviews.mockRejectedValue(new Error("502"));
       const res = await executeReviewFromIntent({
@@ -656,8 +658,44 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
         draftAtDispatch: true,
         terminalText: BARE_COMMENT,
       });
+      expect(res).toMatchObject({ outcome: "post_failed", workFailed: true });
+      expectNoReview(github);
+    });
+
+    it("a legacy degraded COMMENT at HEAD never swallows a later COMMENT with findings", async () => {
+      const github = makeGithub([
+        {
+          id: 8,
+          user: { login: BOT },
+          state: "APPROVED",
+          submittedAt: "2026-10-24T11:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: "LGTM.",
+        },
+        {
+          id: 9,
+          user: { login: BOT },
+          state: "COMMENTED",
+          submittedAt: "2026-10-24T12:00:00Z",
+          dismissedAt: null,
+          commitId: HEAD,
+          body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: x._`,
+        },
+      ]);
+      const res = await executeReviewFromIntent({
+        ...base,
+        github,
+        terminalText: fenced({
+          verdict: "comment",
+          commit: HEAD,
+          summary: "One thing worth a look.",
+          findings: [
+            { severity: "info", path: "a.ts", line: 3, body: "untested" },
+          ],
+        }),
+      });
       expect(res).toEqual({ outcome: "posted", verdict: "comment" });
-      expect(github.dismissReview).not.toHaveBeenCalled();
     });
 
     // The PR also moved on: a draft-era comment about an older commit says

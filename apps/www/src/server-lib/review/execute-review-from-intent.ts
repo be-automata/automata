@@ -618,7 +618,7 @@ export async function executeReviewFromIntent(
     // state: without this, a later COMMENT would be skipped as its redelivery.
     canSupersede: (r: GitHubReview) => !isNotAVerdict(r),
     isSameReview: (r: GitHubReview) =>
-      !isDraftEraNote(r) &&
+      !isNotAVerdict(r) &&
       (!reviewBase || sameReviewByBase(reviewBase, opts.liveBase)(r)),
     ...(draftEraNote
       ? {
@@ -654,7 +654,7 @@ export async function executeReviewFromIntent(
   const yieldedToAnother =
     yieldedTo !== undefined &&
     !(
-      yieldedTo.state === "COMMENTED" &&
+      isDraftEraNote(yieldedTo) &&
       yieldedTo.body.trim() === finalIntent.body.trim()
     );
   if (

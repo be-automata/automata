@@ -213,7 +213,7 @@ export async function executeReviewIntent(
   const wantedState = reviewStateForVerdict(intent.verdict);
   const isSameReview = opts.isSameReview;
   // A yielding note never supersedes: ONE snapshot decides, `existing` stays
-  // null below whatever happens, and a failed read posts dismissing nothing.
+  // null below, and a failed read posts nothing.
   const yieldTo = opts.yieldTo;
   if (yieldTo) {
     try {
@@ -239,10 +239,15 @@ export async function executeReviewIntent(
         return { outcome: "skipped_existing", yieldedTo: inForce };
       }
     } catch (err) {
-      logger?.warn(
-        "review-executor: yield check failed; posting without superseding",
-        { repo, prNumber, error: getErrorMessage(err) },
-      );
+      // No read, no post: a yielding note has no other idempotency check, so
+      // posting blind would add a duplicate on every retry while GitHub flaps.
+      const failureReason = `yield check failed: ${getErrorMessage(err)}`;
+      logger?.warn("review-executor: yield check failed; not posting", {
+        repo,
+        prNumber,
+        error: failureReason,
+      });
+      return { outcome: "post_failed", failureReason };
     }
   }
   let existing: GitHubReview | null = null;

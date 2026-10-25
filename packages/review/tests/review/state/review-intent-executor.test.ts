@@ -406,7 +406,7 @@ describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
     assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
   });
 
-  test("reads the reviews ONCE; a failed read posts and dismisses nothing", async () => {
+  test("reads the reviews ONCE; a failed read posts nothing", async () => {
     const github = makeGithub([botReviewAtHead("APPROVED", 5)]);
     let calls = 0;
     github.listReviews.mock.mockImplementation(async () => {
@@ -423,8 +423,9 @@ describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
       intent: { verdict: "comment", body: "draft note" },
       yieldTo: () => true,
     });
-    assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+    assert.equal(res.outcome, "post_failed");
     assert.equal(calls, 1);
+    assert.equal(github.submitReviewWithComments.mock.calls.length, 0);
     assert.equal(github.dismissReview.mock.calls.length, 0);
   });
 
