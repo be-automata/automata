@@ -1935,6 +1935,8 @@ export const hatchetRun = pgTable(
      */
     supersedePolicy: text("supersede_policy"),
     recheckOnComplete: boolean("recheck_on_complete"),
+    /** #374: the Hatchet tenant the run was dispatched into; NULL = the env tenant (old rows). */
+    tenantId: text("tenant_id"),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
@@ -1952,6 +1954,40 @@ export const hatchetRun = pgTable(
     // One row per Hatchet run; the generation fence, the worker terminal and
     // the staleness self-check all look rows up by externalId.
     uniqueIndex("hatchet_run_external_id_index").on(table.externalId),
+  ],
+);
+
+/**
+ * #374 per-org Hatchet tenant map: which engine tenant (and credentials) an
+ * org's runs dispatch into. `repoFullName` is a lowercased 'owner/name' or
+ * '*' (the org default); a repo row wins over '*', and no row = the env
+ * tenant. The tenant API token is stored encrypted (ENCRYPTION_MASTER_KEY)
+ * and decrypted only at use. `apiUrl` NULL = the env HATCHET_API_URL.
+ */
+export const hatchetTenantBinding = pgTable(
+  "hatchet_tenant_binding",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    apiUrl: text("api_url"),
+    apiTokenEncrypted: text("api_token_encrypted").notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("hatchet_tenant_binding_org_repo_unique").on(
+      table.organizationId,
+      table.repoFullName,
+    ),
   ],
 );
 

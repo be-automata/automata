@@ -502,6 +502,8 @@ export type RepoSkillVersionInsert =
 
 export type HatchetRun = typeof schema.hatchetRun.$inferSelect;
 export type HatchetRunInsert = typeof schema.hatchetRun.$inferInsert;
+export type HatchetTenantBinding =
+  typeof schema.hatchetTenantBinding.$inferSelect;
 
 /**
  * Egress enforcement level (#66): 'none' = system hosts only, 'ip_port' =

@@ -69,7 +69,9 @@ import {
   buildReviewRunMetadata,
   RunMetadataLimitError,
   type TriggerOpts,
+  type HatchetTriggerConfig,
 } from "./transport";
+import { resolveHatchetConfig } from "./tenant-resolver";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -119,13 +121,14 @@ async function triggerWithRetry(
   input: AgentRunWireInput,
   threadId: string,
   threadChatId: string,
+  config: HatchetTriggerConfig,
   opts?: TriggerOpts,
   scrub: (text: string) => string = redactSecrets,
 ): Promise<{ externalId: string | undefined }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= TRIGGER_MAX_ATTEMPTS; attempt++) {
     try {
-      return await triggerAgentRun(input, hatchetConfig(), opts);
+      return await triggerAgentRun(input, config, opts);
     } catch (error) {
       lastError = error;
       // An engine 4xx can echo the request body, which in the rollout window
@@ -195,16 +198,17 @@ async function triggerSelfHealBounded({
   threadId,
   threadChatId,
   organizationId,
+  config,
   scrub = redactSecrets,
 }: {
   input: AgentRunWireInput;
   threadId: string;
   threadChatId: string;
   organizationId: string;
+  config: HatchetTriggerConfig;
   /** #380: blanks this dispatch's own secret values in every log line here. */
   scrub?: (text: string) => string;
 }): Promise<{ externalId: string | undefined }> {
-  const config = hatchetConfig();
   const dispatchedAt = new Date();
   const record = async (
     outcome: "success" | "failure",
@@ -1175,6 +1179,13 @@ export async function dispatchAgentRun({
     // triggerAgentRun derives it from the input when no plan metadata is
     // given, so a self-heal run stamps self-heal-* on either trigger path.
     // Review runs keep their plan's metadata.
+    // Resolved once per dispatch (#374); a resolve failure takes the same
+    // failure path as a trigger failure.
+    const hatchetTarget = await resolveHatchetConfig({
+      db,
+      organizationId: thread?.organizationId ?? null,
+      repoFullName,
+    });
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({
@@ -1182,12 +1193,14 @@ export async function dispatchAgentRun({
             threadId,
             threadChatId,
             organizationId: selfHealOrgId,
+            config: hatchetTarget,
             scrub,
           })
         : await triggerWithRetry(
             wireInput,
             threadId,
             threadChatId,
+            hatchetTarget,
             plan?.triggerOpts,
             scrub,
           );
@@ -1238,6 +1251,7 @@ export async function dispatchAgentRun({
             repoFullName,
             prNumber: reviewContext.prNumber,
             externalId,
+            tenantId: hatchetTarget.tenantId,
             // #125 C5: the control-plane copy of the policy snapshot — the
             // recheck reconciliation reads THIS, never the settings row.
             snapshot: plan.snapshot,

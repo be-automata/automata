@@ -20,7 +20,8 @@ import { TERMINAL_THREAD_STATUSES } from "@terragon/shared/model/thread-effectiv
 import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 
-import { hatchetConfig } from "@/agent/hatchet/dispatch";
+import { resolveHatchetConfigForThread } from "@/agent/hatchet/tenant-resolver";
+import { db } from "@/lib/db";
 import {
   listAgentRunsForThread,
   type AgentRunLookupHint,
@@ -156,11 +157,15 @@ export async function stopFixThread({
 
 export function defaultFixReconcileDeps(): FixReconcileDeps {
   return {
-    listRuns: (hint) =>
-      listAgentRunsForThread(hint, hatchetConfig(), {
-        signal: AbortSignal.timeout(FIX_RECONCILE_LOOKUP_TIMEOUT_MS),
-        maxPages: FIX_RECONCILE_LOOKUP_MAX_PAGES,
-      }),
+    listRuns: async (hint) =>
+      listAgentRunsForThread(
+        hint,
+        await resolveHatchetConfigForThread({ db, threadId: hint.threadId }),
+        {
+          signal: AbortSignal.timeout(FIX_RECONCILE_LOOKUP_TIMEOUT_MS),
+          maxPages: FIX_RECONCILE_LOOKUP_MAX_PAGES,
+        },
+      ),
     stopThread: stopFixThread,
     log: (message, fields) => console.log(message, fields ?? {}),
   };

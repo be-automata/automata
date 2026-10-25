@@ -63,7 +63,7 @@ function makeDeps(
     | Error
   >,
 ) {
-  const cancel = vi.fn(async (_ids: string[]) => undefined);
+  const cancel = vi.fn(async (_ids: string[], _threadId: string) => undefined);
   const listRuns = vi.fn(async (hint: { threadId: string }) => {
     const runs = runsByThread[hint.threadId];
     if (runs instanceof Error) throw runs;
@@ -166,7 +166,7 @@ describe("drainSelfHeal", () => {
     expect(result.lookupFailed).toEqual([bad]);
     expect(result.cancelled).toEqual([good]);
     expect(cancel).toHaveBeenCalledTimes(1);
-    expect(cancel).toHaveBeenCalledWith(["run-good"]);
+    expect(cancel).toHaveBeenCalledWith(["run-good"], good);
   });
 
   it("is idempotent: nothing in flight still sets the switch and writes the log row", async () => {

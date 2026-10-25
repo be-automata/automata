@@ -60,6 +60,27 @@ describe("runSupersedeSweep (#125 C4)", () => {
   const reader = (map: Record<string, AgentRunStatus>) => async (id: string) =>
     map[id] ?? "NOT_FOUND";
 
+  it("rule (i): reads a bound-tenant row with the config its resolver returns", async () => {
+    await remoteRun(1, T + 60_000, "r-tenant");
+    const seen: unknown[] = [];
+    await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      resolveRunConfig: async () => ({
+        apiUrl: "https://t2",
+        tenantId: "T2",
+        apiToken: "tok2",
+      }),
+      readStatus: async (_id, _hint, config) => {
+        seen.push(config);
+        return "RUNNING";
+      },
+    });
+    expect(seen).toEqual([
+      { apiUrl: "https://t2", tenantId: "T2", apiToken: "tok2" },
+    ]);
+  });
+
   it("rule (i): CANCELLED ⇒ superseded (with sibling, linked) / user-cancelled; NOT_FOUND ⇒ superseded / plane-offline; FAILED ⇒ daemon-failed; live ⇒ untouched + lease extended; COMPLETED ⇒ run retired, thread untouched", async () => {
     const superseded = await remoteRun(1, T + 60_000, "r-old");
     const newer = await remoteRun(1, 0, "r-newer"); // newer sibling, same PR

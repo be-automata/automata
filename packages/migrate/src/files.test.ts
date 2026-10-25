@@ -117,6 +117,7 @@ describe("deploy/migrations", () => {
       "2026-10-24-knowledge-op-fingerprint-index",
       "2026-10-25-knowledge-updated-at",
       "2026-10-26-delivery-loop",
+      "2026-10-27-hatchet-tenant-binding",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);
