@@ -43,3 +43,9 @@ Ticket: be-automata/automata#526. Out of scope: what the loop decides or when it
 ## Validator
 
 Cycle 1: PASS_WITH_WARNINGS (Opus). Applied: line numbers corrected; email and backticked-`@` behaviour stated; typecheck gate switched to the repo's `tsc-check`.
+
+## Refinement (applied)
+
+- `renderRefsFollowup` strips every `@` run that starts a login and is not preceded by a word character (`unmention`), not only the `` `@name` `` spans: `@@carol`, `` `x`@dave `` and `path/@erin` escaped the narrower form. Emails keep their `@`.
+- `renderMergeReady` names `Automata` alone when no login is left (approver `[bot]`).
+- The test's reason list is a `Record<DeliveryNeedsHumanReason, 1>`, so a new reason fails the typecheck until it is tested.

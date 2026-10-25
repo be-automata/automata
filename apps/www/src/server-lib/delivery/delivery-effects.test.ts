@@ -420,13 +420,17 @@ describe("delivery lane never merges", () => {
 
 describe("#526 delivery comments never @-mention", () => {
   const MENTION = /@[A-Za-z0-9]/;
-  const REASONS: DeliveryNeedsHumanReason[] = [
-    "app_authored_pr",
-    "fix_cap_reached",
-    "cycle_pushed_nothing",
-    "no_bot_review",
-    "human_changes_requested",
-  ];
+  // A record, so a new reason that is not listed here fails the typecheck.
+  const REASONS = Object.keys({
+    app_authored_pr: 1,
+    fix_cap_reached: 1,
+    cycle_pushed_nothing: 1,
+    no_bot_review: 1,
+    human_changes_requested: 1,
+  } satisfies Record<
+    DeliveryNeedsHumanReason,
+    1
+  >) as DeliveryNeedsHumanReason[];
 
   it("renderMergeReady names the approver in a code span, without @ or [bot]", () => {
     for (const approver of [BOT, "automata-ai-bot"]) {
@@ -439,6 +443,16 @@ describe("#526 delivery comments never @-mention", () => {
       expect(body).not.toContain("[bot]");
       expect(body).not.toMatch(MENTION);
     }
+  });
+
+  it("renderMergeReady with no login left names Automata alone", () => {
+    expect(
+      renderMergeReady({
+        prNumber: 5,
+        headSha: "abcdef1234",
+        approver: "[bot]",
+      }),
+    ).toContain("**Ready to merge.** Automata approved `abcdef1`");
   });
 
   it("no renderer emits an @ followed by a login", () => {
@@ -454,6 +468,9 @@ describe("#526 delivery comments never @-mention", () => {
           "ask @alice to check",
           "ping @acme/reviewers",
           "already `@bob`",
+          "@@carol",
+          "see `x`@dave",
+          "path/@erin",
         ],
       }),
       renderRefsFollowup({ prNumber: 12, items: [] }),
@@ -468,6 +485,12 @@ describe("#526 delivery comments never @-mention", () => {
     });
     expect(body).toContain("alice");
     expect(body).toContain("acme/reviewers");
+  });
+
+  it("renderRefsFollowup leaves an email alone", () => {
+    expect(
+      renderRefsFollowup({ prNumber: 12, items: ["mail ops@example.com"] }),
+    ).toContain("ops@example.com");
   });
 
   it("the marker line is unchanged", () => {
