@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { encryptValue } from "@terragon/utils/encryption";
 
@@ -44,7 +44,12 @@ export async function getHatchetTenantBindings({
     );
 }
 
-/** The org's binding for one engine tenant id, if any. */
+/**
+ * The org's binding for one engine tenant id, if any. Several rows of one org
+ * may share a tenant id with different api_url/token (the unique index is on
+ * org + repo), so the pick is deterministic: the '*' row first, then the
+ * lowest repoFullName.
+ */
 export async function getHatchetTenantBindingByTenant({
   db,
   organizationId,
@@ -62,6 +67,12 @@ export async function getHatchetTenantBindingByTenant({
         eq(hatchetTenantBinding.organizationId, organizationId),
         eq(hatchetTenantBinding.tenantId, tenantId),
       ),
+    )
+    .orderBy(
+      desc(
+        sql`${hatchetTenantBinding.repoFullName} = ${HATCHET_TENANT_BINDING_ORG_DEFAULT}`,
+      ),
+      asc(hatchetTenantBinding.repoFullName),
     )
     .limit(1);
   return row;
