@@ -141,11 +141,14 @@ export function renderNeedsHuman({
   ].join("\n");
 }
 
+/** The footer remote-task-pr.ts appends after the agent's body: `---`, then the task link. */
+const PLATFORM_FOOTER_LINE = /^(-{3,}|📎 \*\*Task\*\*: \S+)$/;
+
 /**
  * The criteria a merged delivery PR left open, from its body: null unless
- * the body's last line is `Refs #<issue>` (a PR that delivered everything
- * ends `Closes #<issue>`), else the unticked items of its
- * `## Acceptance criteria` section, in order.
+ * the body's last line, above the platform's task-link footer, is
+ * `Refs #<issue>` (a PR that delivered everything ends `Closes #<issue>`),
+ * else the unticked items of its `## Acceptance criteria` section, in order.
  */
 export function parseUndeliveredCriteria(
   body: string | null | undefined,
@@ -153,7 +156,10 @@ export function parseUndeliveredCriteria(
 ): string[] | null {
   if (!body) return null;
   const lines = body.split(/\r?\n/);
-  const last = [...lines].reverse().find((l) => l.trim() !== "");
+  const last = [...lines].reverse().find((l) => {
+    const line = l.trim();
+    return line !== "" && !PLATFORM_FOOTER_LINE.test(line);
+  });
   if (last?.trim() !== `Refs #${issueNumber}`) return null;
   const items: string[] = [];
   let inSection = false;
