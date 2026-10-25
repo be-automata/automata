@@ -748,8 +748,23 @@ async function handleThreadFinish({
             threadId,
             threadChatId,
           });
-          if (outcome.status !== "skipped") {
-            console.log("[remote-task-pr]", { threadId, ...outcome });
+          if (outcome.status === "skipped") return;
+          console.log("[remote-task-pr]", { threadId, ...outcome });
+          // #509: an issue-delivery run's PR enters the delivery loop. A
+          // failure here never touches the PR that was just opened.
+          const { enrollDeliveryAtPrOpen } = await import(
+            "@/server-lib/delivery/enroll"
+          );
+          const enrolled = await enrollDeliveryAtPrOpen({
+            userId,
+            threadId,
+            prNumber: outcome.prNumber,
+          }).catch((error: unknown) => ({
+            status: "failed" as const,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+          if (enrolled.status !== "skipped") {
+            console.log("[delivery-loop] enroll", { threadId, ...enrolled });
           }
         })
         .catch((error) =>
@@ -777,6 +792,21 @@ async function handleThreadFinish({
       )
       .catch((error) =>
         console.error("[audit-findings] finish-hook failed (non-fatal)", {
+          threadId,
+          error,
+        }),
+      ),
+  );
+  // #509: a delivery fix cycle's thread finished. A sibling like the audit
+  // lane; it no-ops for any thread not stamped as a fix cycle, and settles
+  // the cycle from the PR head before the loop evaluates the PR again.
+  waitUntil(
+    import("@/server-lib/delivery/cycle-finish")
+      .then(({ handleDeliveryCycleFinish }) =>
+        handleDeliveryCycleFinish({ userId, threadId }),
+      )
+      .catch((error) =>
+        console.error("[delivery-loop] finish-hook failed (non-fatal)", {
           threadId,
           error,
         }),

@@ -1610,6 +1610,12 @@ export const repoReviewSettings = pgTable(
     selfHealMaxDiffLines: integer("self_heal_max_diff_lines"),
     selfHealPrExpiryDays: integer("self_heal_pr_expiry_days"),
     selfHealRunWindow: text("self_heal_run_window"),
+    /**
+     * #509 delivery loop: 'off' | 'shadow' | 'on' (model/delivery-loop.ts).
+     * Nullable with NO column default: NULL = inherit (repo row -> '*' org
+     * default row -> 'off').
+     */
+    deliveryLoopMode: text("delivery_loop_mode"),
     /** Provenance: the user who last wrote this override (audit trail). */
     updatedByUserId: text("updated_by_user_id").references(() => user.id, {
       onDelete: "set null",
@@ -2049,6 +2055,129 @@ export const reviewRerun = pgTable(
     ),
     uniqueIndex("review_rerun_failed_thread_index").on(table.failedThreadId),
     index("review_rerun_state_due_index").on(table.state, table.dueAt),
+  ],
+);
+
+/**
+ * #509 delivery loop: one row per pull request an `issue-delivery` run opened,
+ * enrolled by the remote-task-pr finish hook. The loop's whole state; every
+ * phase change is a compare-and-set on (phase, head_sha)
+ * (model/delivery-loop.ts). `repo_full_name` is lowercased.
+ */
+export const deliveryPullRequests = pgTable(
+  "delivery_pull_requests",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    prNumber: integer("pr_number").notNull(),
+    issueNumber: integer("issue_number").notNull(),
+    headRef: text("head_ref").notNull(),
+    baseRef: text("base_ref").notNull(),
+    deliveryThreadId: text("delivery_thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    automationId: text("automation_id").notNull(),
+    phase: text("phase")
+      .$type<
+        | "awaiting_ci"
+        | "awaiting_review"
+        | "fixing"
+        | "merge_ready"
+        | "needs_human"
+        | "paused"
+        | "merged"
+        | "closed"
+      >()
+      .notNull(),
+    /** The PR head the last evaluation saw. */
+    headSha: text("head_sha"),
+    /** When `head_sha` was first seen (the review-wait clock). */
+    headSeenAt: timestamp("head_seen_at", { mode: "date" }),
+    cyclesUsed: integer("cycles_used").notNull().default(0),
+    readyMarkedHeadSha: text("ready_marked_head_sha"),
+    readyMarkedAt: timestamp("ready_marked_at", { mode: "date" }),
+    mergeReadyHeadSha: text("merge_ready_head_sha"),
+    mergeReadyCommentId: bigint("merge_ready_comment_id", { mode: "number" }),
+    stopCommentId: bigint("stop_comment_id", { mode: "number" }),
+    /** The evaluation lease: one evaluator at a time per row. */
+    leaseUntil: timestamp("lease_until", { mode: "date" }),
+    evaluatedAt: timestamp("evaluated_at", { mode: "date" }),
+    /** Why the last transition happened (operator-facing, never on a PR). */
+    lastReason: text("last_reason"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("delivery_pull_requests_org_repo_pr_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.prNumber,
+    ),
+    index("delivery_pull_requests_repo_head_index").on(
+      table.repoFullName,
+      table.headSha,
+    ),
+    index("delivery_pull_requests_phase_evaluated_index").on(
+      table.phase,
+      table.evaluatedAt,
+    ),
+  ],
+);
+
+/**
+ * #509 delivery loop: one row per fix-cycle run. UNIQUE (delivery_pr_id,
+ * trigger_head_sha) makes a cycle idempotent against webhook redelivery and
+ * the sweep: a head gets at most one cycle.
+ */
+export const deliveryFixCycles = pgTable(
+  "delivery_fix_cycles",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    deliveryPrId: text("delivery_pr_id")
+      .notNull()
+      .references(() => deliveryPullRequests.id, { onDelete: "cascade" }),
+    /** 1-based. */
+    cycleNo: integer("cycle_no").notNull(),
+    triggerHeadSha: text("trigger_head_sha").notNull(),
+    trigger: text("trigger").$type<"review" | "ci" | "review+ci">().notNull(),
+    reviewId: bigint("review_id", { mode: "number" }),
+    failingChecks: text("failing_checks").array(),
+    state: text("state")
+      .$type<
+        | "dispatching"
+        | "running"
+        | "pushed"
+        | "no_push"
+        | "abandoned"
+        | "shadow"
+      >()
+      .notNull(),
+    threadId: text("thread_id").references(() => thread.id, {
+      onDelete: "set null",
+    }),
+    resultHeadSha: text("result_head_sha"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { mode: "date" }),
+  },
+  (table) => [
+    uniqueIndex("delivery_fix_cycles_pr_cycle_index").on(
+      table.deliveryPrId,
+      table.cycleNo,
+    ),
+    uniqueIndex("delivery_fix_cycles_pr_head_index").on(
+      table.deliveryPrId,
+      table.triggerHeadSha,
+    ),
   ],
 );
 

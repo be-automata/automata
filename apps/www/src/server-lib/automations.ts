@@ -27,6 +27,7 @@ import {
   AccessTier,
   CompanionLaneStamp,
   DBUserMessage,
+  DeliveryLaneStamp,
   MentionLaneStamp,
   ThreadTrustContext,
 } from "@terragon/shared";
@@ -162,6 +163,11 @@ export async function runAutomation({
       reviewBase?: string;
       /** PR-event runs: the PR's draft state at dispatch (#504). */
       reviewIsDraft?: boolean;
+      /**
+       * #509 delivery loop: the fix cycle this thread runs. The cycle-finish
+       * hook settles the cycle row it names.
+       */
+      delivery?: DeliveryLaneStamp;
     };
   };
   source: "automated" | "manual";
@@ -342,6 +348,9 @@ export async function runAutomation({
               : {}),
             ...(options?.stampExtra?.reviewIsDraft !== undefined
               ? { reviewIsDraft: options.stampExtra.reviewIsDraft }
+              : {}),
+            ...(options?.stampExtra?.delivery
+              ? { delivery: options.stampExtra.delivery }
               : {}),
           },
           automation: automation,

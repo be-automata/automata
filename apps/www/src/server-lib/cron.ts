@@ -392,6 +392,7 @@ export async function runScheduledCron(cron: string): Promise<void> {
         await runQueuedTasksCron();
       } finally {
         await runSelfHealCronSafe("tick");
+        await runDeliveryLoopCronSafe();
       }
       return;
     case "*/30 * * * *": // every 30m — fire due automations
@@ -417,6 +418,21 @@ async function runSelfHealCronSafe(kind: "tick" | "hourly"): Promise<void> {
     await runSelfHealCron(kind);
   } catch (error) {
     console.error("[cron:self-heal] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * The delivery-loop sweep (#509), bulkheaded like the self-heal backstops:
+ * dynamic import, every failure logged and swallowed.
+ */
+async function runDeliveryLoopCronSafe(): Promise<void> {
+  try {
+    const { runDeliveryLoopSweep } = await import(
+      "@/server-lib/delivery/delivery-cron"
+    );
+    await runDeliveryLoopSweep();
+  } catch (error) {
+    console.error("[cron:delivery-loop] failed (non-fatal)", error);
   }
 }
 
