@@ -113,11 +113,35 @@ export interface StubResponse {
 
 export interface StubDeps {
   store: CanaryThreadStore;
-  /** The Anthropic API key served as the owner credential. SECRET. */
+  /**
+   * The owner credential: an Anthropic API key, or a `claude setup-token`
+   * subscription token (`sk-ant-oat…`). SECRET.
+   */
   readAnthropicKey: () => string;
   /** The evidence sink: one call per request (and one per agent result). */
   record: (entry: Record<string, unknown>) => void;
   now?: () => Date;
+}
+
+/** A `claude setup-token` subscription token, as opposed to an API key. */
+export function isSetupToken(key: string): boolean {
+  return key.startsWith("sk-ant-oat");
+}
+
+/**
+ * The claudeAiOauth shape www emits for a setup-token credential: no refresh
+ * token (the CLI must never refresh) and a far-future expiry.
+ */
+export function setupTokenCredentials(accessToken: string, at: Date) {
+  return {
+    claudeAiOauth: {
+      accessToken,
+      refreshToken: "",
+      expiresAt: at.getTime() + 365 * 24 * 60 * 60 * 1000,
+      scopes: ["user:inference"],
+      subscriptionType: null,
+    },
+  };
 }
 
 /** The marker GET /__canary/health answers; dispatch refuses a callback URL without it. */
@@ -298,17 +322,23 @@ export function createStubHandler(
 
     "/api/daemon/agent-credentials": (req) =>
       daemonRoute(req, "agent-credentials", (_entry, _body, note) => {
-        // www's getAndVerifyCredentials for a claudeCode API-key credential:
-        // a `json-file` whose contents are {"anthropicApiKey": …}
-        // (apps/www/src/agent/msg/claudeCredentials.ts). H2: never recorded.
-        note.credential = "json-file(anthropicApiKey)";
+        // www's getAndVerifyCredentials for a claudeCode credential: a
+        // `json-file` (apps/www/src/agent/msg/claudeCredentials.ts). H2: never
+        // recorded.
+        const key = deps.readAnthropicKey();
+        const setupToken = isSetupToken(key);
+        note.credential = setupToken
+          ? "json-file(claudeAiOauth setup-token)"
+          : "json-file(anthropicApiKey)";
         return json(200, {
           agent: "claudeCode",
           credentials: {
             type: "json-file",
-            contents: JSON.stringify({
-              anthropicApiKey: deps.readAnthropicKey(),
-            }),
+            contents: JSON.stringify(
+              setupToken
+                ? setupTokenCredentials(key, now())
+                : { anthropicApiKey: key },
+            ),
           },
         });
       }),

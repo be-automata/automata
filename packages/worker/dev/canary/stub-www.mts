@@ -4,7 +4,8 @@
  * reaches it through a public tunnel (README §Reachability).
  *
  *   CANARY_STATE_DIR           spec dir dispatch.mts writes (default /var/lib/automata-canary)
- *   CANARY_ANTHROPIC_KEY_FILE  root-only file holding the Anthropic API key (required)
+ *   CANARY_ANTHROPIC_KEY_FILE  root-only file holding the Anthropic API key or a
+ *                              `claude setup-token` token, sk-ant-oat… (required)
  *   CANARY_STUB_PORT           loopback port (default 8787)
  *   CANARY_LOG_FILE            JSON-lines evidence log (default <state>/requests.jsonl)
  */
