@@ -97,8 +97,12 @@ export function renderMergeReady({
   headSha: string;
   approver: string;
 }): string {
+  // A bot comment never @-mentions anyone (#526): the login is a code span
+  // without its `[bot]` suffix.
+  const login = approver.trim().replace(/\[bot\]$/i, "");
+  const who = login ? `Automata (\`${login}\`)` : "Automata";
   return [
-    `**Ready to merge.** @${approver} approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
+    `**Ready to merge.** ${who} approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
     "",
     "The delivery loop never merges. When you are ready:",
     "",
@@ -174,6 +178,15 @@ export function parseUndeliveredCriteria(
   return items;
 }
 
+/**
+ * Drops every `@` that starts a login, so the comment holds no @<login> at
+ * all (#526): the ones sanitizeAgentText code-spans and the ones it skips.
+ * An email keeps its `@`, which follows a word character.
+ */
+function unmention(text: string): string {
+  return text.replace(/(?<!\w)@+(?=[A-Za-z0-9])/g, "");
+}
+
 export function renderRefsFollowup({
   prNumber,
   items,
@@ -183,7 +196,7 @@ export function renderRefsFollowup({
 }): string {
   const listed =
     items.length > 0
-      ? items.map((item) => `- [ ] ${sanitizeAgentText(item)}`)
+      ? items.map((item) => `- [ ] ${unmention(sanitizeAgentText(item))}`)
       : ["- (the PR listed no unticked criteria; see its body)"];
   return [
     `**#${prNumber} merged without delivering every criterion.** Still open:`,

@@ -22,7 +22,11 @@ import {
   deliveryMarker,
   parseUndeliveredCriteria,
   renderMergeReady,
+  renderNoCi,
+  renderNeedsHuman,
+  renderRefsFollowup,
 } from "./delivery-effects";
+import type { DeliveryNeedsHumanReason } from "./decide-delivery-step";
 import {
   evaluateDeliveryPr,
   type EvaluateDeliveryDeps,
@@ -411,5 +415,94 @@ describe("delivery lane never merges", () => {
         .map((line) => `${name}: ${line.trim()}`),
     );
     expect(hits).toEqual([]);
+  });
+});
+
+describe("#526 delivery comments never @-mention", () => {
+  const MENTION = /@[A-Za-z0-9]/;
+  // A record, so a new reason that is not listed here fails the typecheck.
+  const REASONS = Object.keys({
+    app_authored_pr: 1,
+    fix_cap_reached: 1,
+    cycle_pushed_nothing: 1,
+    no_bot_review: 1,
+    human_changes_requested: 1,
+  } satisfies Record<
+    DeliveryNeedsHumanReason,
+    1
+  >) as DeliveryNeedsHumanReason[];
+
+  it("renderMergeReady names the approver in a code span, without @ or [bot]", () => {
+    for (const approver of [BOT, "automata-ai-bot"]) {
+      const body = renderMergeReady({
+        prNumber: 5,
+        headSha: "abcdef1234",
+        approver,
+      });
+      expect(body).toContain("Automata (`automata-ai-bot`) approved `abcdef1`");
+      expect(body).not.toContain("[bot]");
+      expect(body).not.toMatch(MENTION);
+    }
+  });
+
+  it("renderMergeReady with no login left names Automata alone", () => {
+    expect(
+      renderMergeReady({
+        prNumber: 5,
+        headSha: "abcdef1234",
+        approver: "[bot]",
+      }),
+    ).toContain("**Ready to merge.** Automata approved `abcdef1`");
+  });
+
+  it("no renderer emits an @ followed by a login", () => {
+    const bodies = [
+      renderMergeReady({ prNumber: 5, headSha: "abcdef1234", approver: BOT }),
+      renderNoCi(),
+      ...REASONS.map((reason) =>
+        renderNeedsHuman({ reason, headSha: "abcdef1234", cyclesUsed: 2 }),
+      ),
+      renderRefsFollowup({
+        prNumber: 12,
+        items: [
+          "ask @alice to check",
+          "ping @acme/reviewers",
+          "already `@bob`",
+          "@@carol",
+          "see `x`@dave",
+          "path/@erin",
+        ],
+      }),
+      renderRefsFollowup({ prNumber: 12, items: [] }),
+    ];
+    for (const body of bodies) expect(body).not.toMatch(MENTION);
+  });
+
+  it("renderRefsFollowup keeps the names, only without the @", () => {
+    const body = renderRefsFollowup({
+      prNumber: 12,
+      items: ["ask @alice to check", "ping @acme/reviewers"],
+    });
+    expect(body).toContain("alice");
+    expect(body).toContain("acme/reviewers");
+  });
+
+  it("renderRefsFollowup leaves an email alone", () => {
+    expect(
+      renderRefsFollowup({ prNumber: 12, items: ["mail ops@example.com"] }),
+    ).toContain("ops@example.com");
+  });
+
+  it("the marker line is unchanged", () => {
+    for (const kind of [
+      "merge-ready",
+      "no-ci",
+      "needs-human",
+      "refs-followup",
+    ] as const) {
+      expect(deliveryMarker(kind, "H1")).toBe(
+        `<!-- automata:delivery-loop kind=${kind} sha=H1 -->`,
+      );
+    }
   });
 });
