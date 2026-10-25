@@ -1,9 +1,8 @@
 # ADR-013: Image-per-run execution — every agent run is a fresh container from one pinned batteries image
 
-- **Status:** Proposed (2026-10-21). The operator decided the direction and locked the open points on
-  2026-10-21 (see "Locked decisions"); this record fixes _how_. Not implemented: no runtime
-  behaviour changes before the release PR (P3). It stays Proposed until P0's measurements (rootless
-  cgroup enforcement, cold start, RAM, disk) are recorded here, and is Accepted with the release PR.
+- **Status:** Accepted (2026-10-25). Proposed 2026-10-21, when the operator decided the direction
+  and locked the open points (see "Locked decisions"). Released by #498 (P3) and cut over in
+  production 2026-10-24 12:26Z. The measurements and probe results are in "Acceptance record".
 - **Date:** 2026-10-21
 - **Context source:** anchors are against `main` @ `1a13f49a`. The per-phase evidence list (every
   host-model file and function the migration touches, with `file:line`) is in
@@ -285,6 +284,29 @@ its header:
 > are unchanged: the GitHub token stays in the worker, and a review container holds no write
 > credential. Layer 3 customization packs (R3.1, R3.3) become image contents, bumped by a reviewed
 > PR to the image, not packs linked into a HOME.
+
+## Acceptance record (2026-10-25)
+
+Measured after the release (#498) on the production box (8 vCPU, 15 GB RAM, 75 GB disk) and on
+the throwaway box (4 vCPU, 7.6 GB RAM, no swap). Image `fbe9e574` on prod, `61094a87` on the
+throwaway, 12.5 GB each.
+
+| What                                                | Result                                                                                                                                                                                                                                                                                                      |
+| :-------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runs                                                | Prod, 2026-10-24 12:26Z to 2026-10-25 10:00Z: 36 containers created and removed (29 review, 5 task, 2 pr lane). Throwaway (#496 harness, #521 credential): task, review and mention against a test repo, all `complete`.                                                                                    |
+| Rootless cgroup enforcement                         | `--memory` is enforced inside the rootless daemon's cgroup: a prod task run whose `vitest` grew past its 5000M `memory.max` was killed by the memcg OOM killer (`CONSTRAINT_MEMCG`, inside `user@995.service`). The worker typed it `out-of-memory`, the box was unaffected, and other runs continued.      |
+| Cold start (dispatch to agent start, image present) | Prod: n=36, min 13.5 s, median 13.9 s, max 21.8 s, so the median meets the 15 s target. Throwaway: n=3, median 23.3 s on half the vCPUs.                                                                                                                                                                    |
+| RAM                                                 | No box-level OOM on either box. On an 8 GB box with no swap, CommitLimit is 3.9 GB and the commit-fraction admission check defers every run (3.0 GB is committed at idle), so a box that small needs swap or `vm.overcommit_ratio=80`. The 3-concurrent-run measurement (epic #427 AC7) is still to record. |
+| Disk                                                | The 75 GB prod disk holds one 12.5 GB image and has 15 GB free. Re-pulling the previous image for rollback filled it once (#506 now skips that pull below 10 GB free).                                                                                                                                      |
+
+Security probes (`packages/worker/deploy/linux/container-security-probes.sh`), run inside live run
+containers:
+
+- **Throwaway box, review lane, egress enforced (2026-10-25 09:56Z):** all seven PASS. The host
+  recorded the `deny` audit row for `example.org`.
+- **Prod, first live review container after the cutover:** probes 2-7 PASS. Probe 1 needs an
+  enforce-mode policy, and no onboarded repo has one yet (every prod run is in observe mode), so it
+  was proven on the throwaway box.
 
 ## Out of scope
 
