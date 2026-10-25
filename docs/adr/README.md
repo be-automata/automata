@@ -18,7 +18,7 @@ seam — the **Anti-deviation invariants** section of each ADR states what must 
 | [ADR-010](ADR-010-audit-self-heal-single-writer.md)              | Audit self-healing: the agent emits findings, the control plane is the only issue writer      | Accepted (part 1: audit to issues)                                                      |
 | [ADR-011](ADR-011-nango-oauth-vault-behind-credential-broker.md) | Nango is the OAuth vault behind the credential broker; only the control plane calls it        | Proposed                                                                                |
 | [ADR-012](ADR-012-slack-decision-trusted-approver.md)            | Which source is trusted to say who approved a knowledge decision made in Slack                | Accepted                                                                                |
-| [ADR-013](ADR-013-image-per-run-execution.md)                    | Image-per-run execution: every agent run is a fresh container from one pinned batteries image | Proposed                                                                                |
+| [ADR-013](ADR-013-image-per-run-execution.md)                    | Image-per-run execution: every agent run is a fresh container from one pinned batteries image | Accepted                                                                                |
 
 **Note:** [`../uat/adr-036-effect-intent.md`](../uat/adr-036-effect-intent.md) documents the
 effect-intent / emit-only wire format under `docs/uat/` (separate numbering); ADR-004 references it
