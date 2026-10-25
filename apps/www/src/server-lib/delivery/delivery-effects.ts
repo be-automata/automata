@@ -1,6 +1,7 @@
 import type { Octokit } from "octokit";
 
 import { markReadyViaApp } from "@/server-lib/audit/evaluate-fix-ci";
+import { sanitizeAgentText } from "@/server-lib/audit/render-issue";
 
 import type { DeliveryNeedsHumanReason } from "./decide-delivery-step";
 
@@ -14,7 +15,11 @@ import type { DeliveryNeedsHumanReason } from "./decide-delivery-step";
  * and the DB write never posts twice.
  */
 
-export type DeliveryCommentKind = "merge-ready" | "needs-human" | "no-ci";
+export type DeliveryCommentKind =
+  | "merge-ready"
+  | "needs-human"
+  | "no-ci"
+  | "refs-followup";
 
 export function deliveryMarker(kind: DeliveryCommentKind, headSha: string) {
   return `<!-- automata:delivery-loop kind=${kind} sha=${headSha} -->`;
@@ -133,5 +138,52 @@ export function renderNeedsHuman({
     `**The delivery loop stopped at \`${headSha.slice(0, 7)}\`.** ${NEEDS_HUMAN_TEXT[reason]}`,
     "",
     `Fix cycles used: ${cyclesUsed}. A new push to this branch resumes the loop.`,
+  ].join("\n");
+}
+
+/**
+ * The criteria a merged delivery PR left open, from its body: null unless
+ * the body's last line is `Refs #<issue>` (a PR that delivered everything
+ * ends `Closes #<issue>`), else the unticked items of its
+ * `## Acceptance criteria` section, in order.
+ */
+export function parseUndeliveredCriteria(
+  body: string | null | undefined,
+  issueNumber: number,
+): string[] | null {
+  if (!body) return null;
+  const lines = body.split(/\r?\n/);
+  const last = [...lines].reverse().find((l) => l.trim() !== "");
+  if (last?.trim() !== `Refs #${issueNumber}`) return null;
+  const items: string[] = [];
+  let inSection = false;
+  for (const line of lines) {
+    if (/^##\s/.test(line)) {
+      inSection = /^##\s+Acceptance criteria\s*$/i.test(line);
+      continue;
+    }
+    const open = inSection ? /^\s*[-*]\s+\[ \]\s+(.+)$/.exec(line) : null;
+    if (open?.[1]) items.push(open[1].trim());
+  }
+  return items;
+}
+
+export function renderRefsFollowup({
+  prNumber,
+  items,
+}: {
+  prNumber: number;
+  items: string[];
+}): string {
+  const listed =
+    items.length > 0
+      ? items.map((item) => `- [ ] ${sanitizeAgentText(item)}`)
+      : ["- (the PR listed no unticked criteria; see its body)"];
+  return [
+    `**#${prNumber} merged without delivering every criterion.** Still open:`,
+    "",
+    ...listed,
+    "",
+    "Re-label this issue `automata:deliver` to deliver the rest.",
   ].join("\n");
 }

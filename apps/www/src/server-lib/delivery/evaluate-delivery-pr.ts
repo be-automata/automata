@@ -26,10 +26,12 @@ import {
 } from "./decide-delivery-step";
 import {
   markDeliveryPrReady,
+  parseUndeliveredCriteria,
   postDeliveryComment,
   renderMergeReady,
   renderNeedsHuman,
   renderNoCi,
+  renderRefsFollowup,
 } from "./delivery-effects";
 import { loadDeliveryLoopMode } from "./delivery-mode";
 import { readDeliveryHeadCi } from "./head-ci";
@@ -134,7 +136,7 @@ async function evaluateLeased({
     return { status: "failed", reason: `bad repo ${initial.repoFullName}` };
   }
   const octokit = await deps.octokitFor({ owner, repo });
-  const { pr, nodeId, conflicting } = await readSnapshot({
+  const { pr, nodeId, conflicting, body } = await readSnapshot({
     deps,
     octokit,
     owner,
@@ -149,6 +151,7 @@ async function evaluateLeased({
     botLogin: deps.botLogin(),
     nodeId,
     conflicting,
+    body,
   };
   const steps: DeliveryStep[] = [];
   let row = initial;
@@ -189,7 +192,12 @@ async function readSnapshot({
   owner: string;
   repo: string;
   row: DeliveryPullRequestRow;
-}): Promise<{ pr: DeliveryPrSnapshot; nodeId: string; conflicting: boolean }> {
+}): Promise<{
+  pr: DeliveryPrSnapshot;
+  nodeId: string;
+  conflicting: boolean;
+  body: string | null;
+}> {
   const signal = AbortSignal.timeout(GITHUB_READ_TIMEOUT_MS);
   const { data: pull } = await octokit.rest.pulls.get({
     owner,
@@ -223,6 +231,7 @@ async function readSnapshot({
   return {
     nodeId: pull.node_id,
     conflicting: pull.mergeable_state === "dirty",
+    body: pull.body ?? null,
     pr: {
       state: pull.state === "closed" ? "closed" : "open",
       merged: pull.merged_at !== null && pull.merged_at !== undefined,
@@ -247,6 +256,8 @@ interface GithubTarget {
   nodeId: string;
   /** GitHub reports a conflict with the base (mergeable_state "dirty"). */
   conflicting: boolean;
+  /** The PR body as GitHub has it now (a merge's `Refs #N` follow-up reads it). */
+  body: string | null;
 }
 
 interface ReviewLike {
@@ -331,11 +342,28 @@ async function applyStep({
   switch (step.kind) {
     case "noop":
       return null;
-    case "close":
+    case "close": {
+      // A merge that left criteria open (`Refs #N`) tells the issue what is
+      // left; a re-label by a person delivers it (no automatic re-run).
+      const open =
+        mode === "on" && step.phase === "merged"
+          ? parseUndeliveredCriteria(github.body, row.issueNumber)
+          : null;
+      if (open !== null) {
+        await postDeliveryComment(
+          { ...github, prNumber: row.issueNumber },
+          {
+            kind: "refs-followup",
+            headSha: pr.headSha,
+            body: renderRefsFollowup({ prNumber: row.prNumber, items: open }),
+          },
+        );
+      }
       return await move(deps.db, row, {
         phase: step.phase,
         lastReason: `pr ${step.phase}`,
       });
+    }
     case "observe_head":
       return await move(deps.db, row, {
         phase: step.phase,
