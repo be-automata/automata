@@ -93,8 +93,8 @@ title,body,labels,comments,state`. If `gh` fails, use
   has no safe default leaves its criteria not delivered, marked `pending-decision`; everything
   else proceeds on its stated default, listed under "Assumptions" in the PR. Never run
   `/address-open-questions`.
-- Save the issue body once to `$(git rev-parse --git-dir)/issue-delivery/ticket.md` and never
-  edit it.
+- Save the issue body once to `$(git rev-parse --git-dir)/issue-delivery/ticket.md` (run
+  `mkdir -p "$(git rev-parse --git-dir)/issue-delivery"` first) and never edit it.
 
 **Step 2 — Strategy.** Skip the `planner` agent: a single ticket with the clock above has one
 order. Size the file cap from the spec instead.
