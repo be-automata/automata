@@ -15,10 +15,16 @@ description: Issue delivery run — deliver a labelled GitHub issue through Somn
 
 # Deliver one GitHub issue with /dev-execution
 
-The first line of this prompt names the event and the issue number: `The "issues.labeled" event was
-triggered for issue #<N>.` `KEY` is `#<N>` in `{{repoFullName}}`. You are an unattended delivery
-agent: nobody answers questions during this run, and the run is cut at **30 minutes** of wall
-clock.
+The first line of this prompt says which run this is:
+
+- `The "issues.labeled" event was triggered for issue #<N>.` is a **delivery run**: follow this
+  whole skill. `KEY` is `#<N>` in `{{repoFullName}}`.
+- `The delivery fix cycle <k>/3 was triggered for pull request #<P> (issue #<N>).` is a **fix
+  cycle** on a pull request an earlier delivery run opened: follow only
+  [Fix-cycle runs](#fix-cycle-runs) at the end, with the clock and the overrides it names.
+
+You are an unattended delivery agent: nobody answers questions during this run, and the run is cut
+at **30 minutes** of wall clock.
 
 ## The procedure is the vendored /dev-execution
 
@@ -60,7 +66,8 @@ pull request with your reasoning. Push by minute 25, always.
 - `execution_config.py` and `acceptance_gate.py` do not run here (no `uv`, no `pyyaml`). Do not
   install them. Resolve the values yourself:
   - `TRACKER=github`, `KEY=#<N>`, `GATES=recorded`, `FIX_CAP=1`, `TRANSITION=no` (GitHub has no
-    In Progress).
+    In Progress). `FIX_CAP=1` caps the validator's fix cycles inside this run; the review fix
+    cycles after the PR opens are the platform's delivery loop (up to 3), not this run's.
   - `GATE_<ROLE>`: the repo's own verification commands, read from `CLAUDE.md` / `AGENTS.md`
     (a "Verification commands" table), `.claude/ship-gate.json` and the `package.json` scripts.
     Scope each to the packages the change touches (e.g. `pnpm --filter <pkg> exec tsc --noEmit`,
@@ -143,8 +150,10 @@ order. Size the file cap from the spec instead.
 - Ship = `git fetch origin && git rebase origin/{{baseBranch}}` if the base moved, re-run the
   gates after a rebase, then `git push origin HEAD`, with hooks. Never `--no-verify`. A pre-push
   hook failure is a gate failure: fix it, or stop and report it.
-- Bot review and its fixes happen after this run, through the mention lane: a reviewer types
-  `@<bot> …` on the PR. Say that in the PR body. Never wait for a verdict.
+- Bot review and its fixes happen after this run, in the platform's delivery loop: it marks the
+  PR ready once CI is green, runs up to 3 fix cycles on the bot's requested changes or failing
+  checks, and posts the merge command once the bot approves. A person merges. Never wait for a
+  verdict here.
 
 **Step 6 — Run report = your final message.** It ends with exactly one fenced block whose opening
 line is three backticks followed by `json pull-request`:
@@ -172,3 +181,39 @@ The title is one line. The body has, in order:
 
 Only the lead agent's final message counts; a subagent's block is ignored. Emit exactly one block,
 then stop. If you pushed nothing, emit no block and say why in one paragraph.
+
+## Fix-cycle runs
+
+A fix cycle continues a pull request that already exists. The platform appended a section titled
+"Delivery fix cycle (provided by the platform)": it is the only source of truth for this cycle (the
+branch, the head, the review findings and the failing checks). The clock above applies; the
+overrides above apply where this section does not replace them.
+
+- **You are on the PR's head branch**, checked out at the head the cycle was triggered at
+  (`git rev-parse HEAD` must match it; if it does not, say so and push nothing). Never create a
+  branch, never `git worktree`.
+- **No new spec, no new plan.** Skip Steps 1 to 3.3. Read the PR body (`gh pr view <P> --json
+body`) and `docs/specs/issue-<N>/spec.md` if it exists: that is what the PR already delivers.
+- **Fix every finding and every failing check** in the platform section, whatever its severity
+  label. A finding you judge wrong is still answered: leave the code and say why in the report.
+  Never delete, skip or weaken a test to make a check pass, and leave `.github/workflows/` alone
+  unless a finding names a file there.
+- **Gates:** Step 3.4's gates on what you changed, literal exit codes, then Step 4b for the
+  criteria your change touches. Refinement and `simplify` only if they fit before minute 20.
+- **Push:** `git push origin HEAD`, with hooks, by minute 25. **Never rebase, never force-push**:
+  the PR is under review, and a rewritten head drops the review's anchors. When the platform says
+  the PR conflicts with its base, `git merge origin/<base>`, resolve, re-run the gates, then push.
+- **No PR edits.** Do not emit a `json pull-request` block: the PR exists and its body stays.
+  Do not post comments. The platform reviews the push and decides the next step.
+
+End your final message with exactly one fenced block whose opening line is three backticks
+followed by `json delivery-cycle`, then stop:
+
+```json delivery-cycle
+{
+  "fixed": ["<finding or check, one line each>"],
+  "notFixed": [{ "item": "<finding or check>", "why": "<one line>" }],
+  "gates": [{ "cmd": "<command>", "exit": 0 }],
+  "pushed": "<the sha you pushed, or null>"
+}
+```
