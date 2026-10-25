@@ -27,6 +27,7 @@ import {
   AccessTier,
   CompanionLaneStamp,
   DBUserMessage,
+  DeliveryLaneStamp,
   MentionLaneStamp,
   ThreadTrustContext,
 } from "@terragon/shared";
@@ -160,6 +161,11 @@ export async function runAutomation({
        * at an unchanged head is not read as a replay of the earlier review.
        */
       reviewBase?: string;
+      /**
+       * #509 delivery loop: the fix cycle this thread runs. The cycle-finish
+       * hook settles the cycle row it names.
+       */
+      delivery?: DeliveryLaneStamp;
     };
   };
   source: "automated" | "manual";
@@ -337,6 +343,9 @@ export async function runAutomation({
               : {}),
             ...(options?.stampExtra?.reviewBase
               ? { reviewBase: options.stampExtra.reviewBase }
+              : {}),
+            ...(options?.stampExtra?.delivery
+              ? { delivery: options.stampExtra.delivery }
               : {}),
           },
           automation: automation,

@@ -47,6 +47,7 @@ import { isAuditFixAction } from "@/server-lib/review/review-skill";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { waitUntil } from "@/lib/wait-until";
 import { mapLimit } from "@/lib/map-limit";
+import { isDeliveryLoopOwned } from "@/server-lib/delivery/exclusions";
 import { deferWebhookWork, errorText } from "./defer-webhook-work";
 // publicAppUrl is used within utils via postBillingLinkComment
 export type PullRequestEvent = EmitterWebhookEvent<"pull_request">["payload"];
@@ -294,10 +295,17 @@ async function handlePullRequestAutomation(
   // bot — dependabot, or this App pushing its own branch — is not reviewed.
   // Keyed on the SENDER, not the PR author: a human pushing to a bot's branch
   // is still reviewed. ready_for_review is always a human act and stays in.
+  // #509: except a delivery-loop fix-cycle push (sent by the App), which the
+  // loop needs reviewed to get its verdict.
   if (
     config.filter.excludeBotSenders &&
     event.sender?.type === "Bot" &&
-    (event.action === "opened" || event.action === "synchronize")
+    (event.action === "opened" || event.action === "synchronize") &&
+    !(await isDeliveryLoopOwned({
+      repoFullName,
+      headRef: event.pull_request.head?.ref,
+      prNumber,
+    }))
   ) {
     console.log(
       `Skipping automation ${automation.id} for PR #${prNumber} in ${repoFullName}: ${event.action} sent by bot ${event.sender.login}`,
@@ -1163,6 +1171,16 @@ export async function handlePullRequestReviewMirror(
   if (event.review.state !== "changes_requested") {
     return;
   }
+  // #509: the delivery loop runs this PR's fix cycles itself.
+  if (
+    await isDeliveryLoopOwned({
+      repoFullName: event.repository.full_name,
+      headRef: event.pull_request.head?.ref,
+      prNumber: event.pull_request.number,
+    })
+  ) {
+    return;
+  }
   await createMirrorTask({
     repoFullName: event.repository.full_name,
     installationId: installationIdOf(event),
@@ -1189,6 +1207,15 @@ export async function handleWorkflowRunEvent(
   // GATE-01: CI on a self-heal fix branch is judged by the fix gate, never
   // turned into a ci-failure mirror task.
   if (event.workflow_run.head_branch?.startsWith(FIX_BRANCH_PREFIX)) {
+    return;
+  }
+  // #509: so is CI on a delivery-loop PR (its fix cycles cover CI).
+  if (
+    await isDeliveryLoopOwned({
+      repoFullName: event.repository.full_name,
+      headRef: event.workflow_run.head_branch,
+    })
+  ) {
     return;
   }
   await createMirrorTask({

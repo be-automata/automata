@@ -245,6 +245,34 @@ describe("#509 delivery effects (mode on)", () => {
     );
   });
 
+  it("a red draft dispatches one fix cycle in mode on, and only records it in shadow", async () => {
+    const red: DeliveryHeadCi = {
+      state: "failure",
+      gateSource: "all-checks",
+      failing: ["test"],
+      noCi: false,
+    };
+    const runCycle = vi.fn(async () => ({
+      status: "not_started" as const,
+      reason: "duplicate" as const,
+    }));
+    await evaluate({ ...deps(fakeGithub({ draft: true }), red), runCycle });
+    expect(runCycle).toHaveBeenCalledTimes(1);
+    expect((runCycle.mock.calls as unknown[][])[0]?.[0]).toMatchObject({
+      headSha: "H1",
+      trigger: "ci",
+      reviewId: null,
+      failingChecks: ["test"],
+      conflicting: false,
+    });
+    const shadowCycle = vi.fn();
+    await evaluate({
+      ...deps(fakeGithub({ draft: true }), red, "shadow"),
+      runCycle: shadowCycle,
+    });
+    expect(shadowCycle).not.toHaveBeenCalled();
+  });
+
   it("shadow never writes to GitHub", async () => {
     const github = fakeGithub({ draft: true, author: "Bot" });
     await evaluate(deps(github, GREEN, "shadow"));
