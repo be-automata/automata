@@ -280,6 +280,104 @@ describe("executeReviewFromIntent — resolutions + verify-before-block", () => 
     expect(client.resolveThread).toHaveBeenCalledTimes(1);
   });
 
+  // #504: a draft-era bare comment that yields to the ready-PR verdict at
+  // HEAD leaves that verdict's open threads alone.
+  it("a draft-era note that yielded to a verdict at HEAD → nothing is resolved", async () => {
+    const github = makeGithub([
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "CHANGES_REQUESTED",
+        submittedAt: "t",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: "fix the guard",
+      },
+    ]);
+    const client = makeThreadClient([openThread()]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      draftAtDispatch: true,
+      terminalText: intent({ verdict: "comment", summary: "Draft: fine." }),
+      threadResolutions: { client, claim: async () => true },
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(client.findThreadByCommentId).not.toHaveBeenCalled();
+  });
+
+  it("a draft-era note that yielded to another COMMENT → nothing is resolved", async () => {
+    const github = makeGithub([
+      {
+        id: 1,
+        user: { login: BOT },
+        state: "COMMENTED",
+        submittedAt: "t",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: "One thing worth a look.",
+      },
+    ]);
+    const client = makeThreadClient([openThread()]);
+    const res = await executeReviewFromIntent({
+      github,
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      draftAtDispatch: true,
+      terminalText: intent({ verdict: "comment", summary: "Draft: fine." }),
+      threadResolutions: { client, claim: async () => true },
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(client.findThreadByCommentId).not.toHaveBeenCalled();
+  });
+
+  it("a redelivered draft-era note that already posted still finishes its resolutions", async () => {
+    // First delivery posts the note, then "crashes" before resolutions.
+    const first = makeGithub([]);
+    const terminalText = intent({
+      verdict: "comment",
+      summary: "Draft: fine.",
+    });
+    const base = {
+      repoFullName: REPO,
+      prNumber: PR,
+      botLogin: BOT,
+      currentHeadSha: HEAD,
+      isDraft: false,
+      draftAtDispatch: true,
+      terminalText,
+    };
+    await executeReviewFromIntent({ ...base, github: first });
+    const postedBody = first.submitReviewWithComments.mock.calls[0]![4];
+    // The redelivery finds that same note in force at HEAD.
+    const github = makeGithub([
+      {
+        id: 2,
+        user: { login: BOT },
+        state: "COMMENTED",
+        submittedAt: "t",
+        dismissedAt: null,
+        commitId: HEAD,
+        body: postedBody,
+      },
+    ]);
+    const client = makeThreadClient([openThread()]);
+    const res = await executeReviewFromIntent({
+      ...base,
+      github,
+      threadResolutions: { client, claim: async () => true },
+    });
+    expect(res.outcome).toBe("skipped_existing");
+    expect(client.resolveThread).toHaveBeenCalledTimes(1);
+  });
+
   it("stale intent → nothing is resolved", async () => {
     const github = makeGithub([]);
     const client = makeThreadClient([openThread()]);

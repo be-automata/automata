@@ -17,12 +17,13 @@ import {
 import { resolveApproveFloor } from "./resolve-approve-floor";
 import {
   executeReviewFromIntent,
-  isDegradedComment,
+  isNotAVerdict,
   snapshotOf,
 } from "./execute-review-from-intent";
 import {
   isReviewThread,
   reviewBaseOfThread,
+  reviewIsDraftOfThread,
   selectReviewTerminalText,
 } from "./review-single-writer-finish";
 import { isPrAuthoredByBot } from "./bot-login";
@@ -164,7 +165,9 @@ export async function runReviewSweep(): Promise<void> {
       // would have run the backstop on a PR that already had a verdict. The
       // check lives in the one shared helper, so this guard and the two in
       // execute-review-from-intent.ts cannot diverge — divergence is what
-      // produced #213, #221 and this issue.
+      // produced #213, #221 and this issue. `isNotAVerdict` also drops a
+      // draft-era note (#504): it answers the PR as it was, so a thread whose
+      // real verdict never posted is still backstopped.
       //
       // A DISMISSED verdict at HEAD also skips. The sweep sees every terminal
       // review thread in the window, including ones whose finish hook posted
@@ -173,7 +176,7 @@ export async function runReviewSweep(): Promise<void> {
       // person's decision; a delivered verdict is never delivered twice.
       const reviews = await github.listReviews(c.repoFullName, c.prNumber);
       const existing = await findAnyBotReviewAtCommit({
-        github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
+        github: snapshotOf(reviews.filter((r) => !isNotAVerdict(r))),
         repo: c.repoFullName,
         prNumber: c.prNumber,
         headSha: currentHeadSha,
@@ -205,6 +208,8 @@ export async function runReviewSweep(): Promise<void> {
         // The same draft state the finish hook passes: it caps the floor at
         // `comment` and decides whether a bare `comment` is a verdict at all.
         isDraft,
+        // ...and the same dispatch-time draft stamp (#504).
+        draftAtDispatch: reviewIsDraftOfThread(c),
         // The same author check the finish hook makes: on a PR the bot opened
         // a formal verdict 422s, so without it this backstop would fail the
         // same post again every hour for the whole lookback window.

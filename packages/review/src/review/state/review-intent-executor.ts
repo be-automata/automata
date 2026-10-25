@@ -60,7 +60,11 @@ export interface ReviewIntent {
 
 export type ReviewIntentOutcome =
   | { outcome: "posted"; verdict: ReviewVerdict }
-  | { outcome: "skipped_existing" }
+  /**
+   * `yieldedTo` is set only on a `yieldTo` skip: the review in force at HEAD
+   * this note stood down for. Absent = this intent was already posted.
+   */
+  | { outcome: "skipped_existing"; yieldedTo?: GitHubReview }
   | { outcome: "post_failed"; failureReason: string };
 
 export interface ExecuteReviewIntentOpts {
@@ -88,6 +92,21 @@ export interface ExecuteReviewIntentOpts {
    * key below, unchanged).
    */
   isSameReview?: (existing: GitHubReview) => boolean;
+  /**
+   * Never supersede: a bot review in force at HEAD that this predicate
+   * accepts, whatever its state, means skip. For a note that must not replace
+   * a review the PR already has (a draft-era `comment` on a PR that has since
+   * left draft); the caller excludes reviews that are not real reviews.
+   * Absent = today's supersede rules.
+   */
+  yieldTo?: (existing: GitHubReview) => boolean;
+  /**
+   * Which bot reviews in force at HEAD may be this post's supersede target.
+   * The caller excludes reviews that are not verdicts (a degraded comment, a
+   * draft-era note): a COMMENT cannot be dismissed, so picking one would
+   * leave the real prior verdict in force next to the new one. Absent = any.
+   */
+  canSupersede?: (existing: GitHubReview) => boolean;
 }
 
 const SUPERSEDE_AT_HEAD_REASON =
@@ -193,15 +212,61 @@ export async function executeReviewIntent(
 
   const wantedState = reviewStateForVerdict(intent.verdict);
   const isSameReview = opts.isSameReview;
+  // A yielding note never supersedes: ONE snapshot decides, `existing` stays
+  // null below, and a failed read posts nothing.
+  const yieldTo = opts.yieldTo;
+  if (yieldTo) {
+    try {
+      const inForce = (await github.listReviews(repo, prNumber)).find(
+        (r) =>
+          r.user?.login === botLogin &&
+          r.commitId === headSha &&
+          r.dismissedAt === null &&
+          yieldTo(r),
+      );
+      if (inForce) {
+        logger?.info(
+          "review-executor: a bot review is in force at HEAD; yielding to it (never superseded)",
+          {
+            repo,
+            prNumber,
+            headSha,
+            verdict: intent.verdict,
+            existingReviewId: inForce.id,
+            existingReviewState: inForce.state,
+          },
+        );
+        return { outcome: "skipped_existing", yieldedTo: inForce };
+      }
+    } catch (err) {
+      // No read, no post: a yielding note has no other idempotency check, so
+      // posting blind would add a duplicate on every retry while GitHub flaps.
+      const failureReason = `yield check failed: ${getErrorMessage(err)}`;
+      logger?.warn("review-executor: yield check failed; not posting", {
+        repo,
+        prNumber,
+        error: failureReason,
+      });
+      return { outcome: "post_failed", failureReason };
+    }
+  }
   let existing: GitHubReview | null = null;
   try {
-    existing = await findBotReviewAtHead({
-      github,
-      repo,
-      prNumber,
-      headSha,
-      botLogin,
-    });
+    // ONE listing answers both "what is in force at HEAD?" and, with
+    // `isSameReview`, "is any of it this review?" (no second round trip).
+    const reviews = yieldTo ? [] : await github.listReviews(repo, prNumber);
+    existing = yieldTo
+      ? null
+      : await findBotReviewAtHead({
+          github: {
+            listReviews: async () =>
+              opts.canSupersede ? reviews.filter(opts.canSupersede) : reviews,
+          },
+          repo,
+          prNumber,
+          headSha,
+          botLogin,
+        });
     const alreadyPosted = !existing
       ? false
       : !isSameReview
@@ -209,7 +274,7 @@ export async function executeReviewIntent(
         : // Every bot review in force at HEAD, not only the first: an earlier
           // review of a different change that could not be dismissed (a
           // COMMENT) must not hide a redelivery of this one.
-          (await github.listReviews(repo, prNumber)).some(
+          reviews.some(
             (r) =>
               r.user?.login === botLogin &&
               r.commitId === headSha &&

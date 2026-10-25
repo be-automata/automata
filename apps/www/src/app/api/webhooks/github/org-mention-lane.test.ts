@@ -316,6 +316,8 @@ describe("routing: org lane vs the legacy per-user path", () => {
       commentId: event.comment.id,
       commentKind: "issue",
       commenterLogin: "alice",
+      // #504: the draft state the prompt states, for the finish to judge by.
+      isDraft: false,
     });
     const message: DBUserMessage = {
       type: "user",
@@ -365,6 +367,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
     expect(call.options?.issueNumber).toBe(7);
     expect(call.options?.branchName).toBe("main");
     expect(call.options?.stampExtra?.mention?.isPullRequest).toBe(false);
+    expect(call.options?.stampExtra?.mention).not.toHaveProperty("isDraft");
   });
 
   it("repo-level hook: no installation in the payload → looked up from the App", async () => {
@@ -550,6 +553,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
     const text = first?.type === "text" ? first.text : "";
     expect(text).toContain("On GitHub this pull request is a draft.");
     expect(text).not.toContain("ready for review, not a draft");
+    expect(call.options?.stampExtra?.mention?.isDraft).toBe(true);
   });
 
   it("a fork PR: one short reply, no thread, no reaction", async () => {

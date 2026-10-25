@@ -372,6 +372,24 @@ describe("maybeStartQueuedThreadChat — drain + stale retirement (S12)", () => 
       (await chatRow(reviewed.threadId, reviewed.threadChatId)).errorMessage,
     ).toBe("queue-retired");
 
+    // #504: a draft-era note at the commit is not a verdict; the notice posts.
+    gh.reviews = [
+      {
+        id: 2,
+        user: { login: BOT },
+        commit_id: SHA,
+        state: "COMMENTED",
+        body: "Draft: fine.\n\n<!-- automata:draft-era-note -->",
+        submitted_at: new Date().toISOString(),
+        dismissed_at: null,
+      },
+    ];
+    await queuedReview(506, ago(90 * MIN));
+    await maybeStartQueuedThreadChat({ userId: user.id });
+    expect(gh.createComment).toHaveBeenCalledTimes(1);
+    gh.createComment.mockClear();
+    gh.comments = [];
+
     gh.reviews = [];
     gh.createCommentError = new Error("HTTP 502");
     const failing = await queuedReview(505, ago(90 * MIN));

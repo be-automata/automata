@@ -95,6 +95,7 @@ import {
   botAuthoredVerdictLine,
   executeReviewFromIntent,
   DEGRADED_INTENT_MARKER,
+  DRAFT_ERA_NOTE_MARKER,
 } from "./execute-review-from-intent";
 
 import {
@@ -189,6 +190,28 @@ describe("runReviewSweep — which terminal runs it may speak for", () => {
       expect(executeReviewFromIntent).toHaveBeenCalledWith(
         expect.objectContaining({ isDraft }),
       );
+    },
+  );
+
+  // #504: the same dispatch-time draft stamp the finish hook passes.
+  it.each([true, false, undefined])(
+    "hands the executor the thread's dispatch draft stamp (reviewIsDraft=%s)",
+    async (reviewIsDraft) => {
+      selected.rows = [
+        candidate({
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName: "github-ops",
+            contentSha: "sha",
+            source: "db-version",
+            ...(reviewIsDraft === undefined ? {} : { reviewIsDraft }),
+          },
+        }),
+      ];
+      await runReviewSweep();
+      expect(
+        vi.mocked(executeReviewFromIntent).mock.calls[0]![0].draftAtDispatch,
+      ).toBe(reviewIsDraft);
     },
   );
 
@@ -321,6 +344,19 @@ describe("runReviewSweep — a degraded comment is silence, not a verdict (#224)
     // sweep matched A's silence and skipped, and B's verdict was lost forever.
     prReviews.rows = [
       review({ body: `${DEGRADED_INTENT_MARKER}\n\n_Reason: x._` }),
+    ];
+    selected.rows = [candidate({ terminalCause: "timeout" })];
+
+    await runReviewSweep();
+
+    expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+  });
+
+  // #504: a draft-era note answers the PR as it was; it is not the verdict
+  // this candidate owed the ready PR.
+  it("a DRAFT-ERA note at HEAD does NOT skip the candidate — the backstop runs", async () => {
+    prReviews.rows = [
+      review({ body: `Draft: fine.\n\n${DRAFT_ERA_NOTE_MARKER}` }),
     ];
     selected.rows = [candidate({ terminalCause: "timeout" })];
 

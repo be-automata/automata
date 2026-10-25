@@ -17,6 +17,7 @@ import {
 } from "./mention-reply-finish";
 import { MENTION_SKILL_NAME, validateSkillBody } from "./review-skill";
 import { resolveBotLogin } from "./bot-login";
+import { executeReviewFromIntent } from "./execute-review-from-intent";
 
 /**
  * The mention lane's terminal writer: the agent emits one `json mention-reply`
@@ -49,6 +50,18 @@ vi.mock(
 );
 vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: vi.fn() }),
+}));
+// The routing tests observe what the finish hands the review executor; the
+// executor itself has its own suite.
+vi.mock("./execute-review-from-intent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./execute-review-from-intent")>()),
+  executeReviewFromIntent: vi.fn(async () => ({
+    outcome: "posted" as const,
+    verdict: "comment",
+  })),
+}));
+vi.mock("./resolve-approve-floor", () => ({
+  resolveApproveFloor: vi.fn(async () => undefined),
 }));
 
 const ISSUE_STAMP: MentionLaneStamp = {
@@ -327,7 +340,19 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
         listComments: vi.fn(),
         createComment: vi.fn(async () => ({ data: {} })),
       },
-      pulls: { createReplyForReviewComment: vi.fn(async () => ({ data: {} })) },
+      pulls: {
+        createReplyForReviewComment: vi.fn(async () => ({ data: {} })),
+        // The live PR read: ready now.
+        get: vi.fn(async () => ({
+          data: {
+            head: { sha: "abc" },
+            draft: false,
+            state: "open",
+            user: { login: "octocat" },
+            base: { ref: "main" },
+          },
+        })),
+      },
     },
   };
   const args = {
@@ -365,6 +390,49 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
     await handleMentionReplyAtFinish(args);
     expect(getOctokitForApp).not.toHaveBeenCalled();
   });
+
+  // #504: a mention review judges a bare `comment` by the draft state the
+  // mention's prompt stated, beside the live read.
+  it.each([true, false, undefined])(
+    "a PR mention's review gets the stamped draft state (isDraft=%s)",
+    async (isDraft) => {
+      vi.mocked(getThreadChat).mockResolvedValue({
+        messages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [
+              {
+                type: "text",
+                text: block({
+                  kind: "mention-reply",
+                  reply: "Reviewed.",
+                  review: { verdict: "comment", commit: "abc", summary: "ok" },
+                }),
+              },
+            ],
+          },
+        ],
+      } as never);
+      vi.mocked(getThreadMinimal).mockResolvedValue({
+        organizationId: "o-1",
+        terminalCause: null,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: MENTION_SKILL_NAME,
+          contentSha: "x",
+          source: "db-version",
+          mention:
+            isDraft === undefined ? ISSUE_STAMP : { ...ISSUE_STAMP, isDraft },
+        },
+      } as never);
+      await handleMentionReplyAtFinish(args);
+      expect(executeReviewFromIntent).toHaveBeenCalledTimes(1);
+      const reviewArgs = vi.mocked(executeReviewFromIntent).mock.calls[0]![0];
+      expect(reviewArgs.draftAtDispatch).toBe(isDraft);
+      expect(reviewArgs.isDraft).toBe(false);
+    },
+  );
 
   it("a review-comment mention → the App replies in the thread", async () => {
     vi.mocked(getThreadMinimal).mockResolvedValue({

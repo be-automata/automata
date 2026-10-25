@@ -161,6 +161,8 @@ export async function runAutomation({
        * at an unchanged head is not read as a replay of the earlier review.
        */
       reviewBase?: string;
+      /** PR-event runs: the PR's draft state at dispatch (#504). */
+      reviewIsDraft?: boolean;
       /**
        * #509 delivery loop: the fix cycle this thread runs. The cycle-finish
        * hook settles the cycle row it names.
@@ -343,6 +345,9 @@ export async function runAutomation({
               : {}),
             ...(options?.stampExtra?.reviewBase
               ? { reviewBase: options.stampExtra.reviewBase }
+              : {}),
+            ...(options?.stampExtra?.reviewIsDraft !== undefined
+              ? { reviewIsDraft: options.stampExtra.reviewIsDraft }
               : {}),
             ...(options?.stampExtra?.delivery
               ? { delivery: options.stampExtra.delivery }
@@ -878,6 +883,9 @@ export async function runPullRequestAutomation({
         stampExtra: {
           ...(companion ? { companion } : {}),
           ...(pr.base?.ref ? { reviewBase: pr.base.ref } : {}),
+          // The draft state the prompt below states, so finish judges the
+          // run's bare `comment` against what the agent was told (#504).
+          ...(pr.draft !== undefined ? { reviewIsDraft: pr.draft } : {}),
         },
         // The control plane names the base in EVERY PR-event prompt, whatever
         // the skill body says: a skill without {{baseBranch}} left the agent

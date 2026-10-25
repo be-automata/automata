@@ -65,7 +65,7 @@ The notice:
 
 `comment` stays a review in two cases: on a draft PR, and when it carries findings (the agent
 surfacing findings below the repository's block floor, or the approve floor downgrading an
-`approve`).
+`approve`). #504 adds a third, the draft-era note (see Consequences).
 
 ## Options considered
 
@@ -99,13 +99,24 @@ Negative / watch:
   the notice posts, and the notice then names the run's error (`run_failed`). Ledger:
   `review_rerun` (one row per re-run; UNIQUE per (PR, head, attempt) and per failed thread).
   A re-run is skipped when the PR closed, its head moved, or a verdict already sits at HEAD.
+- #504 amends this: "a draft" is judged by what the run's prompt said, not only by the live
+  read. PR-event runs stamp the dispatch draft state (`sourceMetadata.reviewIsDraft`), PR
+  mentions stamp `MentionLaneStamp.isDraft`. A bare `comment` about live HEAD (and the commit
+  the run was dispatched to) from a non-abandoned run told "draft" is not a no-verdict when the
+  PR left draft mid-run: it posts as a **draft-era note**, a `COMMENTED` review whose server-
+  appended last line is `<!-- automata:draft-era-note -->` (agent text is stripped of it). The
+  note yields to any real same-base bot review in force at HEAD, never supersedes or becomes a
+  supersede target, never retires a notice, and posts nothing when the review lookup fails.
+  Every "verdict at this commit?" guard ignores it (`isNotAVerdict`), so it is never the verdict
+  a later run, the sweep, the re-run planner or the queue-retired notice looks for. A ready-PR
+  run is still expected to deliver the real verdict.
 
 ## Anti-deviation invariants
 
 1. No code path may call `submitReview` or `submitReviewWithComments` for a run without a verdict.
 2. `unable_to_review` is not a member of the verdict enum and never reaches the review executor.
 3. Notice matching always checks the author and matches the marker as a prefix.
-4. An absent draft flag is read as "ready for review".
+4. An absent draft flag is read as "ready for review" (live and dispatch stamp alike).
 5. A failure to publish, dedup or retire a notice never throws and never costs a verdict.
 
 ## Testing
@@ -115,4 +126,6 @@ Negative / watch:
 `parse-review-intent.test.ts` ("unable_to_review"), `review-sweep.test.ts` (draft state reaches
 the executor), `skill-contract-drift.test.ts` (the skill's unable example parses),
 `execute-review-from-intent.rerun.test.ts` and `review-rerun.test.ts` (#107 deferral, bound,
-dispatch-time skips).
+dispatch-time skips); "draft at dispatch, ready at finish" in
+`execute-review-from-intent.test.ts`, `review-intent-executor.test.ts` (`yieldTo`,
+`canSupersede`) and `review-rerun-pr-state.test.ts` (#504).

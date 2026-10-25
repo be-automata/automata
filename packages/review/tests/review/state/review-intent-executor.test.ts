@@ -321,3 +321,146 @@ describe("executeReviewIntent — caller-owned isSameReview (retarget at an unch
     assert.equal(github.dismissReview.mock.calls.length, 0);
   });
 });
+
+describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
+  for (const state of ["APPROVED", "CHANGES_REQUESTED", "COMMENTED"] as const) {
+    test(`a ${state} review in force at HEAD wins: skip, never dismiss`, async () => {
+      const github = makeGithub([botReviewAtHead(state, 5)]);
+      const res = await executeReviewIntent({
+        github,
+        repo: REPO,
+        prNumber: PR,
+        headSha: HEAD,
+        botLogin: BOT,
+        intent: { verdict: "comment", body: "draft note" },
+        yieldTo: () => true,
+      });
+      assert.deepEqual(res, {
+        outcome: "skipped_existing",
+        yieldedTo: botReviewAtHead(state, 5),
+      });
+      assert.equal(github.submitReviewWithComments.mock.calls.length, 0);
+      assert.equal(github.dismissReview.mock.calls.length, 0);
+    });
+  }
+
+  test("the yield returns the review it stood down for", async () => {
+    const github = makeGithub([botReviewAtHead("APPROVED", 5)]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: () => true,
+    });
+    assert.equal(res.outcome, "skipped_existing");
+    assert.equal(
+      res.outcome === "skipped_existing" ? res.yieldedTo?.id : undefined,
+      5,
+    );
+  });
+
+  for (const [label, review] of [
+    [
+      "dismissed",
+      {
+        ...botReviewAtHead("APPROVED", 5),
+        dismissedAt: "2026-10-24T00:00:00Z",
+      },
+    ],
+    ["older-commit", { ...botReviewAtHead("APPROVED", 5), commitId: "old" }],
+    [
+      "another user's",
+      { ...botReviewAtHead("APPROVED", 5), user: { login: "alice" } },
+    ],
+  ] as const) {
+    test(`a ${label} review is not in force: posts`, async () => {
+      const github = makeGithub([review]);
+      const res = await executeReviewIntent({
+        github,
+        repo: REPO,
+        prNumber: PR,
+        headSha: HEAD,
+        botLogin: BOT,
+        intent: { verdict: "comment", body: "draft note" },
+        yieldTo: () => true,
+      });
+      assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+      assert.equal(github.dismissReview.mock.calls.length, 0);
+    });
+  }
+
+  test("nothing at HEAD: posts as usual", async () => {
+    const github = makeGithub([]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: () => true,
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+  });
+
+  test("reads the reviews ONCE; a failed read posts nothing", async () => {
+    const github = makeGithub([botReviewAtHead("APPROVED", 5)]);
+    let calls = 0;
+    github.listReviews.mock.mockImplementation(async () => {
+      calls++;
+      if (calls === 1) throw new Error("502");
+      return [botReviewAtHead("APPROVED", 5)];
+    });
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: () => true,
+    });
+    assert.equal(res.outcome, "post_failed");
+    assert.equal(calls, 1);
+    assert.equal(github.submitReviewWithComments.mock.calls.length, 0);
+    assert.equal(github.dismissReview.mock.calls.length, 0);
+  });
+
+  test("a review the predicate rejects is not yielded to", async () => {
+    const github = makeGithub([
+      { ...botReviewAtHead("COMMENTED", 5), body: "degraded" },
+    ]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "comment", body: "draft note" },
+      yieldTo: (r) => r.body !== "degraded",
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
+  });
+});
+
+describe("executeReviewIntent — canSupersede (#504)", () => {
+  test("a rejected review at HEAD is never the supersede target: the real prior verdict is dismissed", async () => {
+    const note = { ...botReviewAtHead("COMMENTED", 4), body: "draft note" };
+    const github = makeGithub([note, botReviewAtHead("APPROVED", 5)]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "request_changes", body: "bug" },
+      canSupersede: (r) => r.body !== "draft note",
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "request_changes" });
+    assert.equal(github.dismissReview.mock.calls.length, 1);
+    assert.equal(github.dismissReview.mock.calls[0].arguments[2], 5);
+  });
+});

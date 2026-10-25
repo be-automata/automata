@@ -17,7 +17,7 @@ import { findAnyBotReviewAtCommit } from "@terragon/review/state/head-review-gua
 import { redactSecrets } from "@terragon/utils/redact";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { resolveBotLogin } from "./bot-login";
-import { isDegradedComment, snapshotOf } from "./execute-review-from-intent";
+import { isNotAVerdict, snapshotOf } from "./execute-review-from-intent";
 import { createOctokitReviewClient } from "./octokit-review-client";
 
 /**
@@ -305,7 +305,7 @@ export async function runReviewRerunDispatcher(
   return counts;
 }
 
-async function readPrStateForRerun(
+export async function readPrStateForRerun(
   repoFullName: string,
   prNumber: number,
 ): Promise<RerunPrState> {
@@ -322,7 +322,7 @@ async function readPrStateForRerun(
     prNumber,
   );
   const verdict = await findAnyBotReviewAtCommit({
-    github: snapshotOf(reviews.filter((r) => !isDegradedComment(r))),
+    github: snapshotOf(reviews.filter((r) => !isNotAVerdict(r))),
     repo: repoFullName,
     prNumber,
     headSha,
