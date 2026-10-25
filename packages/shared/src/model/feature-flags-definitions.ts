@@ -141,6 +141,11 @@ export const featureFlagsDefinitions = {
     description:
       "Global switch for the audit self-healing loop. Off stops every self-heal GitHub effect and dispatch immediately; reviews are unaffected.",
   },
+  deliveryLoop: {
+    defaultValue: false,
+    description:
+      "Global switch for the issue-delivery loop (#509): mark a delivery PR ready on green CI, run up to 3 fix cycles on the bot's requested changes or failing checks, and post the merge command once approved. Off stops every loop effect and dispatch on the next evaluation; the per-repo delivery_loop_mode still picks off/shadow/on under it.",
+  },
   harnessBatteries: {
     defaultValue: false,
     description:

@@ -159,7 +159,23 @@ export type ThreadSourceMetadata =
       // idempotency on it, so a retarget at an unchanged head is a new
       // review, not a replay. Absent on threads written before it existed.
       reviewBase?: string;
+      // #509 delivery loop: set ONLY on fix-cycle threads. The cycle-finish
+      // hook settles the cycle row it names.
+      delivery?: DeliveryLaneStamp;
     };
+
+/**
+ * The delivery-loop fix cycle a thread runs (#509). The issue number lives
+ * here, never on `thread.githubIssueNumber`: the per-issue label-run cap
+ * (#324) counts threads by that column, and a fix cycle is not a label run.
+ */
+export type DeliveryLaneStamp = {
+  deliveryPrId: string;
+  cycleNo: number;
+  /** The PR head the cycle was triggered at. */
+  headSha: string;
+  issueNumber: number;
+};
 
 /**
  * The pull request a PR companion run reports on. Written at intake from the
