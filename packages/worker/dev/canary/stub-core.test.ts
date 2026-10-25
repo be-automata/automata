@@ -13,6 +13,7 @@ import type { CanaryThreadSpec } from "./thread-spec";
 const TOKEN = "daemon-token-0123456789abcdef0123456789abcdef";
 const OTHER_TOKEN = "daemon-token-ffffffffffffffffffffffffffffffff";
 const API_KEY = "sk-ant-canary-test-key-0123456789";
+const SETUP_TOKEN = "sk-ant-oat01-canary-test-token-0123456789";
 
 function spec(over: Partial<CanaryThreadSpec> = {}): CanaryThreadSpec {
   return {
@@ -119,6 +120,36 @@ describe("canary stub: daemon-token check", () => {
       },
     });
     expect(JSON.stringify(records)).not.toContain(API_KEY);
+  });
+
+  // card: protects=a subscription setup-token is served in www's claudeAiOauth shape, not as an API key; fails_when=the CLI gets the token as anthropicApiKey and every model call 401s; no_claim=the token's validity
+  it("serves a setup-token as www's claudeAiOauth json-file credential", () => {
+    const records: Record<string, unknown>[] = [];
+    const at = new Date("2026-10-25T00:00:00Z");
+    const handle = createStubHandler({
+      store: createThreadStore(() => [spec()]),
+      readAnthropicKey: () => SETUP_TOKEN,
+      record: (e) => records.push(e),
+      now: () => at,
+    });
+    const res = handle({
+      method: "POST",
+      path: "/api/daemon/agent-credentials",
+      headers: { "x-daemon-token": TOKEN },
+      body: JSON.stringify({ threadId: "thread-1", threadChatId: "chat-1" }),
+    });
+    expect(res.status).toBe(200);
+    const body = res.json as { credentials: { contents: string } };
+    expect(JSON.parse(body.credentials.contents)).toEqual({
+      claudeAiOauth: {
+        accessToken: SETUP_TOKEN,
+        refreshToken: "",
+        expiresAt: at.getTime() + 365 * 24 * 60 * 60 * 1000,
+        scopes: ["user:inference"],
+        subscriptionType: null,
+      },
+    });
+    expect(JSON.stringify(records)).not.toContain(SETUP_TOKEN);
   });
 });
 

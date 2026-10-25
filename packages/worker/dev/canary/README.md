@@ -86,6 +86,10 @@ allowlist = your hosts + **the callback host (e.g. `<random>.trycloudflare.com`)
 
 **Model traffic.** The stub serves an owner credential (`json-file`
 `{"anthropicApiKey": …}`, www's shape for an Anthropic API-key credential).
+A key file holding a `claude setup-token` token (`sk-ant-oat…`) is served in
+www's setup-token shape instead (`{"claudeAiOauth": {accessToken, refreshToken:
+"", far-future expiresAt}}`), so a subscription works too. Never copy a live
+interactive login: its access token dies when the source refreshes.
 With `WORKER_BOX_TRUST=owner`, the worker delivers it into the run HOME, forces
 `useCredits=false`, and the daemon sets `ANTHROPIC_API_KEY` from the file. No
 `ANTHROPIC_BASE_URL` is set, so the agent calls `api.anthropic.com` directly
@@ -100,7 +104,7 @@ would call `<callback>/api/proxy/anthropic`. The stub answers that path with
 # 0. Worker env (in its systemd env file): WORKER_BOX_TRUST=owner; it already holds HATCHET_CLIENT_TOKEN for the
 #    local engine and the seal ring at /etc/automata/payload-seal.key.
 install -d -m 0700 /var/lib/automata-canary /etc/automata-canary
-install -m 0600 /dev/null /etc/automata-canary/anthropic.key   # then write the key into it
+install -m 0600 /dev/null /etc/automata-canary/anthropic.key   # then write the API key or setup-token into it
 install -m 0600 /dev/null /etc/automata-canary/gh-app.pem      # then write the App private key into it
 
 # 1. Stub (loopback) + tunnel
