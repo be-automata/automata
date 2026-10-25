@@ -120,6 +120,13 @@ order. Size the file cap from the spec instead.
   brief; the commit happens only after a separate verify step saw literal zero exits from the
   gates (`echo "exit=$?"` after each command, never a pipe that hides the code). Stop starting
   phases at minute 20; the phases not built are criteria not delivered.
+- After each phase's commit, `git push origin HEAD`. A pushed phase survives anything that ends
+  the run early; an unpushed commit dies with the container.
+- **Ending your turn ends the run.** Nobody re-invokes you: a scheduled wakeup never fires, and
+  any subagent or command still running is killed with the container. So every `Agent` call
+  runs in the foreground (never `run_in_background: true`), one at a time, and you wait for its
+  result in the same turn. Never call `ScheduleWakeup`, `CronCreate` or `Monitor`, and never end
+  a turn to wait for anything. Stop only after the push and the final message.
 - Every Bash call runs in the foreground (`timeout` up to 600000). Background Bash and `Monitor`
   are blocked here; a long command is run once, in the foreground, scoped down.
 
