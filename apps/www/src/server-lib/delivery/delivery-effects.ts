@@ -25,19 +25,29 @@ interface PrRef {
   owner: string;
   repo: string;
   prNumber: number;
+  /** The App's bot login: only its own comments are the loop's. */
+  botLogin: string;
 }
 
-/** The id of the loop's comment carrying `marker`, if one exists. */
+/**
+ * The id of the loop's own comment carrying `marker`, if one exists. A
+ * comment by anyone else that quotes or pastes the marker is not adopted, or
+ * the loop would skip its real comment and still move the row.
+ */
 async function findMarkedComment(
-  { octokit, owner, repo, prNumber }: PrRef,
+  { octokit, owner, repo, prNumber, botLogin }: PrRef,
   marker: string,
 ): Promise<number | null> {
+  const bot = botLogin.toLowerCase();
   for await (const page of octokit.paginate.iterator(
     octokit.rest.issues.listComments,
     { owner, repo, issue_number: prNumber, per_page: 100 },
   )) {
     const hit = page.data.find(
-      (c) => typeof c.body === "string" && c.body.includes(marker),
+      (c) =>
+        c.user?.login?.toLowerCase() === bot &&
+        typeof c.body === "string" &&
+        c.body.includes(marker),
     );
     if (hit) return hit.id;
   }

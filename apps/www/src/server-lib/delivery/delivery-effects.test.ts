@@ -38,7 +38,13 @@ interface FakeGithub {
   octokit: Octokit;
   graphql: ReturnType<typeof vi.fn>;
   createComment: ReturnType<typeof vi.fn>;
-  comments: { id: number; body: string }[];
+  comments: FakeComment[];
+}
+
+interface FakeComment {
+  id: number;
+  body: string;
+  user: { login: string };
 }
 
 function fakeGithub({
@@ -50,13 +56,14 @@ function fakeGithub({
   draft: boolean;
   reviews?: unknown[];
   author?: string;
-  comments?: { id: number; body: string }[];
+  comments?: FakeComment[];
 }): FakeGithub {
   const store = [...comments];
   const graphql = vi.fn(async () => ({}));
+  // Comments the loop posts are the App's, as on GitHub.
   const createComment = vi.fn(async ({ body }: { body: string }) => {
     const id = 1000 + store.length;
-    store.push({ id, body });
+    store.push({ id, body, user: { login: BOT } });
     return { data: { id } };
   });
   const listComments = vi.fn();
@@ -193,12 +200,14 @@ describe("#509 delivery effects (mode on)", () => {
     expect(github.graphql).not.toHaveBeenCalled();
   });
 
-  it("needs_human posts one stop comment; a comment that survived a crash is adopted, not re-posted", async () => {
+  it("needs_human posts one stop comment; the loop's own comment that survived a crash is adopted, not re-posted", async () => {
     const marker = deliveryMarker("needs-human", "H1");
     const github = fakeGithub({
       draft: true,
       author: "Bot",
-      comments: [{ id: 77, body: `earlier text\n\n${marker}` }],
+      comments: [
+        { id: 77, body: `earlier text\n\n${marker}`, user: { login: BOT } },
+      ],
     });
     await evaluate(deps(github));
     expect(github.createComment).not.toHaveBeenCalled();
@@ -207,6 +216,24 @@ describe("#509 delivery effects (mode on)", () => {
       stopCommentId: 77,
       lastReason: "app_authored_pr",
     });
+  });
+
+  it("a person's comment that quotes or pastes the marker is never adopted: the loop posts its own", async () => {
+    const marker = deliveryMarker("needs-human", "H1");
+    const github = fakeGithub({
+      draft: true,
+      author: "Bot",
+      comments: [
+        {
+          id: 55,
+          body: `> quoting the bot\n> ${marker}`,
+          user: { login: "alice" },
+        },
+      ],
+    });
+    await evaluate(deps(github));
+    expect(github.createComment).toHaveBeenCalledTimes(1);
+    expect((await getDeliveryPr(db, deliveryPrId))?.stopCommentId).toBe(1001);
   });
 
   it("a fresh needs_human posts its stop comment with the reason", async () => {

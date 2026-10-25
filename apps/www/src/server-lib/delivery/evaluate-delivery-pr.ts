@@ -143,6 +143,7 @@ async function evaluateLeased({
     owner,
     repo,
     prNumber: initial.prNumber,
+    botLogin: deps.botLogin(),
     nodeId,
   };
   const steps: DeliveryStep[] = [];
@@ -235,6 +236,8 @@ interface GithubTarget {
   owner: string;
   repo: string;
   prNumber: number;
+  /** The App's bot login: the author of the loop's own comments. */
+  botLogin: string;
   /** The PR's GraphQL node id (the ready mutation takes it). */
   nodeId: string;
 }
