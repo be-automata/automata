@@ -53,6 +53,7 @@ export async function recordHatchetRun({
   prNumber,
   externalId,
   snapshot,
+  tenantId,
 }: {
   db: DB;
   threadId: string;
@@ -62,6 +63,8 @@ export async function recordHatchetRun({
   externalId: string;
   /** #125 C5: the policy snapshot stamped at dispatch (absent on legacy dispatches). */
   snapshot?: SupersedeSnapshot;
+  /** #374: the Hatchet tenant the run was dispatched into (absent/NULL = env tenant). */
+  tenantId?: string | null;
 }): Promise<HatchetRun> {
   const [row] = await db
     .insert(hatchetRun)
@@ -71,6 +74,7 @@ export async function recordHatchetRun({
       repoFullName: normalizeRepo(repoFullName),
       prNumber,
       externalId,
+      ...(tenantId != null ? { tenantId } : {}),
       ...(snapshot
         ? {
             supersedePolicy: snapshot.policy,
@@ -191,6 +195,7 @@ export async function findSweepCandidates({
       repoFullName: hatchetRun.repoFullName,
       prNumber: hatchetRun.prNumber,
       externalId: hatchetRun.externalId,
+      tenantId: hatchetRun.tenantId,
       createdAt: hatchetRun.createdAt,
       // #125 C5: the snapshot + thread columns the recheck needs — in the
       // same join, so the sweep's terminal path adds zero extra reads.
