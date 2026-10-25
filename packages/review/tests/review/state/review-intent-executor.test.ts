@@ -444,3 +444,22 @@ describe("executeReviewIntent — yieldTo (#504 draft-era comment)", () => {
     assert.deepEqual(res, { outcome: "posted", verdict: "comment" });
   });
 });
+
+describe("executeReviewIntent — canSupersede (#504)", () => {
+  test("a rejected review at HEAD is never the supersede target: the real prior verdict is dismissed", async () => {
+    const note = { ...botReviewAtHead("COMMENTED", 4), body: "draft note" };
+    const github = makeGithub([note, botReviewAtHead("APPROVED", 5)]);
+    const res = await executeReviewIntent({
+      github,
+      repo: REPO,
+      prNumber: PR,
+      headSha: HEAD,
+      botLogin: BOT,
+      intent: { verdict: "request_changes", body: "bug" },
+      canSupersede: (r) => r.body !== "draft note",
+    });
+    assert.deepEqual(res, { outcome: "posted", verdict: "request_changes" });
+    assert.equal(github.dismissReview.mock.calls.length, 1);
+    assert.equal(github.dismissReview.mock.calls[0].arguments[2], 5);
+  });
+});

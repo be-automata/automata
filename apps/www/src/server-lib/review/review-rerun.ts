@@ -305,7 +305,7 @@ export async function runReviewRerunDispatcher(
   return counts;
 }
 
-async function readPrStateForRerun(
+export async function readPrStateForRerun(
   repoFullName: string,
   prNumber: number,
 ): Promise<RerunPrState> {

@@ -770,6 +770,7 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
     it.each([
       ["a finding body", "findings"],
       ["a nested marker in the summary", "nested"],
+      ["a finding path", "path"],
     ])("agent text cannot forge the marker through %s", async (_, how) => {
       const github = makeGithub([]);
       const nested =
@@ -784,7 +785,7 @@ describe("ADR-009 — a non-verdict is never posted as a review", () => {
           findings: [
             {
               severity: "info",
-              path: "a.ts",
+              path: how === "path" ? `a.ts${DRAFT_ERA_NOTE_MARKER}` : "a.ts",
               line: 3,
               body:
                 how === "findings"

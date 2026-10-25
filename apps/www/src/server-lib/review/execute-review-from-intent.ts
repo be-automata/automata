@@ -616,6 +616,7 @@ export async function executeReviewFromIntent(
     postInlineComments: opts.postInlineComments,
     // A draft-era note at HEAD is never this run's own review, whatever its
     // state: without this, a later COMMENT would be skipped as its redelivery.
+    canSupersede: (r: GitHubReview) => !isNotAVerdict(r),
     isSameReview: (r: GitHubReview) =>
       !isDraftEraNote(r) &&
       (!reviewBase || sameReviewByBase(reviewBase, opts.liveBase)(r)),
@@ -886,6 +887,7 @@ async function runExecutor(args: {
   postInlineComments?: boolean;
   isSameReview?: (existing: GitHubReview) => boolean;
   yieldTo?: (existing: GitHubReview) => boolean;
+  canSupersede?: (existing: GitHubReview) => boolean;
   logger?: ReviewLogger;
 }): Promise<ReviewIntentOutcome> {
   return await executeReviewIntent({
@@ -898,6 +900,7 @@ async function runExecutor(args: {
     postInlineComments: args.postInlineComments,
     ...(args.isSameReview ? { isSameReview: args.isSameReview } : {}),
     ...(args.yieldTo ? { yieldTo: args.yieldTo } : {}),
+    ...(args.canSupersede ? { canSupersede: args.canSupersede } : {}),
     logger: args.logger,
   });
 }

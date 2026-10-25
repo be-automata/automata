@@ -100,6 +100,13 @@ export interface ExecuteReviewIntentOpts {
    * Absent = today's supersede rules.
    */
   yieldTo?: (existing: GitHubReview) => boolean;
+  /**
+   * Which bot reviews in force at HEAD may be this post's supersede target.
+   * The caller excludes reviews that are not verdicts (a degraded comment, a
+   * draft-era note): a COMMENT cannot be dismissed, so picking one would
+   * leave the real prior verdict in force next to the new one. Absent = any.
+   */
+  canSupersede?: (existing: GitHubReview) => boolean;
 }
 
 const SUPERSEDE_AT_HEAD_REASON =
@@ -246,7 +253,10 @@ export async function executeReviewIntent(
     existing = yieldTo
       ? null
       : await findBotReviewAtHead({
-          github: { listReviews: async () => reviews },
+          github: {
+            listReviews: async () =>
+              opts.canSupersede ? reviews.filter(opts.canSupersede) : reviews,
+          },
           repo,
           prNumber,
           headSha,
