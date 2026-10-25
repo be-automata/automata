@@ -449,7 +449,10 @@ tag next to a digest, is refused with exit 2 before anything runs: the worker's 
 `gh attestation verify oci://…@sha256:… --repo be-automata/automata`, `verify.sh` as the worker
 account, then it records the digest in `/etc/automata/batteries-image.state` (`CURRENT=`, and the
 digest it replaces as `PREVIOUS=`) and keeps the previous digest pulled (it pulls it back if it is
-gone, and never removes an image), so an image rollback is an env change. Root; from a checkout at
+gone, and never removes an image), so an image rollback is an env change. It skips that pull, with
+a WARNING, when it would leave under `PREVIOUS_MIN_FREE_GB` (default 10) free in the rootless store:
+two 12.5 GB images on the production box's 75 GB disk left 3.3 GB and `verify.sh` died with ENOSPC.
+A rollback on such a box pulls the previous digest first. Root; from a checkout at
 the revision being deployed:
 
 ```bash

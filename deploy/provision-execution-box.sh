@@ -32,7 +32,10 @@ umask 022
 #                       the CURRENT it replaces becomes PREVIOUS
 #   previous-image      the PREVIOUS digest stays pulled (pulled back if gone),
 #                       so an image rollback is an env change. This script never
-#                       removes an image.
+#                       removes an image. It is not pulled back when that would
+#                       leave under PREVIOUS_MIN_FREE_GB (default 10) free in the
+#                       rootless store: skip with a WARNING, and a rollback then
+#                       pulls it first.
 #   worker-runtime      full mode: node (the worker's floor) and pnpm on the host (checked only:
 #                       the cloud-init.yaml base bring-up installs them)
 #   worker-launcher     full mode: run-worker.sh.template -> ~/.automata/run-worker.sh
@@ -75,6 +78,7 @@ umask 022
 RUNNER=automata-runner
 SOCK=/run/automata-docker/docker.sock
 STATE=/etc/automata/batteries-image.state
+PREVIOUS_MIN_FREE_GB="${PREVIOUS_MIN_FREE_GB:-10}"
 ATTEST_REPO=be-automata/automata
 UNIT_PATH=/etc/systemd/system/automata-worker.service
 LOOPBACK_CONF=/etc/automata/loopback-nft.conf
@@ -402,7 +406,25 @@ step_previous() {
   if ! (validate_image "$previous") 2>/dev/null; then
     fail previous-image "PREVIOUS in $STATE is not a digest reference"
   fi
+  # Measured against CURRENT, so only once it is in the store: a dry run has
+  # not pulled it yet and falls through to "would pull".
+  if image_present "$image" && ! image_present "$previous" && ! previous_fits; then
+    report skip previous-image "WARNING not pulled: ${previous#*@} would leave under ${PREVIOUS_MIN_FREE_GB} GB free in the rootless store (an image rollback re-pulls it first)"
+    return
+  fi
   step_pull previous-image "$previous"
+}
+
+# previous_fits: pulling one more image the size of CURRENT still leaves
+# PREVIOUS_MIN_FREE_GB free where the rootless daemon stores images. A 12.5 GB
+# image twice on a 75 GB disk left 3.3 GB, and verify.sh (and every run's
+# workspace) died with ENOSPC; runs need the disk more than a rollback image.
+previous_fits() {
+  local root size avail
+  root="$(runner_docker info -f '{{.DockerRootDir}}')" || return 1
+  size="$(runner_docker image inspect -f '{{.Size}}' "$image")" || return 1
+  avail="$(df -B1 --output=avail "$root" | tail -n 1)" || return 1
+  [ $((avail - size)) -ge $((PREVIOUS_MIN_FREE_GB * 1024 * 1024 * 1024)) ]
 }
 
 # ── full mode only: the worker unit, its launcher and its env ────────────────
