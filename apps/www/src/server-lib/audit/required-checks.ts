@@ -56,7 +56,7 @@ export interface CommitStatusLike {
 
 export type RequiredChecksResult = { names: string[] } | { unavailable: true };
 
-interface RawBranch {
+export interface RawBranch {
   protection?: {
     required_status_checks?: {
       contexts?: string[] | null;
@@ -65,7 +65,7 @@ interface RawBranch {
   } | null;
 }
 
-interface RawRule {
+export interface RawRule {
   type?: string;
   parameters?: {
     required_status_checks?: Array<{ context?: string | null }> | null;
@@ -154,20 +154,31 @@ export async function readRequiredChecks({
     }),
   ]);
   if (!branch.ok || !rules.ok) return { unavailable: true };
+  return { names: requiredCheckNamesFrom(branch.data, rules.data) };
+}
 
+/**
+ * The required check names in a branch read and a branch-rules read (either
+ * null = absent or forbidden), sorted. Pure: the delivery loop (#509) reads
+ * the same two endpoints outside the self-heal breaker and decides with this.
+ */
+export function requiredCheckNamesFrom(
+  branch: RawBranch | null,
+  rules: readonly RawRule[] | null,
+): string[] {
   const names = new Set<string>();
-  const classic = branch.data?.protection?.required_status_checks;
+  const classic = branch?.protection?.required_status_checks;
   for (const context of classic?.contexts ?? []) names.add(context);
   for (const check of classic?.checks ?? []) {
     if (check.context) names.add(check.context);
   }
-  for (const rule of rules.data ?? []) {
+  for (const rule of rules ?? []) {
     if (rule.type !== "required_status_checks") continue;
     for (const check of rule.parameters?.required_status_checks ?? []) {
       if (check.context) names.add(check.context);
     }
   }
-  return { names: [...names].sort() };
+  return [...names].sort();
 }
 
 /**
