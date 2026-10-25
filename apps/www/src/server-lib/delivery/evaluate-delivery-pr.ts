@@ -24,6 +24,13 @@ import {
   type DeliveryPrSnapshot,
   type DeliveryStep,
 } from "./decide-delivery-step";
+import {
+  markDeliveryPrReady,
+  postDeliveryComment,
+  renderMergeReady,
+  renderNeedsHuman,
+  renderNoCi,
+} from "./delivery-effects";
 import { loadDeliveryLoopMode } from "./delivery-mode";
 import { readDeliveryHeadCi } from "./head-ci";
 
@@ -35,10 +42,12 @@ import { readDeliveryHeadCi } from "./head-ci";
  * (phase, head_sha) and decides again on the updated row, at most
  * MAX_STEPS times. Never throws.
  *
- * Effects in this revision: phase changes are written in every mode. The
- * steps that would write to GitHub or dispatch a run (mark ready, the
- * merge-ready and stop comments, fix cycles) are only recorded: a shadow
- * cycle row and `last_reason`. Effects land behind mode "on" separately.
+ * Effects: phase changes are written in every mode. GitHub writes (mark
+ * ready, the merge-ready, no-CI and stop comments) happen in mode "on" only;
+ * in shadow they are recorded as `last_reason`. A GitHub write ends the
+ * evaluation: the snapshot no longer describes the PR, and the webhook the
+ * write causes (ready_for_review, a review) evaluates it afresh. Fix cycles
+ * are still recorded only (a shadow cycle row) in this revision.
  */
 
 const MAX_STEPS = 4;
@@ -122,7 +131,20 @@ async function evaluateLeased({
     return { status: "failed", reason: `bad repo ${initial.repoFullName}` };
   }
   const octokit = await deps.octokitFor({ owner, repo });
-  const pr = await readSnapshot({ deps, octokit, owner, repo, row: initial });
+  const { pr, nodeId } = await readSnapshot({
+    deps,
+    octokit,
+    owner,
+    repo,
+    row: initial,
+  });
+  const github: GithubTarget = {
+    octokit,
+    owner,
+    repo,
+    prNumber: initial.prNumber,
+    nodeId,
+  };
   const steps: DeliveryStep[] = [];
   let row = initial;
   for (let i = 0; i < MAX_STEPS; i++) {
@@ -134,7 +156,7 @@ async function evaluateLeased({
       now: deps.now(),
     });
     steps.push(step);
-    const next = await applyStep({ deps, row, pr, step, mode });
+    const next = await applyStep({ deps, github, row, pr, step, mode });
     console.log("[delivery-loop] step", {
       deliveryPrId: row.id,
       mode,
@@ -162,7 +184,7 @@ async function readSnapshot({
   owner: string;
   repo: string;
   row: DeliveryPullRequestRow;
-}): Promise<DeliveryPrSnapshot> {
+}): Promise<{ pr: DeliveryPrSnapshot; nodeId: string }> {
   const signal = AbortSignal.timeout(GITHUB_READ_TIMEOUT_MS);
   const { data: pull } = await octokit.rest.pulls.get({
     owner,
@@ -194,14 +216,27 @@ async function readSnapshot({
     }),
   ]);
   return {
-    state: pull.state === "closed" ? "closed" : "open",
-    merged: pull.merged_at !== null && pull.merged_at !== undefined,
-    draft: pull.draft === true,
-    headSha,
-    authorIsBot: pull.user?.type === "Bot",
-    ci,
-    ...summarizeReviews(reviews, headSha, deps.botLogin()),
+    nodeId: pull.node_id,
+    pr: {
+      state: pull.state === "closed" ? "closed" : "open",
+      merged: pull.merged_at !== null && pull.merged_at !== undefined,
+      draft: pull.draft === true,
+      headSha,
+      authorIsBot: pull.user?.type === "Bot",
+      ci,
+      ...summarizeReviews(reviews, headSha, deps.botLogin()),
+    },
   };
+}
+
+/** Where a mode-"on" effect writes. */
+interface GithubTarget {
+  octokit: Octokit;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  /** The PR's GraphQL node id (the ready mutation takes it). */
+  nodeId: string;
 }
 
 interface ReviewLike {
@@ -269,12 +304,14 @@ async function readLatestCycle(
  */
 async function applyStep({
   deps,
+  github,
   row,
   pr,
   step,
   mode,
 }: {
   deps: EvaluateDeliveryDeps;
+  github: GithubTarget;
   row: DeliveryPullRequestRow;
   pr: DeliveryPrSnapshot;
   step: DeliveryStep;
@@ -302,11 +339,29 @@ async function applyStep({
         ...(step.recordReadyAt ? { readyMarkedAt: now } : {}),
         lastReason: step.reason,
       });
-    case "needs_human":
-      return await move(deps.db, row, {
+    case "needs_human": {
+      if (mode !== "on") {
+        return await move(deps.db, row, {
+          phase: "needs_human",
+          lastReason: step.reason,
+        });
+      }
+      const stopCommentId = await postDeliveryComment(github, {
+        kind: "needs-human",
+        headSha: pr.headSha,
+        body: renderNeedsHuman({
+          reason: step.reason,
+          headSha: pr.headSha,
+          cyclesUsed: row.cyclesUsed,
+        }),
+      });
+      await move(deps.db, row, {
         phase: "needs_human",
+        stopCommentId,
         lastReason: step.reason,
       });
+      return null;
+    }
     case "start_cycle":
       await recordShadowFixCycle(deps.db, {
         deliveryPrId: row.id,
@@ -322,11 +377,47 @@ async function applyStep({
       );
       return null;
     case "mark_ready":
-      await record(deps.db, row, `${mode}: would mark ready`);
+      if (mode !== "on") {
+        await record(deps.db, row, `${mode}: would mark ready`);
+        return null;
+      }
+      await markDeliveryPrReady(github.octokit, github.nodeId);
+      if (step.noCi) {
+        await postDeliveryComment(github, {
+          kind: "no-ci",
+          headSha: pr.headSha,
+          body: renderNoCi(),
+        });
+      }
+      await move(deps.db, row, {
+        phase: "awaiting_review",
+        readyMarkedHeadSha: pr.headSha,
+        readyMarkedAt: now,
+        lastReason: step.noCi ? "marked ready (no repo CI)" : "marked ready",
+      });
       return null;
-    case "merge_ready":
-      await record(deps.db, row, `${mode}: would post merge-ready`);
+    case "merge_ready": {
+      if (mode !== "on") {
+        await record(deps.db, row, `${mode}: would post merge-ready`);
+        return null;
+      }
+      const mergeReadyCommentId = await postDeliveryComment(github, {
+        kind: "merge-ready",
+        headSha: pr.headSha,
+        body: renderMergeReady({
+          prNumber: row.prNumber,
+          headSha: pr.headSha,
+          approver: deps.botLogin(),
+        }),
+      });
+      await move(deps.db, row, {
+        phase: "merge_ready",
+        mergeReadyHeadSha: pr.headSha,
+        mergeReadyCommentId,
+        lastReason: "merge-ready comment posted",
+      });
       return null;
+    }
   }
 }
 
