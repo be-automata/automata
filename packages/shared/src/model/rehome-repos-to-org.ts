@@ -108,6 +108,7 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "usage_events",
   "usage_events_agg_cache_sku",
   "agent_provider_credentials",
+  "hatchet_tenant_binding",
   "organization_review_settings",
   "organization_environment",
   "organization_environment_event",
