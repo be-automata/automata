@@ -51,6 +51,7 @@ export const REHOME_MOVE_BY_REPO: readonly RehomeByRepoTable[] = [
   { table: "audit_findings", repoColumn: "repo_full_name" },
   { table: "audit_effects", repoColumn: "repo_full_name" },
   { table: "audit_fix_attempts", repoColumn: "repo_full_name" },
+  { table: "delivery_pull_requests", repoColumn: "repo_full_name" },
   { table: "knowledge_claim", repoColumn: "repo_full_name" },
   { table: "knowledge_pin", repoColumn: "repo_full_name" },
   { table: "knowledge_op", repoColumn: "repo_full_name" },
