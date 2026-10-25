@@ -182,4 +182,42 @@ describe("#509 runDeliveryFixCycle", () => {
     });
     expect(runAutomation).toHaveBeenCalledTimes(1);
   });
+
+  it("once the thread exists a failed bind refunds nothing: the cycle stays in flight", async () => {
+    // A thread id that does not exist makes the bind's FK fail (it throws).
+    const runAutomation = vi.fn(async () => ({
+      threadId: "no-such-thread",
+      threadChatId: "c",
+    }));
+    expect(await run(runAutomation)).toMatchObject({
+      status: "dispatched",
+      threadId: "no-such-thread",
+    });
+    expect(await getDeliveryPr(db, row.id)).toMatchObject({
+      phase: "fixing",
+      cyclesUsed: 1,
+    });
+    expect((await listDeliveryFixCycles(db, row.id))[0]).toMatchObject({
+      state: "dispatching",
+      threadId: null,
+    });
+  });
+
+  it("an abandoned dispatch can be retried at the same head", async () => {
+    await run(
+      vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    );
+    row = (await getDeliveryPr(db, row.id))!; // exists: enrolled in beforeEach
+    const cycleThread = (await createTestThread({ db, userId })).threadId;
+    expect(
+      await run(
+        vi.fn(async () => ({ threadId: cycleThread, threadChatId: "c" })),
+      ),
+    ).toMatchObject({ status: "dispatched", threadId: cycleThread });
+    expect(await listDeliveryFixCycles(db, row.id)).toMatchObject([
+      { state: "running", threadId: cycleThread },
+    ]);
+  });
 });

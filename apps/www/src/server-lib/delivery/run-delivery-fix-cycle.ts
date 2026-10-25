@@ -99,6 +99,7 @@ export async function runDeliveryFixCycle({
     return { status: "abandoned", reason };
   };
 
+  let cycleThreadId: string;
   try {
     const [owner, repo] = row.repoFullName.split("/");
     if (!owner || !repo) return await abandon(`bad repo ${row.repoFullName}`);
@@ -158,20 +159,35 @@ export async function runDeliveryFixCycle({
       },
     });
     if (!thread) return await abandon("runAutomation created no thread");
-    await bindDeliveryFixCycleThread(db, {
-      cycleId: cycle.id,
-      threadId: thread.threadId,
-    });
-    return {
-      status: "dispatched",
-      cycleId: cycle.id,
-      threadId: thread.threadId,
-    };
+    cycleThreadId = thread.threadId;
   } catch (error: unknown) {
     return await abandon(
       error instanceof Error ? error.message : String(error),
     );
   }
+  // The thread exists from here on and will push: never abandon (a refund
+  // would let a second cycle run on the same branch). A failed bind leaves
+  // the cycle dispatching; the finish hook and the sweep bind it by stamp.
+  try {
+    if (
+      !(await bindDeliveryFixCycleThread(db, {
+        cycleId: cycle.id,
+        threadId: cycleThreadId,
+      }))
+    ) {
+      console.error("[delivery-loop] cycle bind refused", {
+        cycleId: cycle.id,
+        threadId: cycleThreadId,
+      });
+    }
+  } catch (error: unknown) {
+    console.error("[delivery-loop] cycle bind failed", {
+      cycleId: cycle.id,
+      threadId: cycleThreadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return { status: "dispatched", cycleId: cycle.id, threadId: cycleThreadId };
 }
 
 async function readReview({

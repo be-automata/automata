@@ -425,4 +425,41 @@ describe("#509 delivery loop ledger", () => {
     expect(cycles.map((c) => c.cycleNo)).toEqual([1, 2, 3, 4, 5]);
     expect(new Set(cycles.map((c) => c.triggerHeadSha)).size).toBe(5);
   });
+
+  it("an abandoned cycle does not wedge its head: the next start at that head reuses it", async () => {
+    const { row } = await enroll();
+    const start = (expectedPhase: "awaiting_ci" | "fixing") =>
+      startDeliveryFixCycle(db, {
+        deliveryPrId: row.id,
+        expectedPhase,
+        headSha: "sha-1",
+        trigger: "ci",
+        reviewId: null,
+        failingChecks: ["test"],
+      });
+    const first = await start("awaiting_ci");
+    if (first.kind !== "started") throw new Error("expected a started cycle");
+    await abandonDeliveryFixCycle(db, {
+      cycleId: first.cycle.id,
+      restorePhase: "awaiting_ci",
+      reason: "thread create failed",
+      now,
+    });
+    const retry = await start("awaiting_ci");
+    expect(retry.kind).toBe("started");
+    const cycles = await listDeliveryFixCycles(db, row.id);
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]).toMatchObject({
+      id: first.cycle.id,
+      state: "dispatching",
+      threadId: null,
+      finishedAt: null,
+    });
+    expect(await getDeliveryPr(db, row.id)).toMatchObject({
+      phase: "fixing",
+      cyclesUsed: 1,
+    });
+    // A cycle that really started (not abandoned) still blocks its head.
+    expect(await start("fixing")).toEqual({ kind: "duplicate" });
+  });
 });

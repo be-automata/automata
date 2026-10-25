@@ -72,7 +72,7 @@ describe("#509 delivery fix-cycle finish", () => {
     cycle = started.cycle;
   });
 
-  async function cycleThread(stamped = true): Promise<string> {
+  async function cycleThread(stamped = true, bind = true): Promise<string> {
     const stamp: ThreadSourceMetadata = {
       type: "automation-skill",
       skillName: "issue-delivery",
@@ -96,7 +96,9 @@ describe("#509 delivery fix-cycle finish", () => {
         overrides: { sourceMetadata: stamp },
       })
     ).threadId;
-    await bindDeliveryFixCycleThread(db, { cycleId: cycle.id, threadId });
+    if (bind) {
+      await bindDeliveryFixCycleThread(db, { cycleId: cycle.id, threadId });
+    }
     return threadId;
   }
 
@@ -192,5 +194,36 @@ describe("#509 delivery fix-cycle finish", () => {
     expect((await listDeliveryFixCycles(db, deliveryPrId))[0]?.state).toBe(
       "running",
     );
+  });
+
+  it("the sweep binds a stamped thread whose bind was lost instead of refunding its cycle", async () => {
+    const threadId = await cycleThread(true, false);
+    await db
+      .update(deliveryFixCycles)
+      .set({
+        createdAt: new Date(NOW.getTime() - DELIVERY_DISPATCH_STALE_MS - 1),
+      })
+      .where(eq(deliveryFixCycles.id, cycle.id));
+    const result = await reconcileStaleDeliveryCycles(deps("H1").deps);
+    expect(result.abandoned).toBe(0);
+    expect((await listDeliveryFixCycles(db, deliveryPrId))[0]).toMatchObject({
+      state: "running",
+      threadId,
+    });
+    expect(await getDeliveryPr(db, deliveryPrId)).toMatchObject({
+      phase: "fixing",
+      cyclesUsed: 1,
+    });
+  });
+
+  it("the finish of a thread whose bind was lost still settles its cycle", async () => {
+    const threadId = await cycleThread(true, false);
+    const d = deps("H2");
+    await handleDeliveryCycleFinish({ userId, threadId, deps: d.deps });
+    expect((await listDeliveryFixCycles(db, deliveryPrId))[0]).toMatchObject({
+      state: "pushed",
+      resultHeadSha: "H2",
+    });
+    expect(d.evaluate).toHaveBeenCalledWith({ deliveryPrId });
   });
 });

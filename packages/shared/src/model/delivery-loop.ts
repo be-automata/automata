@@ -11,7 +11,7 @@ import {
 } from "drizzle-orm";
 
 import type { DB } from "../db";
-import { deliveryFixCycles, deliveryPullRequests } from "../db/schema";
+import { deliveryFixCycles, deliveryPullRequests, thread } from "../db/schema";
 import { DELIVERY_FIX_CAP } from "./delivery-loop-settings";
 import { type SelfHealTx, withSelfHealTx } from "./self-heal-tx";
 
@@ -346,6 +346,12 @@ const CYCLE_HEAD_TARGET = [
   deliveryFixCycles.triggerHeadSha,
 ];
 
+/** Cycle rows at a head that never ran, so a live start may take them over. */
+const REUSABLE_CYCLE_STATES: readonly DeliveryFixCycleState[] = [
+  "shadow",
+  "abandoned",
+];
+
 /**
  * Starts a fix cycle at `headSha`: in one transaction, moves the row from
  * `expectedPhase` to `fixing`, spends one cycle (only below DELIVERY_FIX_CAP)
@@ -378,7 +384,12 @@ export async function startDeliveryFixCycle(
       return { kind: "stale" };
     }
     const existing = await cycleAtHead(tx, deliveryPrId, headSha);
-    if (existing && existing.state !== "shadow") return { kind: "duplicate" };
+    // A shadow row (recorded, never run) or an abandoned one (never started,
+    // already refunded) becomes the live cycle; any other row at this head
+    // is a real cycle, so this trigger is a duplicate.
+    if (existing && !REUSABLE_CYCLE_STATES.includes(existing.state)) {
+      return { kind: "duplicate" };
+    }
     if (row.cyclesUsed >= DELIVERY_FIX_CAP) {
       return { kind: "cap_reached", cyclesUsed: row.cyclesUsed };
     }
@@ -392,7 +403,13 @@ export async function startDeliveryFixCycle(
     const [cycle] = existing
       ? await tx
           .update(deliveryFixCycles)
-          .set({ ...live, createdAt: new Date() })
+          .set({
+            ...live,
+            threadId: null,
+            resultHeadSha: null,
+            finishedAt: null,
+            createdAt: new Date(),
+          })
           .where(eq(deliveryFixCycles.id, existing.id))
           .returning()
       : await tx
@@ -562,6 +579,27 @@ export async function listDeliveryFixCycles(
     .from(deliveryFixCycles)
     .where(eq(deliveryFixCycles.deliveryPrId, deliveryPrId))
     .orderBy(asc(deliveryFixCycles.cycleNo));
+}
+
+/**
+ * The thread a cycle's dispatch created, found by its stamp
+ * (`source_metadata.delivery`), for a cycle whose bind never landed.
+ */
+export async function findDeliveryCycleThreadId(
+  db: DB,
+  { deliveryPrId, headSha }: { deliveryPrId: string; headSha: string },
+): Promise<string | null> {
+  const [row] = await db
+    .select({ id: thread.id })
+    .from(thread)
+    .where(
+      and(
+        sql`${thread.sourceMetadata} -> 'delivery' ->> 'deliveryPrId' = ${deliveryPrId}`,
+        sql`${thread.sourceMetadata} -> 'delivery' ->> 'headSha' = ${headSha}`,
+      ),
+    )
+    .limit(1);
+  return row?.id ?? null;
 }
 
 /** The cycle a fix-cycle thread's stamp names: its PR and trigger head. */

@@ -3,6 +3,8 @@ import type { Octokit } from "octokit";
 import type { DB } from "@terragon/shared/db";
 import {
   abandonDeliveryFixCycle,
+  bindDeliveryFixCycleThread,
+  findDeliveryCycleThreadId,
   findDeliveryFixCycleAtHead,
   getDeliveryPr,
   listStaleDeliveryFixCycles,
@@ -91,7 +93,10 @@ export async function handleDeliveryCycleFinish({
       deliveryPrId: stamp.delivery.deliveryPrId,
       headSha: stamp.delivery.headSha,
     });
-    if (!cycle || cycle.threadId !== threadId) return;
+    if (!cycle) return;
+    // A cycle whose bind never landed (threadId null) is this thread's: its
+    // stamp names the cycle. Any other bound thread is not.
+    if (cycle.threadId !== threadId && cycle.threadId !== null) return;
     const outcome = await settleAndEvaluate(deps, cycle);
     console.log("[delivery-loop] cycle finished", {
       threadId,
@@ -125,6 +130,19 @@ export async function reconcileStaleDeliveryCycles(
   for (const cycle of stale) {
     try {
       if (cycle.state === "dispatching" && cycle.threadId === null) {
+        // Its thread may exist with only the bind lost: bind it, never
+        // refund a cycle whose agent is running (it will push).
+        const orphan = await findDeliveryCycleThreadId(deps.db, {
+          deliveryPrId: cycle.deliveryPrId,
+          headSha: cycle.triggerHeadSha,
+        });
+        if (orphan !== null) {
+          await bindDeliveryFixCycleThread(deps.db, {
+            cycleId: cycle.id,
+            threadId: orphan,
+          });
+          continue;
+        }
         const row = await getDeliveryPr(deps.db, cycle.deliveryPrId);
         // The phase the cycle left: a ready PR waits for review, a draft for CI.
         const restorePhase =
