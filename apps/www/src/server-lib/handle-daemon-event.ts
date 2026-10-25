@@ -797,6 +797,21 @@ async function handleThreadFinish({
         }),
       ),
   );
+  // #509: a delivery fix cycle's thread finished. A sibling like the audit
+  // lane; it no-ops for any thread not stamped as a fix cycle, and settles
+  // the cycle from the PR head before the loop evaluates the PR again.
+  waitUntil(
+    import("@/server-lib/delivery/cycle-finish")
+      .then(({ handleDeliveryCycleFinish }) =>
+        handleDeliveryCycleFinish({ userId, threadId }),
+      )
+      .catch((error) =>
+        console.error("[delivery-loop] finish-hook failed (non-fatal)", {
+          threadId,
+          error,
+        }),
+      ),
+  );
   // The org-owned mention lane's terminal writer: a mention on an ISSUE has
   // no PR number, so like the audit lane this is a sibling of the PR block
   // above (whose review executor never matches a github_mention thread). It

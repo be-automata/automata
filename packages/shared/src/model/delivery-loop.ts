@@ -563,3 +563,52 @@ export async function listDeliveryFixCycles(
     .where(eq(deliveryFixCycles.deliveryPrId, deliveryPrId))
     .orderBy(asc(deliveryFixCycles.cycleNo));
 }
+
+/** The cycle a fix-cycle thread's stamp names: its PR and trigger head. */
+export async function findDeliveryFixCycleAtHead(
+  db: DB,
+  { deliveryPrId, headSha }: { deliveryPrId: string; headSha: string },
+): Promise<DeliveryFixCycleRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(deliveryFixCycles)
+    .where(
+      and(
+        eq(deliveryFixCycles.deliveryPrId, deliveryPrId),
+        eq(deliveryFixCycles.triggerHeadSha, headSha),
+      ),
+    );
+  return row;
+}
+
+/**
+ * Cycles the sweep must reconcile: `dispatching` since before
+ * `dispatchingBefore` (the thread never started), or `running` since before
+ * `runningBefore` (past the run's hard cap with no finish event seen).
+ */
+export async function listStaleDeliveryFixCycles(
+  db: DB,
+  {
+    dispatchingBefore,
+    runningBefore,
+    limit,
+  }: { dispatchingBefore: Date; runningBefore: Date; limit: number },
+): Promise<DeliveryFixCycleRow[]> {
+  return await db
+    .select()
+    .from(deliveryFixCycles)
+    .where(
+      or(
+        and(
+          eq(deliveryFixCycles.state, "dispatching"),
+          lt(deliveryFixCycles.createdAt, dispatchingBefore),
+        ),
+        and(
+          eq(deliveryFixCycles.state, "running"),
+          lt(deliveryFixCycles.createdAt, runningBefore),
+        ),
+      ),
+    )
+    .orderBy(asc(deliveryFixCycles.createdAt))
+    .limit(limit);
+}

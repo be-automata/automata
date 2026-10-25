@@ -33,6 +33,7 @@ import {
 } from "./delivery-effects";
 import { loadDeliveryLoopMode } from "./delivery-mode";
 import { readDeliveryHeadCi } from "./head-ci";
+import { runDeliveryFixCycle } from "./run-delivery-fix-cycle";
 
 /**
  * The delivery loop's single evaluator (#509). Every trigger (enrollment, CI
@@ -43,11 +44,11 @@ import { readDeliveryHeadCi } from "./head-ci";
  * MAX_STEPS times. Never throws.
  *
  * Effects: phase changes are written in every mode. GitHub writes (mark
- * ready, the merge-ready, no-CI and stop comments) happen in mode "on" only;
- * in shadow they are recorded as `last_reason`. A GitHub write ends the
- * evaluation: the snapshot no longer describes the PR, and the webhook the
- * write causes (ready_for_review, a review) evaluates it afresh. Fix cycles
- * are still recorded only (a shadow cycle row) in this revision.
+ * ready, the merge-ready, no-CI and stop comments) and fix-cycle dispatch
+ * happen in mode "on" only; in shadow they are recorded (`last_reason`, a
+ * shadow cycle row). An effect ends the evaluation: the snapshot no longer
+ * describes the PR, and the event the effect causes (ready_for_review, a
+ * review, the cycle's finish) evaluates it afresh.
  */
 
 const MAX_STEPS = 4;
@@ -64,6 +65,7 @@ export interface EvaluateDeliveryDeps {
   loadMode: typeof loadDeliveryLoopMode;
   readHeadCi: typeof readDeliveryHeadCi;
   botLogin: () => string;
+  runCycle: typeof runDeliveryFixCycle;
   now: () => Date;
 }
 
@@ -73,6 +75,7 @@ const DEFAULT_DEPS: EvaluateDeliveryDeps = {
   loadMode: loadDeliveryLoopMode,
   readHeadCi: readDeliveryHeadCi,
   botLogin: resolveBotLogin,
+  runCycle: runDeliveryFixCycle,
   now: () => new Date(),
 };
 
@@ -131,7 +134,7 @@ async function evaluateLeased({
     return { status: "failed", reason: `bad repo ${initial.repoFullName}` };
   }
   const octokit = await deps.octokitFor({ owner, repo });
-  const { pr, nodeId } = await readSnapshot({
+  const { pr, nodeId, conflicting } = await readSnapshot({
     deps,
     octokit,
     owner,
@@ -145,6 +148,7 @@ async function evaluateLeased({
     prNumber: initial.prNumber,
     botLogin: deps.botLogin(),
     nodeId,
+    conflicting,
   };
   const steps: DeliveryStep[] = [];
   let row = initial;
@@ -185,7 +189,7 @@ async function readSnapshot({
   owner: string;
   repo: string;
   row: DeliveryPullRequestRow;
-}): Promise<{ pr: DeliveryPrSnapshot; nodeId: string }> {
+}): Promise<{ pr: DeliveryPrSnapshot; nodeId: string; conflicting: boolean }> {
   const signal = AbortSignal.timeout(GITHUB_READ_TIMEOUT_MS);
   const { data: pull } = await octokit.rest.pulls.get({
     owner,
@@ -218,6 +222,7 @@ async function readSnapshot({
   ]);
   return {
     nodeId: pull.node_id,
+    conflicting: pull.mergeable_state === "dirty",
     pr: {
       state: pull.state === "closed" ? "closed" : "open",
       merged: pull.merged_at !== null && pull.merged_at !== undefined,
@@ -240,6 +245,8 @@ interface GithubTarget {
   botLogin: string;
   /** The PR's GraphQL node id (the ready mutation takes it). */
   nodeId: string;
+  /** GitHub reports a conflict with the base (mergeable_state "dirty"). */
+  conflicting: boolean;
 }
 
 interface ReviewLike {
@@ -365,7 +372,24 @@ async function applyStep({
       });
       return null;
     }
-    case "start_cycle":
+    case "start_cycle": {
+      if (mode === "on") {
+        const outcome = await deps.runCycle({
+          db: deps.db,
+          octokit: github.octokit,
+          row,
+          headSha: pr.headSha,
+          trigger: step.trigger,
+          reviewId: step.reviewId,
+          failingChecks: step.failingChecks,
+          conflicting: github.conflicting,
+        });
+        console.log("[delivery-loop] cycle", {
+          deliveryPrId: row.id,
+          ...outcome,
+        });
+        return null;
+      }
       await recordShadowFixCycle(deps.db, {
         deliveryPrId: row.id,
         headSha: pr.headSha,
@@ -379,6 +403,7 @@ async function applyStep({
         `${mode}: would start a ${step.trigger} cycle`,
       );
       return null;
+    }
     case "mark_ready":
       if (mode !== "on") {
         await record(deps.db, row, `${mode}: would mark ready`);
