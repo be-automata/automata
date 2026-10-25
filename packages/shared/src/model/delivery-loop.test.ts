@@ -350,4 +350,79 @@ describe("#509 delivery loop ledger", () => {
     ]);
     expect((await getDeliveryPr(db, row.id))?.cyclesUsed).toBe(1);
   });
+
+  it("a live start at the SAME head a shadow cycle recorded converts that row into the live cycle", async () => {
+    const { row } = await enroll();
+    expect(
+      await recordShadowFixCycle(db, {
+        deliveryPrId: row.id,
+        headSha: "sha-1",
+        trigger: "ci",
+        reviewId: null,
+        failingChecks: ["old"],
+      }),
+    ).toBe(true);
+    const live = await startDeliveryFixCycle(db, {
+      deliveryPrId: row.id,
+      expectedPhase: "awaiting_ci",
+      headSha: "sha-1",
+      trigger: "review+ci",
+      reviewId: 42,
+      failingChecks: ["lint"],
+    });
+    expect(live.kind).toBe("started");
+    const cycles = await listDeliveryFixCycles(db, row.id);
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]).toMatchObject({
+      cycleNo: 1,
+      triggerHeadSha: "sha-1",
+      state: "dispatching",
+      trigger: "review+ci",
+      reviewId: 42,
+      failingChecks: ["lint"],
+    });
+    expect(await getDeliveryPr(db, row.id)).toMatchObject({
+      phase: "fixing",
+      cyclesUsed: 1,
+    });
+    expect(
+      await startDeliveryFixCycle(db, {
+        deliveryPrId: row.id,
+        expectedPhase: "fixing",
+        headSha: "sha-1",
+        trigger: "ci",
+        reviewId: null,
+        failingChecks: [],
+      }),
+    ).toEqual({ kind: "duplicate" });
+  });
+
+  it("concurrent shadow writers on different heads and a live start all land, with distinct cycle numbers", async () => {
+    const { row } = await enroll();
+    const heads = ["sha-a", "sha-b", "sha-c", "sha-d"];
+    const results = await Promise.all([
+      ...heads.map((headSha) =>
+        recordShadowFixCycle(db, {
+          deliveryPrId: row.id,
+          headSha,
+          trigger: "ci",
+          reviewId: null,
+          failingChecks: [],
+        }),
+      ),
+      startDeliveryFixCycle(db, {
+        deliveryPrId: row.id,
+        expectedPhase: "awaiting_ci",
+        headSha: "sha-1",
+        trigger: "ci",
+        reviewId: null,
+        failingChecks: [],
+      }),
+    ]);
+    expect(results.slice(0, heads.length)).toEqual([true, true, true, true]);
+    expect((results[heads.length] as { kind: string }).kind).toBe("started");
+    const cycles = await listDeliveryFixCycles(db, row.id);
+    expect(cycles.map((c) => c.cycleNo)).toEqual([1, 2, 3, 4, 5]);
+    expect(new Set(cycles.map((c) => c.triggerHeadSha)).size).toBe(5);
+  });
 });

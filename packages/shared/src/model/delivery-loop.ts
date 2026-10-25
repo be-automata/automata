@@ -13,7 +13,7 @@ import {
 import type { DB } from "../db";
 import { deliveryFixCycles, deliveryPullRequests } from "../db/schema";
 import { DELIVERY_FIX_CAP } from "./delivery-loop-settings";
-import { withSelfHealTx } from "./self-heal-tx";
+import { type SelfHealTx, withSelfHealTx } from "./self-heal-tx";
 
 /**
  * #509 delivery loop ledger. `delivery_pull_requests` holds the loop state of
@@ -290,9 +290,52 @@ export type StartFixCycleResult =
   | { kind: "stale" };
 
 /**
+ * Locks the PR row for the rest of the transaction. Every cycle writer takes
+ * it before reading the head's cycle or computing `cycle_no`, so writers on
+ * one PR are serialized and `cycle_no` never collides.
+ */
+async function lockDeliveryPr(tx: SelfHealTx, deliveryPrId: string) {
+  const [row] = await tx
+    .select({
+      phase: deliveryPullRequests.phase,
+      headSha: deliveryPullRequests.headSha,
+      cyclesUsed: deliveryPullRequests.cyclesUsed,
+    })
+    .from(deliveryPullRequests)
+    .where(eq(deliveryPullRequests.id, deliveryPrId))
+    .for("update");
+  return row;
+}
+
+async function cycleAtHead(
+  tx: SelfHealTx,
+  deliveryPrId: string,
+  headSha: string,
+) {
+  const [row] = await tx
+    .select({ id: deliveryFixCycles.id, state: deliveryFixCycles.state })
+    .from(deliveryFixCycles)
+    .where(
+      and(
+        eq(deliveryFixCycles.deliveryPrId, deliveryPrId),
+        eq(deliveryFixCycles.triggerHeadSha, headSha),
+      ),
+    );
+  return row;
+}
+
+/** The head index: the only conflict a cycle insert may absorb. */
+const CYCLE_HEAD_TARGET = [
+  deliveryFixCycles.deliveryPrId,
+  deliveryFixCycles.triggerHeadSha,
+];
+
+/**
  * Starts a fix cycle at `headSha`: in one transaction, moves the row from
  * `expectedPhase` to `fixing`, spends one cycle (only below DELIVERY_FIX_CAP)
- * and inserts the cycle row in `dispatching`. Any guard failing changes
+ * and puts the cycle row in `dispatching`. A shadow row recorded at this head
+ * (the repo ran in shadow, then went live at the same head) becomes the live
+ * cycle; any other row at this head is a duplicate. Any guard failing changes
  * nothing.
  */
 export async function startDeliveryFixCycle(
@@ -314,45 +357,38 @@ export async function startDeliveryFixCycle(
   },
 ): Promise<StartFixCycleResult> {
   return await withSelfHealTx(db, async (tx) => {
-    const [existing] = await tx
-      .select({ id: deliveryFixCycles.id })
-      .from(deliveryFixCycles)
-      .where(
-        and(
-          eq(deliveryFixCycles.deliveryPrId, deliveryPrId),
-          eq(deliveryFixCycles.triggerHeadSha, headSha),
-        ),
-      );
-    if (existing) return { kind: "duplicate" };
-    const [row] = await tx
-      .select({
-        phase: deliveryPullRequests.phase,
-        headSha: deliveryPullRequests.headSha,
-        cyclesUsed: deliveryPullRequests.cyclesUsed,
-      })
-      .from(deliveryPullRequests)
-      .where(eq(deliveryPullRequests.id, deliveryPrId))
-      .for("update");
+    const row = await lockDeliveryPr(tx, deliveryPrId);
     if (!row || row.phase !== expectedPhase || row.headSha !== headSha) {
       return { kind: "stale" };
     }
+    const existing = await cycleAtHead(tx, deliveryPrId, headSha);
+    if (existing && existing.state !== "shadow") return { kind: "duplicate" };
     if (row.cyclesUsed >= DELIVERY_FIX_CAP) {
       return { kind: "cap_reached", cyclesUsed: row.cyclesUsed };
     }
     const cyclesUsed = row.cyclesUsed + 1;
-    const [cycle] = await tx
-      .insert(deliveryFixCycles)
-      .values({
-        deliveryPrId,
-        cycleNo: await nextCycleNo(tx, deliveryPrId),
-        triggerHeadSha: headSha,
-        trigger,
-        reviewId,
-        failingChecks,
-        state: "dispatching",
-      })
-      .onConflictDoNothing()
-      .returning();
+    const live = {
+      trigger,
+      reviewId,
+      failingChecks,
+      state: "dispatching" as const,
+    };
+    const [cycle] = existing
+      ? await tx
+          .update(deliveryFixCycles)
+          .set({ ...live, createdAt: new Date() })
+          .where(eq(deliveryFixCycles.id, existing.id))
+          .returning()
+      : await tx
+          .insert(deliveryFixCycles)
+          .values({
+            deliveryPrId,
+            cycleNo: await nextCycleNo(tx, deliveryPrId),
+            triggerHeadSha: headSha,
+            ...live,
+          })
+          .onConflictDoNothing({ target: CYCLE_HEAD_TARGET })
+          .returning();
     if (!cycle) return { kind: "duplicate" };
     await tx
       .update(deliveryPullRequests)
@@ -368,7 +404,8 @@ export async function startDeliveryFixCycle(
 
 /**
  * Shadow mode: records the cycle the loop would have started at `headSha`,
- * without spending a cycle or moving the phase. Idempotent per head.
+ * without spending a cycle or moving the phase. Idempotent per head; takes
+ * the same row lock as the live path, so `cycle_no` never collides.
  */
 export async function recordShadowFixCycle(
   db: DB,
@@ -386,20 +423,24 @@ export async function recordShadowFixCycle(
     failingChecks: string[];
   },
 ): Promise<boolean> {
-  const rows = await db
-    .insert(deliveryFixCycles)
-    .values({
-      deliveryPrId,
-      cycleNo: await nextCycleNo(db, deliveryPrId),
-      triggerHeadSha: headSha,
-      trigger,
-      reviewId,
-      failingChecks,
-      state: "shadow",
-    })
-    .onConflictDoNothing()
-    .returning({ id: deliveryFixCycles.id });
-  return rows.length === 1;
+  return await withSelfHealTx(db, async (tx) => {
+    if (!(await lockDeliveryPr(tx, deliveryPrId))) return false;
+    if (await cycleAtHead(tx, deliveryPrId, headSha)) return false;
+    const rows = await tx
+      .insert(deliveryFixCycles)
+      .values({
+        deliveryPrId,
+        cycleNo: await nextCycleNo(tx, deliveryPrId),
+        triggerHeadSha: headSha,
+        trigger,
+        reviewId,
+        failingChecks,
+        state: "shadow",
+      })
+      .onConflictDoNothing({ target: CYCLE_HEAD_TARGET })
+      .returning({ id: deliveryFixCycles.id });
+    return rows.length === 1;
+  });
 }
 
 /** dispatching -> running, once the cycle's thread exists. */
