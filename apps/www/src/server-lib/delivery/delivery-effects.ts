@@ -97,8 +97,11 @@ export function renderMergeReady({
   headSha: string;
   approver: string;
 }): string {
+  // A bot comment never @-mentions anyone (#526): the login is a code span
+  // without its `[bot]` suffix.
+  const login = approver.replace(/\[bot\]$/i, "");
   return [
-    `**Ready to merge.** @${approver} approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
+    `**Ready to merge.** Automata (\`${login}\`) approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
     "",
     "The delivery loop never merges. When you are ready:",
     "",
@@ -183,7 +186,12 @@ export function renderRefsFollowup({
 }): string {
   const listed =
     items.length > 0
-      ? items.map((item) => `- [ ] ${sanitizeAgentText(item)}`)
+      ? items.map(
+          // sanitizeAgentText turns @name into `@name`; drop the @ so the
+          // comment holds no @<login> at all (#526). Emails are left alone.
+          (item) =>
+            `- [ ] ${sanitizeAgentText(item).replace(/`@([A-Za-z0-9][\w-]*(?:\/[\w.-]+)?)`/g, "`$1`")}`,
+        )
       : ["- (the PR listed no unticked criteria; see its body)"];
   return [
     `**#${prNumber} merged without delivering every criterion.** Still open:`,

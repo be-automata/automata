@@ -22,7 +22,11 @@ import {
   deliveryMarker,
   parseUndeliveredCriteria,
   renderMergeReady,
+  renderNoCi,
+  renderNeedsHuman,
+  renderRefsFollowup,
 } from "./delivery-effects";
+import type { DeliveryNeedsHumanReason } from "./decide-delivery-step";
 import {
   evaluateDeliveryPr,
   type EvaluateDeliveryDeps,
@@ -411,5 +415,71 @@ describe("delivery lane never merges", () => {
         .map((line) => `${name}: ${line.trim()}`),
     );
     expect(hits).toEqual([]);
+  });
+});
+
+describe("#526 delivery comments never @-mention", () => {
+  const MENTION = /@[A-Za-z0-9]/;
+  const REASONS: DeliveryNeedsHumanReason[] = [
+    "app_authored_pr",
+    "fix_cap_reached",
+    "cycle_pushed_nothing",
+    "no_bot_review",
+    "human_changes_requested",
+  ];
+
+  it("renderMergeReady names the approver in a code span, without @ or [bot]", () => {
+    for (const approver of [BOT, "automata-ai-bot"]) {
+      const body = renderMergeReady({
+        prNumber: 5,
+        headSha: "abcdef1234",
+        approver,
+      });
+      expect(body).toContain("Automata (`automata-ai-bot`) approved `abcdef1`");
+      expect(body).not.toContain("[bot]");
+      expect(body).not.toMatch(MENTION);
+    }
+  });
+
+  it("no renderer emits an @ followed by a login", () => {
+    const bodies = [
+      renderMergeReady({ prNumber: 5, headSha: "abcdef1234", approver: BOT }),
+      renderNoCi(),
+      ...REASONS.map((reason) =>
+        renderNeedsHuman({ reason, headSha: "abcdef1234", cyclesUsed: 2 }),
+      ),
+      renderRefsFollowup({
+        prNumber: 12,
+        items: [
+          "ask @alice to check",
+          "ping @acme/reviewers",
+          "already `@bob`",
+        ],
+      }),
+      renderRefsFollowup({ prNumber: 12, items: [] }),
+    ];
+    for (const body of bodies) expect(body).not.toMatch(MENTION);
+  });
+
+  it("renderRefsFollowup keeps the names, only without the @", () => {
+    const body = renderRefsFollowup({
+      prNumber: 12,
+      items: ["ask @alice to check", "ping @acme/reviewers"],
+    });
+    expect(body).toContain("alice");
+    expect(body).toContain("acme/reviewers");
+  });
+
+  it("the marker line is unchanged", () => {
+    for (const kind of [
+      "merge-ready",
+      "no-ci",
+      "needs-human",
+      "refs-followup",
+    ] as const) {
+      expect(deliveryMarker(kind, "H1")).toBe(
+        `<!-- automata:delivery-loop kind=${kind} sha=H1 -->`,
+      );
+    }
   });
 });
