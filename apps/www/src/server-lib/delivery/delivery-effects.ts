@@ -98,7 +98,7 @@ export function renderMergeReady({
   approver: string;
 }): string {
   return [
-    `**Ready to merge.** @${approver} approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
+    `**Ready to merge.** ${approver} approved \`${headSha.slice(0, 7)}\` and every check is green at that commit.`,
     "",
     "The delivery loop never merges. When you are ready:",
     "",

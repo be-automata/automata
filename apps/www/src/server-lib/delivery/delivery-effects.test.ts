@@ -299,6 +299,16 @@ describe("#509 delivery effects (mode on)", () => {
     ).toContain("`abcdef1`");
   });
 
+  it("names the approver as plain text, not an @-mention", () => {
+    const body = renderMergeReady({
+      prNumber: 5,
+      headSha: "abcdef1234",
+      approver: BOT,
+    });
+    expect(body).toContain(`${BOT} approved`);
+    expect(body).not.toContain(`@${BOT}`);
+  });
+
   const mergedWith = (body: string) =>
     fakeGithub({
       draft: false,
