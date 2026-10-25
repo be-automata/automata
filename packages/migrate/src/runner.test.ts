@@ -73,7 +73,7 @@ describe("deploy/migrations on a fresh database", () => {
       "2026-10-23-knowledge-org-controls",
       "2026-10-24-knowledge-op-fingerprint-index",
       "2026-10-25-knowledge-updated-at",
-    "2026-10-26-delivery-loop",
+      "2026-10-26-delivery-loop",
     ]);
     const ledger = await readLedger(c);
     expect(ledger).toHaveLength(12);
