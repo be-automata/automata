@@ -180,7 +180,7 @@ export function parseUndeliveredCriteria(
 
 /**
  * Drops every `@` that starts a login, so the comment holds no @<login> at
- * all (#526): sanitizeAgentText only code-spans the mentions it recognises.
+ * all (#526): the ones sanitizeAgentText code-spans and the ones it skips.
  * An email keeps its `@`, which follows a word character.
  */
 function unmention(text: string): string {
