@@ -352,6 +352,22 @@ describe("#509 parseUndeliveredCriteria", () => {
     expect(parseUndeliveredCriteria("Refs #4\n", 4)).toEqual([]);
   });
 
+  it("reads the closing line above the platform's task-link footer", () => {
+    const footer =
+      "\n\n---\n\n📎 **Task**: https://app.example/task/d7a618d9-f805";
+    expect(
+      parseUndeliveredCriteria(
+        `## Acceptance criteria\n- [x] a\n- [ ] b\n\nRefs #4${footer}`,
+        4,
+      ),
+    ).toEqual(["b"]);
+    expect(parseUndeliveredCriteria(`x\n\nCloses #4${footer}`, 4)).toBeNull();
+    // Only a trailing footer is skipped: a closing line above other text is not the last.
+    expect(
+      parseUndeliveredCriteria("Refs #4\n\n---\n\nmore text", 4),
+    ).toBeNull();
+  });
+
   it("returns only the unticked items of the Acceptance criteria section", () => {
     expect(
       parseUndeliveredCriteria(
