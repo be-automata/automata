@@ -208,7 +208,9 @@ export function hatchetAdminTokenArgs(args: {
 /** The JWT `hatchet-admin token create` prints as its last line. Never echoes stdout. */
 export function parseMintedToken(stdout: string): string {
   const last = stdout.trim().split("\n").pop()?.trim() ?? "";
-  if (last.split(".").length !== 3 || /\s/.test(last)) {
+  // A JWT's header is base64url JSON, so it starts `eyJ`: a version string or a
+  // dotted config key on the last line is never taken for a token.
+  if (!/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(last)) {
     throw new ProvisionError("hatchet-admin did not print a token");
   }
   return last;
@@ -329,7 +331,7 @@ export async function provisionTenant(
       // The slug is taken now, so a plain re-run fails; say how to finish.
       const message = e instanceof Error ? e.message : String(e);
       throw new ProvisionError(
-        `tenant ${tenantId} was created but the token mint failed (${message}); re-run with --tenant-id ${tenantId} --token-name ${opts.tokenName}`,
+        `tenant ${tenantId} was created but the token mint failed (${message}); re-run with --tenant-id ${tenantId} --token-name ${opts.tokenName} --expires-in ${opts.expiresIn}`,
       );
     }
     throw e;

@@ -62,6 +62,10 @@ if (tenantId !== undefined) {
   if (name !== undefined || slug !== undefined) {
     usage("--tenant-id mints into an existing tenant; drop --name/--slug");
   }
+  // A second token in a tenant is a worker's or a box's: name it, never default it to www.
+  if (values["token-name"] === undefined) {
+    usage("--tenant-id needs --token-name");
+  }
   tenant = { tenantId };
 } else {
   if (name === undefined || slug === undefined) {

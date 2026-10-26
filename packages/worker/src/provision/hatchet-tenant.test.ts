@@ -293,6 +293,11 @@ describe("token mint", () => {
 
   it("parses the JWT on the last line and never echoes stdout on refusal", () => {
     expect(parseMintedToken(`some log line\n${TOKEN}\n`)).toBe(TOKEN);
+    for (const notToken of ["v0.94.10", "config.server.url", "a.b.c"]) {
+      expect(() => parseMintedToken(`ok\n${notToken}\n`)).toThrow(
+        ProvisionError,
+      );
+    }
     const noisy = "level=info secret-ish output\nnot-a-token";
     const err = thrown(() => parseMintedToken(noisy));
     expect(err).toBeInstanceOf(ProvisionError);
@@ -449,7 +454,7 @@ describe("provisionTenant", () => {
     await expect(
       provisionTenant({ ...base, tenant: { name: "A", slug: "client-a" } }, d),
     ).rejects.toThrow(
-      `tenant ${TENANT} was created but the token mint failed (hatchet-admin did not print a token); re-run with --tenant-id ${TENANT} --token-name www`,
+      `tenant ${TENANT} was created but the token mint failed (hatchet-admin did not print a token); re-run with --tenant-id ${TENANT} --token-name www --expires-in 8760h`,
     );
     expect(created).toEqual([TENANT]);
   });
