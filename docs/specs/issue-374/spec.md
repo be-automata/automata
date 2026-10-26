@@ -184,17 +184,19 @@ injected `fetch`, `runAdmin`, `uid`, `now`):
   reply whose `version` is not `V1`; slug `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`; non-200 →
   status + the engine's validation descriptions.
 - `hatchetAdminTokenArgs({tenantId, name, expiresIn})` → `/hatchet-admin token create
---config /config --tenant-id … --name … --expiresIn …`; `tokenCreateArgv({container,
-adminArgs})` prepends `exec <container>`.
-- `parseMintedToken(stdout)`: last line, 3-part JWT; the refusal never echoes stdout.
-- `describeAdminFailure(e)`: exit code + a 300-byte, redacted stderr tail (never the argv).
+--config /config --tenant-id … --name … --expiresIn …`, for any way of exec-ing into the
+  engine (the CLI prepends `docker exec <container>`, the IT harness `compose exec -T`).
+- `parseMintedToken(stdout)`: last line, a JWT (`eyJ…`, three base64url parts); the refusal
+  never echoes stdout.
+- `describeAdminFailure(e)`: exit code + the last 300 bytes of the redacted stderr (never the
+  argv).
 - `provisionTenant`: URL + expiry checks → create form: password → login → create →
   `onTenantCreated(id)`; mint-only form (`tenantId`, canonical UUID, lowercased): no password,
   no REST → mint → `{tenantId, token, expiresAt}` (`expiresAt` from the token's `exp`, else
   computed). A mint failing after create names the tenant and the mint-only re-run.
 
 CLI `packages/worker/scripts/provision-tenant.ts` (`provision:tenant`), run as root on the box,
-`node:util` `parseArgs` strict (unknown flags exit 2):
+`node:util` `parseArgs` strict (unknown flags exit 2; mint-only requires `--token-name`):
 
     pnpm -s --filter @terragon/worker provision:tenant --name <n> --slug <s> [--token-name www] [--expires-in 8760h]
     pnpm -s --filter @terragon/worker provision:tenant --tenant-id <id> --token-name <n>   # mint only (#375 worker tokens)
