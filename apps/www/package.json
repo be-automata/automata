@@ -90,7 +90,7 @@
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.45.2",
     "fast-deep-equal": "^3.1.3",
-    "framer-motion": "^12.19.1",
+    "framer-motion": "^14.6.0",
     "jose": "^6.1.0",
     "jotai": "^2.12.4",
     "loops": "^6.0.0",
