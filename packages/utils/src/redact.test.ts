@@ -23,6 +23,17 @@ describe("redactSecrets", () => {
     expect(out).toContain("clone --depth 1");
   });
 
+  it("scrubs a bare JWT but leaves dotted names alone", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZW5hbnQifQ.c2lnbmF0dXJlLXZhbHVl";
+    const out = redactSecrets(
+      `minted ${jwt}\nloaded config.server.grpc_broadcast_address`,
+    );
+    expect(out).toBe(
+      "minted <redacted>\nloaded config.server.grpc_broadcast_address",
+    );
+  });
+
   it("masks the password in any URL's userinfo, keeping scheme, user and host", () => {
     const text = [
       "connect failed: postgresql://automata_test:0a1b2c3d4e5f60718293a4b5c6d7e8f9@127.0.0.1:25432/postgres",

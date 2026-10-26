@@ -26,10 +26,13 @@ export function readGuardedFile(
   {
     maxBytes = 64 * 1024,
     ownerOnly = false,
+    ownerUid,
   }: {
     maxBytes?: number;
     /** Refuse group bits too (a 0400/0600 secret): `mode & 0o077` must be 0. */
     ownerOnly?: boolean;
+    /** Refuse a file another uid owns (checked on the open fd). */
+    ownerUid?: number;
   } = {},
 ): string {
   let fd: number;
@@ -50,6 +53,12 @@ export function readGuardedFile(
     }
     if (ownerOnly && (stat.mode & 0o070) !== 0) {
       throw new GuardedFileError(path, "group-accessible");
+    }
+    if (ownerUid !== undefined && stat.uid !== ownerUid) {
+      throw new GuardedFileError(
+        path,
+        `owned by uid ${stat.uid}, not uid ${ownerUid}`,
+      );
     }
     return fs.readFileSync(fd, "utf8");
   } finally {
