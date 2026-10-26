@@ -81,7 +81,7 @@
     "ai": "^5.0.59",
     "ansi-to-html": "^0.7.2",
     "arctic": "^3.7.0",
-    "babel-plugin-react-compiler": "19.1.0-rc.2",
+    "babel-plugin-react-compiler": "19.1.0-rc.3",
     "better-auth": "1.6.26",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
