@@ -247,6 +247,8 @@ export function describeAdminFailure(e: unknown): ProvisionError {
 }
 
 /** Go duration in hours (`8760h`): the only shape the CLI accepts for --expires-in. */
+const TOKEN_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+
 const TOKEN_EXPIRY = /^[1-9][0-9]{0,5}h$/;
 
 export interface ProvisionOptions {
@@ -287,8 +289,12 @@ export async function provisionTenant(
       `token expiry ${JSON.stringify(opts.expiresIn)} must be whole hours, e.g. 8760h`,
     );
   }
-  if (opts.tokenName.trim().length === 0) {
-    throw new ProvisionError("token name must not be empty");
+  // A safe charset, not quoting: the name is echoed into the recovery hint's
+  // shell command, and an operator may paste that as root.
+  if (!TOKEN_NAME.test(opts.tokenName)) {
+    throw new ProvisionError(
+      `token name ${JSON.stringify(opts.tokenName)} must be 1-64 letters, digits, dots, dashes or underscores`,
+    );
   }
   const created = !("tenantId" in opts.tenant);
   let tenantId: string;

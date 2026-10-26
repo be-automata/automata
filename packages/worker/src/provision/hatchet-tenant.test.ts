@@ -414,6 +414,21 @@ describe("provisionTenant", () => {
     expect(d.runAdmin).not.toHaveBeenCalled();
   });
 
+  it.each(["", "www prod", "box-2; rm -rf /", "$(id)", "x".repeat(65)])(
+    "refuses token name %j before any engine call",
+    async (tokenName) => {
+      const d = deps();
+      await expect(
+        provisionTenant(
+          { ...base, tokenName, tenant: { name: "A", slug: "client-a" } },
+          d,
+        ),
+      ).rejects.toThrow(/token name/);
+      expect(d.fetch).not.toHaveBeenCalled();
+      expect(d.runAdmin).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["90d", "0h", "8760", "1h; rm -rf /"])(
     "refuses expiry %j",
     async (expiresIn) => {
