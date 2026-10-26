@@ -171,36 +171,40 @@ Part A shipped in #524 (`b574a6a`). This run delivers part B and the live ACs 4�
 ## Contract
 
 `packages/worker/src/provision/hatchet-tenant.ts` (pure helpers + one orchestrator with
-injected `fetch`, `exec`, `stat`/`readFile`):
+injected `fetch`, `runAdmin`, `uid`, `now`):
 
-- `assertLoopbackEngineUrl(url)`: `http:`/`https:` and host ∈ {`127.0.0.1`, `localhost`, `::1`};
-  anything else throws `ProvisionError`. (AC 5: no non-loopback engine call is possible.)
-- `readAdminPassword(path, {stat, readFile, uid})`: refuses a missing file, a non-regular file,
-  any group/other mode bit (`mode & 0o077`), or an owner other than the running uid; returns the
-  trimmed password; empty → refuse.
-- `engineLogin` → `hatchet=<v>` cookie; non-200 or no cookie → throws with the status only.
-- `createTenant({name, slug})` → tenant id from `metadata.id`; slug must match
-  `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`; non-200 → throws with status + the engine's validation
-  descriptions (never the request body).
-- `tokenCreateArgv({container, tenantId, name, expiresIn})` → `["exec", container,
-"/hatchet-admin", "token", "create", "--config", "/config", "--tenant-id", id, "--name", n,
-"--expiresIn", dur]`.
-- `parseMintedToken(stdout)` → last non-empty line, must be a 3-part JWT, else throws (the
-  thrown message never echoes stdout).
-- `provisionTenant(opts, deps)`: url check → password → login → (create tenant | use
-  `--tenant-id`) → mint → `{tenantId, token}`.
+- `assertLoopbackEngineUrl(url)`: `http:`/`https:`, host the IP literal `127.0.0.1` or `[::1]`
+  (after WHATWG normalization, so `127.1` is accepted and `localhost`, `0.0.0.0`,
+  `[::ffff:127.0.0.1]` are not), no userinfo → origin; else `ProvisionError`. (AC 5)
+- `readAdminPassword(path, uid)`: `readGuardedFile(path, {ownerOnly, ownerUid: uid})` —
+  `O_NOFOLLOW`, regular file, `mode & 0o077 === 0`, owned by `uid` — trimmed, non-empty.
+- `engineLogin` → `hatchet=<v>` from `getSetCookie()`; non-200 or no cookie → throws with the
+  status only. `redirect: "error"`.
+- `createTenant({name, slug})` sends `engineVersion: "V1"`, returns `metadata.id`, refuses a
+  reply whose `version` is not `V1`; slug `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`; non-200 →
+  status + the engine's validation descriptions.
+- `hatchetAdminTokenArgs({tenantId, name, expiresIn})` → `/hatchet-admin token create
+--config /config --tenant-id … --name … --expiresIn …`; `tokenCreateArgv({container,
+adminArgs})` prepends `exec <container>`.
+- `parseMintedToken(stdout)`: last line, 3-part JWT; the refusal never echoes stdout.
+- `describeAdminFailure(e)`: exit code + a 300-byte, redacted stderr tail (never the argv).
+- `provisionTenant`: URL + expiry checks → create form: password → login → create →
+  `onTenantCreated(id)`; mint-only form (`tenantId`, canonical UUID, lowercased): no password,
+  no REST → mint → `{tenantId, token, expiresAt}` (`expiresAt` from the token's `exp`, else
+  computed). A mint failing after create names the tenant and the mint-only re-run.
 
-CLI `packages/worker/scripts/provision-tenant.ts`, script `provision:tenant`
-(`tsx scripts/provision-tenant.ts`), run as root on the box:
+CLI `packages/worker/scripts/provision-tenant.ts` (`provision:tenant`), run as root on the box,
+`node:util` `parseArgs` strict (unknown flags exit 2):
 
-    pnpm --filter @terragon/worker provision:tenant --name <n> --slug <s> [--token-name www] [--expires-in 8760h]
-    pnpm --filter @terragon/worker provision:tenant --tenant-id <id> --token-name <n>   # mint only (#375 worker tokens)
+    pnpm -s --filter @terragon/worker provision:tenant --name <n> --slug <s> [--token-name www] [--expires-in 8760h]
+    pnpm -s --filter @terragon/worker provision:tenant --tenant-id <id> --token-name <n>   # mint only (#375 worker tokens)
 
 Env: `HATCHET_ENGINE_URL` (default `http://127.0.0.1:8888`), `HATCHET_ADMIN_EMAIL` (default
-`ops@beautomata.com`), `HATCHET_ADMIN_PASS_FILE` (default `/root/.automata/hatchet-admin.pass`),
-`HATCHET_ENGINE_CONTAINER` (default `automata-hatchet-hatchet-lite-1`). Stdout: exactly one JSON
-line `{"tenantId":…,"token":…}`; progress on stderr without the token. Exit 0 ok, 1 refused/failed,
-2 usage.
+`ops@beautomata.com`, empty = default), `HATCHET_ADMIN_PASS_FILE` (default
+`/root/.automata/hatchet-admin.pass`), `HATCHET_ENGINE_CONTAINER` (default
+`automata-hatchet-hatchet-lite-1`). `docker exec` has a 60 s timeout. Stdout: exactly one JSON
+line `{"tenantId","token","expiresAt"}`; progress on stderr without the token. Exit 0 ok,
+1 refused/failed, 2 usage.
 
 ## Tests
 
@@ -220,7 +224,7 @@ AC 4 provision + curl scope check · AC 5 by-construction evidence · AC 6 renam
 engine idle, register ≠ 200, admin login 200 · AC 7 bind one org's repo to the new tenant, real
 runs in each tenant, cross-tenant absence.
 
-## Validator fixes (part B, cycle 1, PASS_WITH_WARNINGS) — applied
+## Validator fixes (part B, cycle 1, PASS_WITH_WARNINGS) and refinement — applied
 
 - The credential read reuses `readGuardedFile` (`O_NOFOLLOW`, fstat on the open fd), extended
   with an `ownerUid` option; `GuardedFileError` becomes a `ProvisionError`.

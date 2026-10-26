@@ -1,3 +1,6 @@
+import { redactSecrets } from "@terragon/utils/redact";
+
+import { decodeJwtClaims } from "../agent-run/assert-auth";
 import { GuardedFileError, readGuardedFile } from "../agent-run/guarded-file";
 
 /**
@@ -23,7 +26,8 @@ export class ProvisionError extends Error {
   }
 }
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+// IP literals only: `localhost` would hang the guarantee on /etc/hosts and DNS.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]"]);
 
 /** The engine URL with any trailing slash removed; refuses anything not loopback. */
 export function assertLoopbackEngineUrl(raw: string): string {
@@ -38,7 +42,7 @@ export function assertLoopbackEngineUrl(raw: string): string {
   }
   if (!LOOPBACK_HOSTS.has(url.hostname)) {
     throw new ProvisionError(
-      "engine URL must be loopback (127.0.0.1, localhost or [::1]); provisioning never leaves the box",
+      "engine URL must be the loopback literal 127.0.0.1 or [::1]; provisioning never leaves the box",
     );
   }
   if (url.username || url.password) {
@@ -83,23 +87,41 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
+function asRecord(v: unknown): Record<string, unknown> {
+  return typeof v === "object" && v !== null
+    ? (v as Record<string, unknown>)
+    : {};
+}
+
+function postJson(
+  fetch: FetchLike,
+  url: string,
+  payload: unknown,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(payload),
+    // A redirect would re-send the body (the password, on login) to wherever it points.
+    redirect: "error",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+}
+
 export async function engineLogin(args: {
   apiUrl: string;
   email: string;
   password: string;
   fetch: FetchLike;
 }): Promise<string> {
-  const res = await args.fetch(`${args.apiUrl}/api/v1/users/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: args.email, password: args.password }),
-    // A redirect would re-send the password to wherever it points.
-    redirect: "error",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  const res = await postJson(args.fetch, `${args.apiUrl}/api/v1/users/login`, {
+    email: args.email,
+    password: args.password,
   });
   if (res.status !== 200) {
     throw new ProvisionError(
-      `engine login as ${args.email} failed (HTTP ${res.status})`,
+      `engine login failed (HTTP ${res.status}); check HATCHET_ADMIN_EMAIL and the credential file`,
     );
   }
   const cookie = extractSessionCookie(res.headers.getSetCookie());
@@ -109,19 +131,14 @@ export async function engineLogin(args: {
   return cookie;
 }
 
-export const TENANT_SLUG = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+const TENANT_SLUG = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
 
 /** The engine's validation descriptions from an error body, if it has any. */
 function validationDetail(body: unknown): string {
-  if (typeof body !== "object" || body === null) return "";
-  const errors = (body as { errors?: unknown }).errors;
+  const errors = asRecord(body).errors;
   if (!Array.isArray(errors)) return "";
   const descriptions = errors
-    .map((e) =>
-      typeof e === "object" && e !== null
-        ? (e as { description?: unknown }).description
-        : undefined,
-    )
+    .map((e) => asRecord(e).description)
     .filter((d): d is string => typeof d === "string");
   return descriptions.length > 0 ? `: ${descriptions.join("; ")}` : "";
 }
@@ -141,29 +158,21 @@ export async function createTenant(args: {
   if (args.name.trim().length === 0) {
     throw new ProvisionError("tenant name must not be empty");
   }
-  const res = await args.fetch(`${args.apiUrl}/api/v1/tenants`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie: args.cookie },
+  const res = await postJson(
+    args.fetch,
+    `${args.apiUrl}/api/v1/tenants`,
     // The API's own default is V0; every route this box uses is V1.
-    body: JSON.stringify({
-      name: args.name,
-      slug: args.slug,
-      engineVersion: "V1",
-    }),
-    redirect: "error",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+    { name: args.name, slug: args.slug, engineVersion: "V1" },
+    { cookie: args.cookie },
+  );
   const body: unknown = await res.json().catch(() => null);
   if (res.status !== 200) {
     throw new ProvisionError(
       `tenant create failed (HTTP ${res.status})${validationDetail(body)}`,
     );
   }
-  const tenant =
-    typeof body === "object" && body !== null
-      ? (body as { metadata?: { id?: unknown }; version?: unknown })
-      : {};
-  const id = tenant.metadata?.id;
+  const tenant = asRecord(body);
+  const id = asRecord(tenant.metadata).id;
   if (typeof id !== "string" || id.length === 0) {
     throw new ProvisionError("tenant create returned no tenant id");
   }
@@ -173,14 +182,6 @@ export async function createTenant(args: {
     );
   }
   return id;
-}
-
-/** `docker` argv that runs the admin CLI's argv inside the engine container. */
-export function tokenCreateArgv(args: {
-  container: string;
-  adminArgs: string[];
-}): string[] {
-  return ["exec", args.container, ...args.adminArgs];
 }
 
 /** The `/hatchet-admin token create` argv itself, for any way of exec-ing into the engine. */
@@ -213,8 +214,38 @@ export function parseMintedToken(stdout: string): string {
   return last;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The token's own `exp` claim as an ISO time, or null (no signature check: it is ours). */
+export function tokenExpiry(token: string): string | null {
+  const exp = asRecord(decodeJwtClaims(token)).exp;
+  return typeof exp === "number" && Number.isFinite(exp)
+    ? new Date(exp * 1000).toISOString()
+    : null;
+}
+
+/**
+ * A failed `docker exec … hatchet-admin` as a ProvisionError. execFile's own
+ * message echoes the argv and the full stderr, and hatchet-admin's stderr can
+ * carry `/config` values (the engine's database URL); keep the exit code and a
+ * short, redacted stderr tail only.
+ */
+export function describeAdminFailure(e: unknown): ProvisionError {
+  const err = asRecord(e);
+  if (err.killed === true) {
+    return new ProvisionError("hatchet-admin timed out");
+  }
+  const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
+  // Redact the whole stream, then cut: a cut first could split a secret
+  // past the point a pattern can recognise it.
+  const tail = redactSecrets(stderr).slice(-300);
+  return new ProvisionError(
+    `hatchet-admin failed (exit ${String(err.code ?? "unknown")})${tail ? `: ${tail}` : ""}`,
+  );
+}
+
 /** Go duration in hours (`8760h`): the only shape the CLI accepts for --expires-in. */
-export const TOKEN_EXPIRY = /^[1-9][0-9]{0,5}h$/;
+const TOKEN_EXPIRY = /^[1-9][0-9]{0,5}h$/;
 
 export interface ProvisionOptions {
   apiUrl: string;
@@ -233,6 +264,8 @@ export interface ProvisionDeps {
   /** Runs this `/hatchet-admin …` argv inside the engine container; returns stdout. */
   runAdmin: (adminArgv: string[]) => Promise<string>;
   now: () => Date;
+  /** Told the new tenant's id as soon as it exists, before the mint. */
+  onTenantCreated?: (tenantId: string) => void;
 }
 
 export interface ProvisionResult {
@@ -255,12 +288,13 @@ export async function provisionTenant(
   if (opts.tokenName.trim().length === 0) {
     throw new ProvisionError("token name must not be empty");
   }
+  const created = !("tenantId" in opts.tenant);
   let tenantId: string;
   if ("tenantId" in opts.tenant) {
-    tenantId = opts.tenant.tenantId;
-    if (!/^[0-9a-f-]{36}$/.test(tenantId)) {
+    if (!UUID.test(opts.tenant.tenantId)) {
       throw new ProvisionError("tenant id must be a UUID");
     }
+    tenantId = opts.tenant.tenantId.toLowerCase();
   } else {
     const password = readAdminPassword(opts.passwordFile, deps.uid);
     const cookie = await engineLogin({
@@ -276,19 +310,36 @@ export async function provisionTenant(
       slug: opts.tenant.slug,
       fetch: deps.fetch,
     });
+    deps.onTenantCreated?.(tenantId);
   }
   const mintedAt = deps.now();
-  const stdout = await deps.runAdmin(
-    hatchetAdminTokenArgs({
-      tenantId,
-      name: opts.tokenName,
-      expiresIn: opts.expiresIn,
-    }),
-  );
+  let token: string;
+  try {
+    token = parseMintedToken(
+      await deps.runAdmin(
+        hatchetAdminTokenArgs({
+          tenantId,
+          name: opts.tokenName,
+          expiresIn: opts.expiresIn,
+        }),
+      ),
+    );
+  } catch (e) {
+    if (created) {
+      // The slug is taken now, so a plain re-run fails; say how to finish.
+      const message = e instanceof Error ? e.message : String(e);
+      throw new ProvisionError(
+        `tenant ${tenantId} was created but the token mint failed (${message}); re-run with --tenant-id ${tenantId} --token-name ${opts.tokenName}`,
+      );
+    }
+    throw e;
+  }
   const hours = Number(opts.expiresIn.slice(0, -1));
   return {
     tenantId,
-    token: parseMintedToken(stdout),
-    expiresAt: new Date(mintedAt.getTime() + hours * 3_600_000).toISOString(),
+    token,
+    expiresAt:
+      tokenExpiry(token) ??
+      new Date(mintedAt.getTime() + hours * 3_600_000).toISOString(),
   };
 }

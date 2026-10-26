@@ -103,11 +103,12 @@ describe.skipIf(!itEnabled)(
       );
       expect(row.rows[0]?.slug).toBe("it-client");
 
-      const own = await runsStatus(tenantId, token);
+      const [own, cross] = await Promise.all([
+        runsStatus(tenantId, token),
+        runsStatus(defaultTenantId, token),
+      ]);
       expect(own.status).toBe(200);
       expect(own.rows).toEqual([]);
-
-      const cross = await runsStatus(defaultTenantId, token);
       expect(cross.status).toBe(403);
     }, 120_000);
   },

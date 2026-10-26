@@ -5,6 +5,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
 
+import {
+  hatchetAdminTokenArgs,
+  parseMintedToken,
+} from "../provision/hatchet-tenant";
+
 /**
  * Test-support harness for the ISOLATED hatchet-lite stack the integration
  * suites run against (HATCHET_IT=1). Not shipped. ONE home for the safety
@@ -230,23 +235,14 @@ export async function bootstrapTenant(
     500,
   );
   await waitForEngineReady();
-  const minted = await compose([
-    "exec",
-    "-T",
-    "hatchet-lite",
-    "/hatchet-admin",
-    "token",
-    "create",
-    "--config",
-    "/config",
-    "--tenant-id",
-    tenantId,
-    "--name",
-    "it",
-  ]);
-  const token = minted.trim().split("\n").pop()!.trim();
-  if (token.split(".").length !== 3) {
-    throw new Error("hatchet-admin did not return a JWT");
-  }
+  const token = parseMintedToken(
+    await compose([
+      "exec",
+      "-T",
+      "hatchet-lite",
+      // 2160h: hatchet-admin's own default, which the suites always minted with.
+      ...hatchetAdminTokenArgs({ tenantId, name: "it", expiresIn: "2160h" }),
+    ]),
+  );
   return { tenantId, token };
 }

@@ -938,45 +938,54 @@ the default tenant. `provision:tenant` creates the tenant on an admin session an
 API token scoped to it with the image's own `hatchet-admin`; `deploy/bind-hatchet-tenant.ts`
 then points www at it.
 
-**Loopback + ssh only.** The tool dials the engine on a loopback literal (anything else is
-refused before the credential file is opened), reads the admin password from
-`/root/.automata/hatchet-admin.pass` (refused unless a regular file, owned by the running
-uid, mode 0600/0400, not a symlink), and adds no listener. Never route it through the
-tunnel. The admin must already be renamed into the domain (above); until then pass
-`HATCHET_ADMIN_EMAIL=admin@example.com`.
+**Loopback + ssh only.** The tool dials the engine on a loopback IP literal (`127.0.0.1` or
+`[::1]`; anything else, `localhost` included, is refused before the credential file is
+opened), reads the admin password from `/root/.automata/hatchet-admin.pass` (refused unless
+a regular file owned by the running uid, mode 0600/0400, not a symlink), refuses redirects,
+and adds no listener. Never route it through the tunnel. The admin must already be renamed
+into the domain (above); until then pass `HATCHET_ADMIN_EMAIL=admin@example.com`.
+
+Run it **once**, from the operator's machine, and keep its output in a variable there —
+every run of the create form makes a new tenant:
 
 ```bash
-# as root, on the box
-cd /opt/automata-platform
-OUT="$(pnpm -s --filter @terragon/worker provision:tenant --name 'Client A' --slug client-a \
-  --token-name www --expires-in 8760h)"            # stdout: {"tenantId","token","expiresAt"}
+BOX=root@138.201.174.63
+OUT="$(ssh "$BOX" 'cd /opt/automata-platform && pnpm -s --filter @terragon/worker \
+  provision:tenant --name "Client A" --slug client-a --token-name www --expires-in 8760h')"
 TENANT="$(printf '%s' "$OUT" | jq -r .tenantId)"
-# mint-only, into an existing tenant (e.g. a worker token for #375):
-pnpm -s --filter @terragon/worker provision:tenant --tenant-id "$TENANT" --token-name box-2
+printf '%s' "$OUT" | jq -r .expiresAt              # re-mint and re-bind before this
 ```
 
-`-s` matters: without it pnpm prints its script header on stdout ahead of the JSON. The
-token is printed once and never logged; keep it in a shell variable, never a file in the
-repo. Tokens expire (`expiresAt`, default one year; `hatchet-admin`'s own default is 90
-days): re-mint and re-bind before then.
-
-Scope check, with the new token (`T`): the tenant's own windowed collection answers 200
-with zero rows; the default tenant answers 403.
+`-s` matters: without it pnpm prints its script header on stdout ahead of the JSON line
+`{"tenantId","token","expiresAt"}`. Progress (the tenant id as soon as it exists) goes to
+stderr; the token is printed once and never logged — keep it in a variable, never a file in
+the repo. Expiry defaults to one year (`hatchet-admin`'s own default is 90 days). If the
+mint fails after the tenant was created, the error names the tenant and the mint-only
+re-run:
 
 ```bash
-SINCE="$(date -u -d '-1 hour' +%FT%TZ)"
-for t in "$TENANT" 707d0855-80ab-4e1f-a156-f1c4546cbf52; do
-  curl -s -o /dev/null -w "$t %{http_code}\n" -H "Authorization: Bearer $T" \
-    "http://127.0.0.1:8888/api/v1/stable/tenants/$t/workflow-runs?since=$SINCE&limit=1&only_tasks=true"
-done
+ssh "$BOX" 'cd /opt/automata-platform && pnpm -s --filter @terragon/worker \
+  provision:tenant --tenant-id <tenantId> --token-name www'     # also #375's worker tokens
 ```
 
-Bind from a machine that holds the prod `DATABASE_URL` and `ENCRYPTION_MASTER_KEY`; the
-token travels over ssh into an env var, never through argv or a terminal:
+Scope check: the token reads its own tenant's windowed collection (200, zero rows) and is
+refused on the default tenant (403):
 
 ```bash
-HATCHET_TENANT_API_TOKEN="$(ssh root@<box> "$PROVISION_COMMAND" | jq -r .token)" \
-  pnpm exec tsx deploy/bind-hatchet-tenant.ts <orgSlug> <owner/repo|'*'> "$TENANT"
+T="$(printf '%s' "$OUT" | jq -r .token)"
+ssh "$BOX" 'read -r T; SINCE=$(date -u -d "-1 hour" +%FT%TZ)
+  for t in '"$TENANT"' 707d0855-80ab-4e1f-a156-f1c4546cbf52; do
+    curl -s -o /dev/null -w "$t %{http_code}\n" -H "Authorization: Bearer $T" \
+      "http://127.0.0.1:8888/api/v1/stable/tenants/$t/workflow-runs?since=$SINCE&limit=1&only_tasks=true"
+  done' <<<"$T"
+```
+
+Bind from a machine that holds the prod `DATABASE_URL` and `ENCRYPTION_MASTER_KEY` (the
+token stays in the environment, never argv):
+
+```bash
+HATCHET_TENANT_API_TOKEN="$T" pnpm exec tsx deploy/bind-hatchet-tenant.ts \
+  <orgSlug> <owner/repo|'*'> "$TENANT"
 ```
 
 A tenant with no worker enrolled queues its runs until #375 enrolls one. Rollback: delete

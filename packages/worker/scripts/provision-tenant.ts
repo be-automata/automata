@@ -9,7 +9,7 @@
  *
  * (`-s`: without it pnpm prints its own script header on stdout, ahead of the JSON.)
  *
- * Env: HATCHET_ENGINE_URL (default http://127.0.0.1:8888, loopback only),
+ * Env: HATCHET_ENGINE_URL (default http://127.0.0.1:8888; 127.0.0.1 or [::1] only),
  * HATCHET_ADMIN_EMAIL (default ops@beautomata.com), HATCHET_ADMIN_PASS_FILE
  * (default /root/.automata/hatchet-admin.pass, owner-only), HATCHET_ENGINE_CONTAINER
  * (default automata-hatchet-hatchet-lite-1).
@@ -20,12 +20,12 @@
  * Exit: 0 provisioned; 1 refused or failed; 2 usage.
  */
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { parseArgs, promisify } from "node:util";
 
 import {
   ProvisionError,
+  describeAdminFailure,
   provisionTenant,
-  tokenCreateArgv,
 } from "../src/provision/hatchet-tenant";
 import type { ProvisionOptions } from "../src/provision/hatchet-tenant";
 
@@ -39,17 +39,23 @@ function usage(message: string): never {
   process.exit(2);
 }
 
-function flag(name: string): string | undefined {
-  const i = process.argv.indexOf(name);
-  if (i < 0) return undefined;
-  const v = process.argv[i + 1];
-  if (v === undefined || v.startsWith("--")) usage(`${name} needs a value`);
-  return v;
+let values: Record<string, string | undefined>;
+try {
+  ({ values } = parseArgs({
+    strict: true,
+    allowPositionals: false,
+    options: {
+      name: { type: "string" },
+      slug: { type: "string" },
+      "tenant-id": { type: "string" },
+      "token-name": { type: "string" },
+      "expires-in": { type: "string" },
+    },
+  }));
+} catch (e) {
+  usage(e instanceof Error ? e.message : String(e));
 }
-
-const name = flag("--name");
-const slug = flag("--slug");
-const tenantId = flag("--tenant-id");
+const { name, slug, "tenant-id": tenantId } = values;
 
 let tenant: ProvisionOptions["tenant"];
 if (tenantId !== undefined) {
@@ -73,22 +79,35 @@ try {
   const result = await provisionTenant(
     {
       apiUrl: process.env.HATCHET_ENGINE_URL ?? "http://127.0.0.1:8888",
-      adminEmail: process.env.HATCHET_ADMIN_EMAIL ?? "ops@beautomata.com",
+      // An empty value is as unusable as an unset one.
+      adminEmail: process.env.HATCHET_ADMIN_EMAIL || "ops@beautomata.com",
       passwordFile:
         process.env.HATCHET_ADMIN_PASS_FILE ??
         "/root/.automata/hatchet-admin.pass",
-      tokenName: flag("--token-name") ?? "www",
-      expiresIn: flag("--expires-in") ?? "8760h",
+      tokenName: values["token-name"] ?? "www",
+      expiresIn: values["expires-in"] ?? "8760h",
       tenant,
     },
     {
       fetch,
       uid,
       now: () => new Date(),
+      onTenantCreated: (id) =>
+        console.error(`provision:tenant: tenant ${id} created; minting`),
       runAdmin: async (adminArgs) => {
-        const argv = tokenCreateArgv({ container, adminArgs });
-        const { stdout } = await execFileAsync("docker", argv);
-        return stdout;
+        try {
+          const { stdout } = await execFileAsync(
+            "docker",
+            ["exec", container, ...adminArgs],
+            {
+              timeout: 60_000,
+              maxBuffer: 64 * 1024,
+            },
+          );
+          return stdout;
+        } catch (e) {
+          throw describeAdminFailure(e);
+        }
       },
     },
   );
@@ -97,7 +116,6 @@ try {
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (e) {
-  // execFile's error text carries the argv and stderr, never stdout (the token).
   const message = e instanceof Error ? e.message : String(e);
   console.error(
     `provision:tenant: ${e instanceof ProvisionError ? "refused" : "failed"}: ${message}`,

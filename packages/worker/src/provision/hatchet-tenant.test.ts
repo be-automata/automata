@@ -13,6 +13,8 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   ProvisionError,
   assertLoopbackEngineUrl,
+  describeAdminFailure,
+  tokenExpiry,
   createTenant,
   engineLogin,
   extractSessionCookie,
@@ -20,7 +22,6 @@ import {
   parseMintedToken,
   provisionTenant,
   readAdminPassword,
-  tokenCreateArgv,
 } from "./hatchet-tenant";
 import type { ProvisionDeps } from "./hatchet-tenant";
 
@@ -33,6 +34,16 @@ const DIR = mkdtempSync(path.join(tmpdir(), "provision-unit-"));
 afterAll(() => rmSync(DIR, { recursive: true, force: true }));
 const UID = process.getuid?.() ?? 0;
 let fileSeq = 0;
+
+/** What `fn` threw; fails the test when it returns. */
+function thrown(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  throw new Error("expected a throw");
+}
 
 /** A real credential file with `mode`, so the guarded open is what's tested. */
 function credFile(mode = 0o600, content = `${PASSWORD}\n`): string {
@@ -55,9 +66,9 @@ function response(
 describe("assertLoopbackEngineUrl", () => {
   it.each([
     ["http://127.0.0.1:8888", "http://127.0.0.1:8888"],
-    ["http://localhost:8888/", "http://localhost:8888"],
+    ["http://127.0.0.1:8888/", "http://127.0.0.1:8888"],
     ["http://[::1]:8888", "http://[::1]:8888"],
-    ["https://localhost", "https://localhost"],
+    ["http://127.1:8888", "http://127.0.0.1:8888"],
   ])("accepts %s", (raw, origin) => {
     expect(assertLoopbackEngineUrl(raw)).toBe(origin);
   });
@@ -68,6 +79,9 @@ describe("assertLoopbackEngineUrl", () => {
     "http://138.201.174.63:8888",
     "http://127.0.0.1.nip.io:8888",
     "http://localhost.evil.test",
+    "http://localhost:8888",
+    "http://0.0.0.0:8888",
+    "http://[::ffff:127.0.0.1]:8888",
     "ftp://127.0.0.1",
     "http://admin:pw@127.0.0.1:8888",
     "not a url",
@@ -111,12 +125,7 @@ describe("readAdminPassword", () => {
   });
 
   it("never puts the password in a refusal", () => {
-    let err: unknown;
-    try {
-      readAdminPassword(credFile(0o644), UID);
-    } catch (e) {
-      err = e;
-    }
+    const err = thrown(() => readAdminPassword(credFile(0o644), UID));
     expect(err).toBeInstanceOf(ProvisionError);
     expect(String(err)).not.toContain(PASSWORD);
   });
@@ -267,9 +276,7 @@ describe("token mint", () => {
       name: "www",
       expiresIn: "8760h",
     });
-    expect(tokenCreateArgv({ container: "engine-1", adminArgs })).toEqual([
-      "exec",
-      "engine-1",
+    expect(adminArgs).toEqual([
       "/hatchet-admin",
       "token",
       "create",
@@ -287,14 +294,44 @@ describe("token mint", () => {
   it("parses the JWT on the last line and never echoes stdout on refusal", () => {
     expect(parseMintedToken(`some log line\n${TOKEN}\n`)).toBe(TOKEN);
     const noisy = "level=info secret-ish output\nnot-a-token";
-    let err: unknown;
-    try {
-      parseMintedToken(noisy);
-    } catch (e) {
-      err = e;
-    }
+    const err = thrown(() => parseMintedToken(noisy));
     expect(err).toBeInstanceOf(ProvisionError);
     expect(String(err)).not.toContain("secret-ish");
+  });
+});
+
+describe("hatchet-admin failures and token expiry", () => {
+  it("keeps the exit code and a redacted stderr tail, never the argv", () => {
+    const err = describeAdminFailure(
+      Object.assign(
+        new Error(
+          `Command failed: docker exec engine /hatchet-admin --tenant-id ${TENANT}`,
+        ),
+        {
+          code: 1,
+          stderr:
+            "could not load config: postgres://hatchet:dbpass123@db:5432/hatchet unreachable\n" +
+            `leaked ${TOKEN}`,
+        },
+      ),
+    );
+    expect(err).toBeInstanceOf(ProvisionError);
+    expect(err.message).toMatch(/^hatchet-admin failed \(exit 1\): /);
+    expect(err.message).not.toContain("dbpass123");
+    expect(err.message).not.toContain(TOKEN);
+    expect(err.message).not.toContain("Command failed");
+    expect(describeAdminFailure({ killed: true }).message).toBe(
+      "hatchet-admin timed out",
+    );
+  });
+
+  it("reads exp from the token, null when it has none", () => {
+    const body = Buffer.from(JSON.stringify({ exp: 1830297600 })).toString(
+      "base64url",
+    );
+    expect(tokenExpiry(`aaaa.${body}.bbbb`)).toBe("2028-01-01T00:00:00.000Z");
+    expect(tokenExpiry(TOKEN)).toBeNull();
+    expect(tokenExpiry("not-a-jwt")).toBeNull();
   });
 });
 
@@ -384,10 +421,37 @@ describe("provisionTenant", () => {
     },
   );
 
-  it("refuses a malformed tenant id in mint-only mode", async () => {
+  it.each(["default", "-".repeat(36)])(
+    "refuses tenant id %j in mint-only mode",
+    async (tenantId) => {
+      await expect(
+        provisionTenant({ ...base, tenant: { tenantId } }, deps()),
+      ).rejects.toThrow(/UUID/);
+    },
+  );
+
+  it("lowercases an uppercase tenant id", async () => {
+    const d = deps();
     await expect(
-      provisionTenant({ ...base, tenant: { tenantId: "default" } }, deps()),
-    ).rejects.toThrow(/UUID/);
+      provisionTenant(
+        { ...base, tenant: { tenantId: TENANT.toUpperCase() } },
+        d,
+      ),
+    ).resolves.toMatchObject({ tenantId: TENANT });
+  });
+
+  it("a mint that fails after create names the tenant and the mint-only re-run", async () => {
+    const created: string[] = [];
+    const d = deps({
+      runAdmin: async () => "no token here",
+      onTenantCreated: (id) => created.push(id),
+    });
+    await expect(
+      provisionTenant({ ...base, tenant: { name: "A", slug: "client-a" } }, d),
+    ).rejects.toThrow(
+      `tenant ${TENANT} was created but the token mint failed (hatchet-admin did not print a token); re-run with --tenant-id ${TENANT} --token-name www`,
+    );
+    expect(created).toEqual([TENANT]);
   });
 
   it("does not mint when the credential file is world-readable", async () => {
