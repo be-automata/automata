@@ -30,6 +30,18 @@ Inheritance and safety rules:
 - At the cap the loop stops starting cycles and posts a needs-a-person comment with the reason `fix_cap_reached` (`apps/www/src/server-lib/delivery/decide-delivery-step.ts`, `cycleOrCap`).
 - When the PR is approved at its head and every check is green, the loop posts one comment with the `gh pr merge <n> --squash` command. The loop never merges; a person always merges (`apps/www/src/server-lib/delivery/delivery-effects.ts`, `renderMergeReady`).
 
+## Partial delivery
+
+A delivery PR ends its body with `Closes #N` only when every criterion is `PASS`, otherwise with `Refs #N` (`deploy/skills/issue-delivery/SKILL.md`; `apps/www/src/server-lib/delivery/delivery-effects.ts`, `parseUndeliveredCriteria`).
+
+- `Refs #N` is not a GitHub closing keyword, so merging the PR leaves the issue open. The loop itself never closes or reopens an issue (`apps/www/src/server-lib/delivery/evaluate-delivery-pr.ts`, `applyStep`).
+- A PR counts as `Refs` only when the last non-empty line of its body above the platform's task-link footer is `Refs #<issue>` for that PR's issue, surrounding whitespace ignored. Anything else, such as `Closes #N` or another number, gets no comment (`apps/www/src/server-lib/delivery/delivery-effects.ts`, `parseUndeliveredCriteria` and `PLATFORM_FOOTER_LINE`).
+- When that PR merges in mode `on`, the loop posts one comment, as the App, on the issue (not the PR). It lists the unticked `- [ ]` (or `* [ ]`) items of the PR's `## Acceptance criteria` section, in order. A PR closed without merging, or any merge in mode `shadow`, posts nothing (`apps/www/src/server-lib/delivery/evaluate-delivery-pr.ts`, `applyStep`; `apps/www/src/server-lib/delivery/delivery-effects.ts`, `parseUndeliveredCriteria` and `renderRefsFollowup`).
+- If the section lists no unticked item, the comment still posts and says the PR listed none (`apps/www/src/server-lib/delivery/delivery-effects.ts`, `renderRefsFollowup`).
+- It is one comment per merged PR. The comment carries a `refs-followup` marker keyed to the PR's head sha and is not posted again if the App's own marked comment exists, and the row is terminal after the merge. A second partial PR for the same issue posts its own comment (`apps/www/src/server-lib/delivery/delivery-effects.ts`, `postDeliveryComment` and `deliveryMarker`; `apps/www/src/server-lib/delivery/decide-delivery-step.ts`, `decideDeliveryStep`).
+- The loop never re-runs delivery by itself: it adds no label and dispatches no run (`apps/www/src/server-lib/delivery/evaluate-delivery-pr.ts`, `applyStep`).
+- The comment ends "Re-label this issue `automata:deliver` to deliver the rest." A person re-labels the issue `automata:deliver`, and the next delivery run treats the merged PR's work as already done (`apps/www/src/server-lib/delivery/delivery-effects.ts`, `renderRefsFollowup`; `deploy/skills/issue-delivery/SKILL.md`).
+
 ## Rollback
 
 Roll back in this order, cheapest first (the order comes from #509, not from code).
