@@ -10,7 +10,7 @@
   },
   "packageManager": "pnpm@10.14.0",
   "devDependencies": {
-    "@e2b/cli": "^1.5.1",
+    "@e2b/cli": "^2.22.3",
     "@e2b/code-interpreter": "^2.7.1",
     "@daytonaio/sdk": "0.205.1",
     "@terragon/tsconfig": "workspace:*",
