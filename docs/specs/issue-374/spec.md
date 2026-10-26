@@ -136,3 +136,103 @@ Migration `deploy/migrations/2026-10-25-hatchet-tenant-binding.sql` (`migrate:ex
   stop/drain/reconcile of other lanes resolve from the current binding — drain before unbinding.
 - `resolveHatchetConfigForThread` selects `thread.organizationId, thread.githubRepoFullName` by id.
 - Tests compare "no rows" against `hatchetConfig()` (vitest env `HATCHET_TENANT_ID=TENANT_TEST`).
+
+---
+
+# Part B — engine-side `provision:tenant` (second delivery run, 2026-10-26)
+
+Part A shipped in #524 (`b574a6a`). This run delivers part B and the live ACs 4–7.
+
+## Ground truth (verified 2026-10-26 against `origin/main` `d2685bb` and the live box)
+
+- `packages/worker/src/provision/` does not exist; `packages/worker/package.json` has no
+  `provision:*` script. `tsx` is a worker dev dependency (the README knob check runs
+  `./node_modules/.bin/tsx`).
+- Live engine `automata-hatchet-hatchet-lite-1` (hatchet-lite v0.94.10), REST on
+  `127.0.0.1:8888` (loopback-only publish, `docker-compose.hatchet.prod.yml`). Tenants:
+  `default` (`707d0855-…`) and `internal`.
+- Login: `POST /api/v1/users/login {email,password}` → 200 and
+  `Set-Cookie: hatchet=…; Domain=localhost; HttpOnly`. curl drops that cookie for a
+  `127.0.0.1` URL (domain mismatch), so the CLI carries the cookie itself (reads `Set-Cookie`,
+  sends `Cookie: hatchet=…`), whatever host it dials.
+- Tenant create: `POST /api/v1/tenants` with the session → validation requires `name` and
+  `slug` (empty body → 400 naming both). With an API token it is 403.
+- Token mint: `hatchet-admin token create --config /config --tenant-id <id> --name <n>
+[--expiresIn <dur>]`; default expiry **2160h (90 days)**. Prints the JWT as its last line
+  (`hatchet-it-harness.ts` `bootstrapTenant` parses it the same way).
+- Admin credential: `/root/.automata/hatchet-admin.pass`, `root 0600` (the ticket's
+  `/home/automata/...` path is wrong; the rotation recipe in `packages/worker/deploy/README.md`
+  writes it under `/root`). Seed admin email is still `admin@example.com`.
+- `SERVER_AUTH_RESTRICTED_EMAIL_DOMAINS` is in the prod overlay (#377) but NOT in the running
+  container's env (container up 7 days, created before the overlay change was pulled). Public
+  registration is therefore still open on the live engine → AC 6 needs README steps 2–3 (rename
+  admin to `ops@beautomata.com`, recreate `hatchet-lite`) in an idle window.
+
+## Contract
+
+`packages/worker/src/provision/hatchet-tenant.ts` (pure helpers + one orchestrator with
+injected `fetch`, `exec`, `stat`/`readFile`):
+
+- `assertLoopbackEngineUrl(url)`: `http:`/`https:` and host ∈ {`127.0.0.1`, `localhost`, `::1`};
+  anything else throws `ProvisionError`. (AC 5: no non-loopback engine call is possible.)
+- `readAdminPassword(path, {stat, readFile, uid})`: refuses a missing file, a non-regular file,
+  any group/other mode bit (`mode & 0o077`), or an owner other than the running uid; returns the
+  trimmed password; empty → refuse.
+- `engineLogin` → `hatchet=<v>` cookie; non-200 or no cookie → throws with the status only.
+- `createTenant({name, slug})` → tenant id from `metadata.id`; slug must match
+  `^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`; non-200 → throws with status + the engine's validation
+  descriptions (never the request body).
+- `tokenCreateArgv({container, tenantId, name, expiresIn})` → `["exec", container,
+"/hatchet-admin", "token", "create", "--config", "/config", "--tenant-id", id, "--name", n,
+"--expiresIn", dur]`.
+- `parseMintedToken(stdout)` → last non-empty line, must be a 3-part JWT, else throws (the
+  thrown message never echoes stdout).
+- `provisionTenant(opts, deps)`: url check → password → login → (create tenant | use
+  `--tenant-id`) → mint → `{tenantId, token}`.
+
+CLI `packages/worker/scripts/provision-tenant.ts`, script `provision:tenant`
+(`tsx scripts/provision-tenant.ts`), run as root on the box:
+
+    pnpm --filter @terragon/worker provision:tenant --name <n> --slug <s> [--token-name www] [--expires-in 8760h]
+    pnpm --filter @terragon/worker provision:tenant --tenant-id <id> --token-name <n>   # mint only (#375 worker tokens)
+
+Env: `HATCHET_ENGINE_URL` (default `http://127.0.0.1:8888`), `HATCHET_ADMIN_EMAIL` (default
+`ops@beautomata.com`), `HATCHET_ADMIN_PASS_FILE` (default `/root/.automata/hatchet-admin.pass`),
+`HATCHET_ENGINE_CONTAINER` (default `automata-hatchet-hatchet-lite-1`). Stdout: exactly one JSON
+line `{"tenantId":…,"token":…}`; progress on stderr without the token. Exit 0 ok, 1 refused/failed,
+2 usage.
+
+## Tests
+
+- Unit `src/provision/hatchet-tenant.test.ts`: loopback accept/refuse matrix; credential file
+  refusals (missing, mode 0640/0604, foreign owner, empty); cookie extraction; tenant-create
+  parsing incl. 400 validation; argv shape; JWT parse refusals; orchestrator mint-only path skips
+  login/create; no thrown message contains the password or token.
+- IT `src/provision/hatchet-tenant.integration.test.ts` (`HATCHET_IT=1`): against the isolated
+  stack, provision a tenant with the seed admin; the minted token reads the new tenant's windowed
+  workflow-runs collection → 200 with zero rows; the same token on the default tenant → 403.
+  Added to the CI HATCHET_IT step and the CLAUDE.md verification row.
+- README: a "Provisioning a tenant (#374)" section (operator flow → `bind-hatchet-tenant.ts`).
+
+## Live UAT (box) → `deploy/uat/phase2-6.md`
+
+AC 4 provision + curl scope check · AC 5 by-construction evidence · AC 6 rename admin, recreate
+engine idle, register ≠ 200, admin login 200 · AC 7 bind one org's repo to the new tenant, real
+runs in each tenant, cross-tenant absence.
+
+## Validator fixes (part B, cycle 1, PASS_WITH_WARNINGS) — applied
+
+- The credential read reuses `readGuardedFile` (`O_NOFOLLOW`, fstat on the open fd), extended
+  with an `ownerUid` option; `GuardedFileError` becomes a `ProvisionError`.
+- Tenant create sends `engineVersion: "V1"` and refuses a reply whose `version` is not `V1`.
+- Both REST calls use `redirect: "error"` (a redirect would re-send the password).
+- The exec seam is `runAdmin(adminArgv)`: the CLI prepends `docker exec <container>`, the IT
+  uses the harness `compose(["exec","-T","hatchet-lite", …])`. Mint-only needs no password,
+  login or REST call.
+- Default expiry `8760h`; the output carries `expiresAt`.
+- Docs use `pnpm -s` so stdout is the JSON line alone.
+- The IT is `describe.skipIf(!HATCHET_IT)`, listed in the CI worker-e2e step and the
+  CLAUDE.md verification row.
+- AC 7's bind runs on the operator's machine (prod `DATABASE_URL` and `ENCRYPTION_MASTER_KEY`
+  are write-only secrets); one low-traffic repo is bound, not the org, because the new tenant
+  has no worker until #375.

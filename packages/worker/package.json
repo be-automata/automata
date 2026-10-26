@@ -13,6 +13,7 @@
     "daemon:build": "pnpm --filter @terragon/daemon run build",
     "worker": "pnpm run daemon:build && tsx src/hello/worker.ts",
     "trigger": "tsx src/hello/trigger.ts",
+    "provision:tenant": "tsx scripts/provision-tenant.ts",
     "test": "vitest --no-file-parallelism --passWithNoTests",
     "tsc-check": "tsc --noEmit",
     "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
