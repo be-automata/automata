@@ -34,6 +34,13 @@ export interface EvidencePin {
    */
   hash: string;
 }
+/**
+ * The largest statement the knowledge store accepts (OPS-04, confirmed by the owner 2026-10-26).
+ * Raise only: stored rows are re-validated on read, so lowering these would make older rows unreadable.
+ */
+export const MAX_STATEMENT_CHARS = 1_000;
+export const MAX_STATEMENT_LINES = 4;
+
 export interface Claim {
   id: string;
   statement: string;
@@ -423,13 +430,7 @@ export interface Updater {
 }
 /** "add" and "reverify" are produced by callers (incremental seeding, unchanged-fact re-pins), not by reconcile. */
 export type DraftOpKind =
-  | "repin"
-  | "update"
-  | "reverify"
-  | "add"
-  | "conflict"
-  | "retract"
-  | "review";
+  "repin" | "update" | "reverify" | "add" | "conflict" | "retract" | "review";
 
 interface OpKindRules {
   /** Applied without approval. Only reconcile mints auto ops. */
@@ -1129,6 +1130,17 @@ export async function reconcile(
         );
         continue;
       }
+      if (!fitsStatementCap(u.statement)) {
+        add(
+          {
+            ...baseOf(w.claim, w.evidence),
+            op: "review",
+            why: "the updater's rewrite is longer than one stored fact allows: a human must review this fact",
+          },
+          fp,
+        );
+        continue;
+      }
       if (
         u.evidence !== undefined &&
         !acceptableEvidence(root, u.evidence, w.newEvidence.length)
@@ -1193,6 +1205,14 @@ function isUsableAnswer(u: UpdateResult): boolean {
     statement.trim() !== "" &&
     (evidence === undefined ||
       (Array.isArray(evidence) && evidence.every((e) => typeof e === "string")))
+  );
+}
+
+/** Over the cap, the store would refuse the whole op: route the fact to a human instead. */
+function fitsStatementCap(statement: string): boolean {
+  return (
+    statement.length <= MAX_STATEMENT_CHARS &&
+    statement.split("\n").length <= MAX_STATEMENT_LINES
   );
 }
 

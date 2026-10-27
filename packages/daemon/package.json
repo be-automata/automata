@@ -32,8 +32,8 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
-    "@google/gemini-cli-core": "^0.65.0",
-    "@openai/codex-sdk": "^0.164.0",
+    "@google/gemini-cli-core": "^0.16.0",
+    "@openai/codex-sdk": "^0.46.0",
     "@opencode-ai/sdk": "^0.15.16",
     "@types/node": "^22.10.2",
     "esbuild": "^0.28.2",

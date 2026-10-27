@@ -31,7 +31,7 @@ export interface AuthProbeConfig {
 }
 
 /** Minimal JWT claim decode (mirrors the SDK config-loader; no signature check). */
-function decodeJwtClaims(token: string): Record<string, unknown> | null {
+export function decodeJwtClaims(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {

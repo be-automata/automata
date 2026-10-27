@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_STATEMENT_CHARS as ENGINE_MAX_STATEMENT_CHARS,
+  MAX_STATEMENT_LINES as ENGINE_MAX_STATEMENT_LINES,
+} from "@terragon/knowledge/claims";
+
+import {
+  MAX_SNIPPET_LINES,
+  MAX_STATEMENT_CHARS,
   MinimizationError,
   assertAdminLogTarget,
   assertIntentFields,
@@ -190,6 +197,13 @@ describe("assertStoredProposal", () => {
     const missing = validProposal();
     delete missing["why"];
     expectRejected(() => assertStoredProposal(missing), "proposal.why");
+  });
+});
+
+describe("statement cap", () => {
+  it("matches the engine's, so an over-cap rewrite becomes a review, not a refused write", () => {
+    expect(ENGINE_MAX_STATEMENT_CHARS).toBe(MAX_STATEMENT_CHARS);
+    expect(ENGINE_MAX_STATEMENT_LINES).toBe(MAX_SNIPPET_LINES);
   });
 });
 

@@ -40,7 +40,7 @@
     "@terragon/types": "workspace:*",
     "@terragon/utils": "workspace:*",
     "ai": "^5.0.59",
-    "better-auth": "1.7.12",
+    "better-auth": "1.6.26",
     "cron-parser": "^5.10.2",
     "cronstrue": "^3.38.0",
     "date-fns": "^4.4.0",

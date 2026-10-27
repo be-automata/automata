@@ -18,6 +18,10 @@ const PATTERNS: RegExp[] = [
   // string in a client error). No `/` in the password, so `host:port/a@b` is
   // left alone; a real password is percent-encoded and has none.
   /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)[^\s@/]+(?=@)/gi,
+  // A bare JWT (an engine API token in a CLI's output). Anchored on the
+  // base64url JSON header, which always starts `eyJ`, so dotted names in
+  // ordinary log text never match.
+  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
 ];
 
 export function redactSecrets(text: string): string {
