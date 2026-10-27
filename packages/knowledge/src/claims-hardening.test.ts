@@ -21,6 +21,8 @@ import {
   generateSidecar,
   HumanEditedPageError,
   InvalidEvidenceUriError,
+  MAX_STATEMENT_CHARS,
+  MAX_STATEMENT_LINES,
   reconcile,
   resolve,
   retargetOp,
@@ -300,6 +302,29 @@ describe("updater answers are validated", () => {
       sourceRev: SHA,
     });
     expect(findOp(draft.ops, "sso-fixed-in")?.op).toBe("review");
+  });
+
+  it("a rewrite over the store's statement cap becomes a review", async () => {
+    const { root, sc } = corpus();
+    edit(root, "tickets/SUP-12.json", (s) => s.replace('"2.4.1"', '"2.4.2"'));
+    const op = async (statement: string) =>
+      findOp(
+        (
+          await reconcile(root, pageOf(root), sc, answering(statement), {
+            sourceRev: SHA,
+          })
+        ).ops,
+        "sso-fixed-in",
+      )?.op;
+    const fill = (n: number) => `Fixed in 2.4.2.${" x".repeat(n)}`.slice(0, n);
+    expect(await op(fill(MAX_STATEMENT_CHARS))).toBe("update");
+    expect(await op(fill(MAX_STATEMENT_CHARS + 1))).toBe("review");
+    const lines = (n: number) =>
+      Array.from({ length: n }, (_, i) => `Fixed in 2.4.2, line ${i}.`).join(
+        "\n",
+      );
+    expect(await op(lines(MAX_STATEMENT_LINES))).toBe("update");
+    expect(await op(lines(MAX_STATEMENT_LINES + 1))).toBe("review");
   });
 
   it("an evidence override wider than 200 lines becomes a review", async () => {

@@ -11,9 +11,14 @@
 
 /** Locked by OPS-04. */
 export const MAX_SNIPPET_LINES = 4;
-/** Assumption A2: review with the owner before Phase 14 seeding. */
+/**
+ * Confirmed by the owner 2026-10-26: one claim is one fact. Raise only: stored
+ * proposals are re-validated on read, so a lower cap makes older rows throw.
+ * The engine routes an over-cap rewrite to human review (@terragon/knowledge
+ * MAX_STATEMENT_CHARS, kept equal by a test).
+ */
 export const MAX_STATEMENT_CHARS = 1_000;
-/** Assumption A2: review with the owner before Phase 14 seeding. */
+/** Confirmed by the owner 2026-10-26. Raise only, as above. */
 export const MAX_SNIPPET_LINE_CHARS = 200;
 export const MAX_URI_CHARS = 512;
 export const MAX_VALUE_TOKEN_CHARS = 64;
