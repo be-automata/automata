@@ -82,13 +82,23 @@ describe("createToolFailureStreak", () => {
     ).toMatchObject({ kind: "trip", streak: 4, lastTool: null });
   });
 
-  it("a success after the failures in the same batch clears the verdict", () => {
+  it("a success later in the batch keeps a trip already reached", () => {
+    const s = createToolFailureStreak({ limit: 3 });
+    expect(
+      s.observe(results(["a", true], ["b", true], ["c", true], ["d", false])),
+    ).toEqual({ kind: "trip", streak: 3, lastTool: null });
+    expect(s.current()).toBe(0);
+  });
+
+  it("a success later in the batch keeps a report already reached", () => {
     const s = createToolFailureStreak({ limit: 0 });
     for (let i = 0; i < 4; i += 1) {
       s.observe(results([`x${i}`, true]));
     }
     expect(s.observe(results(["y", true], ["z", false]))).toEqual({
-      kind: "none",
+      kind: "report",
+      streak: 5,
+      lastTool: null,
     });
     expect(s.current()).toBe(0);
   });

@@ -124,8 +124,9 @@ export function createToolFailureStreak({
     let verdict: StreakVerdict = { kind: "none" };
     for (const result of results) {
       if (!result.isError) {
+        // Reset the count only: a trip or report already reached earlier in
+        // this batch must still reach the caller (the trip is latched).
         streak = 0;
-        verdict = { kind: "none" };
         continue;
       }
       streak += 1;
