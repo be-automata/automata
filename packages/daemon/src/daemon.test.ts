@@ -2030,6 +2030,89 @@ describe("daemon", () => {
       ).toBe(false);
     });
   });
+
+  describe("tool failure streak (stuck agent)", () => {
+    const S = "SESSION_STREAK";
+    const failedCall = (i: number) => [
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", name: "Bash", id: `toolu_${i}`, input: {} },
+          ],
+        },
+        session_id: S,
+      },
+      {
+        type: "user",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: `toolu_${i}`,
+              content: "Error: exit code 1",
+              is_error: true,
+            },
+          ],
+        },
+        session_id: S,
+      },
+    ];
+    const sentMessages = (): Array<Record<string, unknown>> =>
+      serverPostMock.mock.calls.flatMap(
+        (call) =>
+          (call[0] as { messages: Array<Record<string, unknown>> }).messages,
+      );
+    const stuckResults = () =>
+      sentMessages().filter(
+        (m) =>
+          m.type === "result" &&
+          String(m.result ?? "").includes("consecutive failed tool calls"),
+      );
+
+    async function startAndFail(calls: number) {
+      await daemon.start();
+      await writeToUnixSocket({
+        unixSocketPath: runtime.unixSocketPath,
+        dataStr: JSON.stringify(TEST_INPUT_MESSAGE),
+      });
+      await sleepUntil(() => spawnCommandLineMock.mock.calls.length === 1);
+      mockSpawnCommandStdoutLine({
+        type: "system",
+        subtype: "init",
+        session_id: S,
+        tools: ["Bash"],
+        mcp_servers: [],
+      });
+      for (let i = 0; i < calls; i += 1) {
+        for (const line of failedCall(i)) {
+          mockSpawnCommandStdoutLine(line);
+        }
+      }
+    }
+
+    it("enforce mode kills the run at the limit with an error result", async () => {
+      vi.stubEnv("TOOL_FAILURE_STREAK_LIMIT", "3");
+      await startAndFail(4);
+      await sleepUntil(() => stuckResults().length === 1, 3000);
+      const [stuck] = stuckResults();
+      expect(stuck!.is_error).toBe(true);
+      expect(stuck!.result).toContain("stuck after 3 consecutive");
+      expect(stuck!.result).toContain("(last: Bash)");
+      expect(killChildProcessGroupMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("observe mode (no limit) never kills the run", async () => {
+      await startAndFail(12);
+      await sleep(100);
+      expect(stuckResults()).toHaveLength(0);
+      expect(killChildProcessGroupMock).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("withAgentPathPrepend", () => {
