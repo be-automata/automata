@@ -1,6 +1,12 @@
-import { sql, type SQL } from "drizzle-orm";
+import { and, eq, lte, sql, type SQL } from "drizzle-orm";
+
+import {
+  RECONCILE_ALL_ERROR_CODES,
+  type ReconcileErrorCode,
+} from "@terragon/knowledge/reconcile-wire";
 
 import { rowsOf, type DB } from "../db";
+import { knowledgeIntent } from "../db/schema";
 
 /**
  * Knowledge intent lifecycle. SYSTEM path, org-agnostic: called only by the
@@ -212,5 +218,193 @@ export async function claimDueKnowledgeIntents({
     `);
 
     return claimed;
+  });
+}
+
+export interface RequeuedKnowledgeIntent {
+  id: string;
+  organizationId: string;
+  repoFullName: string;
+  attempts: number;
+  code: ReconcileErrorCode;
+  state: "pending" | "failed";
+  /** True only for the row this call flipped to failed (PD-3: alert once). */
+  becameFailed: boolean;
+}
+
+/**
+ * PD-2: return every expired lease to pending (attempts + 1, code
+ * lease_expired), or to failed (code max_attempts) at the attempt cap.
+ * Org gating does not apply: the claim skips an Off org's pending row.
+ */
+export async function requeueExpiredKnowledgeIntents({
+  db,
+  now,
+  rng = Math.random,
+  limit = 50,
+}: {
+  db: DB;
+  now: Date;
+  rng?: () => number;
+  limit?: number;
+}): Promise<RequeuedKnowledgeIntent[]> {
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as DB;
+    const expired = await tx
+      .select()
+      .from(knowledgeIntent)
+      .where(
+        and(
+          eq(knowledgeIntent.state, "processing"),
+          lte(knowledgeIntent.nextAttemptAt, now),
+        ),
+      )
+      .limit(limit)
+      .for("update", { skipLocked: true });
+    const out: RequeuedKnowledgeIntent[] = [];
+    for (const r of expired) {
+      const attempts = r.attempts + 1;
+      const exhausted = attempts >= KNOWLEDGE_INTENT_MAX_ATTEMPTS;
+      const code: ReconcileErrorCode = exhausted
+        ? "max_attempts"
+        : "lease_expired";
+      await tx
+        .update(knowledgeIntent)
+        .set(
+          exhausted
+            ? {
+                state: "failed",
+                attempts,
+                lastErrorCode: code,
+                processedAt: now,
+                updatedAt: now,
+              }
+            : {
+                state: "pending",
+                attempts,
+                lastErrorCode: code,
+                nextAttemptAt: new Date(
+                  now.getTime() + knowledgeIntentBackoffMs(attempts, rng),
+                ),
+                updatedAt: now,
+              },
+        )
+        .where(eq(knowledgeIntent.id, r.id));
+      out.push({
+        id: r.id,
+        organizationId: r.organizationId,
+        repoFullName: r.repoFullName,
+        attempts,
+        code,
+        state: exhausted ? "failed" : "pending",
+        becameFailed: exhausted,
+      });
+    }
+    return out;
+  });
+}
+
+/** Give a claimed intent back untouched (for example a dispatch skipped by a cap). */
+export async function releaseKnowledgeIntent({
+  db,
+  intentId,
+  now,
+}: {
+  db: DB;
+  intentId: string;
+  now: Date;
+}): Promise<{ result: "released" | "not_processing" }> {
+  const rows = await db
+    .update(knowledgeIntent)
+    .set({ state: "pending", nextAttemptAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(knowledgeIntent.id, intentId),
+        eq(knowledgeIntent.state, "processing"),
+      ),
+    )
+    .returning({ id: knowledgeIntent.id });
+  return { result: rows.length > 0 ? "released" : "not_processing" };
+}
+
+export type FailKnowledgeIntentResult =
+  | {
+      result: "recorded";
+      state: "pending" | "failed";
+      attempts: number;
+      code: ReconcileErrorCode;
+      /** True only for the row this call flipped to failed (PD-3). */
+      becameFailed: boolean;
+      organizationId: string;
+      repoFullName: string;
+    }
+  | { result: "not_processing" };
+
+function isReconcileErrorCode(value: unknown): value is ReconcileErrorCode {
+  return (
+    typeof value === "string" &&
+    (RECONCILE_ALL_ERROR_CODES as readonly string[]).includes(value)
+  );
+}
+
+/** Record a failed attempt of a processing intent: backoff, or failed at the cap. */
+export async function failKnowledgeIntent({
+  db,
+  intentId,
+  code,
+  now,
+  rng = Math.random,
+}: {
+  db: DB;
+  intentId: string;
+  code: ReconcileErrorCode;
+  now: Date;
+  rng?: () => number;
+}): Promise<FailKnowledgeIntentResult> {
+  // Closed enum, checked before any write; the value is never echoed.
+  if (!isReconcileErrorCode(code)) {
+    throw new Error("code is not a reconcile error code");
+  }
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as DB;
+    const [r] = await tx
+      .select()
+      .from(knowledgeIntent)
+      .where(eq(knowledgeIntent.id, intentId))
+      .for("update");
+    if (!r || r.state !== "processing") return { result: "not_processing" };
+    const attempts = r.attempts + 1;
+    const exhausted = attempts >= KNOWLEDGE_INTENT_MAX_ATTEMPTS;
+    await tx
+      .update(knowledgeIntent)
+      .set(
+        exhausted
+          ? {
+              state: "failed",
+              attempts,
+              lastErrorCode: code,
+              processedAt: now,
+              updatedAt: now,
+            }
+          : {
+              state: "pending",
+              attempts,
+              lastErrorCode: code,
+              nextAttemptAt: new Date(
+                now.getTime() + knowledgeIntentBackoffMs(attempts, rng),
+              ),
+              updatedAt: now,
+            },
+      )
+      .where(eq(knowledgeIntent.id, intentId));
+    return {
+      result: "recorded",
+      state: exhausted ? "failed" : "pending",
+      attempts,
+      code,
+      becameFailed: exhausted,
+      organizationId: r.organizationId,
+      repoFullName: r.repoFullName,
+    };
   });
 }
