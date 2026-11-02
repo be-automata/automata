@@ -214,3 +214,56 @@ describe("KnowledgeReposTableView", () => {
     expect(html).not.toMatch(/rounded-full|border-l-|data-slot="card"/);
   });
 });
+
+describe("evidence coverage text (PD-21, PD-24, PD-25)", () => {
+  const render = (over: Partial<KnowledgeRepoDto>, viewer = MEMBER) =>
+    renderToStaticMarkup(
+      <KnowledgeReposTableView
+        status="ready"
+        repos={[repo(over)]}
+        viewer={viewer}
+        now={NOW}
+        onRetry={() => {}}
+        onDiagnose={() => {}}
+        onReload={() => {}}
+        diagnose={null}
+      />,
+    );
+
+  it("states the excluded doc and invalid-path claims", () => {
+    const html = render({ excludedDocClaims: 3, excludedInvalidClaims: 1 });
+    expect(html).toContain("3 claims not checked: doc source not connected");
+    expect(html).toContain("1 claim not checked: invalid evidence path");
+  });
+
+  it("states whether ticket claims have a tracker, singular and plural", () => {
+    expect(
+      render({ ticketClaimCount: 2, ticketSource: "not_configured" }),
+    ).toContain("2 ticket claims: no tracker configured");
+    expect(
+      render({ ticketClaimCount: 2, ticketSource: "configured" }),
+    ).toContain("2 ticket claims checked against the tracker");
+    expect(
+      render({ ticketClaimCount: 1, ticketSource: "configured" }),
+    ).toContain("1 ticket claim checked against the tracker");
+  });
+
+  it("adds nothing when everything is zero or null", () => {
+    expect(render({})).not.toContain("knowledge-repo-evidence");
+  });
+
+  it("members and admins see the same text, with no pills, cards or colored borders", () => {
+    const over = {
+      excludedDocClaims: 2,
+      ticketClaimCount: 1,
+      ticketSource: "configured" as const,
+    };
+    const member = render(over, MEMBER);
+    const admin = render(over, ADMIN);
+    const text = (h: string) =>
+      /data-testid="knowledge-repo-evidence"[^>]*>([^<]*)</.exec(h)?.[1];
+    expect(text(member)).toBe(text(admin));
+    expect(text(member)).toContain("2 claims not checked");
+    expect(member).not.toMatch(/rounded-full|border-l-/);
+  });
+});

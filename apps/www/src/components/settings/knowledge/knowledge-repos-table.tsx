@@ -95,6 +95,40 @@ function webhookState(repo: KnowledgeRepoDto, now: Date): RunState {
   };
 }
 
+const plural = (n: number, one: string, many: string) =>
+  `${n} ${n === 1 ? one : many}`;
+
+/**
+ * PD-25 / PD-21 / PD-24: which evidence the reconcile does and does not check.
+ * Empty when nothing is excluded and the repo has no ticket claims.
+ */
+export function evidenceCoverage(repo: KnowledgeRepoDto): string[] {
+  const parts: string[] = [];
+  if (repo.excludedDocClaims > 0) {
+    parts.push(
+      `${plural(repo.excludedDocClaims, "claim", "claims")} not checked: doc source not connected`,
+    );
+  }
+  if (repo.excludedInvalidClaims > 0) {
+    parts.push(
+      `${plural(repo.excludedInvalidClaims, "claim", "claims")} not checked: invalid evidence path`,
+    );
+  }
+  if (repo.ticketClaimCount > 0 && repo.ticketSource !== null) {
+    const tickets = plural(
+      repo.ticketClaimCount,
+      "ticket claim",
+      "ticket claims",
+    );
+    parts.push(
+      repo.ticketSource === "configured"
+        ? `${tickets} checked against the tracker`
+        : `${tickets}: no tracker configured`,
+    );
+  }
+  return parts;
+}
+
 function RepoRow({
   repo,
   canAct,
@@ -114,6 +148,7 @@ function RepoRow({
   const sha = intent?.targetSha ?? repo.lastSha;
   const failed = intent?.state === "failed";
   const open = diagnose?.repoFullName === repo.repoFullName ? diagnose : null;
+  const coverage = evidenceCoverage(repo);
   return (
     <li
       className="border-b border-line-soft last:border-b-0"
@@ -189,6 +224,14 @@ function RepoRow({
           pending validation since {relativeTime(repo.pendingSince, now)} ·{" "}
           {repo.affectedClaimCount}{" "}
           {repo.affectedClaimCount === 1 ? "claim" : "claims"}
+        </p>
+      )}
+      {coverage.length > 0 && (
+        <p
+          className="px-3 pb-1 text-xs tabular-nums text-muted-foreground"
+          data-testid="knowledge-repo-evidence"
+        >
+          {coverage.join(" · ")}
         </p>
       )}
       {open !== null && <DeliveriesRegister state={open} />}
