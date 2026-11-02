@@ -54,10 +54,43 @@ function isAcceptableUrl(value: string): boolean {
   );
 }
 
+export type KnowledgeMirrorPurgeFailureReason =
+  | "routing_unresolved"
+  | "trigger_failed";
+
+export interface KnowledgeMirrorPurgeFailedAlert {
+  organizationId: string;
+  reason: KnowledgeMirrorPurgeFailureReason;
+  count: number;
+}
+
+export function formatKnowledgeMirrorPurgeFailedAlert(
+  alert: KnowledgeMirrorPurgeFailedAlert,
+): { text: string } {
+  return {
+    text: `knowledge mirror purge dispatch failed: org ${alert.organizationId}, reason ${alert.reason}, count ${alert.count}`,
+  };
+}
+
 /** Never throws; reports why nothing was sent instead. */
 export async function postKnowledgeIntentFailedAlert(
   alert: KnowledgeIntentFailedAlert,
   deps: OpsAlertDeps = {},
+): Promise<OpsAlertResult> {
+  return postAlertText(formatKnowledgeIntentFailedAlert(alert), deps);
+}
+
+/** Never throws; reports why nothing was sent instead. */
+export async function postKnowledgeMirrorPurgeFailedAlert(
+  alert: KnowledgeMirrorPurgeFailedAlert,
+  deps: OpsAlertDeps = {},
+): Promise<OpsAlertResult> {
+  return postAlertText(formatKnowledgeMirrorPurgeFailedAlert(alert), deps);
+}
+
+async function postAlertText(
+  payload: { text: string },
+  deps: OpsAlertDeps,
 ): Promise<OpsAlertResult> {
   const url = deps.url ?? env.OPS_ALERT_WEBHOOK_URL;
   if (url === "") return { sent: false, reason: "unconfigured" };
@@ -67,7 +100,7 @@ export async function postKnowledgeIntentFailedAlert(
     const response = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(formatKnowledgeIntentFailedAlert(alert)),
+      body: JSON.stringify(payload),
       redirect: "manual",
       signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
     });

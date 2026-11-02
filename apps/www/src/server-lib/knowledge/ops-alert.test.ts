@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   formatKnowledgeIntentFailedAlert,
+  formatKnowledgeMirrorPurgeFailedAlert,
+  postKnowledgeMirrorPurgeFailedAlert,
   postKnowledgeIntentFailedAlert,
 } from "./ops-alert";
 
@@ -90,5 +92,33 @@ describe("postKnowledgeIntentFailedAlert", () => {
     });
     expect(timed).toEqual({ sent: false, reason: "timeout" });
     expect(JSON.stringify([failed, timed])).not.toContain("secret-token");
+  });
+});
+
+describe("knowledge mirror purge alert", () => {
+  const MIRROR = {
+    organizationId: "org_1",
+    reason: "trigger_failed" as const,
+    count: 2,
+  };
+
+  it("carries org, reason and count only", () => {
+    const { text } = formatKnowledgeMirrorPurgeFailedAlert(MIRROR);
+    expect(text).toContain("org_1");
+    expect(text).toContain("trigger_failed");
+    expect(text).toContain("2");
+  });
+
+  it("posts through the same sender and is unconfigured when empty", async () => {
+    const fetchImpl = vi.fn(async () => ({ status: 200 }));
+    expect(
+      await postKnowledgeMirrorPurgeFailedAlert(MIRROR, {
+        url: "https://hooks.example/x",
+        fetchImpl,
+      }),
+    ).toEqual({ sent: true });
+    expect(
+      await postKnowledgeMirrorPurgeFailedAlert(MIRROR, { url: "" }),
+    ).toEqual({ sent: false, reason: "unconfigured" });
   });
 });

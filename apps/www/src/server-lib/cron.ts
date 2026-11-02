@@ -193,56 +193,69 @@ export async function runQueuedTasksCron(): Promise<void> {
  * worker's own public URL and 404'd on Workers (the last of the four dead self-fetches).
  */
 export async function runScheduledTasksCron(): Promise<void> {
-  // #125 C4: the supersede sweep rides the every-minute cron. Fail-soft and
-  // dynamically imported like the other runners — a sweep error must never
-  // skip scheduled-thread processing.
   try {
-    const { runSupersedeSweep } = await import("@/server-lib/supersede-sweep");
-    const r = await runSupersedeSweep();
-    if (r.terminals.length > 0 || r.orphans.length > 0) {
-      console.log("[cron:scheduled] supersede sweep", r);
-    }
-  } catch (error) {
-    console.error("[cron:scheduled] supersede sweep failed (non-fatal)", error);
-  }
-
-  // #107: dispatch the due automatic re-runs of failed reviews. Same
-  // bulkhead: a dispatcher error never skips scheduled-thread processing.
-  try {
-    const { runReviewRerunDispatcher } = await import(
-      "@/server-lib/review/review-rerun"
-    );
-    const r = await runReviewRerunDispatcher({ db });
-    if (r.dispatched + r.skipped + r.failed + r.expired > 0) {
-      console.log("[cron:scheduled] review re-runs", r);
-    }
-  } catch (error) {
-    console.error(
-      "[cron:scheduled] review re-run dispatch failed (non-fatal)",
-      error,
-    );
-  }
-
-  const { runScheduledThread } = await import("@/server-lib/scheduled-thread");
-  const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
-  console.log(`[cron:scheduled] ${dueThreadChats.length} thread chats due`);
-  for (let i = 0; i < dueThreadChats.length; i += BATCH_SIZE) {
-    const batch = dueThreadChats.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((threadChat) =>
-        runScheduledThread({
-          userId: threadChat.userId,
-          threadId: threadChat.threadId,
-          threadChatId: threadChat.threadChatId,
-        }),
-      ),
-    );
-    for (const result of results) {
-      if (result.status === "rejected") {
-        console.error("[cron:scheduled] run failed", result.reason);
+    // #125 C4: the supersede sweep rides the every-minute cron. Fail-soft and
+    // dynamically imported like the other runners — a sweep error must never
+    // skip scheduled-thread processing.
+    try {
+      const { runSupersedeSweep } = await import(
+        "@/server-lib/supersede-sweep"
+      );
+      const r = await runSupersedeSweep();
+      if (r.terminals.length > 0 || r.orphans.length > 0) {
+        console.log("[cron:scheduled] supersede sweep", r);
       }
+    } catch (error) {
+      console.error(
+        "[cron:scheduled] supersede sweep failed (non-fatal)",
+        error,
+      );
     }
-    await sleep();
+
+    // #107: dispatch the due automatic re-runs of failed reviews. Same
+    // bulkhead: a dispatcher error never skips scheduled-thread processing.
+    try {
+      const { runReviewRerunDispatcher } = await import(
+        "@/server-lib/review/review-rerun"
+      );
+      const r = await runReviewRerunDispatcher({ db });
+      if (r.dispatched + r.skipped + r.failed + r.expired > 0) {
+        console.log("[cron:scheduled] review re-runs", r);
+      }
+    } catch (error) {
+      console.error(
+        "[cron:scheduled] review re-run dispatch failed (non-fatal)",
+        error,
+      );
+    }
+
+    const { runScheduledThread } = await import(
+      "@/server-lib/scheduled-thread"
+    );
+    const dueThreadChats = await getScheduledThreadChatsDueToRun({ db });
+    console.log(`[cron:scheduled] ${dueThreadChats.length} thread chats due`);
+    for (let i = 0; i < dueThreadChats.length; i += BATCH_SIZE) {
+      const batch = dueThreadChats.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map((threadChat) =>
+          runScheduledThread({
+            userId: threadChat.userId,
+            threadId: threadChat.threadId,
+            threadChatId: threadChat.threadChatId,
+          }),
+        ),
+      );
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error("[cron:scheduled] run failed", result.reason);
+        }
+      }
+      await sleep();
+    }
+  } finally {
+    // D-12, PD-7: the knowledge reconcile sweep runs LAST, in a finally, so it
+    // can never delay or skip scheduled threads and still runs when they throw.
+    await runKnowledgeReconcileSweepSafe();
   }
 }
 
@@ -433,6 +446,21 @@ async function runDeliveryLoopCronSafe(): Promise<void> {
     await runDeliveryLoopSweep();
   } catch (error) {
     console.error("[cron:delivery-loop] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * D-12 knowledge reconcile sweep. Dynamic import, bounded and fail-soft: every
+ * failure is logged and swallowed.
+ */
+async function runKnowledgeReconcileSweepSafe(): Promise<void> {
+  try {
+    const { runKnowledgeReconcileSweep } = await import(
+      "@/server-lib/knowledge/reconcile-sweep"
+    );
+    await runKnowledgeReconcileSweep();
+  } catch (error) {
+    console.error("[cron:knowledge-reconcile] failed (non-fatal)", error);
   }
 }
 
