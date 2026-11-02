@@ -19,6 +19,11 @@ import {
 } from "./knowledge-controls";
 import { assertIntentFields, assertStatement } from "./knowledge-minimize";
 import {
+  listKnowledgeRepoStatus,
+  recordKnowledgePush,
+  retryKnowledgeIntent,
+} from "./knowledge-repo-status";
+import {
   getKnowledgeClaim,
   insertKnowledgeClaim,
   insertKnowledgeIntent,
@@ -56,6 +61,11 @@ type Bound<F extends (arg: never) => unknown> = Omit<
  * `budget.settle` are never gated, so an Off org stays administrable and its
  * reservations are always released. Purge is a system path (knowledge-purge,
  * called only by the hourly sweep), not part of this accessor.
+ *
+ * D-05 exception: `store.recordPushUnlessOffboarded` records a push (intent,
+ * observed head, push liveness) for an Off org too, so turning the engine On
+ * resumes from fresh state; only an offboarded org records nothing. The gated
+ * `store.insertIntent` is unchanged.
  */
 export function forKnowledge({
   db,
@@ -67,6 +77,15 @@ export function forKnowledge({
   async function gated<T>(run: () => Promise<T>): Promise<KnowledgeGated<T>> {
     const reason = await getKnowledgeGateReason({ db, organizationId });
     if (reason) return { ok: false, reason };
+    return { ok: true, value: await run() };
+  }
+
+  /** Refuses only an offboarded org; an Off (not offboarded) org runs. */
+  async function offboardGated<T>(
+    run: () => Promise<T>,
+  ): Promise<KnowledgeGated<T>> {
+    const controls = await getKnowledgeControls({ db, organizationId });
+    if (controls.offboardedAt) return { ok: false, reason: "offboarded" };
     return { ok: true, value: await run() };
   }
 
@@ -84,6 +103,10 @@ export function forKnowledge({
         offboardKnowledge({ ...a, ...scope }),
       clearOffboard: (a: Bound<typeof clearKnowledgeOffboard>) =>
         clearKnowledgeOffboard({ ...a, ...scope }),
+      listRepoStatus: (limit?: number) =>
+        listKnowledgeRepoStatus({ ...scope, limit }),
+      retryIntent: (a: Bound<typeof retryKnowledgeIntent>) =>
+        retryKnowledgeIntent({ ...a, ...scope }),
     },
     store: {
       insertClaim: (a: Bound<typeof insertKnowledgeClaim>) =>
@@ -102,6 +125,11 @@ export function forKnowledge({
         gated(() => loadLatestKnowledgeRejections({ ...a, ...scope })),
       insertIntent: (a: Bound<typeof insertKnowledgeIntent>) =>
         gated(() => insertKnowledgeIntent({ ...a, ...scope })),
+      recordPushUnlessOffboarded: (a: Bound<typeof recordKnowledgePush>) =>
+        offboardGated(async () => {
+          assertCursorFields(a.repoFullName, a.defaultBranch, a.targetSha);
+          return recordKnowledgePush({ ...a, ...scope });
+        }),
       listPendingIntents: (a: Bound<typeof listPendingKnowledgeIntents> = {}) =>
         gated(() => listPendingKnowledgeIntents({ ...a, ...scope })),
       decideOp: (a: Bound<typeof decideKnowledgeOp>) =>

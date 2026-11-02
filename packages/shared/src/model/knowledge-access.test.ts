@@ -325,6 +325,7 @@ describe("forKnowledge", () => {
       "advanceCursor",
       "observeHead",
       "getCursor",
+      "recordPushUnlessOffboarded",
     ] as const;
     type Method = (typeof methods)[number];
 
@@ -467,5 +468,34 @@ describe("forKnowledge", () => {
         expect(await snapshot(orgA)).toEqual(before);
       },
     );
+  });
+
+  describe("recordPushUnlessOffboarded (D-05)", () => {
+    const pushArgs = {
+      repoFullName: REPO,
+      defaultBranch: "main",
+      targetSha: SHA,
+    };
+
+    it("records for an Off org while gated insertIntent stays refused", async () => {
+      const a = acc(orgA).store;
+      expect((await a.recordPushUnlessOffboarded(pushArgs)).ok).toBe(true);
+      expect(await a.insertIntent({ ...pushArgs, targetSha: SHA2 })).toEqual({
+        ok: false,
+        reason: "engine_off",
+      });
+    });
+
+    it("refuses an offboarded org and writes nothing", async () => {
+      await acc(orgA).admin.offboard({ actorUserId: actor });
+      expect(
+        await acc(orgA).store.recordPushUnlessOffboarded(pushArgs),
+      ).toEqual({ ok: false, reason: "offboarded" });
+      const rows = await db
+        .select()
+        .from(schema.knowledgeIntent)
+        .where(eq(schema.knowledgeIntent.organizationId, orgA));
+      expect(rows).toHaveLength(0);
+    });
   });
 });
