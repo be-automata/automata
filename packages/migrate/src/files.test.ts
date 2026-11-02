@@ -118,6 +118,7 @@ describe("deploy/migrations", () => {
       "2026-10-25-knowledge-updated-at",
       "2026-10-26-delivery-loop",
       "2026-10-27-hatchet-tenant-binding",
+      "2026-11-01-better-auth-1-7-columns",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);

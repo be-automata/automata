@@ -75,9 +75,10 @@ describe("deploy/migrations on a fresh database", () => {
       "2026-10-25-knowledge-updated-at",
       "2026-10-26-delivery-loop",
       "2026-10-27-hatchet-tenant-binding",
+      "2026-11-01-better-auth-1-7-columns",
     ]);
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(13);
+    expect(ledger).toHaveLength(14);
     expect(ledger.every((row) => row.mode === "applied")).toBe(true);
     expect(ledger.every((row) => row.appliedBy === "test@0")).toBe(true);
 
@@ -106,7 +107,7 @@ describe("deploy/migrations on a fresh database", () => {
 
     const second = await applyDir(c, REPO_MIGRATIONS);
     expect(second.applied).toEqual([]);
-    expect(await readLedger(c)).toHaveLength(13);
+    expect(await readLedger(c)).toHaveLength(14);
   });
 
   it("refuses the baseline on a database that already has tables", async () => {

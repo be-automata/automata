@@ -171,6 +171,8 @@ export const invitation = pgTable(
     inviterId: text("inviter_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // better-auth 1.7 organization plugin (GHSA-965c-763c-88jm bump).
+    createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [
     index("invitation_organization_id_idx").on(table.organizationId),
@@ -270,6 +272,12 @@ export const subscription = pgTable(
     trialStart: timestamp("trial_start"),
     trialEnd: timestamp("trial_end"),
     cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    // better-auth 1.7 stripe plugin (GHSA-965c-763c-88jm bump).
+    cancelAt: timestamp("cancel_at"),
+    canceledAt: timestamp("canceled_at"),
+    endedAt: timestamp("ended_at"),
+    billingInterval: text("billing_interval"),
+    stripeScheduleId: text("stripe_schedule_id"),
     seats: integer("seats").default(1),
     // Tenant fence (WI-5 step 2). Org-level billing: referenceId flips from
     // user.id to organizationId in a later phase; this column is the seam.
