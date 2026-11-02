@@ -100,6 +100,21 @@ export interface RunTelemetryIdentity {
   threadChatId: string;
 }
 
+/**
+ * The placeholder threadChatId every review (and pre-chat thread) carries
+ * (`LEGACY_THREAD_CHAT_ID` in @terragon/shared, which the worker does not
+ * depend on). It names no run, so the run id falls back to the thread id.
+ */
+const LEGACY_THREAD_CHAT_ID = "legacy-thread-chat-id";
+
+/** The id that names one run in telemetry: the chat, or the thread when the chat is the shared placeholder. */
+export function telemetryRunId(identity: RunTelemetryIdentity): string {
+  return identity.threadChatId &&
+    identity.threadChatId !== LEGACY_THREAD_CHAT_ID
+    ? identity.threadChatId
+    : identity.threadId;
+}
+
 /** OTEL_RESOURCE_ATTRIBUTES values are percent-encoded (`,` and `=` are separators). */
 function resourceValue(value: string): string {
   return encodeURIComponent(value);
@@ -114,7 +129,7 @@ export function runTelemetrySettingsEnv(
   identity: RunTelemetryIdentity,
 ): Record<string, string> {
   const attributes = [
-    ["automata.run_id", identity.threadChatId],
+    ["automata.run_id", telemetryRunId(identity)],
     ["automata.thread_id", identity.threadId],
     ["automata.lane", identity.lane],
     ["automata.org", identity.orgId],
