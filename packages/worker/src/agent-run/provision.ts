@@ -17,7 +17,11 @@ const execFileAsync = promisify(execFile);
  */
 export async function gitExec(
   args: string[],
-  opts: { maxBuffer?: number; timeout?: number } = {},
+  opts: {
+    maxBuffer?: number;
+    timeout?: number;
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ) {
   try {
     return await execFileAsync("git", args, opts);
