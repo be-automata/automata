@@ -57,6 +57,7 @@
     "@terragon/cli-api-contract": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/env": "workspace:*",
+    "@terragon/knowledge": "workspace:*",
     "@terragon/r2": "workspace:*",
     "@terragon/review": "workspace:*",
     "@terragon/sandbox": "workspace:*",

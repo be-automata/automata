@@ -98,6 +98,14 @@ export class InvalidEvidenceUriError extends Error {
 
 const sha = (s: string) =>
   createHash("sha256").update(s).digest("hex").slice(0, 16);
+/**
+ * The page hash the engine stores as a sidecar `pageVersion` and compares in checkPage. The worker
+ * reconcile derives a sidecar pageVersion from the page as of the cursor commit (range mode) or the
+ * target (full re-check), Phase 13 PD-14. Reachable through `@terragon/knowledge/node`.
+ */
+export function pageVersionOf(pageMd: string): string {
+  return sha(pageMd);
+}
 /** The identity of a prose span's content. Whitespace-only edits must not flip a prose claim. */
 const fingerprint = (text: string) => sha(text.replace(/\s+/g, " ").trim());
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
