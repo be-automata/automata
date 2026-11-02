@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ConflictBanner } from "@/components/settings/review-settings-parts";
 import { SettingsSection } from "@/components/settings/settings-row";
+import { KnowledgeReposTable } from "./knowledge-repos-table";
 import { ConflictError } from "@/queries/error-from-response";
 import {
   BudgetAboveCeilingError,
@@ -500,13 +501,16 @@ export function KnowledgeSection() {
   // Remount the editor state when another write changes the stored row.
   const version = data?.controls?.updatedAt ?? "none";
   return (
-    <KnowledgeSectionBody
-      key={version}
-      query={query}
-      update={update}
-      offboard={offboard}
-      data={data}
-    />
+    <>
+      <KnowledgeSectionBody
+        key={version}
+        query={query}
+        update={update}
+        offboard={offboard}
+        data={data}
+      />
+      <KnowledgeReposTable />
+    </>
   );
 }
 
