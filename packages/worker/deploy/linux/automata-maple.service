@@ -22,7 +22,9 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK: Maple lists interfaces (getifaddrs) at startup; without it every start dies
+# "getifaddrs returned an error" (seen on automata-exec-1; a privileged test container hid it).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 IPAddressDeny=any
 IPAddressAllow=localhost
 CapabilityBoundingSet=
