@@ -33,6 +33,7 @@ import {
 } from "../agent-run/run-namespace";
 import { containerRunsBoot } from "../agent-run/container-boot";
 import { buildWorkflows } from "../registry";
+import { startKnowledgeWorker } from "../knowledge/knowledge-worker";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
 
 /**
@@ -356,12 +357,26 @@ async function main() {
   // SDK's and risk tearing the daemon down mid-run — the exact drop we're preventing.
   // The operator restart procedure MUST therefore be SIGTERM + wait (never
   // `launchctl kickstart -k`, which is SIGKILL) — see packages/worker/deploy/README.md.
+  // The knowledge worker (PD-18) is created with handleKill: false, so its SDK
+  // handler never calls process.exit and the review drain still decides when the
+  // process exits.
   // This log line lets an operator confirm the drain contract from worker.log.
   console.log(
     "[worker-boot] SIGTERM/SIGINT → SDK graceful drain (in-flight agent-run completes before exit; no custom handler by design)",
   );
 
-  await worker.start();
+  // PD-18: knowledge-reconcile and knowledge-mirror-purge run on their own
+  // worker and slot pool beside the review worker. startKnowledgeWorker never
+  // rejects, so a knowledge failure cannot reach main().catch.
+  await Promise.all([
+    worker.start(),
+    startKnowledgeWorker({
+      hatchet,
+      boxId,
+      env: process.env,
+      log: (m) => console.log(m),
+    }),
+  ]);
 }
 
 main().catch((err) => {
