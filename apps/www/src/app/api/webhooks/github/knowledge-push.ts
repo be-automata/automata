@@ -1,10 +1,12 @@
-import type { PushEvent } from "@octokit/webhooks-types";
+import type { EmitterWebhookEvent } from "@octokit/webhooks";
 
 import { db } from "@/lib/db";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
 import { forKnowledge } from "@terragon/shared/model/knowledge-access";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
+
+type PushEvent = EmitterWebhookEvent<"push">["payload"];
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const ALL_ZERO = /^0+$/;
