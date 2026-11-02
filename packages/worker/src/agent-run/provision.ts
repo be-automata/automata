@@ -21,6 +21,8 @@ export async function gitExec(
     maxBuffer?: number;
     timeout?: number;
     env?: NodeJS.ProcessEnv;
+    /** `latin1` round-trips binary stdout losslessly (Buffer.from(out, "latin1")). */
+    encoding?: BufferEncoding;
   } = {},
 ) {
   try {

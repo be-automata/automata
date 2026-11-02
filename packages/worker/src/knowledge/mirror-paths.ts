@@ -88,14 +88,13 @@ function assertInside(root: string, candidate: string): string {
   return resolved;
 }
 
-export function mirrorPaths(
+/** The tenant and org directories only (purge needs no repo). */
+export function orgMirrorDirs(
   root: string,
   tenantId: string,
   organizationId: string,
-  repoFullName: string,
-): MirrorPaths {
+): { resolvedRoot: string; tenantDir: string; orgDir: string } {
   const resolvedRoot = path.resolve(root);
-  const repo = normalizeRepoFullName(repoFullName);
   if (organizationId === "") {
     throw new MirrorPathError("organization id is required");
   }
@@ -107,6 +106,21 @@ export function mirrorPaths(
   const orgDir = assertInside(
     tenantDir,
     path.join(tenantDir, hash16(organizationId)),
+  );
+  return { resolvedRoot, tenantDir, orgDir };
+}
+
+export function mirrorPaths(
+  root: string,
+  tenantId: string,
+  organizationId: string,
+  repoFullName: string,
+): MirrorPaths {
+  const repo = normalizeRepoFullName(repoFullName);
+  const { resolvedRoot, tenantDir, orgDir } = orgMirrorDirs(
+    root,
+    tenantId,
+    organizationId,
   );
   const repoHash = hash16(repo);
   return {
