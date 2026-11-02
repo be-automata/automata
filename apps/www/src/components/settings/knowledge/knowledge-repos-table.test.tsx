@@ -58,6 +58,10 @@ function repo(over: Partial<KnowledgeRepoDto> = {}): KnowledgeRepoDto {
     pending: false,
     pendingSince: null,
     affectedClaimCount: 0,
+    excludedDocClaims: 0,
+    excludedInvalidClaims: 0,
+    ticketClaimCount: 0,
+    ticketSource: null,
     ...over,
   };
 }

@@ -156,6 +156,76 @@ describe("knowledge repo status", () => {
         await listKnowledgeRepoStatus({ db, organizationId: orgA }),
       ).toEqual([]);
     });
+
+    describe("evidence coverage (PD-21, PD-24, PD-25)", () => {
+      const seed = async (
+        organizationId: string,
+        id: string,
+        page: string,
+        uris: string[],
+      ) => {
+        await db.insert(schema.knowledgeClaim).values({
+          id,
+          organizationId,
+          repoFullName: REPO,
+          page,
+          statement: "s",
+        });
+        for (const uri of uris) {
+          await db.insert(schema.knowledgePin).values({
+            organizationId,
+            claimId: id,
+            repoFullName: REPO,
+            uri,
+            hash: "0123456789abcdef",
+            observedRev: SHA,
+          });
+        }
+      };
+
+      it("counts doc, invalid and ticket claims with the reconcile classifier", async () => {
+        await push(orgA, SHA);
+        await seed(orgA, "ev-a", "docs/a.md", ["repo://src/a.ts#L1-L2"]);
+        await seed(orgA, "ev-b", "docs/b.md", ["ticket://SUP-12#/summary"]);
+        await seed(orgA, "ev-c", "docs/c.md", ["doc://spec/one#/x"]);
+        await seed(orgA, "ev-d", "../escape.md", ["repo://src/a.ts#L1-L2"]);
+        // A doc pin and an invalid page: counted as doc only.
+        await seed(orgA, "ev-e", "../escape.md", ["doc://spec/two#/x"]);
+        const [row] = await listKnowledgeRepoStatus({
+          db,
+          organizationId: orgA,
+        });
+        expect(row?.excludedDocClaims).toBe(2);
+        expect(row?.excludedInvalidClaims).toBe(1);
+        expect(row?.ticketClaimCount).toBe(1);
+      });
+
+      it("never counts another org's claims", async () => {
+        await push(orgA, SHA);
+        await push(orgB, SHA);
+        await seed(orgB, "ev-other", "docs/a.md", ["doc://spec/one#/x"]);
+        const [row] = await listKnowledgeRepoStatus({
+          db,
+          organizationId: orgA,
+        });
+        expect(row?.excludedDocClaims).toBe(0);
+        expect(row?.excludedInvalidClaims).toBe(0);
+        expect(row?.ticketClaimCount).toBe(0);
+      });
+
+      it("a repo without claims reports zeros", async () => {
+        await push(orgA, SHA);
+        const [row] = await listKnowledgeRepoStatus({
+          db,
+          organizationId: orgA,
+        });
+        expect([
+          row?.excludedDocClaims,
+          row?.excludedInvalidClaims,
+          row?.ticketClaimCount,
+        ]).toEqual([0, 0, 0]);
+      });
+    });
   });
 
   describe("retryKnowledgeIntent", () => {

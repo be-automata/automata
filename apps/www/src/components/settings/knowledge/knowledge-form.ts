@@ -78,7 +78,16 @@ export interface KnowledgeRepoDto {
   pending: boolean;
   pendingSince: string | null;
   affectedClaimCount: number;
+  /** PD-25: claims with a doc:// pin, not checked until a doc source exists. */
+  excludedDocClaims: number;
+  /** PD-21: claims with an invalid page or evidence path, not checked. */
+  excludedInvalidClaims: number;
+  ticketClaimCount: number;
+  /** PD-24: null when the repo has no ticket claims. */
+  ticketSource: KnowledgeTicketSource | null;
 }
+
+export type KnowledgeTicketSource = "configured" | "not_configured";
 
 export interface KnowledgeSettingsResponse {
   orgSlug: string | null;
