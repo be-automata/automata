@@ -10,7 +10,9 @@
  *
  * 3. Subscribe to Events:
  *    - In "Permissions & events" section
- *    - Under "Subscribe to events", check: Pull requests, Issues, Issue comments, Pull request review comments, Pull request reviews, Check runs, Check suites
+ *    - Under "Subscribe to events", check: Pull requests, Issues, Issue comments, Pull request review comments, Pull request reviews, Check runs, Check suites, Push
+ *      (Push feeds the knowledge reconcile: ops checklist item, the App must
+ *      be subscribed to push events or default-branch merges are never recorded)
  *
  * 4. Set Required Permissions:
  *    - Repository permissions:
@@ -64,6 +66,7 @@ import {
   handleDeliveryReviewEvent,
 } from "@/server-lib/delivery/webhooks";
 import { deferWebhookWork } from "./defer-webhook-work";
+import { handleKnowledgePush } from "./knowledge-push";
 
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
@@ -207,6 +210,22 @@ export async function POST(request: NextRequest) {
   // readiness. Audit-fix automations only; DB-only, never throws.
   webhooks.on("issues.reopened", async ({ payload }) => {
     await handleSelfHealIssueReopened(payload);
+  });
+  // Phase 13: a push to the default branch durably records a knowledge
+  // reconcile intent BEFORE the ack (awaited, deliberately not deferred: a
+  // deferred write could be lost with the isolate). A separate listener from
+  // the PR mirror (D-02). handleKnowledgePush never throws; the extra
+  // try/catch is defence in depth so a knowledge failure can never turn a
+  // push delivery into a 500 (D-03).
+  webhooks.on("push", async ({ id, payload }) => {
+    try {
+      await handleKnowledgePush(payload, id);
+    } catch (error) {
+      console.error("[github webhook] knowledge push listener failed", {
+        deliveryId: id,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+    }
   });
   webhooks.onAny(({ name, payload }) => {
     const payloadInfo: string[] = [];
