@@ -1,9 +1,12 @@
-import { and, asc, eq, gte } from "drizzle-orm";
+import { and, asc, eq, gte, inArray } from "drizzle-orm";
 
 import {
+  MAX_PUBLISH_OPS,
   repoPinTarget,
   repoRelativePath,
   type ReconcileContextReady,
+  type ReconcilePublishRequest,
+  type ReconcilePublishResponse,
   type WireClaim,
   type WireSidecar,
 } from "@terragon/knowledge/reconcile-wire";
@@ -15,9 +18,13 @@ import {
   knowledgePin,
   organizationReviewSettings,
 } from "../db/schema";
-import { getKnowledgeCursor } from "./knowledge";
+import { advanceKnowledgeCursor, getKnowledgeCursor } from "./knowledge";
 import { getKnowledgeGateReason } from "./knowledge-controls";
-import { loadLatestKnowledgeRejections } from "./knowledge-store";
+import { assertStoredProposal, MinimizationError } from "./knowledge-minimize";
+import {
+  insertKnowledgeOp,
+  loadLatestKnowledgeRejections,
+} from "./knowledge-store";
 
 /**
  * Database side of the reconcile `context` and `publish` endpoints. SYSTEM
@@ -212,4 +219,178 @@ export async function loadKnowledgeReconcileContext({
       excludedClaims,
     };
   });
+}
+
+/** Thrown inside the publish transaction to roll it back when the cursor moved elsewhere. */
+class CursorMovedSignal extends Error {
+  constructor() {
+    super("cursor moved");
+    this.name = "CursorMovedSignal";
+  }
+}
+
+/**
+ * Publish the ops of one reconcile, move the cursor `fromSha -> toSha` and
+ * mark the intent processed, all in ONE transaction (SC2). Idempotent on the
+ * intent id (Pattern 7). `lastSha` moves only here (SC3, PIPE-04).
+ *
+ * `beforeCursorCas` is a TEST SEAM: called after the op inserts and before
+ * the cursor compare-and-swap so a test can prove the rollback. Production
+ * code never passes it.
+ */
+export async function publishKnowledgeReconcile({
+  db,
+  request,
+  now,
+  beforeCursorCas,
+}: {
+  db: DB;
+  request: ReconcilePublishRequest;
+  now: Date;
+  beforeCursorCas?: () => void;
+}): Promise<ReconcilePublishResponse> {
+  try {
+    return await db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DB;
+      const [intent] = await tx
+        .select()
+        .from(knowledgeIntent)
+        .where(eq(knowledgeIntent.id, request.intentId))
+        .for("update");
+      if (!intent) return { result: "not_processing", opsInserted: 0 };
+      if (intent.state === "processed") {
+        return { result: "already_published", opsInserted: 0 };
+      }
+      if (intent.state !== "processing") {
+        return { result: "not_processing", opsInserted: 0 };
+      }
+
+      const organizationId = intent.organizationId;
+      const release = () =>
+        tx
+          .update(knowledgeIntent)
+          .set({ state: "pending", nextAttemptAt: now, updatedAt: now })
+          .where(eq(knowledgeIntent.id, intent.id));
+
+      // OPS-02: the gate is re-checked under the intent lock.
+      if ((await getKnowledgeGateReason({ db: tx, organizationId })) !== null) {
+        await release();
+        return { result: "gated", opsInserted: 0 };
+      }
+
+      if (request.toSha !== intent.targetSha) {
+        throw new KnowledgeReconcileInvalidError("toSha");
+      }
+      if (request.ops.length > MAX_PUBLISH_OPS) {
+        throw new KnowledgeReconcileInvalidError("ops");
+      }
+      for (const op of request.ops) {
+        let proposal;
+        try {
+          proposal = assertStoredProposal(op.proposal);
+        } catch (e) {
+          throw new KnowledgeReconcileInvalidError(
+            e instanceof MinimizationError ? e.path : "proposal",
+          );
+        }
+        if (proposal.id !== op.id)
+          throw new KnowledgeReconcileInvalidError("id");
+        if (proposal.claimId !== op.claimId) {
+          throw new KnowledgeReconcileInvalidError("claimId");
+        }
+        if (proposal.op !== op.kind) {
+          throw new KnowledgeReconcileInvalidError("kind");
+        }
+        if (!Number.isInteger(op.baseVersion) || op.baseVersion < 1) {
+          throw new KnowledgeReconcileInvalidError("baseVersion");
+        }
+      }
+
+      // Org and repo come from the locked intent row; the versions are read
+      // after the lock so PD-23 compares against what is stored now.
+      const claimIds = [...new Set(request.ops.map((o) => o.claimId))];
+      const versions = new Map<string, number>();
+      if (claimIds.length > 0) {
+        const rows = await tx
+          .select({ id: knowledgeClaim.id, version: knowledgeClaim.version })
+          .from(knowledgeClaim)
+          .where(
+            and(
+              eq(knowledgeClaim.organizationId, organizationId),
+              eq(knowledgeClaim.repoFullName, intent.repoFullName),
+              inArray(knowledgeClaim.id, claimIds),
+            ),
+          );
+        for (const r of rows) versions.set(r.id, r.version);
+      }
+      for (const op of request.ops) {
+        if (!versions.has(op.claimId)) {
+          throw new KnowledgeReconcileInvalidError("claimId");
+        }
+      }
+      if (request.ops.some((o) => o.baseVersion !== versions.get(o.claimId))) {
+        await release();
+        return { result: "stale_claim", opsInserted: 0 };
+      }
+
+      let opsInserted = 0;
+      for (const op of request.ops) {
+        const { inserted } = await insertKnowledgeOp({
+          db: tx,
+          organizationId,
+          op: {
+            id: op.id,
+            claimId: op.claimId,
+            kind: op.kind,
+            baseVersion: op.baseVersion,
+            mergeRev: request.toSha,
+            proposal: op.proposal,
+          },
+        });
+        if (inserted) opsInserted += 1;
+      }
+
+      beforeCursorCas?.();
+
+      const moved = await advanceKnowledgeCursor({
+        db: tx,
+        organizationId,
+        repoFullName: intent.repoFullName,
+        defaultBranch: intent.defaultBranch,
+        fromSha: request.fromSha,
+        toSha: request.toSha,
+      });
+      if (!moved) {
+        const cursor = await getKnowledgeCursor({
+          db: tx,
+          organizationId,
+          repoFullName: intent.repoFullName,
+        });
+        if (cursor?.lastSha !== request.toSha) throw new CursorMovedSignal();
+      }
+
+      await tx
+        .update(knowledgeIntent)
+        .set({
+          state: "processed",
+          processedAt: now,
+          lastErrorCode: null,
+          updatedAt: now,
+        })
+        .where(eq(knowledgeIntent.id, intent.id));
+      return { result: "published", opsInserted };
+    });
+  } catch (e) {
+    if (!(e instanceof CursorMovedSignal)) throw e;
+    await db
+      .update(knowledgeIntent)
+      .set({ state: "superseded", processedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(knowledgeIntent.id, request.intentId),
+          eq(knowledgeIntent.state, "processing"),
+        ),
+      );
+    return { result: "cursor_moved", opsInserted: 0 };
+  }
 }
