@@ -64,6 +64,9 @@ export interface TicketSnapshotRequest {
 export interface TicketSnapshotResult {
   tickets: WireTicket[];
   unavailableClaims: UnavailableClaim[];
+  /** Tracker reads made and cache entries used; integers for the route's counts line. */
+  fetched: number;
+  cacheHits: number;
 }
 
 export interface TicketCache {
@@ -224,7 +227,8 @@ export async function loadTicketSnapshots(
   };
 
   const withPins = request.claims.filter((c) => c.ticketPins.length > 0);
-  if (withPins.length === 0) return { tickets: [], unavailableClaims: [] };
+  if (withPins.length === 0)
+    return { tickets: [], unavailableClaims: [], fetched: 0, cacheHits: 0 };
 
   const finish = (
     tickets: WireTicket[],
@@ -246,7 +250,7 @@ export async function loadTicketSnapshots(
     const unavailableClaims = [...unavailable.entries()]
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([claimId, code]) => ({ claimId, code }));
-    return { tickets, unavailableClaims };
+    return { tickets, unavailableClaims, fetched, cacheHits };
   };
 
   const allUnavailable = (): TicketSnapshotResult => {

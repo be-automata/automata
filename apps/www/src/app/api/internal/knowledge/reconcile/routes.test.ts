@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
 import { postKnowledgeIntentFailedAlert } from "@/server-lib/knowledge/ops-alert";
+import { loadTicketSnapshots } from "@/server-lib/knowledge/ticket-snapshots";
 import { env } from "@terragon/env/apps-www";
 import {
   MAX_PUBLISH_BODY_BYTES,
@@ -26,6 +27,9 @@ import { POST as publishPost } from "./publish/route";
 vi.mock("@terragon/shared/github-app", () => ({
   getRepoInstallationId: vi.fn(),
   getReadOnlyInstallationToken: vi.fn(),
+}));
+vi.mock("@/server-lib/knowledge/ticket-snapshots", () => ({
+  loadTicketSnapshots: vi.fn(),
 }));
 vi.mock("@/server-lib/knowledge/ops-alert", () => ({
   postKnowledgeIntentFailedAlert: vi.fn(async () => ({ sent: true })),
@@ -171,6 +175,163 @@ describe("context", () => {
     }
     log.mockRestore();
     error.mockRestore();
+  });
+
+  describe("ticket evidence (PD-24)", () => {
+    const REPO_CLAIM = "repo-claim";
+    const TICKET_CLAIM = "ticket-claim";
+
+    async function seedTicketClaims() {
+      await seedIntent();
+      const claims = [
+        { id: REPO_CLAIM, page: "docs/a.md", uri: "repo://src/a.ts#L1-L2" },
+        {
+          id: TICKET_CLAIM,
+          page: "docs/b.md",
+          uri: "ticket://SUP-12#/summary",
+        },
+      ];
+      for (const c of claims) {
+        await db.insert(schema.knowledgeClaim).values({
+          id: `${c.id}-${orgId}`,
+          organizationId: orgId,
+          repoFullName: REPO,
+          page: c.page,
+          statement: "Statement.",
+        });
+        await db.insert(schema.knowledgePin).values({
+          organizationId: orgId,
+          claimId: `${c.id}-${orgId}`,
+          repoFullName: REPO,
+          uri: c.uri,
+          hash: "0123456789abcdef",
+          observedRev: SHA1,
+        });
+      }
+    }
+    const claimIds = (json: {
+      sidecars: { claims: { id: string }[] }[];
+    }): string[] => json.sidecars.flatMap((s) => s.claims.map((c) => c.id));
+    const emptyResult = { fetched: 0, cacheHits: 0 };
+
+    it("attaches tickets and keeps the claim; ticketClaims never on the wire", async () => {
+      await seedTicketClaims();
+      const ticket = {
+        key: "SUP-12",
+        revision: "r".repeat(64),
+        snapshot: { summary: "Fixture summary" },
+      };
+      vi.mocked(loadTicketSnapshots).mockResolvedValue({
+        tickets: [ticket],
+        unavailableClaims: [],
+        fetched: 1,
+        cacheHits: 0,
+      });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const json = await call({ intentId });
+      const body = await json.json();
+      expect(body.status).toBe("ready");
+      expect(body.tickets).toEqual([ticket]);
+      expect(body.unavailableClaims).toEqual([]);
+      expect(claimIds(body).sort()).toEqual(
+        [`${REPO_CLAIM}-${orgId}`, `${TICKET_CLAIM}-${orgId}`].sort(),
+      );
+      expect(body).not.toHaveProperty("ticketClaims");
+      expect(loadTicketSnapshots).toHaveBeenCalledWith({
+        organizationId: orgId,
+        repoFullName: REPO,
+        intentId,
+        claims: [
+          {
+            claimId: `${TICKET_CLAIM}-${orgId}`,
+            ticketPins: [
+              { key: "SUP-12", pointer: "/summary", field: "summary" },
+            ],
+          },
+        ],
+      });
+      const lines = log.mock.calls.filter(
+        (c) => c[0] === "[knowledge-reconcile] ticket evidence",
+      );
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.[1]).toEqual({
+        intentId,
+        admitted: 1,
+        fetched: 1,
+        cacheHits: 0,
+        source_unavailable: 0,
+        source_too_large: 0,
+        pin_unsupported: 0,
+      });
+      for (const c of log.mock.calls) {
+        const text = JSON.stringify(c);
+        expect(text).not.toContain("SUP-12");
+        expect(text).not.toContain("Fixture summary");
+        expect(text).not.toContain("/summary");
+      }
+      log.mockRestore();
+    });
+
+    it("drops an unavailable ticket claim and keeps the repo claim, still ready", async () => {
+      await seedTicketClaims();
+      vi.mocked(loadTicketSnapshots).mockResolvedValue({
+        tickets: [],
+        unavailableClaims: [
+          { claimId: `${TICKET_CLAIM}-${orgId}`, code: "source_unavailable" },
+        ],
+        ...emptyResult,
+      });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const body = await (await call({ intentId })).json();
+      expect(body.status).toBe("ready");
+      expect(claimIds(body)).toEqual([`${REPO_CLAIM}-${orgId}`]);
+      expect(body.sidecars.map((s: { page: string }) => s.page)).toEqual([
+        "docs/a.md",
+      ]);
+      expect(body.unavailableClaims).toEqual([
+        { claimId: `${TICKET_CLAIM}-${orgId}`, code: "source_unavailable" },
+      ]);
+      log.mockRestore();
+    });
+
+    it("never turns a throwing tracker stage into no_access or 500", async () => {
+      await seedTicketClaims();
+      vi.mocked(loadTicketSnapshots).mockRejectedValue(new Error("boom"));
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const response = await call({ intentId });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.status).toBe("ready");
+      expect(claimIds(body)).toEqual([`${REPO_CLAIM}-${orgId}`]);
+      expect(body.unavailableClaims).toEqual([
+        { claimId: `${TICKET_CLAIM}-${orgId}`, code: "source_unavailable" },
+      ]);
+      log.mockRestore();
+    });
+
+    it("makes zero tracker calls for a gated org", async () => {
+      await seedTicketClaims();
+      await db
+        .update(schema.organizationReviewSettings)
+        .set({ knowledgeEngine: false })
+        .where(eq(schema.organizationReviewSettings.organizationId, orgId));
+      const body = await (await call({ intentId })).json();
+      expect(body.status).toBe("gated");
+      expect(loadTicketSnapshots).not.toHaveBeenCalled();
+    });
+
+    it("skips the tracker when no ticket claim is admitted and logs zeros", async () => {
+      await seedIntent();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const body = await (await call({ intentId })).json();
+      expect(body.tickets).toEqual([]);
+      expect(loadTicketSnapshots).not.toHaveBeenCalled();
+      const line = log.mock.calls.find(
+        (c) => c[0] === "[knowledge-reconcile] ticket evidence",
+      );
+      expect(line?.[1]).toMatchObject({ admitted: 0, fetched: 0 });
+      log.mockRestore();
+    });
   });
 
   it("answers no_access when the mint fails", async () => {
