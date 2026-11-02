@@ -160,8 +160,10 @@ still reading a stale heartbeat does exit.
 
 Both are box settings, OFF by default. The agent never chooses where its telemetry goes.
 
-**Telemetry.** `sudo deploy/linux/install-run-telemetry.sh` installs two services, each as a hardened
-`DynamicUser` bound to loopback. Both releases are pinned and verified by sha256 before extraction:
+**Telemetry.** `sudo deploy/linux/install-run-telemetry.sh` installs two hardened services bound to
+loopback. The collector runs as a `DynamicUser`. Maple runs as the static `automata-telemetry` user,
+because `DynamicUser` symlinks the state dir and Maple refuses a symlinked data dir. Both releases are
+pinned and verified by sha256 before extraction:
 
 - `automata-otel-collector` (otelcol-contrib 0.162.0) listens on `127.0.0.1:4320`. It **deletes
   `user.email`, `user.id`, `user.account_id` and `user.account_uuid`** before storing anything:

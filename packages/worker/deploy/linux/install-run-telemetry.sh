@@ -11,7 +11,7 @@
 # and restart it with automata-worker-safe-restart.
 #
 # Pinned releases, verified by sha256 before anything is extracted. Maple v0.3.2 is the
-# version spike 032 validated (published 2026-11-01); it runs as a DynamicUser bound to
+# version spike 032 validated (published 2026-11-01); it runs as the static automata-telemetry user bound to
 # loopback with no network beyond localhost.
 set -euo pipefail
 code=000
@@ -36,6 +36,9 @@ fetch() { # url sha256 out
 }
 
 install -d -m 0755 "$LIB" "$LIB/maple" /etc/automata
+# Maple's static user (automata-maple.service): DynamicUser's symlinked state dir is refused.
+id -u automata-telemetry >/dev/null 2>&1 ||
+  useradd --system --no-create-home --home-dir /var/lib/automata-maple --shell /usr/sbin/nologin automata-telemetry
 
 fetch "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz" \
   "$OTELCOL_SHA256" "$work/otelcol.tar.gz"
@@ -56,10 +59,17 @@ install -m 0644 "$HERE/automata-otel-collector.service" /etc/systemd/system/auto
 systemctl daemon-reload
 systemctl enable --now automata-maple.service automata-otel-collector.service
 
-for _ in $(seq 1 30); do
+# Both ends must be up: the collector answers 200 even when it cannot export, so a crash-looping
+# Maple would otherwise pass this check.
+maple=000
+for _ in $(seq 1 60); do
+  maple="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4318/ || true)"
   code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/x-protobuf' --data-binary '' http://127.0.0.1:4320/v1/logs || true)"
-  [ "$code" = 200 ] && break
+  [ "$maple" = 200 ] && [ "$code" = 200 ] && break
   sleep 1
 done
+[ "$maple" = 200 ] || { echo "install-run-telemetry: Maple not serving on 127.0.0.1:4318 (last HTTP $maple; journalctl -u automata-maple)" >&2; exit 1; }
 [ "$code" = 200 ] || { echo "install-run-telemetry: collector not accepting OTLP on 127.0.0.1:4320 (last HTTP $code)" >&2; exit 1; }
+systemctl is-active --quiet automata-maple.service automata-otel-collector.service ||
+  { echo "install-run-telemetry: a telemetry unit is not active (systemctl status automata-maple automata-otel-collector)" >&2; exit 1; }
 echo "install-run-telemetry: collector on 127.0.0.1:4320 -> Maple on 127.0.0.1:4318 (ssh -L 4318:127.0.0.1:4318 for the UI)"
