@@ -8,7 +8,10 @@
  * Outside model/knowledge*.ts the allowed imports are knowledge-access,
  * knowledge-controls, knowledge-admin-log (read), knowledge-minimize and
  * knowledge (constants, resolvers, types only); assertion 2 constrains the
- * last one to non-data-plane identifiers.
+ * last one to non-data-plane identifiers. knowledge-intent (reconcile sweep,
+ * internal reconcile fail route) and knowledge-reconcile (internal reconcile
+ * context and publish routes) are system paths with fixed importers
+ * (assertion 7).
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
@@ -102,6 +105,22 @@ describe("knowledge accessor-only access", () => {
     expect(
       offenders(external, /knowledge-purge["']/).filter(
         (p) => p !== "apps/www/src/server-lib/knowledge/purge-sweep.ts",
+      ),
+    ).toEqual([]);
+  });
+
+  it("7: knowledge-intent and knowledge-reconcile are imported only by the reconcile sweep and its internal routes", () => {
+    const sweep = "apps/www/src/server-lib/knowledge/reconcile-sweep.ts";
+    const route = (name: string) =>
+      `apps/www/src/app/api/internal/knowledge/reconcile/${name}/route.ts`;
+    expect(
+      offenders(external, /model\/knowledge-intent["']/).filter(
+        (p) => p !== sweep && p !== route("fail"),
+      ),
+    ).toEqual([]);
+    expect(
+      offenders(external, /model\/knowledge-reconcile["']/).filter(
+        (p) => p !== route("context") && p !== route("publish"),
       ),
     ).toEqual([]);
   });

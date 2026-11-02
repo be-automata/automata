@@ -5,7 +5,10 @@ import { createDb, rowsOf, type DB } from "../db";
 import * as schema from "../db/schema";
 import {
   claimDueKnowledgeIntents,
+  failKnowledgeIntent,
   knowledgeIntentBackoffMs,
+  releaseKnowledgeIntent,
+  requeueExpiredKnowledgeIntents,
   KNOWLEDGE_INTENT_LEASE_MS,
 } from "./knowledge-intent";
 import { createTestOrg } from "./test-helpers";
@@ -266,5 +269,235 @@ describe("claimDueKnowledgeIntents", () => {
           .where(and(eq(schema.knowledgeIntent.state, "processing")))
       ).length,
     ).toBe(ids.length);
+  });
+});
+
+describe("knowledge intent lease, release and failure", () => {
+  let db: DB;
+  let org: string;
+  const HALF = () => 0.5;
+
+  beforeEach(async () => {
+    db = createDb(process.env.DATABASE_URL!);
+    await db.delete(schema.knowledgeIntent);
+    org = await createTestOrg({ db, name: "Acme" });
+  });
+
+  const seed = async (
+    n: number,
+    state: schema.KnowledgeIntentState,
+    attempts: number,
+    nextAttemptAt: Date,
+  ) => {
+    const id = `intent:${org}:acme/docs@${sha(n)}`;
+    await db.insert(schema.knowledgeIntent).values({
+      id,
+      organizationId: org,
+      repoFullName: "acme/docs",
+      defaultBranch: "main",
+      targetSha: sha(n),
+      state,
+      attempts,
+      nextAttemptAt,
+    });
+    return id;
+  };
+
+  const row = async (id: string) =>
+    (
+      await db
+        .select()
+        .from(schema.knowledgeIntent)
+        .where(eq(schema.knowledgeIntent.id, id))
+    )[0]!;
+
+  const past = new Date(NOW.getTime() - MIN);
+
+  describe("requeueExpiredKnowledgeIntents", () => {
+    it("returns an expired lease to pending with attempts + 1 and a backoff", async () => {
+      const id = await seed(1, "processing", 2, past);
+      const res = await requeueExpiredKnowledgeIntents({
+        db,
+        now: NOW,
+        rng: HALF,
+      });
+      expect(res).toEqual([
+        {
+          id,
+          organizationId: org,
+          repoFullName: "acme/docs",
+          attempts: 3,
+          code: "lease_expired",
+          state: "pending",
+          becameFailed: false,
+        },
+      ]);
+      const r = await row(id);
+      expect(r.state).toBe("pending");
+      expect(r.attempts).toBe(3);
+      expect(r.lastErrorCode).toBe("lease_expired");
+      expect(r.nextAttemptAt.getTime()).toBe(
+        NOW.getTime() + knowledgeIntentBackoffMs(3, HALF),
+      );
+    });
+
+    it("fails an exhausted intent with max_attempts exactly once", async () => {
+      const id = await seed(1, "processing", 7, past);
+      const res = await requeueExpiredKnowledgeIntents({
+        db,
+        now: NOW,
+        rng: HALF,
+      });
+      expect(res).toHaveLength(1);
+      expect(res[0]).toMatchObject({
+        id,
+        attempts: 8,
+        code: "max_attempts",
+        state: "failed",
+        becameFailed: true,
+      });
+      expect((await row(id)).state).toBe("failed");
+      expect(
+        await requeueExpiredKnowledgeIntents({ db, now: NOW, rng: HALF }),
+      ).toEqual([]);
+    });
+
+    it("leaves a live lease alone", async () => {
+      const id = await seed(
+        1,
+        "processing",
+        0,
+        new Date(NOW.getTime() + 5 * MIN),
+      );
+      expect(await requeueExpiredKnowledgeIntents({ db, now: NOW })).toEqual(
+        [],
+      );
+      expect((await row(id)).state).toBe("processing");
+    });
+  });
+
+  describe("releaseKnowledgeIntent", () => {
+    it("returns a processing intent to pending now, attempts unchanged", async () => {
+      const id = await seed(
+        1,
+        "processing",
+        2,
+        new Date(NOW.getTime() + 10 * MIN),
+      );
+      expect(
+        await releaseKnowledgeIntent({ db, intentId: id, now: NOW }),
+      ).toEqual({ result: "released" });
+      const r = await row(id);
+      expect(r.state).toBe("pending");
+      expect(r.attempts).toBe(2);
+      expect(r.nextAttemptAt.getTime()).toBe(NOW.getTime());
+    });
+
+    it("reports not_processing for any other state", async () => {
+      const id = await seed(1, "pending", 0, past);
+      expect(
+        await releaseKnowledgeIntent({ db, intentId: id, now: NOW }),
+      ).toEqual({ result: "not_processing" });
+    });
+  });
+
+  describe("failKnowledgeIntent", () => {
+    it("records a failure with the code and a 1m backoff", async () => {
+      const id = await seed(
+        1,
+        "processing",
+        0,
+        new Date(NOW.getTime() + 10 * MIN),
+      );
+      const res = await failKnowledgeIntent({
+        db,
+        intentId: id,
+        code: "fetch_failed",
+        now: NOW,
+        rng: HALF,
+      });
+      expect(res).toEqual({
+        result: "recorded",
+        state: "pending",
+        attempts: 1,
+        code: "fetch_failed",
+        becameFailed: false,
+        organizationId: org,
+        repoFullName: "acme/docs",
+      });
+      const r = await row(id);
+      expect(r.nextAttemptAt.getTime()).toBe(NOW.getTime() + 60_000);
+      expect(r.lastErrorCode).toBe("fetch_failed");
+    });
+
+    it("fails at the eighth attempt with the final code, reporting becameFailed once", async () => {
+      const id = await seed(
+        1,
+        "processing",
+        7,
+        new Date(NOW.getTime() + 10 * MIN),
+      );
+      const res = await failKnowledgeIntent({
+        db,
+        intentId: id,
+        code: "fetch_failed",
+        now: NOW,
+        rng: HALF,
+      });
+      expect(res).toMatchObject({
+        result: "recorded",
+        state: "failed",
+        attempts: 8,
+        code: "fetch_failed",
+        becameFailed: true,
+      });
+      expect(
+        await failKnowledgeIntent({
+          db,
+          intentId: id,
+          code: "fetch_failed",
+          now: NOW,
+          rng: HALF,
+        }),
+      ).toEqual({ result: "not_processing" });
+    });
+
+    it("writes nothing for a pending or processed row", async () => {
+      const a = await seed(1, "pending", 0, past);
+      const b = await seed(2, "processed", 1, past);
+      for (const id of [a, b]) {
+        expect(
+          await failKnowledgeIntent({
+            db,
+            intentId: id,
+            code: "fetch_failed",
+            now: NOW,
+            rng: HALF,
+          }),
+        ).toEqual({ result: "not_processing" });
+      }
+      expect((await row(a)).attempts).toBe(0);
+      expect((await row(b)).attempts).toBe(1);
+    });
+
+    it("throws on a code outside the closed enum before any write", async () => {
+      const id = await seed(
+        1,
+        "processing",
+        0,
+        new Date(NOW.getTime() + 10 * MIN),
+      );
+      await expect(
+        failKnowledgeIntent({
+          db,
+          intentId: id,
+          code: "secret free text" as never,
+          now: NOW,
+        }),
+      ).rejects.toThrow(/code/);
+      const r = await row(id);
+      expect(r.state).toBe("processing");
+      expect(r.attempts).toBe(0);
+    });
   });
 });
