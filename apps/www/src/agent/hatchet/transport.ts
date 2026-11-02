@@ -275,6 +275,48 @@ export async function triggerAgentRun<
 }
 
 /**
+ * Generic sibling of triggerAgentRun for non-agent workflows (the knowledge
+ * reconcile and mirror purge). Same endpoint and auth; the caller supplies the
+ * workflow name, a reference-only input and the metadata. A non-2xx throws with
+ * the status only: the response body is never echoed. Returns the run's
+ * externalId (`run.metadata.id`).
+ */
+export async function triggerWorkflow(
+  workflowName: string,
+  input: Record<string, unknown>,
+  config: HatchetTriggerConfig,
+  opts?: { additionalMetadata?: Record<string, string>; signal?: AbortSignal },
+): Promise<{ externalId: string | undefined }> {
+  const { apiUrl, tenantId, apiToken } = requireHatchetConfig(
+    config,
+    "dispatch",
+  );
+  const res = await fetch(
+    `${apiUrl.replace(/\/$/, "")}/api/v1/stable/tenants/${tenantId}/workflow-runs/trigger`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        workflowName,
+        input,
+        additionalMetadata: opts?.additionalMetadata ?? {},
+      }),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Hatchet trigger failed: ${res.status}`);
+  }
+  const json = (await res.json().catch(() => ({}))) as {
+    run?: { metadata?: { id?: string } };
+  };
+  return { externalId: json.run?.metadata?.id };
+}
+
+/**
  * Cancel one or more in-flight workflow runs by their externalId (#8 supersede). The
  * REST v1 stable cancel endpoint takes a batch of externalIds — the same
  * `run.metadata.id` values `triggerAgentRun` returns. Used when a NEW review run is

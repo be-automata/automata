@@ -1,6 +1,7 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import {
   triggerAgentRun,
+  triggerWorkflow,
   cancelAgentRun,
   getAgentRunStatus,
   listAgentRunsForThread,
@@ -622,5 +623,46 @@ describe("listAgentRunsForThread (KILL-01 Drain reader)", () => {
     controller.abort();
     await expect(pending).rejects.toThrow(/aborted/);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("triggerWorkflow (generic Hatchet REST v1 trigger)", () => {
+  it("POSTs workflowName, input and metadata with the Bearer token and returns run.metadata.id", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ run: { metadata: { id: "run-9" } } })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await triggerWorkflow(
+      "knowledge-reconcile",
+      { intentId: "i1" },
+      CONFIG,
+      { additionalMetadata: { lane: "knowledge" } },
+    );
+    expect(res).toEqual({ externalId: "run-9" });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(
+      "https://tunnel.example.com/api/v1/stable/tenants/tenant-1/workflow-runs/trigger",
+    );
+    expect(init.headers.Authorization).toBe("Bearer secret-token");
+    expect(JSON.parse(init.body)).toEqual({
+      workflowName: "knowledge-reconcile",
+      input: { intentId: "i1" },
+      additionalMetadata: { lane: "knowledge" },
+    });
+  });
+
+  it("throws the status only on a non-2xx, never echoing the response body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("echo: intentId i1", { status: 502 })),
+    );
+    const err = await triggerWorkflow("w", { a: 1 }, CONFIG).catch(
+      (e: Error) => e,
+    );
+    expect((err as Error).message).toBe("Hatchet trigger failed: 502");
   });
 });
