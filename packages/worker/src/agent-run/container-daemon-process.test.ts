@@ -591,6 +591,87 @@ describe("ContainerDaemonProcess C3 forwards (#430)", () => {
     }
   });
 
+  // card: protects=spike 032: with WORKER_RUN_OTLP_URL set, every lane (a review included) gets the collector socket and the OTel export in its user settings env, prompts and tool details pinned off, run identity as resource attributes; fails_when=no socket, the config rides the process env only, prompts are on, or identity is missing; no_claim=the collector's identity strip (deploy/linux/otel-collector.yaml, spike 032)
+  it.each(["task", "review"] as const)(
+    "run telemetry (%s): collector socket + settings env, prompts off",
+    async (lane) => {
+      const collector = await listen("otel", (s, d) =>
+        s.listen(0, "127.0.0.1", d),
+      );
+      const port = (collector.address() as net.AddressInfo).port;
+      try {
+        config = {
+          ...config,
+          runTelemetry: {
+            otlpUrl: `http://127.0.0.1:${port}`,
+            toolFailureStreakLimit: 0,
+          },
+        };
+        const rt = fakeRuntime();
+        const seen = socketsAtCreate(rt);
+        await new ContainerDaemonProcess(
+          config,
+          { ...input, orgId: "org_9" } as AgentRunInput,
+          run,
+          { home: run.home, delivered: false, env: {} },
+          lane,
+          {
+            secrets: { daemonToken: "daemon-token-secret" },
+            runtime: rt as unknown as ContainerRuntime,
+            probeSocket: async () => {},
+            log: () => {},
+            boxTestServicesEnvPath: path.join(root, "absent.env"),
+            egressProxyUrl: null,
+            broker: null,
+          },
+        ).start();
+        expect(seen()).toContain("otel-collector.sock");
+        expect(
+          await ask(path.join(run.runDir, "sock", "otel-collector.sock"), "q"),
+        ).toBe("otel:q");
+        const settings = JSON.parse(
+          rt.copied[0]?.[".claude/settings.json"] ?? "{}",
+        ) as { env?: Record<string, string> };
+        expect(settings.env).toMatchObject({
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:4318",
+          OTEL_LOG_USER_PROMPTS: "0",
+          OTEL_LOG_TOOL_DETAILS: "0",
+          OTEL_RESOURCE_ATTRIBUTES: `automata.run_id=chat_1,automata.thread_id=thr_c3,automata.lane=${lane},automata.org=org_9`,
+        });
+        expect(rt.copied[0]?.[".automata-run/run.env"] ?? "").not.toMatch(
+          /OTEL_|TOOL_FAILURE_STREAK_LIMIT/,
+        );
+      } finally {
+        await new Promise<void>((r) => collector.close(() => r()));
+      }
+    },
+  );
+
+  // card: protects=telemetry is opt-in per box and the #546 stop reaches the daemon only when the box sets a limit, written after the repo env; fails_when=a socket or OTel env appears with no URL, or the limit is missing/overridable; no_claim=the daemon's own streak logic (packages/daemon tool-failure-streak)
+  it("no OTLP URL: no collector socket, no OTel env; a streak limit lands in run.env", async () => {
+    config = {
+      ...config,
+      runTelemetry: { otlpUrl: null, toolFailureStreakLimit: 8 },
+    };
+    const rt = fakeRuntime();
+    const seen = socketsAtCreate(rt);
+    await make("task", rt, {
+      secrets: {
+        daemonToken: "daemon-token-secret",
+        repoEnv: { TOOL_FAILURE_STREAK_LIMIT: "0" },
+      },
+    }).start();
+    expect(seen()).not.toContain("otel-collector.sock");
+    const settings = JSON.parse(
+      rt.copied[0]?.[".claude/settings.json"] ?? "{}",
+    ) as { env?: unknown };
+    expect(settings.env).toBeUndefined();
+    const runEnv = rt.copied[0]?.[".automata-run/run.env"] ?? "";
+    expect(runEnv).toContain("export TOOL_FAILURE_STREAK_LIMIT='8'");
+    expect(runEnv).not.toContain("TOOL_FAILURE_STREAK_LIMIT='0'");
+  });
+
   // card: protects=#437 Part B: a task container's salvage prepare runs the constant freeze-and-bridge script INSIDE the container (bash, the forwarded git broker socket and the candidate ports as arguments only) and hands back the loopback URL of the port the script printed; fails_when=the script is not SALVAGE_PREPARE_SCRIPT, run-derived text enters it, the socket path or ports differ, or the URL is not the printed port's; no_claim=the script's behaviour in a real container (manual drill in the PR, box proof)
   it("salvage prepare: the freeze-and-bridge script in the container, its port as the broker URL", async () => {
     const rt = fakeRuntime();

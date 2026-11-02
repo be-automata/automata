@@ -1,0 +1,72 @@
+# The box collector for run telemetry (spike 032). Run containers reach it through the
+# worker's otel-collector.sock bridge (WORKER_RUN_OTLP_URL=http://127.0.0.1:4320).
+#
+# Its one job besides forwarding: Claude Code exports the credential owner's account
+# identity on every record even with prompts off, so it is deleted HERE, before anything
+# is stored. Prompt text, file contents and command arguments never reach this collector
+# (the worker pins OTEL_LOG_USER_PROMPTS=0 / OTEL_LOG_TOOL_DETAILS=0 in the run settings).
+#
+# Installed to /etc/automata/otel-collector.yaml by install-run-telemetry.sh.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4320
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  attributes/strip-identity:
+    actions:
+      - { key: user.email, action: delete }
+      - { key: user.id, action: delete }
+      - { key: user.account_id, action: delete }
+      - { key: user.account_uuid, action: delete }
+  resource/strip-identity:
+    attributes:
+      - { key: user.email, action: delete }
+      - { key: user.id, action: delete }
+      - { key: user.account_id, action: delete }
+      - { key: user.account_uuid, action: delete }
+  batch: {}
+exporters:
+  # Maple local (automata-maple.service), loopback only. Internal use: Maple is FSL-1.1,
+  # it is never offered to customers.
+  otlphttp/maple:
+    endpoint: http://127.0.0.1:4318
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors:
+        [
+          memory_limiter,
+          attributes/strip-identity,
+          resource/strip-identity,
+          batch,
+        ]
+      exporters: [otlphttp/maple]
+    logs:
+      receivers: [otlp]
+      processors:
+        [
+          memory_limiter,
+          attributes/strip-identity,
+          resource/strip-identity,
+          batch,
+        ]
+      exporters: [otlphttp/maple]
+    metrics:
+      receivers: [otlp]
+      processors:
+        [
+          memory_limiter,
+          attributes/strip-identity,
+          resource/strip-identity,
+          batch,
+        ]
+      exporters: [otlphttp/maple]

@@ -156,6 +156,48 @@ into the same verdict every `RestartSec` until the engine expired the row. The
 grace is bounded by one threshold window: a process older than that which is
 still reading a stale heartbeat does exit.
 
+## Run telemetry and the stuck-agent stop (spike 032, #546)
+
+Both are box settings, OFF by default. The agent never chooses where its telemetry goes.
+
+**Telemetry.** `sudo deploy/linux/install-run-telemetry.sh` installs two hardened services bound to
+loopback. The collector runs as a `DynamicUser`. Maple runs as the static `automata-telemetry` user,
+because `DynamicUser` symlinks the state dir and Maple refuses a symlinked data dir. Both releases are
+pinned and verified by sha256 before extraction:
+
+- `automata-otel-collector` (otelcol-contrib 0.162.0) listens on `127.0.0.1:4320`. It **deletes
+  `user.email`, `user.id`, `user.account_id` and `user.account_uuid`** before storing anything:
+  Claude Code exports the credential owner's identity on every record, even with prompts off.
+- `automata-maple` (Maple local v0.3.2, FSL-1.1, internal use only) stores the telemetry on
+  `127.0.0.1:4318`. For the UI, run `ssh -L 4318:127.0.0.1:4318 <box>`.
+
+Then set `WORKER_RUN_OTLP_URL=http://127.0.0.1:4320` and restart with `automata-worker-safe-restart`.
+Every run container, review lane included, gets `otel-collector.sock` bridged to its loopback `:4318`.
+The OTel export is set in the run's **user settings `env`**, because a settings `env` block beats
+the process env, so env-only config is silently overridden.
+
+| What leaves a run                                                                       | What never does                                       |
+| :-------------------------------------------------------------------------------------- | :---------------------------------------------------- |
+| Tokens, cost, TTFT and model per request                                                | Prompt text (`OTEL_LOG_USER_PROMPTS=0`, pinned)       |
+| Tool name, success/failure and duration per call                                        | File contents                                         |
+| A `claude_code.interaction` trace per turn; a failed call is `Error: ShellError`        | Command arguments (`OTEL_LOG_TOOL_DETAILS=0`, pinned) |
+| `automata.run_id` (threadChatId), `automata.thread_id`, `automata.lane`, `automata.org` | Account identity (deleted by the collector)           |
+
+`WORKER_RUN_OTLP_URL` must be `http://<loopback>:<port>` with no credentials or path. Anything else
+refuses boot.
+
+**Stuck-agent stop (#546).** The daemon counts consecutive failed tool calls. It runs in two modes:
+
+- **Observe** (`WORKER_TOOL_FAILURE_STREAK_LIMIT` unset or `0`, the default). The streak is logged at
+  5, 10, 15, and so on.
+- **Stop** (an integer from 3 to 100). At that streak the run ends with an error result naming the
+  streak and the last tool, the same way the idle watchdog ends it.
+
+The limit is written to the run env after the repo env, and `TOOL_FAILURE_STREAK_LIMIT` is a reserved
+repo-env key, so an owner cannot lift it. Pick the limit from the observe logs (or the telemetry above)
+once they show where working runs peak: a `grep` with no match or a failing test also counts as a
+failure.
+
 ## Payload seal key (#380)
 
 Every run's secrets — the GitHub installation token, the optional read-only

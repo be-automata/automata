@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { CONTAINER_HOME, CONTAINER_WORKSPACE } from "./container-argv";
+import { RUN_TELEMETRY_BRIDGE_PORT } from "./run-telemetry";
 
 /**
  * The container's entry step (ADR-013 "Run path" step 5), run by
@@ -27,7 +28,8 @@ export const CONTAINER_RUN_ENV_FILE = `${CONTAINER_HOME}/.automata-run/run.env`;
  * The socket names the worker forwards under /run/automata (C3, #430) and the
  * entry bridges to loopback TCP ports (egress proxy → 3128, git broker → 3129,
  * test Postgres → 25432). One table for the entry's bridge loop and the
- * worker's forwards (container-daemon-process.ts). The gh broker socket is
+ * worker's forwards (container-daemon-process.ts). The box OTel collector
+ * (`otel-collector.sock` → 4318) is bridged when the box sets one. The gh broker socket is
  * not here: gh speaks HTTP over a unix socket itself.
  */
 export const CONTAINER_BRIDGES: ReadonlyArray<{
@@ -37,6 +39,9 @@ export const CONTAINER_BRIDGES: ReadonlyArray<{
   { socket: "egress-proxy.sock", port: 3128 },
   { socket: "git-broker.sock", port: 3129 },
   { socket: "test-postgres.sock", port: 25432 },
+  // Spike 032: the box OTel collector (run-telemetry.ts). Telemetry only: no
+  // credential, no route to GitHub or the repo.
+  { socket: "otel-collector.sock", port: RUN_TELEMETRY_BRIDGE_PORT },
 ];
 
 /**
