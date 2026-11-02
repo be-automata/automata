@@ -8,7 +8,8 @@
     "./node": "./src/node.ts",
     "./claims": "./src/claims.ts",
     "./op-key": "./src/op-key.ts",
-    "./reanchor": "./src/reanchor.ts"
+    "./reanchor": "./src/reanchor.ts",
+    "./reconcile-wire": "./src/reconcile-wire.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",
