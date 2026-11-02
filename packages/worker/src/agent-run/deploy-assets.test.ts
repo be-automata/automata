@@ -900,6 +900,23 @@ describe("packages/worker/deploy/linux — engine backup (#192)", () => {
   });
 });
 
+describe("Phase 13 knowledge mirror root (PD-6)", () => {
+  // card: protects=the worker unit provisions the knowledge mirror root (/var/lib/automata/mirrors) as a 0700 systemd StateDirectory and nothing points the mirror root under /tmp; fails_when=StateDirectory=automata/mirrors or StateDirectoryMode=0700 is dropped, or a ReadWritePaths/env line puts the mirror root under /tmp; no_claim=the mirror manager itself (mirror.test.ts)
+  it("the unit creates the mirror root with mode 0700, outside /tmp", () => {
+    const unit = deployFile("linux", "automata-worker.service");
+    expect(unit).toMatch(/^StateDirectory=automata\/mirrors$/m);
+    expect(unit).toMatch(/^StateDirectoryMode=0700$/m);
+    const lines = unit
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"));
+    for (const l of lines) {
+      if (/^ReadWritePaths=/.test(l) || /WORKER_MIRROR_ROOT/.test(l)) {
+        expect(l).not.toMatch(/\/tmp\b/);
+      }
+    }
+  });
+});
+
 describe("ADR-013 P3: the host-uid execution path stays deleted", () => {
   /** Every file under `dir` (recursive), relative to the repo root. */
   function walk(dir: string): string[] {

@@ -27,6 +27,12 @@ User=__USER__
 Group=__USER__
 WorkingDirectory=__REPO__/packages/worker
 
+# Phase 13 knowledge mirrors (D-07): systemd creates /var/lib/automata/mirrors
+# owned by the unit's User, mode 0700 (WORKER_MIRROR_ROOT's default). ProtectSystem=full
+# leaves /var writable, and the root is NOT under /tmp, so nothing reaps it.
+StateDirectory=automata/mirrors
+StateDirectoryMode=0700
+
 # ── Wait for the engine before the auth gate can mean anything ─────────────
 #
 # `After=docker.service` orders against the DAEMON, not against the compose
