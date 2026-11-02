@@ -1,10 +1,11 @@
 import { and, asc, eq, gte, inArray } from "drizzle-orm";
 
 import {
+  classifyClaimEvidence,
   MAX_PUBLISH_OPS,
-  repoPinTarget,
   repoRelativePath,
   type ReconcileContextReady,
+  type TicketPin,
   type ReconcilePublishRequest,
   type ReconcilePublishResponse,
   type WireClaim,
@@ -33,6 +34,9 @@ import {
  * always come from the intent row, never from a request. Never logs; errors
  * carry field names only, never partner content.
  *
+ * Admission follows PD-24 (repo and ticket pins) and PD-25 (doc pins excluded) through
+ * classifyClaimEvidence.
+ *
  * Runs in the www Workers bundle: it imports only the fs-free
  * `@terragon/knowledge/reconcile-wire`, never claims.ts or the node entry.
  */
@@ -59,15 +63,22 @@ export class KnowledgeReconcileInvalidError extends Error {
   }
 }
 
+/** An admitted claim with ticket pins; the route fetches its snapshots (PD-24). */
+export interface TicketClaim {
+  claimId: string;
+  ticketPins: TicketPin[];
+}
+
 /**
  * The DB-side context. The ticket snapshots (PD-24) are fetched from the tracker by www, not read
- * here, so the route adds `tickets` and `unavailableClaims` (13-17).
+ * here, so the route adds `tickets` and `unavailableClaims` (13-17). `ticketClaims` is internal: the
+ * route consumes it and never puts it on the wire.
  */
 export type KnowledgeReconcileContext =
-  | Omit<
+  | (Omit<
       ReconcileContextReady,
       "installationToken" | "tickets" | "unavailableClaims"
-    >
+    > & { ticketClaims: TicketClaim[] })
   | {
       status: "gated" | "done" | "not_found";
       purgedOrganizationIds: string[];
@@ -175,20 +186,29 @@ export async function loadKnowledgeReconcileContext({
       pinsByClaim.set(pin.claimId, list);
     }
 
-    // PD-21: admit only claims the worker can check without trusting stored
-    // paths. Everything else is counted, never described.
+    // PD-21 / PD-24 / PD-25: admit only claims whose evidence the worker can
+    // check (repo pins, ticket pins). Doc pins and invalid paths are counted,
+    // never described.
     const pages = new Map<string, WireClaim[]>();
     const admitted: string[] = [];
+    const ticketClaims: TicketClaim[] = [];
     let excludedClaims = 0;
     for (const claim of claims) {
-      const page = repoRelativePath(claim.page);
       const evidence = pinsByClaim.get(claim.id) ?? [];
-      if (
-        page === null ||
-        evidence.some((e) => repoPinTarget(e.uri) === null)
-      ) {
+      const verdict = classifyClaimEvidence({
+        page: claim.page,
+        uris: evidence.map((e) => e.uri),
+      });
+      const page = repoRelativePath(claim.page);
+      if (verdict.kind === "excluded" || page === null) {
         excludedClaims += 1;
         continue;
+      }
+      if (verdict.ticketPins.length > 0) {
+        ticketClaims.push({
+          claimId: claim.id,
+          ticketPins: verdict.ticketPins,
+        });
       }
       const list = pages.get(page) ?? [];
       list.push({
@@ -224,6 +244,7 @@ export async function loadKnowledgeReconcileContext({
       rejected,
       purgedOrganizationIds,
       excludedClaims,
+      ticketClaims,
     };
   });
 }

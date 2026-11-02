@@ -219,10 +219,14 @@ describe("loadKnowledgeReconcileContext", () => {
     expect(res.sidecars).toEqual([]);
   });
 
-  it("admits only repo-pinned claims with a repo-relative page (PD-21)", async () => {
+  it("admits repo and ticket claims, excludes doc pins and bad paths (PD-21, PD-24, PD-25)", async () => {
     const id = await seedIntent();
     const ok = await seedClaim("ok", "docs/a.md", [
       { uri: "repo://src/x.ts#L1-L2" },
+    ]);
+    const ticket = await seedClaim("ticket", "docs/b.md", [
+      { uri: "repo://src/y.ts#L1-L2" },
+      { uri: "ticket://SUP-12#/summary" },
     ]);
     await seedClaim("escape", "../escape.md", [], {
       statement: "ESCAPE-STATEMENT-MARKER",
@@ -238,8 +242,15 @@ describe("loadKnowledgeReconcileContext", () => {
     );
     const res = await load(id);
     if (res.status !== "ready") throw new Error("expected ready");
-    expect(res.sidecars).toHaveLength(1);
+    expect(res.sidecars.map((s) => s.page)).toEqual(["docs/a.md", "docs/b.md"]);
     expect(res.sidecars[0]?.claims.map((c) => c.id)).toEqual([ok]);
+    expect(res.sidecars[1]?.claims.map((c) => c.id)).toEqual([ticket]);
+    expect(res.ticketClaims).toEqual([
+      {
+        claimId: ticket,
+        ticketPins: [{ key: "SUP-12", pointer: "/summary", field: "summary" }],
+      },
+    ]);
     expect(res.excludedClaims).toBe(3);
     const body = JSON.stringify(res);
     expect(body).not.toContain("STATEMENT-MARKER");
