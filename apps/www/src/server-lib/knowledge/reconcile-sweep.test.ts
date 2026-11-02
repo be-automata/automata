@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db", () => ({ db: {} }));
 
@@ -32,6 +32,9 @@ function makeDeps(
     })),
     trigger: vi.fn(async () => undefined),
     alert: vi.fn(async () => undefined),
+    listHeadCandidates: vi.fn(async () => []),
+    readHead: vi.fn(async () => ({ kind: "error" as const })),
+    recoverHead: vi.fn(async () => ({ outcome: "in_sync" as const })),
     log: { log: vi.fn(), error: vi.fn() },
     ...overrides,
   };
@@ -168,5 +171,190 @@ describe("runKnowledgeReconcileSweep", () => {
     const r = await runKnowledgeReconcileSweep(deps);
     expect(r.dispatched).toBe(0);
     expect(deps.fail).not.toHaveBeenCalled();
+  });
+});
+
+describe("runKnowledgeReconcileSweep head check (D-03 / PD-19)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const CAND = (repo: string) => ({
+    organizationId: "org1",
+    repoFullName: repo,
+    defaultBranch: "main" as string | null,
+    lastSha: null,
+    observedHeadSha: null,
+  });
+  const HEAD = "a".repeat(40);
+
+  it("lists the slot of the tick minute, reads each head and recovers ok results", async () => {
+    const now = new Date(Date.UTC(2026, 10, 2, 12, 7)); // minute 7 of the hour
+    const minuteIndex = Math.floor(now.getTime() / 60_000);
+    const deps = makeDeps({
+      listHeadCandidates: vi.fn(async () => [CAND("o/a"), CAND("o/b")]),
+      readHead: vi.fn(async (row) =>
+        row.repoFullName === "o/a"
+          ? { kind: "ok" as const, sha: HEAD, defaultBranch: "main" }
+          : { kind: "no_access" as const },
+      ),
+      recoverHead: vi.fn(async () => ({ outcome: "inserted" as const })),
+    });
+    const r = await runKnowledgeReconcileSweep(deps, now);
+    expect(deps.listHeadCandidates).toHaveBeenCalledWith(
+      now,
+      minuteIndex % 15,
+      5,
+    );
+    expect(deps.recoverHead).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(deps.recoverHead).mock.calls[0]![1]).toBe(HEAD);
+    expect(r).toMatchObject({
+      headChecked: 1,
+      headRecovered: 1,
+      headSkipped: 1,
+    });
+    const logged = JSON.stringify([
+      vi.mocked(deps.log.log).mock.calls,
+      vi.mocked(deps.log.error).mock.calls,
+    ]);
+    expect(logged).not.toContain(HEAD);
+  });
+
+  it("counts in_sync as checked only and other outcomes as skipped", async () => {
+    const outcomes = [
+      "in_sync",
+      "open_intent",
+      "failed_exists",
+      "busy",
+    ] as const;
+    let i = 0;
+    const deps = makeDeps({
+      listHeadCandidates: vi.fn(async () =>
+        outcomes.map((_, n) => CAND(`o/r${n}`)),
+      ),
+      readHead: vi.fn(async () => ({
+        kind: "ok" as const,
+        sha: HEAD,
+        defaultBranch: "main",
+      })),
+      recoverHead: vi.fn(async () => ({ outcome: outcomes[i++]! })),
+    });
+    const r = await runKnowledgeReconcileSweep(deps);
+    expect(r).toMatchObject({
+      headChecked: 4,
+      headRecovered: 0,
+      headSkipped: 3,
+    });
+  });
+
+  it("skips the head check entirely under 8 s of remaining budget", async () => {
+    const deps = makeDeps({
+      budget: {
+        totalMs: 7_000,
+        claimLimit: 10,
+        triggerTimeoutMs: 5_000,
+      },
+    });
+    const r = await runKnowledgeReconcileSweep(deps);
+    expect(deps.listHeadCandidates).not.toHaveBeenCalled();
+    expect(r.headChecked).toBe(0);
+    expect(deps.log.log).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run when the sweep is disabled", async () => {
+    const deps = makeDeps({ secret: () => "" });
+    await runKnowledgeReconcileSweep(deps);
+    expect(deps.listHeadCandidates).not.toHaveBeenCalled();
+  });
+
+  it("runs after dispatch so a head check never delays it", async () => {
+    const order: string[] = [];
+    const deps = makeDeps({
+      claimDue: vi.fn(async () => [ROW("a")]),
+      trigger: vi.fn(async () => {
+        order.push("trigger");
+      }),
+      listHeadCandidates: vi.fn(async () => {
+        order.push("list");
+        return [];
+      }),
+    });
+    await runKnowledgeReconcileSweep(deps);
+    expect(order).toEqual(["trigger", "list"]);
+  });
+
+  it("logs by error name and keeps dispatch results when readHead or recover throws", async () => {
+    const deps = makeDeps({
+      claimDue: vi.fn(async () => [ROW("a")]),
+      listHeadCandidates: vi.fn(async () => [CAND("o/a"), CAND("o/b")]),
+      readHead: vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError("boom"))
+        .mockResolvedValueOnce({
+          kind: "ok",
+          sha: HEAD,
+          defaultBranch: "main",
+        }),
+      recoverHead: vi.fn(async () => {
+        throw new RangeError("db down");
+      }),
+    });
+    const r = await runKnowledgeReconcileSweep(deps);
+    expect(r).toMatchObject({ dispatched: 1, headSkipped: 2 });
+    expect(deps.log.error).toHaveBeenCalledWith(
+      "[cron:knowledge-reconcile] head check failed",
+      { organizationId: "org1", error: "TypeError" },
+    );
+    expect(deps.log.error).toHaveBeenCalledWith(
+      "[cron:knowledge-reconcile] head check failed",
+      { organizationId: "org1", error: "RangeError" },
+    );
+  });
+
+  it("survives listHeadCandidates throwing", async () => {
+    const deps = makeDeps({
+      listHeadCandidates: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+    });
+    await expect(runKnowledgeReconcileSweep(deps)).resolves.toMatchObject({
+      headChecked: 0,
+    });
+  });
+
+  it("bounds a slow repo by min(remaining - 4 s, 9 s) and never overruns the sweep", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const deadlines: number[] = [];
+    const deps = makeDeps({
+      listHeadCandidates: vi.fn(async () => [
+        CAND("o/a"),
+        CAND("o/b"),
+        CAND("o/c"),
+        CAND("o/d"),
+      ]),
+      readHead: vi.fn(
+        (_row, signal: AbortSignal) =>
+          new Promise<{ kind: "error" }>((resolve) => {
+            const began = Date.now();
+            signal.addEventListener("abort", () => {
+              deadlines.push(Date.now() - began);
+              resolve({ kind: "error" as const });
+            });
+          }),
+      ),
+    });
+    const pending = runKnowledgeReconcileSweep(deps);
+    await vi.advanceTimersByTimeAsync(25_000);
+    const r = await pending;
+    // 20 s total: first repo min(20 - 4, 9) = 9 s, second min(11 - 4, 9) = 7 s,
+    // then 4 s remain: nothing more is started.
+    expect(deadlines).toEqual([9_000, 7_000]);
+    expect(deps.readHead).toHaveBeenCalledTimes(2);
+    expect(r.headSkipped).toBe(2);
+    expect(Date.now() - start).toBeLessThanOrEqual(25_000);
+    expect(deadlines.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(
+      20_000 - 4_000,
+    );
   });
 });
