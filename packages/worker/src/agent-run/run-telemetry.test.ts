@@ -89,6 +89,19 @@ describe("runTelemetrySettingsEnv", () => {
     expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
   });
 
+  it("a review's shared placeholder chat id falls back to the thread id (seen live: every review run was 'legacy-thread-chat-id')", () => {
+    expect(
+      runTelemetrySettingsEnv({
+        ...identity,
+        threadChatId: "legacy-thread-chat-id",
+      }).OTEL_RESOURCE_ATTRIBUTES,
+    ).toMatch(/^automata\.run_id=thr_1,/);
+    expect(
+      runTelemetrySettingsEnv({ ...identity, threadChatId: "" })
+        .OTEL_RESOURCE_ATTRIBUTES,
+    ).toMatch(/^automata\.run_id=thr_1,/);
+  });
+
   it("percent-encodes resource attribute values so separators cannot inject keys", () => {
     expect(runTelemetrySettingsEnv(identity).OTEL_RESOURCE_ATTRIBUTES).toBe(
       "automata.run_id=chat_1,automata.thread_id=thr_1,automata.lane=review,automata.org=u%3Aa%2Cb%3Dc",
