@@ -70,6 +70,9 @@ for _ in $(seq 1 60); do
 done
 [ "$maple" = 200 ] || { echo "install-run-telemetry: Maple not serving on 127.0.0.1:4318 (last HTTP $maple; journalctl -u automata-maple)" >&2; exit 1; }
 [ "$code" = 200 ] || { echo "install-run-telemetry: collector not accepting OTLP on 127.0.0.1:4320 (last HTTP $code)" >&2; exit 1; }
-systemctl is-active --quiet automata-maple.service automata-otel-collector.service ||
-  { echo "install-run-telemetry: a telemetry unit is not active (systemctl status automata-maple automata-otel-collector)" >&2; exit 1; }
+# One unit per call: with several units `is-active` exits 0 when ANY of them is active.
+for unit in automata-maple automata-otel-collector; do
+  systemctl is-active --quiet "$unit.service" ||
+    { echo "install-run-telemetry: $unit is not active (systemctl status $unit)" >&2; exit 1; }
+done
 echo "install-run-telemetry: collector on 127.0.0.1:4320 -> Maple on 127.0.0.1:4318 (ssh -L 4318:127.0.0.1:4318 for the UI)"
