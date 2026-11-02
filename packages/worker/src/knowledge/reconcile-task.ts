@@ -17,10 +17,14 @@ import {
   MAX_PUBLISH_OPS,
   repoPinTarget,
   repoRelativePath,
+  TICKET_KEY,
+  ticketPinTarget,
   type KnowledgeReconcileInput,
   type ReconcilePublishOp,
   type ReconcileWorkerErrorCode,
+  type UnavailableClaim,
   type WireSidecar,
+  type WireTicket,
 } from "@terragon/knowledge/reconcile-wire";
 
 import {
@@ -219,7 +223,11 @@ function checkSidecars(sidecars: WireSidecar[]): CheckedContext {
     }
     for (const claim of sidecar.claims) {
       for (const evidence of claim.evidence) {
-        if (repoPinTarget(evidence.uri) === null) {
+        // PD-24: repo and ticket pins are checkable; anything else should have been excluded.
+        if (
+          repoPinTarget(evidence.uri) === null &&
+          ticketPinTarget(evidence.uri) === null
+        ) {
           throw new ReconcileTaskError("control_plane_rejected");
         }
       }
@@ -234,6 +242,82 @@ function checkSidecars(sidecars: WireSidecar[]): CheckedContext {
     kept.push(sidecar);
   }
   return { sidecars: kept, excluded };
+}
+
+/**
+ * PD-24: the snapshots www shipped. Keys follow the wire shape (they become file names), snapshots
+ * are plain objects, keys are unique, and every ticket pin of a sidecar the engine will see has an
+ * entry: a missing one must never be read by the engine as "ticket deleted".
+ */
+function checkTickets(
+  tickets: WireTicket[],
+  sidecars: WireSidecar[],
+): Map<string, WireTicket> {
+  const byKey = new Map<string, WireTicket>();
+  for (const ticket of tickets) {
+    const plain =
+      typeof ticket.snapshot === "object" &&
+      ticket.snapshot !== null &&
+      !Array.isArray(ticket.snapshot);
+    if (!TICKET_KEY.test(ticket.key) || !plain || byKey.has(ticket.key)) {
+      throw new ReconcileTaskError("control_plane_rejected");
+    }
+    byKey.set(ticket.key, ticket);
+  }
+  for (const sidecar of sidecars) {
+    for (const claim of sidecar.claims) {
+      for (const evidence of claim.evidence) {
+        const target = ticketPinTarget(evidence.uri);
+        if (target !== null && !byKey.has(target.key)) {
+          throw new ReconcileTaskError("control_plane_rejected");
+        }
+      }
+    }
+  }
+  return byKey;
+}
+
+function pinnedTicketKeys(sidecars: WireSidecar[]): Set<string> {
+  const out = new Set<string>();
+  for (const sidecar of sidecars) {
+    for (const claim of sidecar.claims) {
+      for (const evidence of claim.evidence) {
+        const target = ticketPinTarget(evidence.uri);
+        if (target !== null) out.add(target.key);
+      }
+    }
+  }
+  return out;
+}
+
+function countByCode(claims: UnavailableClaim[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const claim of claims)
+    counts[claim.code] = (counts[claim.code] ?? 0) + 1;
+  return counts;
+}
+
+/** Lays each referenced snapshot at <root>/tickets/<KEY>.json, where the engine reads ticket pins. */
+async function writeTicketSnapshots(
+  snapshotRoot: string,
+  tickets: Map<string, WireTicket>,
+  keys: ReadonlySet<string>,
+): Promise<void> {
+  if (keys.size === 0) return;
+  const dir = path.join(snapshotRoot, "tickets");
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const key of keys) {
+    const ticket = tickets.get(key);
+    if (!ticket) throw new ReconcileTaskError("control_plane_rejected");
+    const file = path.resolve(dir, `${key}.json`);
+    if (!file.startsWith(dir + path.sep)) {
+      throw new ReconcileTaskError("control_plane_rejected");
+    }
+    await fs.writeFile(file, JSON.stringify(ticket.snapshot), {
+      mode: 0o600,
+      flag: "wx",
+    });
+  }
 }
 
 function pinnedPaths(sidecars: WireSidecar[]): Set<string> {
@@ -314,9 +398,13 @@ export async function runKnowledgeReconcile(
       throw new ReconcileTaskError("control_plane_rejected");
     }
     const checked = checkSidecars(context.sidecars);
+    const tickets = checkTickets(context.tickets, checked.sidecars);
+    const ticketKeys = pinnedTicketKeys(checked.sidecars);
     log("[knowledge-reconcile] context", {
       intentId,
       excludedClaims: context.excludedClaims + checked.excluded,
+      tickets: ticketKeys.size,
+      unavailable: countByCode(context.unavailableClaims),
     });
     const target = intent.targetSha;
     const cursor = context.cursor.lastSha;
@@ -399,6 +487,7 @@ export async function runKnowledgeReconcile(
         statfs: deps.statfs,
       });
       try {
+        await writeTicketSnapshots(snapshot.root, tickets, ticketKeys);
         const written = new Set(snapshot.written);
         const ops: ReconcilePublishOp[] = [];
         try {

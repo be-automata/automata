@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fsp from "node:fs/promises";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { pin } from "@terragon/knowledge/node";
 import type {
@@ -522,5 +524,179 @@ describe("logging", () => {
     );
     expect(lines.length).toBeGreaterThan(0);
     expect(JSON.stringify(lines)).not.toContain("ghs_faketoken");
+  });
+});
+
+describe("ticket evidence (PD-24)", () => {
+  const TICKET_URI = "ticket://SUP-12#/summary";
+  const REVISION = "c".repeat(64);
+
+  /** A real ticket pin against a snapshot laid out the way the engine reads it. */
+  function ticketPinOf(snapshot: Record<string, unknown>, uri: string) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tpin-"));
+    try {
+      fs.mkdirSync(path.join(dir, "tickets"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "tickets", "SUP-12.json"),
+        JSON.stringify(snapshot),
+      );
+      return pin(dir, uri);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const ticketSidecar = (storedSummary: string): WireSidecar[] => [
+    {
+      page: PAGE,
+      claims: [
+        {
+          id: "claim-t",
+          statement: STATEMENT,
+          version: 1,
+          evidence: [ticketPinOf({ summary: storedSummary }, TICKET_URI)],
+        },
+      ],
+    },
+  ];
+
+  const ticket = (summary: string): WireTicket => ({
+    key: "SUP-12",
+    revision: REVISION,
+    snapshot: { summary },
+  });
+
+  it("reports a ticket pin fresh when the snapshot matches", async () => {
+    const target = seed();
+    const client = fakeClient({
+      context: ready({
+        target,
+        sidecars: ticketSidecar("A"),
+        tickets: [ticket("A")],
+      }),
+    });
+    const updater = reviewRoutingUpdater();
+    const res = await runKnowledgeReconcile(
+      inputFor(target),
+      deps(client, { updater }),
+    );
+    expect(res.outcome).toBe("published");
+    expect(client.published[0]?.ops).toEqual([]);
+    expect(updater.calls).toBe(0);
+  });
+
+  it("turns a changed ticket field into one review op with no model call", async () => {
+    const target = seed();
+    const client = fakeClient({
+      context: ready({
+        target,
+        sidecars: ticketSidecar("A"),
+        tickets: [ticket("B")],
+      }),
+    });
+    await runKnowledgeReconcile(inputFor(target), deps(client));
+    const ops = client.published[0]?.ops ?? [];
+    expect(ops.map((o) => [o.claimId, o.kind])).toEqual([
+      ["claim-t", "review"],
+    ]);
+  });
+
+  it("writes <root>/tickets/<KEY>.json with mode 0600 and removes it with the snapshot", async () => {
+    const target = seed();
+    const writes: Array<{ file: string; mode: unknown; body: string }> = [];
+    const original = fsp.writeFile.bind(fsp);
+    const spy = vi
+      .spyOn(fsp, "writeFile")
+      .mockImplementation(async (file, data, options) => {
+        if (String(file).includes(`${path.sep}tickets${path.sep}`)) {
+          writes.push({
+            file: String(file),
+            mode: (options as { mode?: unknown } | undefined)?.mode,
+            body: String(data),
+          });
+        }
+        return original(file, data, options as never);
+      });
+    try {
+      const client = fakeClient({
+        context: ready({
+          target,
+          sidecars: ticketSidecar("A"),
+          tickets: [ticket("A")],
+        }),
+      });
+      await runKnowledgeReconcile(inputFor(target), deps(client));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(writes).toHaveLength(1);
+    expect(path.basename(writes[0]!.file)).toBe("SUP-12.json");
+    expect(writes[0]!.mode).toBe(0o600);
+    expect(JSON.parse(writes[0]!.body)).toEqual({ summary: "A" });
+    expect(fs.existsSync(writes[0]!.file)).toBe(false);
+  });
+
+  it.each([
+    ["a key failing the wire regex", [{ ...ticket("A"), key: "sup-12" }]],
+    [
+      "a key that would escape the directory",
+      [{ ...ticket("A"), key: "../../X-1" }],
+    ],
+    [
+      "a snapshot that is not a plain object",
+      [{ ...ticket("A"), snapshot: [] as unknown as Record<string, unknown> }],
+    ],
+    ["a duplicate key", [ticket("A"), ticket("B")]],
+  ])("rejects %s before any git work", async (_name, tickets) => {
+    const target = seed();
+    const client = fakeClient({
+      context: ready({ target, sidecars: ticketSidecar("A"), tickets }),
+    });
+    const res = await runKnowledgeReconcile(inputFor(target), deps(client));
+    expect(res).toEqual({ outcome: "failed", code: "control_plane_rejected" });
+    expect(client.failed).toEqual([
+      { intentId: INTENT, code: "control_plane_rejected" },
+    ]);
+    expect(client.published).toEqual([]);
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  it("rejects a ticket pin with no matching tickets entry (never a false 'ticket deleted')", async () => {
+    const target = seed();
+    const client = fakeClient({
+      context: ready({ target, sidecars: ticketSidecar("A"), tickets: [] }),
+    });
+    const res = await runKnowledgeReconcile(inputFor(target), deps(client));
+    expect(res).toEqual({ outcome: "failed", code: "control_plane_rejected" });
+    expect(client.published).toEqual([]);
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  it("logs unavailable claims as counts per code and never fails the run", async () => {
+    const target = seed();
+    const logs: Array<Record<string, unknown>> = [];
+    const client = fakeClient({
+      context: ready({
+        target,
+        unavailable: [
+          { claimId: "secret-claim-id", code: "source_unavailable" },
+          { claimId: "other-claim", code: "source_unavailable" },
+          { claimId: "third", code: "pin_unsupported" },
+        ],
+      }),
+    });
+    const res = await runKnowledgeReconcile(
+      inputFor(target),
+      deps(client, { log: (_m, fields) => logs.push(fields) }),
+    );
+    expect(res.outcome).toBe("published");
+    expect(client.failed).toEqual([]);
+    const withCounts = logs.find((l) => "unavailable" in l);
+    expect(withCounts?.unavailable).toEqual({
+      source_unavailable: 2,
+      pin_unsupported: 1,
+    });
+    expect(JSON.stringify(logs)).not.toContain("secret-claim-id");
+    expect(JSON.stringify(logs)).not.toContain("SUP-12");
   });
 });
