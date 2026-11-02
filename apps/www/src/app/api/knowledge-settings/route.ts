@@ -10,6 +10,7 @@ import {
   updateKnowledgeControls,
   type KnowledgeControls,
 } from "@terragon/shared/model/knowledge-controls";
+import { forKnowledge } from "@terragon/shared/model/knowledge-access";
 import { listKnowledgeAdminActions } from "@terragon/shared/model/knowledge-admin-log";
 import { getOrganizationById } from "@terragon/shared/model/organizations";
 
@@ -17,6 +18,7 @@ import { getTenantContextOrNull, isPlatformAdmin } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { isOrgAdmin } from "@/lib/org-role";
 import { controlsToDto } from "@/server-lib/knowledge/controls-dto";
+import { toKnowledgeRepoDto } from "@/server-lib/knowledge/repos-dto";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -43,10 +45,11 @@ export async function GET(): Promise<NextResponse> {
       spend: null,
       actions: [],
       viewer: { isOrgAdmin: false, isPlatformAdmin: false },
+      repos: [],
     });
   }
   const organizationId = ctx.organizationId;
-  const [controls, spend, actions, org, orgAdmin, platformAdmin] =
+  const [controls, spend, actions, org, orgAdmin, platformAdmin, repos] =
     await Promise.all([
       getKnowledgeControls({ db, organizationId }),
       getKnowledgeSpend({ db, organizationId }),
@@ -54,6 +57,7 @@ export async function GET(): Promise<NextResponse> {
       getOrganizationById({ db, organizationId }),
       isOrgAdmin({ db, organizationId, userId: ctx.userId }),
       isPlatformAdmin(),
+      forKnowledge({ db, organizationId }).admin.listRepoStatus(),
     ]);
   return NextResponse.json({
     orgSlug: org?.slug ?? null,
@@ -76,6 +80,7 @@ export async function GET(): Promise<NextResponse> {
       createdAt: a.createdAt.toISOString(),
     })),
     viewer: { isOrgAdmin: orgAdmin, isPlatformAdmin: platformAdmin },
+    repos: repos.map(toKnowledgeRepoDto),
   });
 }
 

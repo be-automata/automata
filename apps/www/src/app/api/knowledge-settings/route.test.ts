@@ -12,6 +12,7 @@ import {
   KnowledgeControlsConflictError,
   KnowledgeOffboardedError,
 } from "@terragon/shared/model/knowledge-controls";
+import { forKnowledge } from "@terragon/shared/model/knowledge-access";
 import { listKnowledgeAdminActions } from "@terragon/shared/model/knowledge-admin-log";
 import { getOrganizationById } from "@terragon/shared/model/organizations";
 
@@ -24,6 +25,9 @@ vi.mock("@/lib/db", () => ({ db: {} }));
 const captureMock = vi.fn();
 vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: captureMock }),
+}));
+vi.mock("@terragon/shared/model/knowledge-access", () => ({
+  forKnowledge: vi.fn(),
 }));
 vi.mock("@terragon/shared/model/organizations", () => ({
   getOrganizationById: vi.fn(),
@@ -44,6 +48,7 @@ vi.mock("@terragon/shared/model/knowledge-controls", async () => {
   };
 });
 
+const listRepoStatus = vi.fn();
 const ORG = "org_1";
 const USER = "user_1";
 const UPDATED = new Date("2026-10-01T00:00:00.000Z");
@@ -107,6 +112,10 @@ describe("/api/knowledge-settings", () => {
     vi.mocked(getOrganizationById).mockResolvedValue({
       slug: "acme",
     } as never);
+    listRepoStatus.mockResolvedValue([]);
+    vi.mocked(forKnowledge).mockReturnValue({
+      admin: { listRepoStatus },
+    } as never);
   });
 
   describe("GET", () => {
@@ -128,7 +137,64 @@ describe("/api/knowledge-settings", () => {
         spend: null,
         actions: [],
         viewer: { isOrgAdmin: false, isPlatformAdmin: false },
+        repos: [],
       });
+    });
+
+    it("returns repo liveness rows to a member, ISO dates, scoped to the session org", async () => {
+      vi.mocked(isOrgAdmin).mockResolvedValue(false);
+      const t = new Date("2026-10-02T00:00:00.000Z");
+      listRepoStatus.mockResolvedValue([
+        {
+          repoFullName: "o/never",
+          defaultBranch: null,
+          lastSha: null,
+          observedHeadSha: null,
+          lastPushAt: null,
+          latestIntent: null,
+          pending: false,
+          pendingSince: null,
+          affectedClaimCount: 0,
+        },
+        {
+          repoFullName: "o/failed",
+          defaultBranch: "main",
+          lastSha: "a".repeat(40),
+          observedHeadSha: "b".repeat(40),
+          lastPushAt: t,
+          latestIntent: {
+            id: "i1",
+            state: "failed",
+            attempts: 8,
+            lastErrorCode: "fetch_failed",
+            targetSha: "b".repeat(40),
+            createdAt: t,
+            processedAt: null,
+          },
+          pending: true,
+          pendingSince: t,
+          affectedClaimCount: 3,
+        },
+      ]);
+      const body = await (await GET()).json();
+      expect(forKnowledge).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: ORG }),
+      );
+      expect(body.repos[0].lastPushAt).toBeNull();
+      expect(body.repos[0].latestIntent).toBeNull();
+      expect(body.repos[1].lastPushAt).toBe(t.toISOString());
+      expect(body.repos[1].latestIntent).toEqual({
+        id: "i1",
+        state: "failed",
+        attempts: 8,
+        lastErrorCode: "fetch_failed",
+        targetSha: "b".repeat(40),
+        createdAt: t.toISOString(),
+        processedAt: null,
+      });
+      expect(body.repos[1].pending).toBe(true);
+      expect(body.repos[1].pendingSince).toBe(t.toISOString());
+      expect(body.repos[1].affectedClaimCount).toBe(3);
     });
 
     it("200 for a plain member with ISO dates, orgSlug, ceiling and viewer flags", async () => {

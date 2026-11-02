@@ -49,12 +49,44 @@ export interface KnowledgeViewer {
   isPlatformAdmin: boolean;
 }
 
+export type KnowledgeIntentStateDto =
+  | "pending"
+  | "processing"
+  | "processed"
+  | "superseded"
+  | "failed";
+
+export interface KnowledgeRepoIntentDto {
+  id: string;
+  state: KnowledgeIntentStateDto;
+  attempts: number;
+  lastErrorCode: string | null;
+  targetSha: string;
+  createdAt: string;
+  processedAt: string | null;
+}
+
+/** One onboarded repo's liveness and pending-validation row (ids, enums, integers, shas, dates). */
+export interface KnowledgeRepoDto {
+  repoFullName: string;
+  defaultBranch: string | null;
+  /** Null = this repo has never seen a push. */
+  lastPushAt: string | null;
+  lastSha: string | null;
+  observedHeadSha: string | null;
+  latestIntent: KnowledgeRepoIntentDto | null;
+  pending: boolean;
+  pendingSince: string | null;
+  affectedClaimCount: number;
+}
+
 export interface KnowledgeSettingsResponse {
   orgSlug: string | null;
   controls: KnowledgeControlsDto | null;
   spend: KnowledgeSpendDto | null;
   actions: KnowledgeActionDto[];
   viewer: KnowledgeViewer;
+  repos: KnowledgeRepoDto[];
 }
 
 export interface KnowledgeFieldError {
