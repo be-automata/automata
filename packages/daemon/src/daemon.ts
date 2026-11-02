@@ -21,6 +21,11 @@ import {
 } from "./utils";
 import { AgentFrontmatterReader } from "./agent-frontmatter";
 import { getAdapter } from "./adapters/registry";
+import {
+  createToolFailureStreak,
+  parseStreakLimit,
+  TOOL_FAILURE_STREAK_LIMIT_ENV,
+} from "./tool-failure-streak";
 
 function formatError(error: unknown): object {
   if (error instanceof Error) {
@@ -763,6 +768,10 @@ export class TerragonDaemon {
     }
 
     const parser = adapter.makeLineParser({ runtime: this.runtime });
+    const failureStreak = createToolFailureStreak({
+      limit: parseStreakLimit(process.env[TOOL_FAILURE_STREAK_LIMIT_ENV]),
+    });
+    let streakTripped = false;
 
     return this.spawnAgentProcess({
       agentName: adapter.displayName,
@@ -863,6 +872,27 @@ export class TerragonDaemon {
             token: input.token,
           });
 
+          const streakVerdict = streakTripped
+            ? null
+            : failureStreak.observe(parsedMessage);
+          if (streakVerdict?.kind === "report") {
+            this.runtime.logger.warn("Tool failure streak (observe mode)", {
+              threadChatId: input.threadChatId,
+              streak: streakVerdict.streak,
+              lastTool: streakVerdict.lastTool,
+            });
+          } else if (streakVerdict?.kind === "trip") {
+            streakTripped = true;
+            this.stopStuckAgent({
+              input,
+              agentName: adapter.displayName,
+              streak: streakVerdict.streak,
+              lastTool: streakVerdict.lastTool,
+              takeHeldResult: () => parser.drainHeld?.() ?? null,
+            });
+            return;
+          }
+
           // isCompleted on type === "result" is uniform across all five agents.
           if (type === "result") {
             this.updateActiveProcessState(input.threadChatId, {
@@ -907,6 +937,55 @@ export class TerragonDaemon {
         }
       },
     });
+  }
+
+  /**
+   * The tool-failure streak tripped (enforce mode): end the run the way the
+   * idle watchdog does, with an error result that names the cause. A held
+   * result is still the run's real answer and wins over the synthetic one.
+   */
+  private stopStuckAgent({
+    input,
+    agentName,
+    streak,
+    lastTool,
+    takeHeldResult,
+  }: {
+    input: DaemonMessageClaude;
+    agentName: string;
+    streak: number;
+    lastTool: string | null;
+    takeHeldResult: () => ClaudeMessage | null;
+  }): void {
+    const durationMs = this.getProcessDurationMs(input.threadChatId);
+    this.runtime.logger.warn("Tool failure streak reached, killing process", {
+      agentName,
+      threadChatId: input.threadChatId,
+      streak,
+      lastTool,
+      durationMs,
+    });
+    const toolSuffix = lastTool ? ` (last: ${lastTool})` : "";
+    this.addMessageToBuffer({
+      agent: input.agent,
+      message: takeHeldResult() ?? {
+        type: "result",
+        subtype: "success",
+        total_cost_usd: 0,
+        duration_ms: durationMs,
+        duration_api_ms: durationMs,
+        is_error: true,
+        num_turns: 1,
+        result: `${agentName} error: stuck after ${streak} consecutive failed tool calls${toolSuffix}; process killed`,
+        session_id:
+          this.activeProcesses.get(input.threadChatId)?.sessionId ?? "",
+      },
+      threadId: input.threadId,
+      threadChatId: input.threadChatId,
+      token: input.token,
+    });
+    this.killActiveProcess(input.threadChatId);
+    this.flushMessageBuffer();
   }
 
   private processMessagesForSending(
