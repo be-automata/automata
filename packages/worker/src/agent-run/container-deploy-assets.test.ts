@@ -678,7 +678,7 @@ describe("container-security-probes.sh (ADR-013 Security probes, P2 #433)", () =
     expect(script).toContain("http://127.0.0.1:3128");
     expect(path.basename(CONTAINER_DAEMON_SOCKET)).toBe("daemon.sock");
     expect(script).toContain(
-      'case "${e##*/}" in daemon.sock | egress-proxy.sock) ;;',
+      'case "${e##*/}" in daemon.sock | egress-proxy.sock | otel-collector.sock) ;;',
     );
     expect(path.basename(CONTAINER_GH_BROKER_SOCKET)).toBe("gh-broker.sock");
     expect(script).toMatch(/127\.0\.0\.1:7077 127\.0\.0\.1:8888/);

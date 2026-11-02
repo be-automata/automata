@@ -320,6 +320,8 @@ const RESERVED_REPO_ENV_KEYS = new Set([
   // The somnio-engineering pack's ytctl shim: a repo value would swap the
   // tracker CLI its skills run.
   "YTCTL",
+  // #546: the box's stuck-agent stop; an owner may not lift it.
+  "TOOL_FAILURE_STREAK_LIMIT",
 ]);
 const RESERVED_REPO_ENV_PREFIXES = [
   "LD_",

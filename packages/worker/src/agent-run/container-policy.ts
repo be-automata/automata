@@ -12,6 +12,7 @@ import {
   isReservedRepoEnvKey,
 } from "./daemon-env";
 import { mergeForegroundOnlySettings } from "./foreground-only-hook";
+import { TOOL_FAILURE_STREAK_LIMIT_KEY } from "./run-telemetry";
 
 /**
  * The per-run policy a container gets copied in before it starts (ADR-013
@@ -57,6 +58,11 @@ export interface ContainerRunEnvOpts {
   egressProxyUrl?: string | null;
   /** The brokered GitHub handoff, or null. Refused on a review. */
   broker?: ContainerBrokerEnv | null;
+  /**
+   * #546: the daemon's tool-failure stop (0 = observe only). Written after the
+   * repo env, so an owner's repo env can never lift or lower it.
+   */
+  toolFailureStreakLimit?: number;
 }
 
 /** A policy violation in the env a container would receive (ADR-013 I4). */
@@ -106,6 +112,9 @@ export function buildContainerRunEnv(
     env[key] = value;
   }
   env.FORCE_COLOR = "0";
+  if (opts.toolFailureStreakLimit && opts.toolFailureStreakLimit > 0) {
+    env[TOOL_FAILURE_STREAK_LIMIT_KEY] = String(opts.toolFailureStreakLimit);
+  }
   if (opts.egressProxyUrl) {
     for (const [k, v] of Object.entries(
       buildRunProxyEnv(opts.egressProxyUrl, {}),
@@ -209,7 +218,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *     registered at image build), for every non-review lane — a review keeps
  *     none, as the host model kept its review HOME hook-free;
  *   - the foreground-only PreToolUse guard, for every non-review lane;
- *   - the lane's `permissions.deny` rules (a review denies risky skills).
+ *   - the lane's `permissions.deny` rules (a review denies risky skills);
+ *   - the run's telemetry `env` (run-telemetry.ts), when the box exports it:
+ *     a settings `env` block beats the process env, so this is the one place
+ *     the export can be set without being silently overridden.
  *
  * Hook arrays are concatenated per event, never replaced; nothing from
  * `batteries` other than `hooks` is taken (the image carries no policy, I1).
@@ -218,6 +230,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export function composeContainerSettings(
   policy: ContainerLanePolicy,
   batteries: unknown,
+  telemetryEnv: Record<string, string> | null = null,
 ): Record<string, unknown> {
   let settings: Record<string, unknown> = {};
   if (policy.batteriesHooks && isPlainObject(batteries)) {
@@ -238,6 +251,9 @@ export function composeContainerSettings(
       ...settings,
       permissions: { deny: [...policy.denyRules] },
     };
+  }
+  if (telemetryEnv) {
+    settings = { ...settings, env: { ...telemetryEnv } };
   }
   return settings;
 }

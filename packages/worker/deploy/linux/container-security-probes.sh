@@ -372,9 +372,10 @@ probe_review() {
   # (a) sockets: absence, not denial (ADR-013 Run path 3).
   for e in "$SOCK_DIR"/* "$SOCK_DIR"/.[!.]*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
-    case "${e##*/}" in daemon.sock | egress-proxy.sock) ;; *) extra="$extra ${e##*/}" ;; esac
+    # otel-collector.sock (spike 032): telemetry only, no credential, no route to GitHub.
+    case "${e##*/}" in daemon.sock | egress-proxy.sock | otel-collector.sock) ;; *) extra="$extra ${e##*/}" ;; esac
   done
-  [ -z "$extra" ] || why="$why; $SOCK_DIR holds$extra (want only daemon.sock, egress-proxy.sock)"
+  [ -z "$extra" ] || why="$why; $SOCK_DIR holds$extra (want only daemon.sock, egress-proxy.sock, otel-collector.sock)"
   # (b) env of every process in reach: names and values, values never printed.
   envs="$(all_environs)"
   envhits="$(grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN)=.' <<<"$envs" | cut -d= -f1 | sort -u | tr '\n' ' ')" || true

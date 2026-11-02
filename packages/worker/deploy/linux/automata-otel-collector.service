@@ -1,0 +1,27 @@
+[Unit]
+Description=Automata run-telemetry collector (strips account identity, forwards to Maple local)
+Documentation=file:///opt/automata/packages/worker/deploy/linux/otel-collector.yaml
+After=network-online.target automata-maple.service
+Wants=automata-maple.service
+
+[Service]
+ExecStart=/usr/local/lib/automata-telemetry/otelcol-contrib --config /etc/automata/otel-collector.yaml
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+CapabilityBoundingSet=
+MemoryMax=384M
+
+[Install]
+WantedBy=multi-user.target

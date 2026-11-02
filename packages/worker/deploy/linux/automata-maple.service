@@ -1,0 +1,26 @@
+[Unit]
+Description=Maple local: run-telemetry store and triage UI (loopback only, internal use)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/lib/automata-telemetry/maple/maple start --host 127.0.0.1 --port 4318 --offline --data-dir /var/lib/automata-maple/data --on-dirty-store restore-checkpoint
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+StateDirectory=automata-maple
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+CapabilityBoundingSet=
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

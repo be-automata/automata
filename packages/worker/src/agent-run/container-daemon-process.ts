@@ -48,6 +48,7 @@ import {
 import type { WorkerConfig } from "./config";
 import type { RunLane } from "./run-lane";
 import type { RunPaths } from "./run-owned-paths";
+import { runTelemetrySettingsEnv } from "./run-telemetry";
 import { getProcessWorkerId } from "./run-namespace";
 import {
   type ForwardTarget,
@@ -240,7 +241,9 @@ export class ContainerDaemonProcess
     egressProxyUrl: string | null;
     broker: ContainerBrokerEnv | null;
     testEnv: Record<string, string>;
-  } = { egressProxyUrl: null, broker: null, testEnv: {} };
+    /** Spike 032: the box collector is bridged into this container. */
+    telemetry: boolean;
+  } = { egressProxyUrl: null, broker: null, testEnv: {}, telemetry: false };
 
   constructor(
     private readonly config: WorkerConfig,
@@ -400,7 +403,19 @@ export class ContainerDaemonProcess
       egressProxyUrl: null,
       broker: null,
       testEnv: {},
+      telemetry: false,
     };
+    const otlpUrl = this.config.runTelemetry?.otlpUrl ?? null;
+    if (otlpUrl) {
+      // Spike 032: telemetry to the box collector, which deletes account
+      // identity before storage. Every lane: a review is where dead runs hurt.
+      const collector = new URL(otlpUrl);
+      await open("otel-collector.sock", {
+        host: collector.hostname.replace(/^\[|\]$/g, ""),
+        port: Number(collector.port),
+      });
+      routed.telemetry = true;
+    }
     if (this.deps.egressProxyUrl) {
       const host = new URL(this.deps.egressProxyUrl);
       await open("egress-proxy.sock", {
@@ -504,7 +519,22 @@ export class ContainerDaemonProcess
     await fs.promises.mkdir(claudeDir, { recursive: true, mode: 0o700 });
     await fs.promises.writeFile(
       path.join(claudeDir, "settings.json"),
-      JSON.stringify(composeContainerSettings(this.policy, batteries), null, 2),
+      JSON.stringify(
+        composeContainerSettings(
+          this.policy,
+          batteries,
+          this.routed.telemetry
+            ? runTelemetrySettingsEnv({
+                lane: this.lane,
+                orgId: this.input.orgId,
+                threadId: this.input.threadId,
+                threadChatId: this.input.threadChatId,
+              })
+            : null,
+        ),
+        null,
+        2,
+      ),
       { mode: 0o600 },
     );
     const ghConfigDir = path.join(home, ".config", "gh");
@@ -529,6 +559,8 @@ export class ContainerDaemonProcess
       },
       egressProxyUrl: this.routed.egressProxyUrl,
       broker: this.routed.broker,
+      toolFailureStreakLimit:
+        this.config.runTelemetry?.toolFailureStreakLimit ?? 0,
     });
     const envDir = path.join(home, ".automata-run");
     const envFile = path.join(envDir, "run.env");

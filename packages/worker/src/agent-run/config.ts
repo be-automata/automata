@@ -5,6 +5,10 @@ import { DEFAULT_PAYLOAD_SEAL_KEY_FILE } from "./payload-seal-keys";
 import { BOX_SLOTS_MAX } from "./slot-limits";
 import { DEFAULT_RUN_NAMESPACE_ROOT } from "./run-namespace";
 import {
+  parseRunTelemetryConfig,
+  type RunTelemetryConfig,
+} from "./run-telemetry";
+import {
   parseContainerRunsConfig,
   type ContainerRunsConfig,
 } from "./container-config";
@@ -222,6 +226,13 @@ export interface WorkerConfig {
    * (container-config.ts). Always set; an unusable value refuses boot.
    */
   containerRuns: ContainerRunsConfig;
+  /**
+   * Spike 032 / #546: where run containers export Claude Code's telemetry
+   * (`WORKER_RUN_OTLP_URL`, the box collector; unset = off) and the daemon's
+   * tool-failure stop (`WORKER_TOOL_FAILURE_STREAK_LIMIT`; 0 = observe only).
+   * Parsed at boot so a bad value refuses to start (run-telemetry.ts).
+   */
+  runTelemetry: RunTelemetryConfig;
 }
 
 function defaultDaemonDist(): string {
@@ -706,6 +717,7 @@ export function loadWorkerConfig(
     maintIntervalS: parsePositiveInt(env.HATCHET_MAINT_INTERVAL_S, 60),
     maintBatch: parsePositiveInt(env.HATCHET_MAINT_BATCH, 100),
     containerRuns,
+    runTelemetry: parseRunTelemetryConfig(env),
     healthPort: (() => {
       const n = Number(env.WORKER_HEALTH_PORT);
       return env.WORKER_HEALTH_PORT?.trim() && Number.isFinite(n) && n > 0
