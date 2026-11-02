@@ -2918,6 +2918,11 @@ export const knowledgeCursor = pgTable(
     defaultBranch: text("default_branch").notNull(),
     lastSha: text("last_sha"),
     observedHeadSha: text("observed_head_sha"),
+    /**
+     * Newest default-branch push seen by the webhook. Null = this repo has
+     * never seen a push (D-17). Written only by the push listener.
+     */
+    lastPushAt: timestamp("last_push_at", { mode: "date" }),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
       .defaultNow()
@@ -2935,7 +2940,12 @@ export type KnowledgeIntentState =
   | "pending"
   | "processing"
   | "processed"
-  | "failed";
+  | "failed"
+  /**
+   * An older pending intent replaced by a newer one for the same repo
+   * (D-13, PD-1). `state` is a plain text column: no DB CHECK to migrate.
+   */
+  | "superseded";
 
 /**
  * Durable reconcile intent. `id` is deterministic
@@ -2986,7 +2996,8 @@ export type KnowledgeAdminAction =
   | "engine_toggle"
   | "budget_change"
   | "offboard"
-  | "offboard_undo";
+  | "offboard_undo"
+  | "intent_retry";
 
 /** Append-only log of knowledge org control changes. */
 export const knowledgeAdminLog = pgTable(
