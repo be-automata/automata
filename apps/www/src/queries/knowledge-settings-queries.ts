@@ -156,3 +156,61 @@ export function useKnowledgeOffboard() {
     "Knowledge offboarding updated.",
   );
 }
+
+/** One recent webhook delivery (metadata only), as returned by the diagnose route. */
+export interface KnowledgeDeliveryDto {
+  guid: string;
+  event: string;
+  action: string | null;
+  statusCode: number;
+  deliveredAt: string;
+  redelivery: boolean;
+}
+
+/** Admin-only: put a failed reconcile intent back in the queue. */
+export function useKnowledgeRetry() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { intentId: string }): Promise<void> => {
+      const res = await fetch(`${BASE_URL}/retry`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(args),
+      });
+      if (!res.ok) throw await knowledgeErrorFromResponse(res);
+    },
+    onSuccess: () => {
+      toast.success("Reconcile queued again.");
+      void queryClient.invalidateQueries({
+        queryKey: knowledgeSettingsQueryKeys.detail(),
+      });
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+}
+
+/**
+ * Admin-only: fetch a repo's recent webhook deliveries. A mutation on purpose,
+ * so it only ever runs on a click and never on page load.
+ */
+export function useKnowledgeDiagnose() {
+  return useMutation({
+    mutationFn: async (args: {
+      repoFullName: string;
+    }): Promise<KnowledgeDeliveryDto[]> => {
+      const res = await fetch(`${BASE_URL}/diagnose`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(args),
+      });
+      if (!res.ok) throw await knowledgeErrorFromResponse(res);
+      const json = (await res.json()) as { deliveries: KnowledgeDeliveryDto[] };
+      return json.deliveries;
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+}
