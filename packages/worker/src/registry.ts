@@ -10,6 +10,11 @@ import type { EngineCaps } from "./agent-run/definition";
  * SCHEDULING_TIMED_OUT (ADR-002 §7). Add new workflows here so bootstrap picks
  * them up automatically.
  *
+ * Knowledge workflows (knowledge-reconcile, knowledge-mirror-purge) are
+ * deliberately NOT here: they register on the dedicated knowledge worker
+ * (src/knowledge/knowledge-worker.ts) with their own slots so they never share
+ * review capacity (PD-18, PIPE-06 isolation).
+ *
  * Ownership boundary: workflow authors (agent-run steps) append their exported task
  * here; they do not need to touch the worker bootstrap.
  */
