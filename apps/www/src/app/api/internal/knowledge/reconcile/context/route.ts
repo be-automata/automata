@@ -113,6 +113,9 @@ export async function POST(request: Request): Promise<NextResponse> {
       return reply({
         ...context,
         installationToken: token,
+        // PD-24: 13-17 fills these from loadTicketSnapshots; until then no ticket pin is admitted.
+        tickets: [],
+        unavailableClaims: [],
       } satisfies ReconcileContextResponse);
     } catch (error) {
       logTokenOutcome(

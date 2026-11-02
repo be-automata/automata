@@ -11,8 +11,13 @@ import {
   parseReconcileContextResponse,
   RECONCILE_ALL_ERROR_CODES,
   RECONCILE_WORKER_ERROR_CODES,
+  classifyClaimEvidence,
   repoPinTarget,
   repoRelativePath,
+  TICKET_SNAPSHOT_FIELDS,
+  TICKET_SOURCE_CODES,
+  TICKET_KEY,
+  ticketPinTarget,
 } from "./reconcile-wire";
 import { LIMITS_SEED, SEED } from "./test-fixtures";
 
@@ -56,6 +61,8 @@ const ready = () => ({
   ],
   purgedOrganizationIds: ["o9"],
   excludedClaims: 0,
+  tickets: [] as unknown[],
+  unavailableClaims: [] as unknown[],
 });
 
 describe("parseReconcileContextResponse", () => {
@@ -261,6 +268,161 @@ describe("repoPinTarget", () => {
       const expected = scheme === "repo" ? repoRelativePath(target) : null;
       expect(repoPinTarget(u)).toBe(expected);
     }
+  });
+});
+
+describe("ticketPinTarget", () => {
+  it("parses key, pointer and decoded first field", () => {
+    expect(ticketPinTarget("ticket://SUP-12#/description")).toEqual({
+      key: "SUP-12",
+      pointer: "/description",
+      field: "description",
+    });
+    expect(ticketPinTarget("ticket://SUP-12#/comments/0/text")?.field).toBe(
+      "comments",
+    );
+    expect(ticketPinTarget("ticket://SUP-12#/a~1b/c")?.field).toBe("a/b");
+  });
+  it.each([
+    "ticket://sup-12#/x",
+    "ticket://SUP-12",
+    "ticket://../x#/a",
+    "repo://a#L1-L1",
+    "ticket://SUP-12#summary",
+    "ticket://SUP-12#/a\u0000b",
+  ])("returns null for %s", (u) => {
+    expect(ticketPinTarget(u)).toBeNull();
+  });
+  it("agrees with parseUri on the ticket fixtures", () => {
+    const uris = [...SEED, ...LIMITS_SEED]
+      .flatMap((c) => c.evidence)
+      .filter((u) => u.startsWith("ticket://"));
+    for (const u of uris) {
+      const { scheme, target, anchor } = parseUri(u);
+      expect(scheme).toBe("ticket");
+      const pin = ticketPinTarget(u);
+      if (pin) {
+        expect(pin.key).toBe(target);
+        expect(pin.pointer).toBe(anchor);
+      }
+    }
+  });
+  it("uses the tracker's issue-key shape", () => {
+    const src = readFileSync(
+      join(HERE, "../../../apps/www/src/server-lib/tracker/tracker-types.ts"),
+      "utf8",
+    );
+    const m = /ISSUE_KEY_SOURCE = "([^"]+)"/.exec(src);
+    expect(m).not.toBeNull();
+    const tracker = (m?.[1] ?? "").replace(/\\\\d/g, "[0-9]");
+    expect(TICKET_KEY.source).toBe(`^${tracker}$`);
+  });
+});
+
+describe("classifyClaimEvidence", () => {
+  it("admits repo plus ticket pins and returns the ticket pins", () => {
+    expect(
+      classifyClaimEvidence({
+        page: "docs/a.md",
+        uris: ["repo://src/x.ts#L1-L2", "ticket://SUP-12#/summary"],
+      }),
+    ).toEqual({
+      kind: "admitted",
+      ticketPins: [{ key: "SUP-12", pointer: "/summary", field: "summary" }],
+    });
+  });
+  it("excludes a doc pin, and doc wins over an invalid page", () => {
+    const uris = ["doc://pricing#trial"];
+    expect(classifyClaimEvidence({ page: "docs/a.md", uris })).toEqual({
+      kind: "excluded",
+      reason: "doc_source",
+    });
+    expect(classifyClaimEvidence({ page: "../x.md", uris })).toEqual({
+      kind: "excluded",
+      reason: "doc_source",
+    });
+  });
+  it("excludes a bad page, an unparsable URI and an unknown scheme as invalid", () => {
+    for (const input of [
+      { page: "../x.md", uris: ["repo://src/x.ts#L1-L2"] },
+      { page: "a.md", uris: ["nonsense"] },
+      { page: "a.md", uris: ["repo://../x#L1-L1"] },
+      { page: "a.md", uris: ["ticket://bad#/x"] },
+      { page: "a.md", uris: ["slack://x#y"] },
+    ]) {
+      expect(classifyClaimEvidence(input)).toEqual({
+        kind: "excluded",
+        reason: "invalid_path",
+      });
+    }
+  });
+  it("admits an unsupported ticket field (the fetcher decides)", () => {
+    const r = classifyClaimEvidence({
+      page: "a.md",
+      uris: ["ticket://SUP-1#/resolution"],
+    });
+    expect(r).toEqual({
+      kind: "admitted",
+      ticketPins: [
+        { key: "SUP-1", pointer: "/resolution", field: "resolution" },
+      ],
+    });
+  });
+});
+
+describe("ticket wire fields", () => {
+  it("pins the closed tuples", () => {
+    expect([...TICKET_SNAPSHOT_FIELDS]).toEqual([
+      "key",
+      "summary",
+      "stage",
+      "resolved",
+      "description",
+      "links",
+      "comments",
+    ]);
+    expect([...TICKET_SOURCE_CODES]).toEqual([
+      "source_unavailable",
+      "source_too_large",
+      "pin_unsupported",
+    ]);
+  });
+  const REV = "b".repeat(64);
+  it("parses tickets and unavailableClaims", () => {
+    const parsed = parseReconcileContextResponse({
+      ...ready(),
+      tickets: [{ key: "SUP-12", revision: REV, snapshot: { summary: "A" } }],
+      unavailableClaims: [{ claimId: "c1", code: "source_unavailable" }],
+    });
+    expect(parsed).toMatchObject({
+      tickets: [{ key: "SUP-12", revision: REV, snapshot: { summary: "A" } }],
+      unavailableClaims: [{ claimId: "c1", code: "source_unavailable" }],
+    });
+  });
+  it("defaults both to empty when an older www omits them", () => {
+    const { tickets: _t, unavailableClaims: _u, ...old } = ready();
+    expect(parseReconcileContextResponse(old)).toMatchObject({
+      tickets: [],
+      unavailableClaims: [],
+    });
+  });
+  it.each([
+    [
+      "bad key",
+      { tickets: [{ key: "x", revision: "b".repeat(64), snapshot: {} }] },
+    ],
+    [
+      "bad revision",
+      { tickets: [{ key: "SUP-1", revision: "zz", snapshot: {} }] },
+    ],
+    [
+      "array snapshot",
+      { tickets: [{ key: "SUP-1", revision: "b".repeat(64), snapshot: [] }] },
+    ],
+    ["unknown code", { unavailableClaims: [{ claimId: "c1", code: "nope" }] }],
+    ["non-array", { tickets: {} }],
+  ])("rejects %s", (_n, extra) => {
+    expect(parseReconcileContextResponse({ ...ready(), ...extra })).toBeNull();
   });
 });
 

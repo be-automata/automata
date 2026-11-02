@@ -63,6 +63,43 @@ export interface KnowledgeMirrorPurgeInput {
 export interface ReconcileContextRequest {
   intentId: string;
 }
+/**
+ * Evidence scheme table (single definition):
+ *   repo   -> reconciled from the mirror snapshot
+ *   ticket -> reconciled from the tracker snapshot (PD-24)
+ *   doc    -> excluded, no fetcher exists (PD-25)
+ *   other  -> invalid evidence (excluded as invalid)
+ */
+export const TICKET_SNAPSHOT_FIELDS = [
+  "key",
+  "summary",
+  "stage",
+  "resolved",
+  "description",
+  "links",
+  "comments",
+] as const;
+export type TicketSnapshotField = (typeof TICKET_SNAPSHOT_FIELDS)[number];
+
+/** Closed enum of why a ticket-pinned claim is left out of a reconcile (PD-24, D-14). */
+export const TICKET_SOURCE_CODES = [
+  "source_unavailable",
+  "source_too_large",
+  "pin_unsupported",
+] as const;
+export type TicketSourceCode = (typeof TICKET_SOURCE_CODES)[number];
+
+/** A minimized tracker issue; revision is the sha256 hex of its canonical JSON. */
+export interface WireTicket {
+  key: string;
+  revision: string;
+  snapshot: Record<string, unknown>;
+}
+export interface UnavailableClaim {
+  claimId: string;
+  code: TicketSourceCode;
+}
+
 export interface WireClaim {
   id: string;
   statement: string;
@@ -93,6 +130,10 @@ export interface ReconcileContextReady {
    * cannot check (PD-21). An integer only.
    */
   excludedClaims: number;
+  /** Minimized tracker snapshots for the ticket pins of the sidecars (PD-24). Empty when none. */
+  tickets: WireTicket[];
+  /** Claims with a ticket pin whose source cannot be read now; left out of this reconcile (PD-24). */
+  unavailableClaims: UnavailableClaim[];
 }
 /** "no_access": www could not mint a read-only token, or the installation is bound to another org. */
 export interface ReconcileContextNotReady {
@@ -142,6 +183,9 @@ export interface ReconcileFailResponse {
 }
 
 const SHA40 = /^[0-9a-f]{40}$/;
+/** Same shape as the tracker's ISSUE_KEY_SOURCE; a test pins them equal (www cannot be imported here). */
+export const TICKET_KEY = /^[A-Z][A-Z0-9_]{1,9}-[0-9]+$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const OP_KINDS: readonly string[] = [
   "repin",
@@ -216,6 +260,27 @@ function parseRejected(v: unknown): RejectedOp | null {
   return out;
 }
 
+function parseTicket(v: unknown): WireTicket | null {
+  if (!isObj(v)) return null;
+  const { key, revision, snapshot } = v;
+  if (!isStr(key) || !TICKET_KEY.test(key)) return null;
+  if (!isStr(revision) || !SHA256_HEX.test(revision)) return null;
+  if (!isObj(snapshot)) return null;
+  return { key, revision, snapshot: { ...snapshot } };
+}
+
+function parseUnavailableClaim(v: unknown): UnavailableClaim | null {
+  if (!isObj(v)) return null;
+  const { claimId, code } = v;
+  if (!isNonEmpty(claimId)) return null;
+  if (
+    !isStr(code) ||
+    !(TICKET_SOURCE_CODES as readonly string[]).includes(code)
+  )
+    return null;
+  return { claimId, code: code as TicketSourceCode };
+}
+
 function mapAll<T>(v: unknown, f: (x: unknown) => T | null): T[] | null {
   if (!Array.isArray(v)) return null;
   const out: T[] = [];
@@ -262,6 +327,14 @@ export function parseReconcileContextResponse(
   const sidecars = mapAll(raw.sidecars, parseSidecar);
   const rejected = mapAll(raw.rejected, parseRejected);
   if (!sidecars || !rejected) return null;
+  // PD-22: an older www omits both fields; absent means none.
+  const tickets =
+    raw.tickets === undefined ? [] : mapAll(raw.tickets, parseTicket);
+  const unavailableClaims =
+    raw.unavailableClaims === undefined
+      ? []
+      : mapAll(raw.unavailableClaims, parseUnavailableClaim);
+  if (!tickets || !unavailableClaims) return null;
   return {
     status: "ready",
     intent: {
@@ -277,6 +350,8 @@ export function parseReconcileContextResponse(
     rejected,
     purgedOrganizationIds: purged,
     excludedClaims: raw.excludedClaims,
+    tickets,
+    unavailableClaims,
   };
 }
 
@@ -339,4 +414,67 @@ export function repoPinTarget(uri: string): string | null {
   const m = /^(repo|ticket|doc):\/\/([^#]+)#(.+)$/.exec(uri);
   if (!m || m[1] !== "repo" || !m[2]) return null;
   return repoRelativePath(m[2]);
+}
+
+export interface TicketPin {
+  key: string;
+  /** RFC 6901 pointer into the snapshot, starting with "/". */
+  pointer: string;
+  /** First pointer segment, ~1 and ~0 decoded. May be outside TICKET_SNAPSHOT_FIELDS. */
+  field: string;
+}
+
+/**
+ * The ticket a `ticket://<KEY>#<pointer>` pin names, or null for any other scheme or a malformed
+ * URI. Whether the field is supported is decided by the fetcher (pin_unsupported).
+ */
+export function ticketPinTarget(uri: string): TicketPin | null {
+  const m = /^(repo|ticket|doc):\/\/([^#]+)#(.+)$/.exec(uri);
+  if (!m || m[1] !== "ticket" || !m[2] || !m[3]) return null;
+  const key = m[2];
+  const pointer = m[3];
+  if (!TICKET_KEY.test(key)) return null;
+  if (!pointer.startsWith("/") || pointer.length > 512) return null;
+  for (let i = 0; i < pointer.length; i++) {
+    const c = pointer.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return null;
+  }
+  const first = pointer.slice(1).split("/")[0] ?? "";
+  const field = first.replace(/~1/g, "/").replace(/~0/g, "~");
+  return { key, pointer, field };
+}
+
+export type EvidenceClassification =
+  | { kind: "admitted"; ticketPins: TicketPin[] }
+  | { kind: "excluded"; reason: "doc_source" | "invalid_path" };
+
+/**
+ * The single admission rule for a claim's evidence (PD-21 one-validator rule): the context producer
+ * (13-17) and the admin count (13-18) both call it. A doc pin excludes the claim (PD-25) and wins
+ * over an invalid path so the admin count is attributable; a bad page, an unparsable URI or an
+ * unknown scheme is invalid. Ticket pins of an admitted claim are returned for the fetcher.
+ */
+export function classifyClaimEvidence(input: {
+  page: string;
+  uris: readonly string[];
+}): EvidenceClassification {
+  let invalid = repoRelativePath(input.page) === null;
+  let hasDoc = false;
+  const ticketPins: TicketPin[] = [];
+  for (const uri of input.uris) {
+    if (uri.startsWith("doc://")) {
+      hasDoc = true;
+      continue;
+    }
+    if (uri.startsWith("repo://")) {
+      if (repoPinTarget(uri) === null) invalid = true;
+      continue;
+    }
+    const pin = ticketPinTarget(uri);
+    if (pin === null) invalid = true;
+    else ticketPins.push(pin);
+  }
+  if (hasDoc) return { kind: "excluded", reason: "doc_source" };
+  if (invalid) return { kind: "excluded", reason: "invalid_path" };
+  return { kind: "admitted", ticketPins };
 }

@@ -59,8 +59,15 @@ export class KnowledgeReconcileInvalidError extends Error {
   }
 }
 
+/**
+ * The DB-side context. The ticket snapshots (PD-24) are fetched from the tracker by www, not read
+ * here, so the route adds `tickets` and `unavailableClaims` (13-17).
+ */
 export type KnowledgeReconcileContext =
-  | Omit<ReconcileContextReady, "installationToken">
+  | Omit<
+      ReconcileContextReady,
+      "installationToken" | "tickets" | "unavailableClaims"
+    >
   | {
       status: "gated" | "done" | "not_found";
       purgedOrganizationIds: string[];

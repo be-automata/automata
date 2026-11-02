@@ -11,7 +11,9 @@ import type {
   ReconcilePublishRequest,
   ReconcilePublishResponse,
   ReconcileWorkerErrorCode,
+  UnavailableClaim,
   WireSidecar,
+  WireTicket,
 } from "@terragon/knowledge/reconcile-wire";
 
 import { createSourceRepo, type SourceRepo } from "./__fixtures__/git-fixture";
@@ -88,6 +90,8 @@ function ready(over: {
   sidecars?: WireSidecar[];
   purged?: string[];
   organizationId?: string;
+  tickets?: WireTicket[];
+  unavailable?: UnavailableClaim[];
 }): ReconcileCallResult<ReconcileContextResponse> {
   return {
     kind: "ok",
@@ -106,6 +110,8 @@ function ready(over: {
       rejected: [],
       purgedOrganizationIds: over.purged ?? [],
       excludedClaims: 0,
+      tickets: over.tickets ?? [],
+      unavailableClaims: over.unavailable ?? [],
     },
   };
 }
