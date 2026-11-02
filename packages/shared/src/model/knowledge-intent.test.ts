@@ -7,6 +7,9 @@ import {
   claimDueKnowledgeIntents,
   failKnowledgeIntent,
   knowledgeIntentBackoffMs,
+  listKnowledgeHeadCheckCandidates,
+  recoverKnowledgeHeadIntent,
+  KNOWLEDGE_HEAD_CHECK_SLOTS,
   releaseKnowledgeIntent,
   requeueExpiredKnowledgeIntents,
   KNOWLEDGE_INTENT_LEASE_MS,
@@ -498,6 +501,400 @@ describe("knowledge intent lease, release and failure", () => {
       const r = await row(id);
       expect(r.state).toBe("processing");
       expect(r.attempts).toBe(0);
+    });
+  });
+});
+
+describe("knowledge head check (D-03 / PD-19)", () => {
+  let db: DB;
+  let org: string;
+  const REPO = "fixture-owner/repo-a";
+
+  const setEngine = (
+    organizationId: string,
+    knowledgeEngine: boolean | null,
+    knowledgeOffboardedAt: Date | null = null,
+  ) =>
+    db
+      .insert(schema.organizationReviewSettings)
+      .values({ organizationId, knowledgeEngine, knowledgeOffboardedAt })
+      .onConflictDoUpdate({
+        target: [schema.organizationReviewSettings.organizationId],
+        set: { knowledgeEngine, knowledgeOffboardedAt },
+      });
+
+  const cursor = (
+    repo: string,
+    over: Partial<typeof schema.knowledgeCursor.$inferInsert> = {},
+    organizationId = org,
+  ) =>
+    db.insert(schema.knowledgeCursor).values({
+      organizationId,
+      repoFullName: repo,
+      defaultBranch: "main",
+      ...over,
+    });
+
+  const slotOf = async (organizationId: string, repo: string) => {
+    const rows = rowsOf<{ s: number }>(
+      await db.execute(
+        sql`SELECT (abs(hashtext(${organizationId} || ':' || ${repo})::bigint) % ${KNOWLEDGE_HEAD_CHECK_SLOTS})::int AS s`,
+      ),
+    );
+    return rows[0]!.s;
+  };
+
+  const intentRows = () =>
+    db
+      .select()
+      .from(schema.knowledgeIntent)
+      .where(eq(schema.knowledgeIntent.organizationId, org));
+
+  const cursorRow = async (repo = REPO) =>
+    (
+      await db
+        .select()
+        .from(schema.knowledgeCursor)
+        .where(
+          and(
+            eq(schema.knowledgeCursor.organizationId, org),
+            eq(schema.knowledgeCursor.repoFullName, repo),
+          ),
+        )
+    )[0];
+
+  const recover = (
+    headSha: string,
+    over: { now?: Date; organizationId?: string; client?: DB } = {},
+  ) =>
+    recoverKnowledgeHeadIntent({
+      db: over.client ?? db,
+      organizationId: over.organizationId ?? org,
+      repoFullName: REPO,
+      defaultBranch: "main",
+      headSha,
+      now: over.now ?? NOW,
+    });
+
+  beforeEach(async () => {
+    db = createDb(process.env.DATABASE_URL!);
+    await db.delete(schema.knowledgeIntent);
+    await db.delete(schema.knowledgeCursor);
+    org = await createTestOrg({ db, name: "Acme" });
+    await setEngine(org, true);
+  });
+
+  describe("listKnowledgeHeadCheckCandidates", () => {
+    const list = (
+      slot: number,
+      now = NOW,
+      limit = 5,
+    ): Promise<Awaited<ReturnType<typeof listKnowledgeHeadCheckCandidates>>> =>
+      listKnowledgeHeadCheckCandidates({ db, now, slot, limit });
+
+    it("returns only the repos hashed into the slot, with their cursor fields", async () => {
+      const repos = Array.from(
+        { length: 40 },
+        (_, i) => `fixture-owner/r-${i}`,
+      );
+      for (const r of repos) await cursor(r, { lastSha: sha(1) });
+      const slot = await slotOf(org, repos[0]!);
+      const expected = [];
+      for (const r of repos) {
+        if ((await slotOf(org, r)) === slot) expected.push(r);
+      }
+      const out = await list(slot, NOW, 100);
+      expect(out.map((c) => c.repoFullName).sort()).toEqual(expected.sort());
+      expect(out[0]).toMatchObject({
+        organizationId: org,
+        defaultBranch: "main",
+        lastSha: sha(1),
+        observedHeadSha: null,
+      });
+    });
+
+    it("rejects an out-of-range slot", async () => {
+      await expect(list(15)).rejects.toThrow("slot");
+      await expect(list(-1)).rejects.toThrow("slot");
+    });
+
+    it("includes review-settings repos, never the * sentinel", async () => {
+      await db.insert(schema.repoReviewSettings).values([
+        { organizationId: org, repoFullName: "Fixture-Owner/Settings-Repo" },
+        { organizationId: org, repoFullName: "*" },
+      ]);
+      const slot = await slotOf(org, "fixture-owner/settings-repo");
+      const out = await list(slot);
+      expect(out.map((c) => c.repoFullName)).toContain(
+        "fixture-owner/settings-repo",
+      );
+      expect(out.map((c) => c.repoFullName)).not.toContain("*");
+      expect(
+        out.find((c) => c.repoFullName.endsWith("settings-repo")),
+      ).toMatchObject({
+        defaultBranch: null,
+        lastSha: null,
+      });
+    });
+
+    it("skips Off and offboarded orgs", async () => {
+      const off = await createTestOrg({ db, name: "Off" });
+      await setEngine(off, false);
+      const gone = await createTestOrg({ db, name: "Gone" });
+      await setEngine(gone, true, new Date(NOW.getTime() - HOUR));
+      await cursor(REPO, {}, off);
+      await cursor(REPO, {}, gone);
+      await cursor(REPO);
+      for (const o of [off, gone, org]) {
+        const out = await list(await slotOf(o, REPO));
+        const orgs = out.map((c) => c.organizationId);
+        expect(orgs.includes(o)).toBe(o === org);
+      }
+    });
+
+    it("excludes a repo with an open intent and a repo with a recent push", async () => {
+      await cursor(REPO);
+      const slot = await slotOf(org, REPO);
+      expect((await list(slot)).map((c) => c.repoFullName)).toEqual([REPO]);
+
+      await db.insert(schema.knowledgeIntent).values({
+        id: `intent:${org}:${REPO}@${sha(1)}`,
+        organizationId: org,
+        repoFullName: REPO,
+        defaultBranch: "main",
+        targetSha: sha(1),
+        state: "pending",
+      });
+      expect(await list(slot)).toEqual([]);
+      await db.delete(schema.knowledgeIntent);
+
+      await db
+        .update(schema.knowledgeCursor)
+        .set({ lastPushAt: new Date(NOW.getTime() - 30_000) });
+      expect(await list(slot)).toEqual([]);
+      await db
+        .update(schema.knowledgeCursor)
+        .set({ lastPushAt: new Date(NOW.getTime() - 3 * MIN) });
+      expect((await list(slot)).map((c) => c.repoFullName)).toEqual([REPO]);
+    });
+
+    it("returns a deterministic 5-repo window that covers a 12-repo slot across rotations", async () => {
+      const found = rowsOf<{ r: string }>(
+        await db.execute(sql`
+          SELECT 'fixture-owner/r-' || i AS r
+          FROM generate_series(1, 600) AS i
+          WHERE abs(hashtext(${org} || ':' || 'fixture-owner/r-' || i)::bigint)
+                % ${KNOWLEDGE_HEAD_CHECK_SLOTS}
+              = abs(hashtext(${org} || ':' || 'fixture-owner/r-1')::bigint)
+                % ${KNOWLEDGE_HEAD_CHECK_SLOTS}
+          ORDER BY i
+          LIMIT 12
+        `),
+      ).map((x) => x.r);
+      expect(found).toHaveLength(12);
+      for (const r of found) await cursor(r);
+      const slot = await slotOf(org, found[0]!);
+
+      // Ranked order as the SQL defines it: hash, org, repo.
+      const hashes = rowsOf<{ r: string; h: string }>(
+        await db.execute(sql`
+          SELECT r, abs(hashtext(${org} || ':' || r)::bigint)::text AS h
+          FROM unnest(${sql.raw(
+            `ARRAY[${found.map((f) => `'${f}'`).join(",")}]::text[]`,
+          )}) AS r
+        `),
+      );
+      const ranked = hashes
+        .sort(
+          (a, b) => Number(BigInt(a.h) - BigInt(b.h)) || (a.r < b.r ? -1 : 1),
+        )
+        .map((x) => x.r);
+
+      const seen = new Set<string>();
+      for (let k = 0; k < 3; k++) {
+        const at = new Date(NOW.getTime() + k * 15 * MIN);
+        const first = (await list(slot, at)).map((c) => c.repoFullName);
+        const again = (await list(slot, at)).map((c) => c.repoFullName);
+        expect(first).toHaveLength(5);
+        expect(again).toEqual(first);
+        const offset = (Math.floor(at.getTime() / 1000 / 900) * 5) % 12;
+        const expected = Array.from(
+          { length: 5 },
+          (_, i) => ranked[(offset + i) % 12]!,
+        );
+        expect([...first].sort()).toEqual([...expected].sort());
+        first.forEach((r) => seen.add(r));
+      }
+      expect(seen.size).toBe(12);
+    });
+  });
+
+  describe("recoverKnowledgeHeadIntent", () => {
+    it("is in_sync when the head equals the cursor's last_sha", async () => {
+      await cursor(REPO, { lastSha: sha(1), observedHeadSha: sha(1) });
+      expect((await recover(sha(1))).outcome).toBe("in_sync");
+      expect(await intentRows()).toEqual([]);
+    });
+
+    it("inserts an intent and a cursor row when there is no cursor", async () => {
+      const r = await recover(sha(2));
+      expect(r).toEqual({
+        outcome: "inserted",
+        intentId: `intent:${org}:${REPO}@${sha(2)}`,
+      });
+      const rows = await intentRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        state: "pending",
+        targetSha: sha(2),
+        defaultBranch: "main",
+      });
+      expect(await cursorRow()).toMatchObject({
+        observedHeadSha: sha(2),
+        lastSha: null,
+        lastPushAt: null,
+      });
+    });
+
+    it("moves observed_head_sha but never last_sha or last_push_at", async () => {
+      const pushedAt = new Date(NOW.getTime() - HOUR);
+      await cursor(REPO, {
+        lastSha: sha(1),
+        observedHeadSha: sha(1),
+        lastPushAt: pushedAt,
+      });
+      expect((await recover(sha(2))).outcome).toBe("inserted");
+      const c = await cursorRow();
+      expect(c?.observedHeadSha).toBe(sha(2));
+      expect(c?.lastSha).toBe(sha(1));
+      expect(c?.lastPushAt?.getTime()).toBe(pushedAt.getTime());
+    });
+
+    it("keeps a newer observation that is ahead of last_sha", async () => {
+      await cursor(REPO, {
+        lastSha: sha(1),
+        observedHeadSha: sha(3),
+        lastPushAt: new Date(NOW.getTime() - HOUR),
+      });
+      expect((await recover(sha(2))).outcome).toBe("inserted");
+      expect((await cursorRow())?.observedHeadSha).toBe(sha(3));
+    });
+
+    it("reports open_intent and writes nothing when an intent is open", async () => {
+      await db.insert(schema.knowledgeIntent).values({
+        id: `intent:${org}:${REPO}@${sha(5)}`,
+        organizationId: org,
+        repoFullName: REPO,
+        defaultBranch: "main",
+        targetSha: sha(5),
+        state: "processing",
+      });
+      expect((await recover(sha(2))).outcome).toBe("open_intent");
+      expect(await intentRows()).toHaveLength(1);
+    });
+
+    it.each(["superseded", "processed"] as const)(
+      "reopens a %s intent for the head while the cursor is elsewhere",
+      async (state) => {
+        await cursor(REPO, { lastSha: sha(1) });
+        await db.insert(schema.knowledgeIntent).values({
+          id: `intent:${org}:${REPO}@${sha(2)}`,
+          organizationId: org,
+          repoFullName: REPO,
+          defaultBranch: "main",
+          targetSha: sha(2),
+          state,
+          attempts: 3,
+          lastErrorCode: "dispatch_failed",
+          processedAt: new Date(NOW.getTime() - HOUR),
+          nextAttemptAt: new Date(NOW.getTime() - HOUR),
+        });
+        expect((await recover(sha(2))).outcome).toBe("reopened");
+        const [row] = await intentRows();
+        expect(row).toMatchObject({
+          state: "pending",
+          attempts: 0,
+          processedAt: null,
+          lastErrorCode: null,
+        });
+        expect(row?.nextAttemptAt.getTime()).toBe(NOW.getTime());
+      },
+    );
+
+    it("leaves a failed intent for the admin Retry", async () => {
+      await db.insert(schema.knowledgeIntent).values({
+        id: `intent:${org}:${REPO}@${sha(2)}`,
+        organizationId: org,
+        repoFullName: REPO,
+        defaultBranch: "main",
+        targetSha: sha(2),
+        state: "failed",
+        attempts: 8,
+      });
+      expect((await recover(sha(2))).outcome).toBe("failed_exists");
+      expect((await intentRows())[0]).toMatchObject({
+        state: "failed",
+        attempts: 8,
+      });
+    });
+
+    it("writes nothing for an offboarded org and writes for an Off org", async () => {
+      await setEngine(org, true, new Date(NOW.getTime() - HOUR));
+      expect((await recover(sha(2))).outcome).toBe("offboarded");
+      expect(await intentRows()).toEqual([]);
+      expect(await cursorRow()).toBeUndefined();
+
+      await setEngine(org, false, null);
+      expect((await recover(sha(2))).outcome).toBe("inserted");
+      expect(await intentRows()).toHaveLength(1);
+    });
+
+    it("reports busy when another client holds the repo lock", async () => {
+      const other = createDb(process.env.DATABASE_URL!);
+      let release!: () => void;
+      let held!: () => void;
+      const heldP = new Promise<void>((r) => (held = r));
+      const releaseP = new Promise<void>((r) => (release = r));
+      const holder = other.transaction(async (tx) => {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${org} || ':' || ${REPO}))`,
+        );
+        held();
+        await releaseP;
+      });
+      await heldP;
+      try {
+        expect((await recover(sha(2))).outcome).toBe("busy");
+        expect(await intentRows()).toEqual([]);
+      } finally {
+        release();
+        await holder;
+      }
+    });
+
+    it("re-checks a recent push under the lock", async () => {
+      await cursor(REPO, {
+        lastSha: sha(1),
+        lastPushAt: new Date(NOW.getTime() - 30_000),
+      });
+      expect((await recover(sha(2))).outcome).toBe("recent_push");
+      expect(await intentRows()).toEqual([]);
+    });
+
+    it("produces an intent the claim picks up like a pushed one", async () => {
+      await recover(sha(2));
+      const claimed = await claimDueKnowledgeIntents({
+        db,
+        now: new Date(NOW.getTime() + MIN),
+      });
+      expect(claimed).toEqual([
+        {
+          id: `intent:${org}:${REPO}@${sha(2)}`,
+          organizationId: org,
+          repoFullName: REPO,
+          targetSha: sha(2),
+        },
+      ]);
     });
   });
 });

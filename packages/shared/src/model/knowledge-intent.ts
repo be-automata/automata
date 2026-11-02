@@ -7,6 +7,8 @@ import {
 
 import { rowsOf, type DB } from "../db";
 import { knowledgeIntent } from "../db/schema";
+import { assertIntentFields } from "./knowledge-minimize";
+import { insertKnowledgeIntent } from "./knowledge-store";
 
 /**
  * Knowledge intent lifecycle. SYSTEM path, org-agnostic: called only by the
@@ -406,5 +408,269 @@ export async function failKnowledgeIntent({
       organizationId: r.organizationId,
       repoFullName: r.repoFullName,
     };
+  });
+}
+
+/** D-03 / PD-19: head checks are spread over this many one-minute slots. */
+export const KNOWLEDGE_HEAD_CHECK_SLOTS = 15;
+const HEAD_CHECK_INTERVAL_S = KNOWLEDGE_HEAD_CHECK_SLOTS * 60;
+/** A push this recent owns its head; the head check leaves the repo alone. */
+const HEAD_CHECK_RECENT_PUSH_MS = 2 * 60_000;
+
+export interface KnowledgeHeadCheckCandidate {
+  organizationId: string;
+  repoFullName: string;
+  defaultBranch: string | null;
+  lastSha: string | null;
+  observedHeadSha: string | null;
+}
+
+interface HeadCandidateRow {
+  organization_id: string;
+  repo: string;
+  default_branch: string | null;
+  last_sha: string | null;
+  observed_head_sha: string | null;
+}
+
+/**
+ * D-03 / PD-19: repos due for a default-branch head check in this slot.
+ * Onboarded repos (PD-13 union) of engine-On, not-offboarded orgs whose
+ * stateless hash slot equals `slot`. The slot is ranked deterministically and
+ * a window of `limit` repos is chosen by an offset that advances every
+ * interval, so a slot of n repos is fully covered every ceil(n / limit)
+ * visits. Ranking runs BEFORE the exclusions (an open intent, a push in the
+ * last 2 minutes), so the window does not shift with them. SYSTEM path: the
+ * reconcile sweep only. Never logs.
+ */
+export async function listKnowledgeHeadCheckCandidates({
+  db,
+  now,
+  slot,
+  limit = 5,
+}: {
+  db: DB;
+  now: Date;
+  slot: number;
+  limit?: number;
+}): Promise<KnowledgeHeadCheckCandidate[]> {
+  if (
+    !Number.isInteger(slot) ||
+    slot < 0 ||
+    slot >= KNOWLEDGE_HEAD_CHECK_SLOTS
+  ) {
+    throw new Error("slot is out of range");
+  }
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error("limit must be a positive integer");
+  }
+  const intervalIndex = Math.floor(
+    now.getTime() / 1000 / HEAD_CHECK_INTERVAL_S,
+  );
+  const offsetBase = intervalIndex * limit;
+  const recentCutoff = new Date(now.getTime() - HEAD_CHECK_RECENT_PUSH_MS);
+  const rows = rowsOf<HeadCandidateRow>(
+    await db.execute(sql`
+      WITH orgs AS (
+        SELECT s.organization_id
+        FROM organization_review_settings s
+        WHERE s.knowledge_engine IS TRUE
+          AND s.knowledge_offboarded_at IS NULL
+      ),
+      repos AS (
+        SELECT DISTINCT u.organization_id, u.repo
+        FROM (
+          SELECT c.organization_id, lower(c.repo_full_name) AS repo
+          FROM knowledge_cursor c
+          UNION
+          SELECT r.organization_id, lower(r.repo_full_name)
+          FROM repo_review_settings r
+          WHERE r.repo_full_name <> '*'
+          UNION
+          SELECT a.organization_id, lower(a.repo_full_name)
+          FROM automations a
+        ) u
+        JOIN orgs o ON o.organization_id = u.organization_id
+      ),
+      in_slot AS (
+        SELECT organization_id, repo,
+               abs(hashtext(organization_id || ':' || repo)::bigint) AS h
+        FROM repos
+        WHERE abs(hashtext(organization_id || ':' || repo)::bigint)
+              % ${KNOWLEDGE_HEAD_CHECK_SLOTS} = ${slot}
+      ),
+      ranked AS (
+        SELECT organization_id, repo,
+               row_number() OVER (ORDER BY h, organization_id, repo) AS rn,
+               count(*) OVER () AS n
+        FROM in_slot
+      ),
+      windowed AS (
+        SELECT organization_id, repo, rn
+        FROM ranked
+        WHERE (((rn - 1 - (${offsetBase}::bigint % n)) % n) + n) % n < ${limit}
+      )
+      SELECT w.organization_id, w.repo,
+             c.default_branch, c.last_sha, c.observed_head_sha
+      FROM windowed w
+      LEFT JOIN knowledge_cursor c
+        ON c.organization_id = w.organization_id
+       AND lower(c.repo_full_name) = w.repo
+      WHERE NOT EXISTS (
+              SELECT 1 FROM knowledge_intent i
+              WHERE i.organization_id = w.organization_id
+                AND i.repo_full_name = w.repo
+                AND i.state IN ('pending', 'processing')
+            )
+        AND (c.last_push_at IS NULL OR c.last_push_at <= ${ts(recentCutoff)})
+      ORDER BY w.rn
+    `),
+  );
+  return rows.map((r) => ({
+    organizationId: r.organization_id,
+    repoFullName: r.repo,
+    defaultBranch: r.default_branch,
+    lastSha: r.last_sha,
+    observedHeadSha: r.observed_head_sha,
+  }));
+}
+
+export type RecoverKnowledgeHeadOutcome =
+  | "in_sync"
+  | "inserted"
+  | "reopened"
+  | "open_intent"
+  | "failed_exists"
+  | "offboarded"
+  | "busy"
+  | "recent_push";
+
+/**
+ * D-03 / PD-19: write the intent a swallowed push handler never wrote.
+ * `headSha` is the default-branch head read from GitHub. One transaction under
+ * the per-repo advisory xact lock (the claim's key). Offboard-only rule (D-05):
+ * an Off org is written, an offboarded one is not. NEVER sets `last_push_at`
+ * (D-17: a recovered intent is not webhook liveness) and never moves
+ * `last_sha` (SC3). SYSTEM path: the reconcile sweep only. Never logs.
+ */
+export async function recoverKnowledgeHeadIntent({
+  db,
+  organizationId,
+  repoFullName,
+  defaultBranch,
+  headSha,
+  now,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  defaultBranch: string;
+  headSha: string;
+  now: Date;
+}): Promise<{ outcome: RecoverKnowledgeHeadOutcome; intentId?: string }> {
+  const fields = assertIntentFields({
+    repoFullName,
+    defaultBranch,
+    targetSha: headSha,
+  });
+  return db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as DB;
+    const lock = rowsOf<{ ok: boolean }>(
+      await tx.execute(sql`
+        SELECT pg_try_advisory_xact_lock(
+          hashtext(${organizationId} || ':' || ${fields.repoFullName})
+        ) AS ok
+      `),
+    );
+    if (lock[0]?.ok !== true) return { outcome: "busy" as const };
+
+    // Fresh statements from here on (READ COMMITTED), under the lock.
+    const org = rowsOf<{ offboarded: boolean }>(
+      await tx.execute(sql`
+        SELECT (knowledge_offboarded_at IS NOT NULL) AS offboarded
+        FROM organization_review_settings
+        WHERE organization_id = ${organizationId}
+      `),
+    );
+    if (org[0]?.offboarded === true) return { outcome: "offboarded" as const };
+
+    const cursor = rowsOf<{ last_sha: string | null }>(
+      await tx.execute(sql`
+        SELECT last_sha
+        FROM knowledge_cursor
+        WHERE organization_id = ${organizationId}
+          AND repo_full_name = ${fields.repoFullName}
+      `),
+    )[0];
+    if (cursor?.last_sha === fields.targetSha) {
+      return { outcome: "in_sync" as const };
+    }
+    const recent = rowsOf<{ recent: boolean }>(
+      await tx.execute(sql`
+        SELECT EXISTS (
+          SELECT 1 FROM knowledge_cursor
+          WHERE organization_id = ${organizationId}
+            AND repo_full_name = ${fields.repoFullName}
+            AND last_push_at > ${ts(new Date(now.getTime() - HEAD_CHECK_RECENT_PUSH_MS))}
+        ) AS recent
+      `),
+    );
+    if (recent[0]?.recent === true) return { outcome: "recent_push" as const };
+
+    const existing = rowsOf<{ id: string; state: string }>(
+      await tx.execute(sql`
+        SELECT id, state FROM knowledge_intent
+        WHERE organization_id = ${organizationId}
+          AND repo_full_name = ${fields.repoFullName}
+          AND (state IN ('pending', 'processing')
+               OR target_sha = ${fields.targetSha})
+      `),
+    );
+    if (
+      existing.some((r) => r.state === "pending" || r.state === "processing")
+    ) {
+      return { outcome: "open_intent" as const };
+    }
+    const same = existing[0];
+    if (same) {
+      if (same.state === "failed") {
+        return { outcome: "failed_exists" as const, intentId: same.id };
+      }
+      // superseded or processed while the cursor is elsewhere: reopen.
+      await tx.execute(sql`
+        UPDATE knowledge_intent
+        SET state = 'pending',
+            attempts = 0,
+            next_attempt_at = ${ts(now)},
+            processed_at = NULL,
+            last_error_code = NULL,
+            updated_at = ${ts(now)}
+        WHERE id = ${same.id} AND state IN ('superseded', 'processed')
+      `);
+      return { outcome: "reopened" as const, intentId: same.id };
+    }
+
+    const { id } = await insertKnowledgeIntent({
+      db: tx,
+      organizationId,
+      ...fields,
+    });
+    // Observed head only: never last_push_at, never last_sha. An observation
+    // that is already ahead of last_sha (an unprocessed push) is kept.
+    await tx.execute(sql`
+      INSERT INTO knowledge_cursor
+        (organization_id, repo_full_name, default_branch, observed_head_sha)
+      VALUES
+        (${organizationId}, ${fields.repoFullName}, ${fields.defaultBranch},
+         ${fields.targetSha})
+      ON CONFLICT (organization_id, repo_full_name) DO UPDATE
+        SET observed_head_sha = EXCLUDED.observed_head_sha,
+            default_branch = EXCLUDED.default_branch,
+            updated_at = ${ts(now)}
+        WHERE knowledge_cursor.observed_head_sha IS NULL
+           OR knowledge_cursor.observed_head_sha
+              IS NOT DISTINCT FROM knowledge_cursor.last_sha
+    `);
+    return { outcome: "inserted" as const, intentId: id };
   });
 }
