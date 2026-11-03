@@ -58,6 +58,7 @@ vi.mock("@/components/settings/settings-row", () => ({
 
 const NO_AGENT = {
   reviewMode: null,
+  reviewModeOnUpdate: null,
   reviewBatteries: null,
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
@@ -150,10 +151,53 @@ describe("firstWriteFence", () => {
 });
 
 describe("REVIEW_AGENT_CLEAR_PATCH", () => {
-  it("clears all six fields, task packs included", () => {
+  it("clears all seven fields, task packs included", () => {
     expect(REVIEW_AGENT_CLEAR_PATCH).toEqual(NO_AGENT);
-    expect(Object.keys(REVIEW_AGENT_CLEAR_PATCH)).toHaveLength(6);
+    expect(Object.keys(REVIEW_AGENT_CLEAR_PATCH)).toHaveLength(7);
     expect(REVIEW_AGENT_CLEAR_PATCH.taskBatteries).toBeNull();
+  });
+});
+
+describe("mode on new commits — form helpers", () => {
+  it("draftFromValues / draftToPatch round-trip reviewModeOnUpdate", () => {
+    const stored = { ...NO_AGENT };
+    const draft = {
+      ...draftFromValues(stored),
+      reviewModeOnUpdate: "classic" as const,
+    };
+    expect(draftToPatch(draft, stored).patch).toEqual({
+      reviewModeOnUpdate: "classic",
+    });
+    expect(
+      draftToPatch(
+        draftFromValues({ ...stored, reviewModeOnUpdate: "classic" }),
+        {
+          ...stored,
+          reviewModeOnUpdate: "classic",
+        },
+      ).patch,
+    ).toEqual({});
+  });
+
+  it("an orchestrated update mode enables the orchestrated-only fields under a classic Mode", () => {
+    const html = renderToStaticMarkup(
+      <ReviewAgentFieldsView
+        idPrefix="t"
+        scope="org"
+        draft={{
+          ...draftFromValues(NO_AGENT),
+          reviewModeOnUpdate: "orchestrated",
+        }}
+        stored={NO_AGENT}
+        inherited={null}
+        disabled={false}
+        saveLabel="Save"
+        onChange={() => {}}
+        onSave={() => {}}
+      />,
+    );
+    expect(html).toContain("Mode on new commits");
+    expect(html).not.toContain('data-testid="t-classic-hint"');
   });
 });
 

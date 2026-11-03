@@ -32,6 +32,10 @@ import {
   ThreadTrustContext,
 } from "@terragon/shared";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
+import {
+  reviewTriggerForPrAction,
+  type ReviewTrigger,
+} from "@terragon/shared/model/review-agent-settings";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { automationLimitMessage } from "@/lib/automation-limit";
 import {
@@ -164,6 +168,12 @@ export async function runAutomation({
       /** PR-event runs: the PR's draft state at dispatch (#504). */
       reviewIsDraft?: boolean;
       /**
+       * PR-event runs: what started the run. Picks `reviewModeOnUpdate` for
+       * the prompt render here and, through the thread stamp (`update`
+       * only), for the dispatch. Absent = `open`.
+       */
+      reviewTrigger?: ReviewTrigger;
+      /**
        * #509 delivery loop: the fix cycle this thread runs. The cycle-finish
        * hook settles the cycle row it names.
        */
@@ -252,6 +262,7 @@ export async function runAutomation({
             automation,
             prNumber: options?.prNumber,
             trustContext: options?.trustContext ?? null,
+            trigger: options?.stampExtra?.reviewTrigger ?? "open",
           }),
         ]);
         if (!resolved) {
@@ -349,6 +360,9 @@ export async function runAutomation({
             ...(options?.stampExtra?.reviewIsDraft !== undefined
               ? { reviewIsDraft: options.stampExtra.reviewIsDraft }
               : {}),
+            ...(options?.stampExtra?.reviewTrigger === "update"
+              ? { reviewTrigger: "update" as const }
+              : {}),
             ...(options?.stampExtra?.delivery
               ? { delivery: options.stampExtra.delivery }
               : {}),
@@ -418,10 +432,12 @@ async function resolveRenderedReviewPrompt({
   automation,
   prNumber,
   trustContext,
+  trigger,
 }: {
   automation: Automation;
   prNumber: number | undefined;
   trustContext: ThreadTrustContext | null;
+  trigger: ReviewTrigger;
 }): Promise<ReviewPromptMode> {
   if (
     automation.triggerType !== "pull_request" ||
@@ -436,6 +452,7 @@ async function resolveRenderedReviewPrompt({
     organizationId: automation.organizationId,
     repoFullName: automation.repoFullName,
     trustContext,
+    trigger,
   });
 }
 
@@ -886,6 +903,11 @@ export async function runPullRequestAutomation({
           // The draft state the prompt below states, so finish judges the
           // run's bare `comment` against what the agent was told (#504).
           ...(pr.draft !== undefined ? { reviewIsDraft: pr.draft } : {}),
+          // Open vs update picks reviewModeOnUpdate (render + dispatch).
+          // A companion is never a review, so it carries no trigger.
+          ...(companion
+            ? {}
+            : { reviewTrigger: reviewTriggerForPrAction(prEventAction) }),
         },
         // The control plane names the base in EVERY PR-event prompt, whatever
         // the skill body says: a skill without {{baseBranch}} left the agent

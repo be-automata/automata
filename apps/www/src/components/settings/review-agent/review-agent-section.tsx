@@ -57,6 +57,7 @@ import {
   availableReviewAgentRepos,
   draftFromValues,
   draftToPatch,
+  effectiveUpdateMode,
   firstWriteFence,
   reviewAgentOverrides,
   toggleIn,
@@ -84,6 +85,8 @@ import {
  * logic lives in review-agent-form.ts.
  */
 
+export const UPDATE_MODE_NOTE =
+  "The mode used when new commits are pushed or the base changes. Mode applies when the PR is opened.";
 export const CLASSIC_HINT =
   "Only used in orchestrated mode. Classic runs exactly as today.";
 export const RUN_TESTS_NOTE =
@@ -322,7 +325,17 @@ export function ReviewAgentFieldsView({
     inherited?.reviewMode,
   );
   const mode = effectiveReviewMode(draft.reviewMode, inheritedMode);
-  const orchestratedOnlyDisabled = disabled || mode === "classic";
+  const updateMode = effectiveUpdateMode(
+    draft.reviewModeOnUpdate,
+    inherited?.reviewModeOnUpdate,
+    mode,
+  );
+  const allClassic = mode === "classic" && updateMode === "classic";
+  const orchestratedOnlyDisabled = disabled || allClassic;
+  const updateInheritLabel =
+    inherited?.reviewModeOnUpdate != null
+      ? `Inherit (${REVIEW_MODE_LABELS[inherited.reviewModeOnUpdate].toLowerCase()})`
+      : "Inherit (same as Mode)";
   const inheritedBatteries = inherited?.reviewBatteries ?? [
     ...DEFAULT_REVIEW_BATTERIES,
   ];
@@ -369,7 +382,7 @@ export function ReviewAgentFieldsView({
         disabled={disabled}
         onChange={(reviewMode) => onChange({ ...draft, reviewMode })}
       >
-        {mode === "classic" && (
+        {allClassic && (
           <p
             className="text-xs text-muted-foreground"
             data-testid={`${idPrefix}-classic-hint`}
@@ -377,6 +390,20 @@ export function ReviewAgentFieldsView({
             {CLASSIC_HINT}
           </p>
         )}
+      </InheritSelect>
+
+      <InheritSelect
+        id={`${idPrefix}-mode-on-update`}
+        label="Mode on new commits"
+        value={draft.reviewModeOnUpdate}
+        options={MODE_OPTIONS}
+        inheritLabel={updateInheritLabel}
+        disabled={disabled}
+        onChange={(reviewModeOnUpdate) =>
+          onChange({ ...draft, reviewModeOnUpdate })
+        }
+      >
+        <p className="text-xs text-muted-foreground">{UPDATE_MODE_NOTE}</p>
       </InheritSelect>
 
       <PackChecklist

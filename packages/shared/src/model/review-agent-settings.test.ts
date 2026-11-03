@@ -17,6 +17,8 @@ import {
   REVIEW_MAX_TURNS_MIN,
   REVIEW_MODES,
   REVIEW_ONLY_AGENT_FIELDS,
+  reviewTriggerForPrAction,
+  reviewTriggerOfSourceMetadata,
   TASK_AGENT_FIELD,
   TASK_BATTERY_PACK_IDS,
   TASK_BATTERY_PACK_LABELS,
@@ -45,6 +47,7 @@ describe("review-agent settings constants", () => {
     expect(REVIEW_MAX_TURNS_MAX).toBe(500);
     expect(REVIEW_AGENT_FIELDS).toEqual([
       "reviewMode",
+      "reviewModeOnUpdate",
       "reviewBatteries",
       "reviewRunTests",
       "reviewCommandTimeoutS",
@@ -58,6 +61,7 @@ describe("review-agent settings constants", () => {
     // value can never fail a review dispatch.
     expect(REVIEW_ONLY_AGENT_FIELDS).toEqual([
       "reviewMode",
+      "reviewModeOnUpdate",
       "reviewBatteries",
       "reviewRunTests",
       "reviewCommandTimeoutS",
@@ -65,6 +69,52 @@ describe("review-agent settings constants", () => {
     ]);
     expect(TASK_AGENT_FIELD).toBe("taskBatteries");
     expect(DEFAULT_TASK_BATTERIES).toEqual([]);
+  });
+});
+
+describe("reviewModeOnUpdate validation", () => {
+  it("accepts either mode and null", () => {
+    expect(
+      findReviewAgentFieldError({ reviewModeOnUpdate: "classic" }),
+    ).toBeUndefined();
+    expect(
+      findReviewAgentFieldError({ reviewModeOnUpdate: "orchestrated" }),
+    ).toBeUndefined();
+    expect(
+      findReviewAgentFieldError({ reviewModeOnUpdate: null }),
+    ).toBeUndefined();
+  });
+
+  it("rejects an unknown mode, naming the field", () => {
+    expect(
+      findReviewAgentFieldError({ reviewModeOnUpdate: "heavy" }),
+    ).toContain("reviewModeOnUpdate");
+  });
+});
+
+describe("review triggers", () => {
+  it("maps PR actions to open or update", () => {
+    expect(reviewTriggerForPrAction("opened")).toBe("open");
+    expect(reviewTriggerForPrAction("ready_for_review")).toBe("open");
+    expect(reviewTriggerForPrAction("synchronize")).toBe("update");
+    expect(reviewTriggerForPrAction("edited")).toBe("update");
+  });
+
+  it("reads the thread stamp; no stamp is open", () => {
+    expect(reviewTriggerOfSourceMetadata(null)).toBe("open");
+    expect(reviewTriggerOfSourceMetadata(undefined)).toBe("open");
+    expect(reviewTriggerOfSourceMetadata({ type: "automation-skill" })).toBe(
+      "open",
+    );
+    expect(
+      reviewTriggerOfSourceMetadata({
+        type: "automation-skill",
+        reviewTrigger: "update",
+      }),
+    ).toBe("update");
+    expect(
+      reviewTriggerOfSourceMetadata({ type: "other", reviewTrigger: "update" }),
+    ).toBe("open");
   });
 });
 
@@ -236,6 +286,7 @@ describe("taskBatteries (phase 7)", () => {
   it("is picked with the rest of the family", () => {
     const row = {
       reviewMode: null,
+      reviewModeOnUpdate: null,
       reviewBatteries: null,
       reviewRunTests: null,
       reviewCommandTimeoutS: null,
@@ -245,6 +296,7 @@ describe("taskBatteries (phase 7)", () => {
     };
     expect(pickReviewAgentFields(row)).toEqual({
       reviewMode: null,
+      reviewModeOnUpdate: null,
       reviewBatteries: null,
       reviewRunTests: null,
       reviewCommandTimeoutS: null,

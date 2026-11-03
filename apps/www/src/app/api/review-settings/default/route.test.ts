@@ -339,6 +339,7 @@ describe("/api/review-settings/default — review-agent fields (phase 4)", () =>
     await actor("admin");
     const res = await put({
       reviewMode: "orchestrated",
+      reviewModeOnUpdate: null,
       reviewBatteries: ["gsd-reviewers"],
       expectedUpdatedAt: null,
     });
@@ -348,6 +349,7 @@ describe("/api/review-settings/default — review-agent fields (phase 4)", () =>
     };
     expect(got.setting).toMatchObject({
       reviewMode: "orchestrated",
+      reviewModeOnUpdate: null,
       reviewBatteries: ["gsd-reviewers"],
       reviewRunTests: null,
       reviewCommandTimeoutS: null,

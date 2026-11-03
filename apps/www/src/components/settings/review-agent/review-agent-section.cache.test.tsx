@@ -34,6 +34,7 @@ function dto(updatedAt: string, maxTurns: number | null): RepoReviewSettingDto {
     supersedePolicy: null,
     recheckOnComplete: false,
     reviewMode: "orchestrated",
+    reviewModeOnUpdate: null,
     reviewBatteries: null,
     reviewRunTests: null,
     reviewCommandTimeoutS: null,

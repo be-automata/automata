@@ -71,6 +71,9 @@ const SINCE_NOTES: Readonly<Record<string, string>> = {
     "#108 — distinguishes an observe-mode allow from an enforced one; " +
     "without it the audit trail cannot say which traffic was actually fenced",
   "repo_review_settings.review_mode": REVIEW_AGENT_SINCE,
+  "repo_review_settings.review_mode_on_update":
+    "the review mode for update runs (pushes, retargets); NULL = review_mode " +
+    "(deploy/migrations/2026-11-02-review-mode-on-update.sql)",
   "repo_review_settings.review_batteries": REVIEW_AGENT_SINCE,
   "repo_review_settings.review_run_tests": REVIEW_AGENT_SINCE,
   "repo_review_settings.review_command_timeout_s": REVIEW_AGENT_SINCE,

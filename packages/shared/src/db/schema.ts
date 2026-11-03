@@ -1605,6 +1605,13 @@ export const repoReviewSettings = pgTable(
      * precedent). Nothing on the worker consumes them until Phase 5.
      */
     reviewMode: text("review_mode"),
+    /**
+     * The mode an UPDATE review run (a pushed head or a retarget) uses instead
+     * of reviewMode. Same family and inherit chain (repo row → '*' row); NULL
+     * on both = use reviewMode (today's behaviour). Open runs never read it.
+     * NO column default.
+     */
+    reviewModeOnUpdate: text("review_mode_on_update"),
     reviewBatteries: text("review_batteries").array(),
     reviewRunTests: boolean("review_run_tests"),
     reviewCommandTimeoutS: integer("review_command_timeout_s"),

@@ -46,12 +46,16 @@ describe("resolveReviewPromptMode", () => {
     vi.restoreAllMocks();
   });
 
-  const resolve = (trustContext: typeof TRUSTED | null = TRUSTED) =>
+  const resolve = (
+    trustContext: typeof TRUSTED | null = TRUSTED,
+    trigger: "open" | "update" = "open",
+  ) =>
     resolveReviewPromptMode({
       db,
       organizationId: orgId,
       repoFullName: REPO,
       trustContext,
+      trigger,
     });
 
   it("no rows → classic", async () => {
@@ -88,6 +92,23 @@ describe("resolveReviewPromptMode", () => {
     expect(await resolve()).toEqual({ mode: "orchestrated", runTests: true });
     expect(await resolve({ ...TRUSTED, isFork: true })).toEqual({
       mode: "orchestrated",
+      runTests: false,
+    });
+  });
+
+  it("update trigger renders reviewModeOnUpdate; open renders reviewMode", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewMode: "orchestrated", reviewModeOnUpdate: "classic" },
+    });
+    expect(await resolve(TRUSTED, "open")).toEqual({
+      mode: "orchestrated",
+      runTests: false,
+    });
+    expect(await resolve(TRUSTED, "update")).toEqual({
+      mode: "classic",
       runTests: false,
     });
   });
