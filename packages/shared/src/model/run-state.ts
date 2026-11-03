@@ -259,6 +259,13 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
           "This run waited in the queue until it was stale, so it was retired without running.",
         action: "open-task",
       };
+    case "box-at-capacity":
+      return {
+        title: "Box at capacity",
+        reason:
+          "The execution box had no memory headroom for this run, so the agent never started. Retry once the box is less busy.",
+        action: "open-task",
+      };
     case "out-of-memory":
       return {
         title: "Ran out of memory",
@@ -309,6 +316,7 @@ const THREAD_ERROR_TYPES: Record<ThreadErrorType, true> = {
   "provider-unavailable": true,
   "queue-retired": true,
   "out-of-memory": true,
+  "box-at-capacity": true,
 };
 
 function isThreadErrorType(value: string): value is ThreadErrorType {

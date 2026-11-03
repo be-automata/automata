@@ -29,6 +29,10 @@ import {
   providerUnavailableOfChat,
   type ProviderUnavailable,
 } from "@/agent/msg/classify-provider-result";
+import {
+  BOX_AT_CAPACITY_SENTENCE,
+  boxAtCapacityOfChat,
+} from "@/agent/msg/classify-box-capacity";
 
 /**
  * The PR companion lane's terminal writer (emit-only, like the review and
@@ -253,6 +257,8 @@ export function renderCompanionNotice(
   run: CompanionReportRun,
   currentHeadSha: string | null,
   providerUnavailable?: ProviderUnavailable | null,
+  /** #561: the execution box never admitted the run. */
+  boxAtCapacity = false,
 ): string {
   const reviewNote =
     run.hasReview === false ? "" : " The review of this PR is not affected.";
@@ -261,8 +267,11 @@ export function renderCompanionNotice(
     providerUnavailable
       ? `The companion run for this commit could not run. ${describeProviderUnavailable(providerUnavailable)} ` +
         `There are no notes this time.${reviewNote}`
-      : "The companion run finished without a usable report for this commit, " +
-        `so there are no notes this time.${reviewNote}`,
+      : boxAtCapacity
+        ? `The companion run for this commit could not run. ${BOX_AT_CAPACITY_SENTENCE} ` +
+          `There are no notes this time; the next push runs it again.${reviewNote}`
+        : "The companion run finished without a usable report for this commit, " +
+          `so there are no notes this time.${reviewNote}`,
   ].join("\n\n");
 }
 
@@ -332,6 +341,7 @@ export async function executeCompanionReport({
   terminalText,
   currentHeadSha,
   providerUnavailable,
+  boxAtCapacity = false,
   logger,
 }: {
   github: CompanionReportGitHub;
@@ -344,6 +354,8 @@ export async function executeCompanionReport({
    * edited in place as for any changed body.
    */
   providerUnavailable?: ProviderUnavailable | null;
+  /** #561: the execution box never admitted the run; read only when no report parsed. */
+  boxAtCapacity?: boolean;
   logger?: ReviewLogger;
 }): Promise<CompanionReportOutcome> {
   const { stamp, requestedAt } = run;
@@ -386,7 +398,12 @@ export async function executeCompanionReport({
   const parsed = parseCompanionReport(terminalText);
   const body = parsed.ok
     ? renderCompanionReport(parsed.value, run, currentHeadSha)
-    : renderCompanionNotice(run, currentHeadSha, providerUnavailable);
+    : renderCompanionNotice(
+        run,
+        currentHeadSha,
+        providerUnavailable,
+        boxAtCapacity,
+      );
   if (existing !== null && existing.body === body) {
     logger?.info("companion: report unchanged; skipping", meta);
     return { outcome: "skipped_unchanged" };
@@ -640,6 +657,7 @@ export async function handleCompanionReportAtFinish({
       terminalText,
       currentHeadSha,
       providerUnavailable: providerUnavailableOfChat(threadChat),
+      boxAtCapacity: boxAtCapacityOfChat(threadChat),
       logger,
     });
     getPostHogServer().capture({

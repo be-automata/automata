@@ -924,4 +924,25 @@ describe("executeCompanionReport — provider_unavailable (#441)", () => {
     );
     expect(body).not.toContain("without a usable report");
   });
+
+  // Card: protects=#561, a companion run the box never admitted says the box
+  // was at capacity and that the next push runs it again; fails_when=it says
+  // "without a usable report"; no_claim=classification.
+  it("a run the box never admitted says the box was at capacity", async () => {
+    const github = fakeGitHub();
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+      boxAtCapacity: true,
+    });
+    const body = github.comments[0]!.body;
+    expect(body).toContain(
+      "The companion run for this commit could not run. The execution box was at capacity",
+    );
+    expect(body).toContain("the next push runs it again");
+    expect(body).not.toContain("without a usable report");
+    expect(body).not.toContain("MemAvailable");
+  });
 });

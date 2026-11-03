@@ -2518,6 +2518,16 @@ Committed_AS:   12000000 kB
     expect((caught as Error).message).toMatch(
       new RegExp(`after ${max} deferral\\(s\\)`),
     );
+    // #561: www classifies the failure by this shared marker, wrapped or not.
+    const { isAdmissionExhaustedText } = await import(
+      "@terragon/utils/box-capacity"
+    );
+    expect(isAdmissionExhaustedText((caught as Error).message)).toBe(true);
+    expect(
+      isAdmissionExhaustedText(
+        `run: ${JSON.stringify({ message: (caught as Error).message })}`,
+      ),
+    ).toBe(true);
     expect(waits).toHaveLength(max);
     // Every refusal gave the slot back; nothing was ever cloned, pulled or spawned.
     expect(releaseMock).toHaveBeenCalledTimes(max + 1);

@@ -1126,3 +1126,58 @@ describe("executeMergeAudit — provider_unavailable (#441)", () => {
     );
   });
 });
+
+describe("executeMergeAudit — box at capacity (#561)", () => {
+  // Card: protects=an audit run the box never admitted says the box was at
+  // capacity (not "did not produce a usable result"), writes no ticket and
+  // stays replaceable by a later run; fails_when=the generic notice, a
+  // tracker call, or a mode other than replace-notice; no_claim=the
+  // classification itself (classify-box-capacity suite).
+  it("posts the capacity notice with replace-notice and changes no ticket", async () => {
+    const tracker = fakeTracker([issue("ACME-1")]);
+    const comments = fakeComments();
+    const outcome = await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText: "",
+      boxAtCapacity: true,
+      config: config("live"),
+      tracker: tracker.client,
+      comments: comments.client,
+      logger,
+    });
+    expect(outcome).toEqual({
+      outcome: "degraded_comment",
+      reason: "box_at_capacity",
+    });
+    expect(tracker.client.getIssue).not.toHaveBeenCalled();
+    expect(tracker.client.setStage).not.toHaveBeenCalled();
+    expect(comments.upserts[0]!.mode).toBe("replace-notice");
+    const body = comments.upserts[0]!.body;
+    expect(body).toContain(
+      "The audit run for ACME-1 could not run. The execution box was at capacity",
+    );
+    expect(body).toContain("No ticket was changed.");
+    expect(body).not.toContain("did not produce a usable result");
+    // A later notice or a later good audit can still replace it in place.
+    expect(isReplaceableAuditNotice(body)).toBe(true);
+  });
+
+  // Card: protects=a provider cause outranks the capacity flag (it names an
+  // action for a person); fails_when=the capacity notice wins; no_claim=none.
+  it("a provider classification wins over the capacity flag", async () => {
+    const comments = fakeComments();
+    await executeMergeAudit({
+      prNumber: 7,
+      pr: pr(),
+      terminalText: "",
+      providerUnavailable: { kind: "auth_rejected" },
+      boxAtCapacity: true,
+      config: config("live"),
+      tracker: fakeTracker([issue("ACME-1")]).client,
+      comments: comments.client,
+      logger,
+    });
+    expect(comments.upserts[0]!.body).toContain("rejected by the provider");
+  });
+});

@@ -329,7 +329,9 @@ export type ThreadErrorType =
   | "queue-limit-exceeded"
   | "provider-unavailable"
   | "queue-retired"
-  | "out-of-memory";
+  | "out-of-memory"
+  /** #561: the box had no memory headroom; the agent never ran. */
+  | "box-at-capacity";
 export type ThreadErrorMessage = ThreadErrorType | string;
 export type GithubPRStatus = "draft" | "open" | "closed" | "merged";
 export type GithubCheckRunConclusion =

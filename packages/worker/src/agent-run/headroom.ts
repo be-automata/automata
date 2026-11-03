@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { ADMISSION_EXHAUSTED_PREFIX } from "@terragon/utils/box-capacity";
 
 import { sumBackoffSeconds } from "./admission-retry";
 
@@ -185,7 +186,8 @@ export class AdmissionBudgetExhaustedError extends NonRetryableError {
     readonly elapsedS: number = sumBackoffSeconds(deferrals),
   ) {
     super(
-      `The box had no memory headroom for this run after ${deferrals} deferral(s) ` +
+      // #561: www recognises this text by the shared prefix — keep it there.
+      `${ADMISSION_EXHAUSTED_PREFIX} ${deferrals} deferral(s) ` +
         `(${elapsedS}s deferred); last check: ${last.message}`,
     );
     this.name = "AdmissionBudgetExhaustedError";

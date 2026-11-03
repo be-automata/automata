@@ -360,6 +360,14 @@ function ChatContent({
         />
       );
     }
+    case "box-at-capacity": {
+      return (
+        <ChatErrorContentsWithPre
+          header="The execution box was at capacity, so this run never started. Retry once the box is less busy."
+          errorStr={errorInfo}
+        />
+      );
+    }
     case "queue-retired": {
       return (
         <ChatErrorContentsWithPre
