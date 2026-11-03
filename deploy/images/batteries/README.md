@@ -112,6 +112,12 @@ deploy/images/batteries/verify.sh ghcr.io/be-automata/automata-batteries@sha256:
 - **Read-only rootfs.** Flutter writes stamps and a lock under `/opt/flutter/bin/cache` on every
   invocation, so `/opt/flutter` belongs to `agent` and a run mounts it, like HOME, as a per-run
   anonymous volume (populated from the image, removed with the container).
+- **One Flutter, and a repo's FVM pin.** The image has one SDK (`FLUTTER_VERSION`). When a
+  checkout pins another release in `.fvmrc` (or `.fvm/fvm_config.json`), the run entry replaces
+  `flutter` and `dart` with shims that name both versions and exit 69, so format, codegen and
+  analyze never run on the wrong SDK. Matching the pin needs that release in the image, which
+  costs a second SDK of disk on the box (the prod disk fits one image) and a second per-run
+  volume.
 - **Bumping a pin** is a reviewed change to the `ARG` lines only: the image records them in
   `/opt/automata/pins.env` and `verify.sh` checks the installed tools against that file. Update the
   table above in the same change.
