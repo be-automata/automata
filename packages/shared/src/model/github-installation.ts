@@ -273,7 +273,10 @@ export type RepoOrgSource = "repo_binding" | "installation";
  * The org AND mode for an event on one repo: the repo's org override when it
  * has one, otherwise the installation's org (getInstallationOrgAndMode,
  * unchanged). The mode always comes from the installation, so an override
- * never turns a shadow installation active. Every installation-resolved
+ * never turns a shadow installation active. The override applies only when
+ * the installation is KNOWN (an id with a mapped row): a null or unmapped
+ * installation keeps `organizationId: null`, so a binding never bypasses a
+ * lane's unmapped-installation rejection. Every installation-resolved
  * webhook lane uses this, so they agree on a repo's org.
  */
 export async function getRepoOrgAndMode({
@@ -293,7 +296,7 @@ export async function getRepoOrgAndMode({
     getRepoOrgBinding({ db, repoFullName }),
     getInstallationOrgAndMode({ db, installationId }),
   ]);
-  if (binding) {
+  if (binding && installation.organizationId !== null) {
     return {
       organizationId: binding.organizationId,
       mode: installation.mode,

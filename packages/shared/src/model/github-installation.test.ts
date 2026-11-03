@@ -277,21 +277,45 @@ describe("github-installation", () => {
         mode: "shadow",
         source: "repo_binding",
       });
-      // An absent installation id still honours the binding (default mode).
+    });
+
+    it("a binding never applies to a null or unmapped installation", async () => {
+      const client = await clientOrg();
+      const name = repo();
+      await bindRepoToOrg({
+        db,
+        repoFullName: name,
+        organizationId: client.id,
+      });
+      const unmapped = {
+        organizationId: null,
+        mode: "active",
+        source: "installation",
+      };
       expect(
         await getRepoOrgAndMode({
           db,
           installationId: null,
           repoFullName: name,
         }),
-      ).toEqual({
-        organizationId: client.id,
-        mode: "active",
-        source: "repo_binding",
-      });
+      ).toEqual(unmapped);
+      expect(
+        await getRepoOrgAndMode({
+          db,
+          installationId: installationId(),
+          repoFullName: name,
+        }),
+      ).toEqual(unmapped);
     });
 
     it("matches the repo case-insensitively and stores it lower-cased", async () => {
+      const instId = installationId();
+      await bindGithubInstallationToOrg({
+        db,
+        installationId: instId,
+        organizationId: orgId,
+        mode: "active",
+      });
       const client = await clientOrg();
       const name = repo();
       const bound = await bindRepoToOrg({
@@ -308,7 +332,7 @@ describe("github-installation", () => {
         (
           await getRepoOrgAndMode({
             db,
-            installationId: null,
+            installationId: instId,
             repoFullName: mixed,
           })
         ).organizationId,
