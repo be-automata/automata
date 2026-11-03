@@ -105,6 +105,7 @@ export async function runMergeAuditAtFinish({
   terminalText,
   botLogin,
   providerUnavailable,
+  boxAtCapacity,
 }: {
   db: DB;
   /** The thread's user — the org owner the mirror task was attributed to. */
@@ -116,6 +117,8 @@ export async function runMergeAuditAtFinish({
   botLogin: string;
   /** #441: the run's provider classification, when the provider refused it. */
   providerUnavailable?: ProviderUnavailable | null;
+  /** #561: the box never admitted the run. */
+  boxAtCapacity?: boolean;
 }): Promise<MergeAuditFinishOutcome> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const octokit = await getOctokitForApp({ owner, repo });
@@ -158,6 +161,7 @@ export async function runMergeAuditAtFinish({
     },
     terminalText,
     providerUnavailable,
+    boxAtCapacity,
     config,
     tracker: config ? createTrackerClient(config) : null,
     comments: createAuditCommentClient({

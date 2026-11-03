@@ -228,4 +228,38 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
     expect(chat.errorMessage).toBe("agent-generic-error");
     expect(chat.reattemptQueueAt ?? null).toBeNull();
   });
+
+  // Card: protects=#561, the worker's admission-exhausted failure (posted by
+  // onFailure as a custom-error) is stored as box-at-capacity with the raw
+  // text kept as info; fails_when=it stays agent-generic-error;
+  // no_claim=the lane notices (lane suites).
+  it("a run the box never admitted ends terminal as box-at-capacity", async () => {
+    const info =
+      'run: {"message":"The box had no memory headroom for this run after 8 deferral(s) (366s deferred); last check: …"}';
+    const { chat } = await finish([
+      {
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info: info,
+      },
+    ]);
+    expect(chat.status).toBe("working-error");
+    expect(chat.errorMessage).toBe("box-at-capacity");
+    expect(chat.errorMessageInfo).toBe(info);
+  });
+
+  // Card: protects=#561 stays narrow: any other worker failure keeps the
+  // generic error; fails_when=it is labelled box-at-capacity; no_claim=none.
+  it("any other worker failure keeps agent-generic-error", async () => {
+    const { chat } = await finish([
+      {
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info: "run: daemon exited with code 1",
+      },
+    ]);
+    expect(chat.errorMessage).toBe("agent-generic-error");
+  });
 });

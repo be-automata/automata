@@ -3,6 +3,36 @@ import { toDBMessage } from "./toDBMessage";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 
 describe("toDBMessage", () => {
+  describe("custom-error (#561)", () => {
+    test("a run the box never admitted is typed box-at-capacity", () => {
+      const [message] = toDBMessage({
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info:
+          'run: {"message":"The box had no memory headroom for this run after 8 deferral(s) (366s deferred)"}',
+      });
+      expect(message).toMatchObject({
+        type: "error",
+        error_type: "box-at-capacity",
+      });
+    });
+
+    test("any other worker failure stays agent-generic-error", () => {
+      const [message] = toDBMessage({
+        type: "custom-error",
+        session_id: null,
+        duration_ms: 0,
+        error_info: "run: daemon exited with code 1",
+      });
+      expect(message).toMatchObject({
+        type: "error",
+        error_type: "agent-generic-error",
+        error_info: "run: daemon exited with code 1",
+      });
+    });
+  });
+
   describe("user messages", () => {
     test("converts simple string user message", () => {
       const claudeMessage: ClaudeMessage = {

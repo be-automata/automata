@@ -9,7 +9,8 @@
     "./encryption": "./src/encryption.ts",
     "./redact": "./src/redact.ts",
     "./payload-seal": "./src/payload-seal.ts",
-    "./run-lane": "./src/run-lane.ts"
+    "./run-lane": "./src/run-lane.ts",
+    "./box-capacity": "./src/box-capacity.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",

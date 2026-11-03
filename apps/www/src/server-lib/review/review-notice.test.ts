@@ -93,6 +93,39 @@ describe("renderReviewNotice", () => {
   });
 });
 
+describe("renderReviewNotice — box at capacity (#561)", () => {
+  // Card: protects=a review the box never admitted says the box was at
+  // capacity, keeps the automatic re-run count, and never pastes the box's
+  // memory figures; fails_when=the raw error reaches the PR; no_claim=the
+  // re-run planner (review-rerun suite).
+  it("names the capacity cause instead of the raw admission error", () => {
+    const body = renderReviewNotice({
+      sha: SHA,
+      cause: "run_failed",
+      reason:
+        'run: {"message":"The box had no memory headroom for this run after 8 deferral(s) (366s deferred); last check: MemAvailable=13047M"}',
+      reruns: 2,
+    });
+    expect(body).toContain(
+      "**Why:** the review run could not start. The execution box was at capacity",
+    );
+    expect(body).toContain("re-ran the review automatically 2 times");
+    expect(body).not.toContain("MemAvailable");
+    expect(body).toContain("This is not a pass");
+  });
+
+  it("keeps the generic run-failed text for any other failure", () => {
+    const body = renderReviewNotice({
+      sha: SHA,
+      cause: "run_failed",
+      reason: "daemon exited with code 1",
+    });
+    expect(body).toContain(
+      "the review run failed before the agent produced a verdict: daemon exited with code 1",
+    );
+  });
+});
+
 describe("renderReviewNotice — the run's thread id (#107)", () => {
   const THREAD = "3f2b8c1e-0d4a-4b6f-9a1e-7c5d2e8f9b10";
 

@@ -1,6 +1,7 @@
 import { Anthropic } from "@anthropic-ai/sdk";
 import { ClaudeMessage } from "@terragon/daemon/shared";
 import { DBMessage, DBTextPart, DBThinkingPart } from "@terragon/shared";
+import { isAdmissionExhaustedText } from "@terragon/utils/box-capacity";
 
 /**
  * Converts a ClaudeMessage to one or more DBMessages
@@ -25,7 +26,10 @@ export function toDBMessage(claudeMessage: ClaudeMessage): DBMessage[] {
       return [
         {
           type: "error",
-          error_type: "agent-generic-error",
+          // #561: a run the box never admitted is not an agent error.
+          error_type: isAdmissionExhaustedText(claudeMessage.error_info)
+            ? "box-at-capacity"
+            : "agent-generic-error",
           error_info: claudeMessage.error_info ?? "",
           timestamp: new Date().toISOString(),
         },
