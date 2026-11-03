@@ -135,7 +135,11 @@ order. Size the file cap from the spec instead.
 - 4.1 Agent `subagent_type: refinement` if it exists here, else a general-purpose subagent briefed
   as a SPARC refinement pass on the diff. 4.2 `Skill: simplify` on the changed code. Re-run the
   gates after each.
-- 4.3 Skip roborev: it is not installed here. Say so in the PR.
+- 4.3 roborev, once, when this run has it: if `command -v roborev` and
+  `"$CLAUDE_PLUGIN_ROOT/scripts/roborev-guard"` both exist, run
+  `timeout 420 "$CLAUDE_PLUGIN_ROOT/scripts/roborev-guard" review --branch --wait` in the
+  foreground. Its findings are refinement input, never a gate; a failure or timeout is reported
+  in the PR and never retried. Without roborev, skip it and say so in the PR.
 - Past minute 20, skip what does not fit before 23 and say which pass was skipped.
 
 **Step 4b — Acceptance.** Follow `acceptance-gate.md` by hand, since its script cannot run:
@@ -181,7 +185,7 @@ The title is one line. The body has, in order:
    when. A not-delivered row is unticked and says what is left.
 4. `## Verification`: every gate you ran, with its exit code, and the gates left to CI and why.
 5. `## Assumptions` (decisions you made that nobody confirmed) and `## Pipeline` (validator
-   verdicts, refinement/simplify findings applied, skipped passes and why, roborev not run).
+   verdicts, refinement/simplify findings applied, skipped passes and why, the roborev result or why it did not run).
 6. `## Follow-up ideas`, if any.
 7. The last line: `Closes #<N>` only when **every** criterion is `PASS`; otherwise `Refs #<N>`.
    A re-label delivers the rest: the next run reads this PR as "already done".

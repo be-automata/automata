@@ -85,7 +85,7 @@ assert batteries-hooks "settings.batteries.json present" test -s "$HOME/.claude/
 # anything), so every pin a check compares against must be set.
 for pin in NODE_VERSION PNPM_VERSION CLAUDE_CODE_VERSION GH_VERSION RUFLO_VERSION \
   CHROMIUM_VERSION CHROMIUM_REVISION BUN_VERSION FLUTTER_VERSION SOMNIO_VERSION_LINE \
-  ACTIONLINT_VERSION GITLEAKS_VERSION SHELLCHECK_VERSION; do
+  ACTIONLINT_VERSION GITLEAKS_VERSION SHELLCHECK_VERSION ROBOREV_VERSION; do
   if [ -z "${!pin:-}" ]; then bad pins "$pin is empty in /opt/automata/pins.env"; fi
 done
 check node            "v${NODE_VERSION}" node --version
@@ -107,6 +107,8 @@ check somnio           "${SOMNIO_VERSION_LINE}" somnio --version
 check actionlint       "${ACTIONLINT_VERSION}" actionlint -version
 check gitleaks         "${GITLEAKS_VERSION}" gitleaks version
 check shellcheck       "${SHELLCHECK_VERSION}" shellcheck --version
+check roborev          "${ROBOREV_VERSION}" roborev version
+assert roborev-guard "the vendor's roborev-guard is executable" test -x "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/scripts/roborev-guard"
 
 # The vendor runtime skills: Somnio's skills and agents link into the catalog
 # checkout, none of it is plugin wiring, and ytctl is the env-aliasing shim.
@@ -124,6 +126,13 @@ assert ytctl-shim "ytctl aliases YOUTRACK_AGENT_TOKEN" grep -q YOUTRACK_AGENT_TO
 for agent in planner refinement; do
   assert "ruflo-agent-$agent" "~/.claude/agents/$agent.md without frontmatter hooks" \
     bash -c "test -s \"\$HOME/.claude/agents/$agent.md\" && ! grep -q '^hooks:' \"\$HOME/.claude/agents/$agent.md\""
+done
+
+# The audits scheduled task automations run (#557), by name: a catalog bump
+# that drops one fails here, not on the first weekly run.
+for skill in nestjs-health-audit flutter-health-audit react-health-audit security-audit dora-metrics; do
+  assert "somnio-skill-$skill" "~/.claude/skills/$skill/SKILL.md resolves" \
+    test -f "$HOME/.claude/skills/$skill/SKILL.md"
 done
 
 # Every Somnio catalog skill is installed globally for Claude (25 at the pin).
