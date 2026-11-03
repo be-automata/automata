@@ -1106,6 +1106,21 @@ describe("dispatchAgentRun — phase 4 reviewAgent payload", () => {
     expect(input.reviewAgent).toMatchObject({ mode: prompt.mode });
   });
 
+  // #560: a plain-message (user_message) review automation stamps its own
+  // update trigger; the dispatch honours it like the skill stamp.
+  it("a plain-message update-stamped review thread runs reviewModeOnUpdate", async () => {
+    await orchestratedOpenClassicUpdate();
+    const t = await makeReviewThread(913);
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: { type: "automation-message", reviewTrigger: "update" },
+      })
+      .where(eq(threadTable.id, t.threadId));
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+  });
+
   it("an update-stamped thread with no reviewModeOnUpdate anywhere keeps reviewMode", async () => {
     await upsertRepoReviewSetting({
       db,

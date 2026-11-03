@@ -112,6 +112,13 @@ describe("review triggers", () => {
         reviewTrigger: "update",
       }),
     ).toBe("update");
+    // #560: a plain-message review run's update stamp.
+    expect(
+      reviewTriggerOfSourceMetadata({
+        type: "automation-message",
+        reviewTrigger: "update",
+      }),
+    ).toBe("update");
     expect(
       reviewTriggerOfSourceMetadata({ type: "other", reviewTrigger: "update" }),
     ).toBe("open");

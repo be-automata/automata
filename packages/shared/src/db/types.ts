@@ -175,6 +175,14 @@ export type ThreadSourceMetadata =
       // #509 delivery loop: set ONLY on fix-cycle threads. The cycle-finish
       // hook settles the cycle row it names.
       delivery?: DeliveryLaneStamp;
+    }
+  // A plain-message (user_message) PR-review automation run started by an
+  // UPDATE (#560). Written ONLY for update runs, so an open run's thread keeps
+  // no stamp (today's object). The dispatch reads it to pick
+  // `reviewModeOnUpdate`, exactly like the automation-skill stamp.
+  | {
+      type: "automation-message";
+      reviewTrigger: "update";
     };
 
 /**
