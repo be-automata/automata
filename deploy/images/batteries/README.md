@@ -30,6 +30,7 @@ tag.
 | actionlint                | 1.7.12                              | tarball sha256                                                 |
 | gitleaks                  | 8.30.1                              | tarball sha256                                                 |
 | shellcheck                | 0.11.0                              | tarball sha256                                                 |
+| roborev                   | 0.68.1                              | tarball sha256 (the vendor installer's pin)                    |
 
 The pins were first copied from the host-model battery manifests, which the ADR-013 release PR
 deleted with the host path; the Dockerfile is now their only source. The npm lockfiles (GSD, ruflo)
