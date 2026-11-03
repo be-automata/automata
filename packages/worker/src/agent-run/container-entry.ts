@@ -87,10 +87,12 @@ export function buildEntryScript(): string {
     // 3. Flutter pin (#558): a checkout that pins an SDK the image does not
     // have gets notice shims instead of the image's flutter/dart, so format,
     // codegen and analyze never run on the wrong SDK and the agent is told why.
-    // The pin was validated on the host (detectFlutterPin) and is re-checked
-    // here; anything else is ignored.
+    // The pin was validated on the host (detectFlutterPin, FLUTTER_PIN) and is
+    // re-checked here with the same shape: only allowlisted characters AND an
+    // X.Y.Z prefix; anything else (a channel name, bare punctuation) is ignored.
     'pin="${AUTOMATA_FLUTTER_PIN:-}"',
     'case "$pin" in *[!0-9A-Za-z.+-]*) pin="" ;; esac',
+    'case "$pin" in [0-9]*.[0-9]*.[0-9]*) ;; *) pin="" ;; esac',
     'if [ -n "$pin" ]; then',
     `  have=$( (. ${CONTAINER_PINS_FILE}; printf '%s' "\${FLUTTER_VERSION:-}") 2>/dev/null || true)`,
     '  if [ "$pin" != "$have" ]; then',

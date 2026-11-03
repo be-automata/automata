@@ -128,12 +128,6 @@ describe("detectSomnioStacksFrom (ADR-013 Run path 5.2)", () => {
   });
 });
 
-/**
- * The entry script run for real by the local bash against a scratch checkout,
- * with `/workspace` and HOME rewritten to temp dirs and a fake `somnio` that
- * behaves like the measured installer (rewrites a tracked CLAUDE.md, adds rule
- * files). The REAL CLI in the REAL image is the integration suite's job.
- */
 describe("detectFlutterPinFrom (#558)", () => {
   // card: protects=an FVM pin is read from .fvmrc (`flutter`) or the legacy .fvm/fvm_config.json (`flutterSdkVersion`), .fvmrc winning; fails_when=either file is ignored or the legacy one wins; no_claim=FVM's own resolution rules
   it("reads .fvmrc, falls back to the legacy config, .fvmrc wins", () => {
@@ -184,6 +178,13 @@ describe("detectFlutterPinFrom (#558)", () => {
     }
   });
 });
+
+/**
+ * The entry script run for real by the local bash against a scratch checkout,
+ * with `/workspace` and HOME rewritten to temp dirs and a fake `somnio` that
+ * behaves like the measured installer (rewrites a tracked CLAUDE.md, adds rule
+ * files). The REAL CLI in the REAL image is the integration suite's job.
+ */
 
 describe("buildEntryScript: the Somnio rules step and the env file (run under bash)", () => {
   let root: string;
@@ -410,10 +411,17 @@ describe("buildEntryScript: the Somnio rules step and the env file (run under ba
     expect(r.stderr).toBe("");
   });
 
-  // card: protects=no pin, or a pin with shell metacharacters, leaves PATH alone (the value is never used); fails_when=an unsafe value reaches the shim text or the SDK is removed; no_claim=nothing
-  it("no pin or an unsafe pin leaves the image SDK alone", () => {
+  // card: protects=no pin, a pin with shell metacharacters, or a non-version value (a channel name, bare punctuation) leaves PATH alone (the value is never used); fails_when=an unsafe value reaches the shim text or the SDK is removed; no_claim=nothing
+  it("no pin, an unsafe pin or a non-version pin leaves the image SDK alone", () => {
     const PATH = fakeImageFlutter("3.47.7");
-    for (const pin of ["", "3.41.2;touch pwned", "$(touch pwned)"]) {
+    for (const pin of [
+      "",
+      "3.41.2;touch pwned",
+      "$(touch pwned)",
+      "stable",
+      "--",
+      "+",
+    ]) {
       const r = runEntry({ PATH, AUTOMATA_FLUTTER_PIN: pin }, "flutter");
       expect(r.status).toBe(0);
       expect(r.stdout).toBe("image-sdk\n");
