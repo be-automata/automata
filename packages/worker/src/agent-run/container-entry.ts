@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { CONTAINER_HOME, CONTAINER_WORKSPACE } from "./container-argv";
+import {
+  CONTAINER_FLUTTER_ROOT,
+  CONTAINER_HOME,
+  CONTAINER_WORKSPACE,
+} from "./container-argv";
 import { RUN_TELEMETRY_BRIDGE_PORT } from "./run-telemetry";
 
 /**
@@ -12,10 +16,13 @@ import { RUN_TELEMETRY_BRIDGE_PORT } from "./run-telemetry";
  *      must not ride the docker argv), then delete it;
  *   2. start the socat bridges for the sockets that are present (C3, #430):
  *      the worker forwards only the exits this run is entitled to;
- *   3. install the Somnio agent rules into the checkout for the stacks the
+ *   3. when the checkout pins a Flutter SDK (FVM) other than the image's, take
+ *      `flutter` and `dart` off PATH and put notice shims in their place, so
+ *      no tool runs on the wrong SDK silently (#558);
+ *   4. install the Somnio agent rules into the checkout for the stacks the
  *      worker detected, restore every tracked path the installer rewrote and
  *      git-exclude every path it added, so `git status` is unchanged;
- *   4. exec the daemon (`"$@"`).
+ *   5. exec the daemon (`"$@"`).
  *
  * Pure: the script is a constant shaped by nothing but this module, and the
  * stack list it reads is detected on the host by `detectSomnioStacks`.
@@ -23,6 +30,15 @@ import { RUN_TELEMETRY_BRIDGE_PORT } from "./run-telemetry";
 
 /** Where the worker copies the run env file (container-daemon-process.ts). */
 export const CONTAINER_RUN_ENV_FILE = `${CONTAINER_HOME}/.automata-run/run.env`;
+
+/** The image's own pins (deploy/images/batteries/Dockerfile writes it). */
+export const CONTAINER_PINS_FILE = "/opt/automata/pins.env";
+
+/** Where the entry writes the Flutter notice shims (the writable HOME). */
+export const CONTAINER_FLUTTER_SHIM_DIR = `${CONTAINER_HOME}/.automata-run/flutter-pin`;
+
+/** The exit the shims return: EX_UNAVAILABLE, a service the run does not have. */
+export const FLUTTER_PIN_SHIM_EXIT = 69;
 
 /**
  * The socket names the worker forwards under /run/automata (C3, #430) and the
@@ -68,7 +84,28 @@ export function buildEntryScript(): string {
     '    socat "TCP-LISTEN:${port},bind=127.0.0.1,reuseaddr,fork" "UNIX-CONNECT:${sock}" &',
     "  fi",
     "done",
-    // 3. Somnio agent rules, every lane, only for detected stacks. A failure
+    // 3. Flutter pin (#558): a checkout that pins an SDK the image does not
+    // have gets notice shims instead of the image's flutter/dart, so format,
+    // codegen and analyze never run on the wrong SDK and the agent is told why.
+    // The pin was validated on the host (detectFlutterPin) and is re-checked
+    // here; anything else is ignored.
+    'pin="${AUTOMATA_FLUTTER_PIN:-}"',
+    'case "$pin" in *[!0-9A-Za-z.+-]*) pin="" ;; esac',
+    'if [ -n "$pin" ]; then',
+    `  have=$( (. ${CONTAINER_PINS_FILE}; printf '%s' "\${FLUTTER_VERSION:-}") 2>/dev/null || true)`,
+    '  if [ "$pin" != "$have" ]; then',
+    `    shim=${CONTAINER_FLUTTER_SHIM_DIR}`,
+    '    mkdir -p "$shim"',
+    "    for t in flutter dart; do",
+    `      printf '#!/bin/sh\\necho "automata: this repository pins Flutter %s (FVM) but the run image has %s and no matching SDK, so %s is not available in this run." >&2\\nexit ${FLUTTER_PIN_SHIM_EXIT}\\n' "$pin" "\${have:-unknown}" "$t" >"$shim/$t"`,
+    '      chmod 0755 "$shim/$t"',
+    "    done",
+    `    PATH="$shim:$(printf '%s' "$PATH" | tr ':' '\\n' | grep -vxF '${CONTAINER_FLUTTER_ROOT}/bin' | paste -sd: -)"`,
+    "    export PATH",
+    `    echo "automata-entry: Flutter $pin is pinned but the image has \${have:-unknown}; flutter and dart are disabled for this run" >&2`,
+    "  fi",
+    "fi",
+    // 4. Somnio agent rules, every lane, only for detected stacks. A failure
     // here never fails the run: the rules are guidance, and the step ends by
     // reporting a checkout that is not clean.
     `ws=${CONTAINER_WORKSPACE}`,
@@ -94,7 +131,7 @@ export function buildEntryScript(): string {
     "  dirty=$(g status --porcelain | wc -l)",
     '  if [ "$dirty" -ne 0 ]; then echo "automata-entry: checkout not clean after the rules install ($dirty paths)" >&2; fi',
     "fi",
-    // 4. The daemon.
+    // 5. The daemon.
     'exec "$@"',
   ].join("\n");
 }
@@ -108,6 +145,38 @@ export function buildEntryScript(): string {
  */
 export function detectSomnioStacks(repo: string): string[] {
   return detectSomnioStacksFrom(fsProbe(repo));
+}
+
+/**
+ * The Flutter SDK version a checkout pins with FVM (`.fvmrc`, or the older
+ * `.fvm/fvm_config.json`), or null. Only an exact release version counts: a
+ * channel name (`stable`) or anything else is not a pin the run can match, and
+ * a value outside that shape never reaches the container (it rides the argv).
+ */
+export function detectFlutterPin(repo: string): string | null {
+  return detectFlutterPinFrom(fsProbe(repo));
+}
+
+const FLUTTER_PIN = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][0-9A-Za-z.]{1,32})?$/;
+
+/** The pure decision over a probe: `.fvmrc` wins over the legacy config. */
+export function detectFlutterPinFrom(probe: CheckoutProbe): string | null {
+  const read = (rel: string, field: string): string | null => {
+    const text = probe.readFile(rel);
+    if (text === null) return null;
+    try {
+      const json: unknown = JSON.parse(text);
+      if (typeof json !== "object" || json === null) return null;
+      const value = (json as Record<string, unknown>)[field];
+      return typeof value === "string" ? value.trim() : null;
+    } catch {
+      return null;
+    }
+  };
+  const pin =
+    read(".fvmrc", "flutter") ??
+    read(".fvm/fvm_config.json", "flutterSdkVersion");
+  return pin !== null && FLUTTER_PIN.test(pin) ? pin : null;
 }
 
 /** The reads `detectSomnioStacksFrom` needs; a fixture checkout implements it in tests. */

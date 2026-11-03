@@ -71,6 +71,7 @@ export const CONTAINER_ARGV_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
   "AUTOMATA_RUN_LANE",
   "AUTOMATA_THREAD_ID",
   "AUTOMATA_SOMNIO_STACKS",
+  "AUTOMATA_FLUTTER_PIN",
 ]);
 
 /**

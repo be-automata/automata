@@ -6,9 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   buildEntryScript,
+  CONTAINER_FLUTTER_SHIM_DIR,
+  CONTAINER_PINS_FILE,
   CONTAINER_RUN_ENV_FILE,
+  detectFlutterPin,
+  detectFlutterPinFrom,
   detectSomnioStacks,
   detectSomnioStacksFrom,
+  FLUTTER_PIN_SHIM_EXIT,
   type CheckoutProbe,
 } from "./container-entry";
 import { serializeRunEnvFile } from "./container-policy";
@@ -129,6 +134,57 @@ describe("detectSomnioStacksFrom (ADR-013 Run path 5.2)", () => {
  * behaves like the measured installer (rewrites a tracked CLAUDE.md, adds rule
  * files). The REAL CLI in the REAL image is the integration suite's job.
  */
+describe("detectFlutterPinFrom (#558)", () => {
+  // card: protects=an FVM pin is read from .fvmrc (`flutter`) or the legacy .fvm/fvm_config.json (`flutterSdkVersion`), .fvmrc winning; fails_when=either file is ignored or the legacy one wins; no_claim=FVM's own resolution rules
+  it("reads .fvmrc, falls back to the legacy config, .fvmrc wins", () => {
+    expect(
+      detectFlutterPinFrom(probe({ ".fvmrc": '{"flutter": "3.41.2"}' })),
+    ).toBe("3.41.2");
+    expect(
+      detectFlutterPinFrom(
+        probe({ ".fvm/fvm_config.json": '{"flutterSdkVersion":"3.24.5"}' }),
+      ),
+    ).toBe("3.24.5");
+    expect(
+      detectFlutterPinFrom(
+        probe({
+          ".fvmrc": '{"flutter":"3.41.2"}',
+          ".fvm/fvm_config.json": '{"flutterSdkVersion":"3.24.5"}',
+        }),
+      ),
+    ).toBe("3.41.2");
+  });
+
+  // card: protects=only an exact release version is a pin: a channel, a shell metacharacter, broken JSON or no file yields null, so nothing unsafe rides the argv; fails_when=`stable` or `3.41.2;rm -rf` comes back as a pin; no_claim=FVM forks/channels support
+  it("returns null for channels, malformed values and absent files", () => {
+    const cases: Record<string, string>[] = [
+      {},
+      { ".fvmrc": '{"flutter":"stable"}' },
+      { ".fvmrc": '{"flutter":"3.41.2; rm -rf /"}' },
+      { ".fvmrc": '{"flutter":"$(id)"}' },
+      { ".fvmrc": "not json" },
+      { ".fvmrc": '{"flutter": 3}' },
+    ];
+    for (const files of cases) {
+      expect(detectFlutterPinFrom(probe(files))).toBeNull();
+    }
+    expect(
+      detectFlutterPinFrom(probe({ ".fvmrc": '{"flutter":"3.41.2-0.1.pre"}' })),
+    ).toBe("3.41.2-0.1.pre");
+  });
+
+  // card: protects=the fs adapter reads a real checkout's .fvmrc; fails_when=the file on disk is not seen; no_claim=nothing
+  it("reads a real checkout", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fvm-"));
+    try {
+      fs.writeFileSync(path.join(dir, ".fvmrc"), '{"flutter":"3.41.2"}');
+      expect(detectFlutterPin(dir)).toBe("3.41.2");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("buildEntryScript: the Somnio rules step and the env file (run under bash)", () => {
   let root: string;
   let ws: string;
@@ -177,7 +233,13 @@ describe("buildEntryScript: the Somnio rules step and the env file (run under ba
       .replaceAll(
         CONTAINER_RUN_ENV_FILE,
         path.join(home, ".automata-run/run.env"),
-      );
+      )
+      .replaceAll(CONTAINER_PINS_FILE, path.join(root, "pins.env"))
+      .replaceAll(
+        CONTAINER_FLUTTER_SHIM_DIR,
+        path.join(home, ".automata-run/flutter-pin"),
+      )
+      .replaceAll("/opt/flutter/bin", path.join(root, "flutter/bin"));
     return spawnSync("bash", ["-c", script, "automata-entry", ...cmd], {
       encoding: "utf8",
       env: {
@@ -294,6 +356,69 @@ describe("buildEntryScript: the Somnio rules step and the env file (run under ba
   it("execs the command and propagates its exit status", () => {
     const r = runEntry({}, "bash", "-c", "exit 7");
     expect(r.status).toBe(7);
+  });
+
+  /** A fake image Flutter at <root>/flutter/bin, first on PATH, and the image pins. */
+  function fakeImageFlutter(version: string) {
+    const fbin = path.join(root, "flutter/bin");
+    fs.mkdirSync(fbin, { recursive: true });
+    for (const t of ["flutter", "dart"]) {
+      fs.writeFileSync(path.join(fbin, t), "#!/bin/sh\necho image-sdk\n", {
+        mode: 0o755,
+      });
+    }
+    fs.writeFileSync(
+      path.join(root, "pins.env"),
+      `FLUTTER_VERSION=${version}\n`,
+    );
+    return `${fbin}:${bin}:${process.env.PATH}`;
+  }
+
+  // card: protects=#558 fail-closed: a pin the image does not have replaces flutter AND dart with shims that name both versions and exit 69, the image SDK leaves PATH, and the entry says so once; fails_when=the image SDK still runs, a shim exits 0, or the notice is missing; no_claim=the agent reading the notice (skills handle a non-zero tool)
+  it("a pin the image lacks: flutter and dart become notice shims", () => {
+    const PATH = fakeImageFlutter("3.47.7");
+    const r = runEntry(
+      { PATH, AUTOMATA_FLUTTER_PIN: "3.41.2" },
+      "bash",
+      "-c",
+      'flutter --version; echo "f=$?"; dart format .; echo "d=$?"',
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(
+      `f=${FLUTTER_PIN_SHIM_EXIT}\nd=${FLUTTER_PIN_SHIM_EXIT}\n`,
+    );
+    expect(r.stdout).not.toContain("image-sdk");
+    expect(r.stderr).toContain(
+      "this repository pins Flutter 3.41.2 (FVM) but the run image has 3.47.7 and no matching SDK, so flutter is not available",
+    );
+    expect(r.stderr).toContain(
+      "automata-entry: Flutter 3.41.2 is pinned but the image has 3.47.7",
+    );
+  });
+
+  // card: protects=a pin that matches the image changes nothing: the image SDK stays on PATH and no notice is printed; fails_when=a matching repo loses flutter; no_claim=nothing
+  it("a pin that matches the image keeps the image SDK", () => {
+    const PATH = fakeImageFlutter("3.47.7");
+    const r = runEntry(
+      { PATH, AUTOMATA_FLUTTER_PIN: "3.47.7" },
+      "bash",
+      "-c",
+      "flutter",
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("image-sdk\n");
+    expect(r.stderr).toBe("");
+  });
+
+  // card: protects=no pin, or a pin with shell metacharacters, leaves PATH alone (the value is never used); fails_when=an unsafe value reaches the shim text or the SDK is removed; no_claim=nothing
+  it("no pin or an unsafe pin leaves the image SDK alone", () => {
+    const PATH = fakeImageFlutter("3.47.7");
+    for (const pin of ["", "3.41.2;touch pwned", "$(touch pwned)"]) {
+      const r = runEntry({ PATH, AUTOMATA_FLUTTER_PIN: pin }, "flutter");
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe("image-sdk\n");
+    }
+    expect(fs.existsSync(path.join(ws, "pwned"))).toBe(false);
   });
 
   // card: protects=the C2 entry starts no bridge: with no socket mounted, socat is never invoked; fails_when=a bridge starts without its socket; no_claim=C3's bridges (#430)

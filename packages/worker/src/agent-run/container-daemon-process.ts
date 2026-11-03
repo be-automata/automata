@@ -28,6 +28,7 @@ import type { ContainerRunsConfig } from "./container-config";
 import {
   buildEntryScript,
   CONTAINER_BRIDGES,
+  detectFlutterPin,
   detectSomnioStacks,
 } from "./container-entry";
 import {
@@ -303,6 +304,7 @@ export class ContainerDaemonProcess
     }
     await this.openForwards();
     const stacks = detectSomnioStacks(this.run.repo);
+    const flutterPin = detectFlutterPin(this.run.repo);
     // Admission backstop (ADR-013 Run path 1): a crash-redelivered run must
     // never meet its predecessor holding this slot's name.
     if (await this.runtime.remove(this.name)) {
@@ -340,6 +342,7 @@ export class ContainerDaemonProcess
         AUTOMATA_RUN_LANE: this.lane,
         AUTOMATA_THREAD_ID: this.input.threadId,
         AUTOMATA_SOMNIO_STACKS: stacks.join(","),
+        ...(flutterPin ? { AUTOMATA_FLUTTER_PIN: flutterPin } : {}),
       },
       entryScript: buildEntryScript(),
       command: this.deps.command ?? [
