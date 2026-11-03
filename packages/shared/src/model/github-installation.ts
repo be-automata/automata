@@ -1,6 +1,6 @@
 import { DB } from "../db";
-import { githubInstallation } from "../db/schema";
-import { GithubInstallation } from "../db/types";
+import { githubInstallation, githubRepoOrgBinding } from "../db/schema";
+import { GithubInstallation, GithubRepoOrgBinding } from "../db/types";
 import { eq, inArray } from "drizzle-orm";
 
 /**
@@ -185,4 +185,120 @@ export async function bindGithubInstallationToOrg({
     throw new Error("Failed to bind GitHub installation");
   }
   return row;
+}
+
+/**
+ * Per-repo org override for a shared installation (github_repo_org_binding).
+ * One GitHub account can host repos that belong to different orgs; a binding
+ * row routes one repo to its own org. Repo names compare case-insensitively
+ * (GitHub treats `Owner/Repo` and `owner/repo` as the same repo), so they are
+ * stored lower-cased.
+ */
+function normalizeRepoFullName(repoFullName: string): string {
+  return repoFullName.trim().toLowerCase();
+}
+
+/** The org override for one repo, or undefined when it has none. */
+export async function getRepoOrgBinding({
+  db,
+  repoFullName,
+}: {
+  db: DB;
+  repoFullName: string;
+}): Promise<GithubRepoOrgBinding | undefined> {
+  const [row] = await db
+    .select()
+    .from(githubRepoOrgBinding)
+    .where(
+      eq(
+        githubRepoOrgBinding.repoFullName,
+        normalizeRepoFullName(repoFullName),
+      ),
+    )
+    .limit(1);
+  return row;
+}
+
+/** Bind (or rebind) one repo to an org. Upserts on the repo name. */
+export async function bindRepoToOrg({
+  db,
+  repoFullName,
+  organizationId,
+}: {
+  db: DB;
+  repoFullName: string;
+  organizationId: string;
+}): Promise<GithubRepoOrgBinding> {
+  const normalized = normalizeRepoFullName(repoFullName);
+  if (!/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    throw new Error(`repoFullName must be owner/repo, got: ${repoFullName}`);
+  }
+  const [row] = await db
+    .insert(githubRepoOrgBinding)
+    .values({ repoFullName: normalized, organizationId })
+    .onConflictDoUpdate({
+      target: githubRepoOrgBinding.repoFullName,
+      set: { organizationId, updatedAt: new Date() },
+    })
+    .returning();
+  if (!row) {
+    throw new Error("Failed to bind repo to org");
+  }
+  return row;
+}
+
+/** Remove a repo's org override. True when a row was deleted. */
+export async function unbindRepoFromOrg({
+  db,
+  repoFullName,
+}: {
+  db: DB;
+  repoFullName: string;
+}): Promise<boolean> {
+  const deleted = await db
+    .delete(githubRepoOrgBinding)
+    .where(
+      eq(
+        githubRepoOrgBinding.repoFullName,
+        normalizeRepoFullName(repoFullName),
+      ),
+    )
+    .returning({ id: githubRepoOrgBinding.id });
+  return deleted.length > 0;
+}
+
+export type RepoOrgSource = "repo_binding" | "installation";
+
+/**
+ * The org AND mode for an event on one repo: the repo's org override when it
+ * has one, otherwise the installation's org (getInstallationOrgAndMode,
+ * unchanged). The mode always comes from the installation, so an override
+ * never turns a shadow installation active. Every installation-resolved
+ * webhook lane uses this, so they agree on a repo's org.
+ */
+export async function getRepoOrgAndMode({
+  db,
+  installationId,
+  repoFullName,
+}: {
+  db: DB;
+  installationId: string | number | null | undefined;
+  repoFullName: string;
+}): Promise<{
+  organizationId: string | null;
+  mode: InstallationMode;
+  source: RepoOrgSource;
+}> {
+  const [binding, installation] = await Promise.all([
+    getRepoOrgBinding({ db, repoFullName }),
+    getInstallationOrgAndMode({ db, installationId }),
+  ]);
+  if (binding) {
+    return {
+      organizationId: binding.organizationId,
+      mode: installation.mode,
+      source: "repo_binding",
+    };
+  }
+  return { ...installation, source: "installation" };
 }

@@ -701,6 +701,28 @@ export const githubInstallation = pgTable(
   ],
 );
 
+// Per-repo org override for a SHARED installation: one GitHub account whose
+// repos belong to more than one org (e.g. an agency account hosting a client
+// org's repos). A row routes that repo's installation-resolved events
+// (mentions, mirror intake, merged-PR audits) to its own org instead of the
+// installation's. No row = the installation's org, exactly as before. The
+// mode (shadow/active) still comes from the installation. Operator-written
+// only (deploy/bind-repo-to-org.ts); repo_full_name is stored lower-cased.
+export const githubRepoOrgBinding = pgTable("github_repo_org_binding", {
+  id: text("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  repoFullName: text("repo_full_name").notNull().unique(),
+  organizationId: text("organization_id")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
 export const userSettings = pgTable(
   "user_settings",
   {

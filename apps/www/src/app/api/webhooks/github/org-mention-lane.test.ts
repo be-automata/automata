@@ -6,7 +6,10 @@ import { runAutomation } from "@/server-lib/automations";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { createAutomation } from "@terragon/shared/model/automations";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
+import {
+  bindGithubInstallationToOrg,
+  bindRepoToOrg,
+} from "@terragon/shared/model/github-installation";
 import { createTestUser } from "@terragon/shared/model/test-helpers";
 import type { DBUserMessage } from "@terragon/shared";
 import { handleAppMention } from "./handle-app-mention";
@@ -518,6 +521,32 @@ describe("routing: org lane vs the legacy per-user path", () => {
       shadowInstallation;
     await handleIssueCommentEvent(empty);
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+
+  it("a repo bound to another org inside a shared installation routes to that org", async () => {
+    const clientOrg = await createOrganization({
+      db,
+      name: "Client",
+      slug: `client-${nanoid(8).toLowerCase()}`,
+    });
+    const { repoFullName, automationId } = await repoWithLane({
+      orgId: clientOrg.id,
+    });
+    // Without the binding the installation's org owns the repo: the client
+    // org's automation is skipped.
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    expect(runAutomation).not.toHaveBeenCalled();
+
+    await bindRepoToOrg({
+      db,
+      repoFullName: repoFullName.toUpperCase(),
+      organizationId: clientOrg.id,
+    });
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    expect(runAutomation).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runAutomation).mock.calls[0]![0].automationId).toBe(
+      automationId,
+    );
   });
 
   it("a review BODY mention on an org-lane repo is neither answered nor sent to legacy", async () => {
