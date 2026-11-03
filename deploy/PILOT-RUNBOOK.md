@@ -1386,6 +1386,16 @@ resolved review mode, and stamps orchestrated threads with
 the tagged block. Flipping a repo back to classic therefore restores today's
 prompt on the next push.
 
+**Mode per trigger.** `review_mode_on_update` (Admin → Review, "Mode on new
+commits") picks the mode for update runs: a pushed head (`synchronize`) or a
+base retarget (`edited`). `review_mode` then applies only when the PR is opened
+or marked ready for review. Both inherit repo row → `'*'` row; NULL on both
+means update runs use `review_mode`, i.e. one mode for every run. An update
+thread is stamped `sourceMetadata.reviewTrigger = "update"` at render time and
+dispatch reads it back, so the prompt and the dispatched run use the same mode.
+Under newest-wins, a push during the open run supersedes it, so a busy PR may
+only ever receive the update-mode review.
+
 **Deploy hazard.** A www older than this phase does not know the section markers
 and serves a marker-bearing body verbatim, orchestrated text included, to every
 repo that uses it. The order below exists because of that: the www deploy comes
