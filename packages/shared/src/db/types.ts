@@ -38,6 +38,8 @@ export type InvitationInsert = typeof schema.invitation.$inferInsert;
 export type GithubInstallation = typeof schema.githubInstallation.$inferSelect;
 export type GithubInstallationInsert =
   typeof schema.githubInstallation.$inferInsert;
+export type GithubRepoOrgBinding =
+  typeof schema.githubRepoOrgBinding.$inferSelect;
 
 export type ThreadVisibility = "private" | "link" | "repo";
 

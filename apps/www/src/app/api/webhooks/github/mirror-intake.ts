@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
-import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
+import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getOrganizationOwnerUserId } from "@terragon/shared/model/organizations";
 import { DBUserMessage } from "@terragon/shared/db/db-message";
 import { getRepoSkill } from "@terragon/shared/model/repo-skills";
@@ -283,9 +283,10 @@ export async function createMirrorTask({
     viaRepoLookup && owner && repo
       ? await getRepoInstallationId(owner, repo)
       : installationId;
-  const { organizationId, mode } = await getInstallationOrgAndMode({
+  const { organizationId, mode } = await getRepoOrgAndMode({
     db,
     installationId: resolvedInstallationId,
+    repoFullName,
   });
   if (!organizationId) {
     // WI-8: unbound installation is a business rejection, not an error. Fast-ack
