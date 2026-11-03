@@ -31,6 +31,10 @@
  * invalid stored task value can never fail a review dispatch. System default:
  * none (`DEFAULT_TASK_BATTERIES`), i.e. today's task runs.
  *
+ * `reviewModeOnUpdate`: the mode an UPDATE run (a pushed head, a retarget)
+ * uses instead of `reviewMode`; NULL across repo and '*' = use `reviewMode`
+ * (today's behaviour). Open runs never read it. See {@link ReviewTrigger}.
+ *
  * `reviewMaxTurns`: Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.
  *
  * This module imports nothing (no db, no drizzle) so client components can
@@ -48,6 +52,38 @@ export function isReviewMode(value: unknown): value is ReviewMode {
     typeof value === "string" &&
     (REVIEW_MODES as readonly string[]).includes(value)
   );
+}
+
+/**
+ * What started a PR-review run. `open` = the PR was opened or marked ready
+ * for review (and every non-webhook dispatch: a manual run); `update` = its
+ * diff changed under an open PR (a pushed head, a retarget, or a re-dispatch
+ * at the current head). `reviewModeOnUpdate` applies to `update` runs only.
+ */
+export const REVIEW_TRIGGERS = ["open", "update"] as const;
+export type ReviewTrigger = (typeof REVIEW_TRIGGERS)[number];
+
+/**
+ * The review trigger for a `pull_request` webhook action: `synchronize` and
+ * `edited` (a base retarget; title/body edits never dispatch) are updates,
+ * everything else (`opened`, `ready_for_review`) is an open.
+ */
+export function reviewTriggerForPrAction(action: string): ReviewTrigger {
+  return action === "synchronize" || action === "edited" ? "update" : "open";
+}
+
+/**
+ * The trigger a thread was stamped with at render time (`reviewTrigger` on an
+ * automation-skill stamp). No stamp (an open, an older thread, a non-skill
+ * thread) = `open`.
+ */
+export function reviewTriggerOfSourceMetadata(
+  metadata: { type: string; reviewTrigger?: string } | null | undefined,
+): ReviewTrigger {
+  return metadata?.type === "automation-skill" &&
+    metadata.reviewTrigger === "update"
+    ? "update"
+    : "open";
 }
 
 export const REVIEW_BATTERY_PACK_IDS = [
@@ -163,6 +199,7 @@ export const REVIEW_MAX_TURNS_MAX = 500;
 /** The review knobs proper; review resolution iterates exactly these. */
 export const REVIEW_ONLY_AGENT_FIELDS = [
   "reviewMode",
+  "reviewModeOnUpdate",
   "reviewBatteries",
   "reviewRunTests",
   "reviewCommandTimeoutS",
@@ -187,6 +224,7 @@ export type ReviewAgentField = (typeof REVIEW_AGENT_FIELDS)[number];
  */
 export type ReviewAgentFieldsPatch = {
   reviewMode?: string | null;
+  reviewModeOnUpdate?: string | null;
   reviewBatteries?: string[] | null;
   reviewRunTests?: boolean | null;
   reviewCommandTimeoutS?: number | null;
@@ -197,6 +235,7 @@ export type ReviewAgentFieldsPatch = {
 /** The review-agent fields of a settings row, typed (null = inherit). */
 export interface ReviewAgentValues {
   reviewMode: ReviewMode | null;
+  reviewModeOnUpdate: ReviewMode | null;
   reviewBatteries: ReviewBatteryPackId[] | null;
   reviewRunTests: boolean | null;
   reviewCommandTimeoutS: number | null;
@@ -315,6 +354,10 @@ function findFieldError(
       return isReviewMode(value)
         ? undefined
         : `reviewMode must be one of ${REVIEW_MODES.join(", ")}, or null (inherit)`;
+    case "reviewModeOnUpdate":
+      return isReviewMode(value)
+        ? undefined
+        : `reviewModeOnUpdate must be one of ${REVIEW_MODES.join(", ")}, or null (use reviewMode)`;
     case "reviewBatteries":
       return findPackListError(
         field,

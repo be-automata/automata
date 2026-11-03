@@ -17,6 +17,7 @@ import {
   type ReviewBatteryPackId,
   type ReviewMode,
   type ReviewOnlyAgentField,
+  type ReviewTrigger,
 } from "@terragon/shared/model/review-agent-settings";
 import {
   capPermissionMode,
@@ -32,6 +33,13 @@ import { composeTrustedAuthorThreshold } from "./resolve-permission-mode";
  * system default. Stored values are validated when picked; an unknown value
  * THROWS (supersede precedent) so the dispatch fails loudly and its daemon
  * token is revoked — it never degrades silently.
+ *
+ * TRIGGER: an `update` run (a pushed head, a retarget) uses the resolved
+ * `reviewModeOnUpdate` instead of `reviewMode` when one is set; an `open` run
+ * never reads it. Each field inherits on its own, so a repo's reviewMode and
+ * the '*' row's reviewModeOnUpdate combine. Every caller passes the trigger
+ * explicitly; for a thread it comes from the render-time stamp
+ * (`reviewTriggerOfThread`), so the prompt and the dispatch agree.
  *
  * CLASSIC = exactly today's behaviour — runTests/timeout/maxTurns apply only
  * when orchestrated. Under classic the result is runTests false, a 60 s
@@ -147,15 +155,22 @@ function resolveStored({
   organizationId,
   repo,
   orgDefault,
+  trigger,
 }: {
   organizationId: string;
   repo: ReviewAgentStoredRow | undefined;
   orgDefault: ReviewAgentStoredRow | undefined;
+  trigger: ReviewTrigger;
 }): { dispatch: ReviewAgentDispatch; runTestsRequested: boolean } {
   // Validate every picked value BEFORE mode gating, so an invalid stored
-  // value throws even when classic would ignore it.
+  // value throws even when classic (or an open run) would ignore it.
   const stored = pickStoredValues(organizationId, [repo, orgDefault]);
-  const mode = effectiveReviewMode(stored.reviewMode, null);
+  const mode = effectiveReviewMode(
+    trigger === "update"
+      ? (stored.reviewModeOnUpdate ?? stored.reviewMode)
+      : stored.reviewMode,
+    null,
+  );
   // Validated above, so the filter only narrows the type.
   const batteries = stored.reviewBatteries
     ? stored.reviewBatteries.filter(isReviewBatteryPackId)
@@ -215,17 +230,20 @@ export function resolveReviewAgentSettings({
   orgDefault,
   trust,
   trustedAuthorThreshold,
+  trigger,
 }: {
   organizationId: string;
   repo: ReviewAgentStoredRow | undefined;
   orgDefault: ReviewAgentStoredRow | undefined;
   trust: ReviewAgentTrust | null;
   trustedAuthorThreshold: TrustedAuthorThreshold;
+  trigger: ReviewTrigger;
 }): ReviewAgentDispatch {
   const { dispatch, runTestsRequested } = resolveStored({
     organizationId,
     repo,
     orgDefault,
+    trigger,
   });
   return runTestsRequested
     ? applyRunTestsGate(dispatch, trust, trustedAuthorThreshold)
@@ -245,17 +263,20 @@ export async function resolveReviewAgentFromRows({
   repo,
   orgDefault,
   trustContext,
+  trigger,
 }: {
   db: DB;
   organizationId: string;
   repo: RepoReviewSetting | undefined;
   orgDefault: RepoReviewSetting | undefined;
   trustContext: ThreadTrustContext | null;
+  trigger: ReviewTrigger;
 }): Promise<ReviewAgentDispatch> {
   const { dispatch, runTestsRequested } = resolveStored({
     organizationId,
     repo,
     orgDefault,
+    trigger,
   });
   if (!runTestsRequested) {
     return dispatch;
@@ -277,11 +298,13 @@ export async function resolveReviewAgentForDispatch({
   organizationId,
   repoFullName,
   trustContext,
+  trigger,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
   trustContext: ThreadTrustContext | null;
+  trigger: ReviewTrigger;
 }): Promise<ReviewAgentDispatch> {
   const { repo, orgDefault } = await getRepoReviewSettingWithOrgDefault({
     db,
@@ -294,5 +317,6 @@ export async function resolveReviewAgentForDispatch({
     repo,
     orgDefault,
     trustContext,
+    trigger,
   });
 }

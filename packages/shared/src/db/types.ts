@@ -166,6 +166,12 @@ export type ThreadSourceMetadata =
       // reads it: a bare `comment` from a run told "draft" is its draft
       // verdict even if the PR left draft mid-run. Absent on older threads.
       reviewIsDraft?: boolean;
+      // PR-review runs: set ONLY when the run was started by an UPDATE (a
+      // pushed head, a retarget, a re-dispatch at the current head). The
+      // prompt render and the dispatch both resolve the review mode with this
+      // trigger, so they pick the same mode. Absent = an open (opened /
+      // ready_for_review / manual), today's object unchanged.
+      reviewTrigger?: "update";
       // #509 delivery loop: set ONLY on fix-cycle threads. The cycle-finish
       // hook settles the cycle row it names.
       delivery?: DeliveryLaneStamp;
