@@ -147,6 +147,26 @@ async function tryLock(root: string, slot = 0): Promise<number | null> {
   return (await exitOf(probe)).code;
 }
 
+/**
+ * After a SIGKILL'd holder's exit resolves, the kernel frees its flock once the
+ * LAST process holding the lock fd is gone. A descendant of the holder can
+ * outlive the `exit` event by a few ms, so a single probe right after `await
+ * exit` races it (#567). Poll the try path, bounded, until the slot is free.
+ */
+async function tryLockAfterHolderDeath(
+  root: string,
+  slot = 0,
+  timeoutMs = 3_000,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  let code = await tryLock(root, slot);
+  while (code !== 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    code = await tryLock(root, slot);
+  }
+  return code;
+}
+
 /** In-process acquire, tracked so afterEach can release a leaked hold. */
 async function acquire(
   opts: Parameters<typeof acquireBoxLock>[0],
@@ -289,7 +309,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
     const exit = holder.exit;
     holder.child.kill("SIGKILL");
     await exit;
-    expect(await tryLock(root)).toBe(0);
+    expect(await tryLockAfterHolderDeath(root)).toBe(0);
   }, 10_000);
 
   it("AC5 (source): the lock module carries no staleness, liveness-beat, mtime, reclaim or polling machinery", () => {
@@ -526,7 +546,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       const exit = holder.exit;
       holder.child.kill("SIGKILL");
       await exit;
-      expect(await tryLock(root)).toBe(0);
+      expect(await tryLockAfterHolderDeath(root)).toBe(0);
       console.log(`[box-lock try] busy → null: ${elapsedMs}ms`);
     }, 10_000);
 
@@ -972,7 +992,7 @@ describe("box lock (#183 — the worker-side one-agent budget, kernel flock(2))"
       holder.child.kill("SIGKILL");
       await exit;
       // Kernel-released on the holder's death: no staleness, no reclaim.
-      expect(await tryLock(root, 1)).toBe(0);
+      expect(await tryLockAfterHolderDeath(root, 1)).toBe(0);
     }, 10_000);
 
     it("tryAcquireAllBoxSlots: every slot or nothing — a busy slot releases the partial set", async () => {
