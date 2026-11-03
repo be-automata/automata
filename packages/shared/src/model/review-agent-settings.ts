@@ -73,14 +73,15 @@ export function reviewTriggerForPrAction(action: string): ReviewTrigger {
 }
 
 /**
- * The trigger a thread was stamped with at render time (`reviewTrigger` on an
- * automation-skill stamp). No stamp (an open, an older thread, a non-skill
- * thread) = `open`.
+ * The trigger a thread was stamped with at creation (`reviewTrigger` on an
+ * automation-skill or automation-message stamp). No stamp (an open, an older
+ * thread, a non-automation thread) = `open`.
  */
 export function reviewTriggerOfSourceMetadata(
   metadata: { type: string; reviewTrigger?: string } | null | undefined,
 ): ReviewTrigger {
-  return metadata?.type === "automation-skill" &&
+  return (metadata?.type === "automation-skill" ||
+    metadata?.type === "automation-message") &&
     metadata.reviewTrigger === "update"
     ? "update"
     : "open";

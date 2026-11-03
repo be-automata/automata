@@ -145,7 +145,8 @@ export async function runAutomation({
     /**
      * Phase 9 (RACE-01): extra fields merged into the automation-skill stamp
      * at thread creation, so the fix attempt travels with the thread. Applies
-     * to skill_message automations only; ignored for user_message.
+     * to skill_message automations only; ignored for user_message, except
+     * `reviewTrigger`, which both action types stamp (#560).
      * `mention` (the org-owned mention lane) also turns git checkpointing off
      * for the thread: the agent pushes its own fix to the PR head, and the
      * lane never auto-commits or opens a pull request.
@@ -221,6 +222,17 @@ export async function runAutomation({
           automation: automation,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
+          // #560: an update run is stamped so the dispatch resolves
+          // reviewModeOnUpdate, as for skill_message. An open run keeps no
+          // stamp (today's thread, unchanged).
+          ...(options?.stampExtra?.reviewTrigger === "update"
+            ? {
+                sourceMetadata: {
+                  type: "automation-message" as const,
+                  reviewTrigger: "update" as const,
+                },
+              }
+            : {}),
           disableGitCheckpointing: automation.disableGitCheckpointing ?? false,
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
