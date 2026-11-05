@@ -147,11 +147,12 @@ describe("loadKnowledgeReconcileContext", () => {
       { uri: "repo://src/c.ts#L3-L4" },
     ]);
     // Foreign org and foreign repo claims never appear.
-    const other = await createTestOrg({ db, name: "Other" });
+    const other = await createTestOrg({ db, name: "Globex" });
     await seedClaim("foreign-org", "docs/a.md", [], {
       organizationId: other,
     });
-    await seedClaim("foreign-repo", "docs/a.md", [], { repo: "acme/other" });
+    const foreignRepo = { repo: "acme/other" };
+    await seedClaim("foreign-repo", "docs/a.md", [], foreignRepo);
     await db.insert(schema.knowledgeOp).values({
       id: `op-rej-${run}`,
       organizationId: org,
@@ -172,8 +173,8 @@ describe("loadKnowledgeReconcileContext", () => {
         evidence: ["repo://src/a.ts#L1-L2"],
       },
     });
-    const recent = await createTestOrg({ db, name: "Recent" });
-    const old = await createTestOrg({ db, name: "Old" });
+    const recent = await createTestOrg({ db, name: "Globex" });
+    const old = await createTestOrg({ db, name: "Initech" });
     await db.insert(schema.organizationReviewSettings).values([
       {
         organizationId: recent,
@@ -529,7 +530,7 @@ describe("publishKnowledgeReconcile", () => {
     });
 
     it("a claim of another org", async () => {
-      const other = await createTestOrg({ db, name: "Other" });
+      const other = await createTestOrg({ db, name: "Globex" });
       const foreign = await seedClaim("f", { organizationId: other });
       await expectInvalid(request([opFor(foreign)]));
     });

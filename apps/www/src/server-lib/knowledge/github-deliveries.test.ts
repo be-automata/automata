@@ -36,7 +36,7 @@ function deps(
 describe("listRepoWebhookDeliveries", () => {
   it("keeps only the repo's deliveries and only the six metadata fields", async () => {
     const d = deps([[item("a", 7), item("b", 8), item("c", null)]]);
-    const out = await listRepoWebhookDeliveries({ repoFullName: "o/r" }, d);
+    const out = await listRepoWebhookDeliveries({ repoFullName: "acme/r" }, d);
     expect(out).toEqual([
       {
         guid: "a",
@@ -52,7 +52,7 @@ describe("listRepoWebhookDeliveries", () => {
   it("follows the cursor across pages and stops at the page cap", async () => {
     const pages = Array.from({ length: 9 }, (_, n) => [item(`g${n}`, 7)]);
     const d = deps(pages);
-    const out = await listRepoWebhookDeliveries({ repoFullName: "o/r" }, d);
+    const out = await listRepoWebhookDeliveries({ repoFullName: "acme/r" }, d);
     expect(out).toHaveLength(5);
     expect(d.getDeliveriesPage).toHaveBeenCalledTimes(5);
     expect(d.getDeliveriesPage).toHaveBeenNthCalledWith(2, "c1");
@@ -62,7 +62,7 @@ describe("listRepoWebhookDeliveries", () => {
     const d = deps([]);
     d.getDeliveriesPage.mockRejectedValue(new Error("Bearer secret-jwt"));
     const err = await listRepoWebhookDeliveries(
-      { repoFullName: "o/r" },
+      { repoFullName: "acme/r" },
       d,
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GithubDeliveriesError);

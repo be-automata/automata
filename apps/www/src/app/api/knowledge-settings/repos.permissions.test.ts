@@ -72,7 +72,7 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
 
   async function seedFailedIntent(
     organizationId: string,
-    repoFullName = "o/repo",
+    repoFullName = "acme/repo",
   ) {
     const { intentId } = await recordKnowledgePush({
       db,
@@ -111,7 +111,7 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
     const body = await (await GET()).json();
     expect(body.repos).toHaveLength(1);
     expect(body.repos[0]).toMatchObject({
-      repoFullName: "o/repo",
+      repoFullName: "acme/repo",
       pending: true,
       latestIntent: {
         id: failedId,
@@ -176,7 +176,7 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
       await actor("owner");
       const foreignId = await seedFailedIntent(orgId);
       await actor("owner");
-      const processedId = await seedFailedIntent(orgId, "o/ok");
+      const processedId = await seedFailedIntent(orgId, "acme/ok");
       await db
         .update(schema.knowledgeIntent)
         .set({ state: "processed" })
@@ -201,7 +201,7 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
       await actor("owner");
       await seedFailedIntent(orgId);
       await joinAs(orgId, "member");
-      expect((await post(DIAGNOSE, { repoFullName: "o/repo" })).status).toBe(
+      expect((await post(DIAGNOSE, { repoFullName: "acme/repo" })).status).toBe(
         403,
       );
       expect(listRepoWebhookDeliveries).not.toHaveBeenCalled();
@@ -209,7 +209,9 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
 
     it("an admin gets 404 for a repo that is not onboarded", async () => {
       await actor("admin");
-      expect((await post(DIAGNOSE, { repoFullName: "x/y" })).status).toBe(404);
+      expect((await post(DIAGNOSE, { repoFullName: "globex/y" })).status).toBe(
+        404,
+      );
       expect(listRepoWebhookDeliveries).not.toHaveBeenCalled();
     });
 
@@ -227,11 +229,11 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
         },
       ];
       vi.mocked(listRepoWebhookDeliveries).mockResolvedValue(deliveries);
-      const res = await post(DIAGNOSE, { repoFullName: "O/Repo" });
+      const res = await post(DIAGNOSE, { repoFullName: "Acme/Repo" });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ deliveries });
       expect(listRepoWebhookDeliveries).toHaveBeenCalledWith({
-        repoFullName: "o/repo",
+        repoFullName: "acme/repo",
       });
     });
 
@@ -241,7 +243,7 @@ describe("knowledge-settings repos, retry and diagnose (real DB)", () => {
       vi.mocked(listRepoWebhookDeliveries).mockRejectedValue(
         new GithubDeliveriesError("github_unavailable"),
       );
-      const res = await post(DIAGNOSE, { repoFullName: "o/repo" });
+      const res = await post(DIAGNOSE, { repoFullName: "acme/repo" });
       expect(res.status).toBe(502);
       expect(await res.json()).toEqual({ error: "github_unavailable" });
     });

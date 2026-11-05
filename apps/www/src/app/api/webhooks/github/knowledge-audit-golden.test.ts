@@ -78,7 +78,7 @@ vi.mock("@terragon/shared/github-app", () => ({
   lookupInstallationId: vi.fn(async () => 424242),
 }));
 
-const REPO = "fixture-owner/golden-repo";
+const REPO = "acme/golden-repo";
 
 let orgId: string;
 let userId: string;
@@ -110,7 +110,7 @@ function pushBody(after: string) {
       full_name: REPO,
       name: "golden-repo",
       default_branch: "main",
-      owner: { login: "fixture-owner" },
+      owner: { login: "acme" },
     },
   };
 }
@@ -138,7 +138,7 @@ function mergedBody() {
       full_name: REPO,
       name: "golden-repo",
       default_branch: "main",
-      owner: { login: "fixture-owner", id: 1 },
+      owner: { login: "acme", id: 1 },
     },
   };
 }
@@ -246,7 +246,7 @@ describe("PIPE-05 audit golden", () => {
     expect(off.audit).toBe(on.audit);
     expect(throwing.audit).toBe(on.audit);
     expect(on.audit).toMatchInlineSnapshot(
-      `"{"userId":"<user>","organizationId":"<org>","shadow":false,"message":{"type":"user","model":null,"parts":[{"type":"text","text":"PR #41 in fixture-owner/golden-repo was merged. Run the post-merge follow-up (no 'github-pr-merged' skill is configured for this repository)."}],"timestamp":"<ts>"},"githubRepoFullName":"fixture-owner/golden-repo","baseBranchName":"main","githubPRNumber":41,"sourceType":"automation"}"`,
+      `"{"userId":"<user>","organizationId":"<org>","shadow":false,"message":{"type":"user","model":null,"parts":[{"type":"text","text":"PR #41 in acme/golden-repo was merged. Run the post-merge follow-up (no 'github-pr-merged' skill is configured for this repository)."}],"timestamp":"<ts>"},"githubRepoFullName":"acme/golden-repo","baseBranchName":"main","githubPRNumber":41,"sourceType":"automation"}"`,
     );
 
     // The push handler really ran for On and Off, and really threw for the third.

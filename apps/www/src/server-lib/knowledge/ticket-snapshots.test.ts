@@ -97,7 +97,7 @@ const req = (
   organizationId = "org1",
 ) => ({
   organizationId,
-  repoFullName: "o/r",
+  repoFullName: "acme/r",
   intentId: "int1",
   claims: claims.map((c) => ({
     claimId: c.claimId,

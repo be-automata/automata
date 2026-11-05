@@ -210,15 +210,15 @@ describe("claimDueKnowledgeIntents", () => {
   });
 
   it("never claims Off, unset or offboarded orgs and spends no attempts", async () => {
-    const offOrg = await createTestOrg({ db, name: "Off" });
+    const offOrg = await createTestOrg({ db, name: "Globex" });
     await setEngine(offOrg, false);
-    const nullOrg = await createTestOrg({ db, name: "Unset" });
-    const offboarded = await createTestOrg({ db, name: "Gone" });
+    const nullOrg = await createTestOrg({ db, name: "Initech" });
+    const offboarded = await createTestOrg({ db, name: "Example" });
     await setEngine(offboarded, true, new Date(NOW.getTime() - HOUR));
     const ids = [
-      await seed("o/a", 1, { organizationId: offOrg }),
-      await seed("o/a", 2, { organizationId: nullOrg }),
-      await seed("o/a", 3, { organizationId: offboarded }),
+      await seed("acme/a", 1, { organizationId: offOrg }),
+      await seed("acme/a", 2, { organizationId: nullOrg }),
+      await seed("acme/a", 3, { organizationId: offboarded }),
     ];
     expect(await claimDueKnowledgeIntents({ db, now: NOW })).toEqual([]);
     for (const id of ids) {
@@ -508,7 +508,7 @@ describe("knowledge intent lease, release and failure", () => {
 describe("knowledge head check (D-03 / PD-19)", () => {
   let db: DB;
   let org: string;
-  const REPO = "fixture-owner/repo-a";
+  const REPO = "acme/repo-a";
 
   const setEngine = (
     organizationId: string,
@@ -593,10 +593,7 @@ describe("knowledge head check (D-03 / PD-19)", () => {
       listKnowledgeHeadCheckCandidates({ db, now, slot, limit });
 
     it("returns only the repos hashed into the slot, with their cursor fields", async () => {
-      const repos = Array.from(
-        { length: 40 },
-        (_, i) => `fixture-owner/r-${i}`,
-      );
+      const repos = Array.from({ length: 40 }, (_, i) => `acme/r-${i}`);
       for (const r of repos) await cursor(r, { lastSha: sha(1) });
       const slot = await slotOf(org, repos[0]!);
       const expected = [];
@@ -620,14 +617,12 @@ describe("knowledge head check (D-03 / PD-19)", () => {
 
     it("includes review-settings repos, never the * sentinel", async () => {
       await db.insert(schema.repoReviewSettings).values([
-        { organizationId: org, repoFullName: "Fixture-Owner/Settings-Repo" },
+        { organizationId: org, repoFullName: "Acme/Settings-Repo" },
         { organizationId: org, repoFullName: "*" },
       ]);
-      const slot = await slotOf(org, "fixture-owner/settings-repo");
+      const slot = await slotOf(org, "acme/settings-repo");
       const out = await list(slot);
-      expect(out.map((c) => c.repoFullName)).toContain(
-        "fixture-owner/settings-repo",
-      );
+      expect(out.map((c) => c.repoFullName)).toContain("acme/settings-repo");
       expect(out.map((c) => c.repoFullName)).not.toContain("*");
       expect(
         out.find((c) => c.repoFullName.endsWith("settings-repo")),
@@ -638,9 +633,9 @@ describe("knowledge head check (D-03 / PD-19)", () => {
     });
 
     it("skips Off and offboarded orgs", async () => {
-      const off = await createTestOrg({ db, name: "Off" });
+      const off = await createTestOrg({ db, name: "Globex" });
       await setEngine(off, false);
-      const gone = await createTestOrg({ db, name: "Gone" });
+      const gone = await createTestOrg({ db, name: "Example" });
       await setEngine(gone, true, new Date(NOW.getTime() - HOUR));
       await cursor(REPO, {}, off);
       await cursor(REPO, {}, gone);
@@ -681,11 +676,11 @@ describe("knowledge head check (D-03 / PD-19)", () => {
     it("returns a deterministic 5-repo window that covers a 12-repo slot across rotations", async () => {
       const found = rowsOf<{ r: string }>(
         await db.execute(sql`
-          SELECT 'fixture-owner/r-' || i AS r
+          SELECT 'acme/r-' || i AS r
           FROM generate_series(1, 600) AS i
-          WHERE abs(hashtext(${org} || ':' || 'fixture-owner/r-' || i)::bigint)
+          WHERE abs(hashtext(${org} || ':' || 'acme/r-' || i)::bigint)
                 % ${KNOWLEDGE_HEAD_CHECK_SLOTS}
-              = abs(hashtext(${org} || ':' || 'fixture-owner/r-1')::bigint)
+              = abs(hashtext(${org} || ':' || 'acme/r-1')::bigint)
                 % ${KNOWLEDGE_HEAD_CHECK_SLOTS}
           ORDER BY i
           LIMIT 12
@@ -883,9 +878,11 @@ describe("knowledge head check (D-03 / PD-19)", () => {
 
     it("produces an intent the claim picks up like a pushed one", async () => {
       await recover(sha(2));
+      // next_attempt_at comes from the column default (the database clock),
+      // so the claim reads the real clock, not the pinned NOW.
       const claimed = await claimDueKnowledgeIntents({
         db,
-        now: new Date(NOW.getTime() + MIN),
+        now: new Date(Date.now() + MIN),
       });
       expect(claimed).toEqual([
         {

@@ -41,7 +41,7 @@ const PLATFORM: KnowledgeViewer = { isOrgAdmin: false, isPlatformAdmin: true };
 
 function repo(over: Partial<KnowledgeRepoDto> = {}): KnowledgeRepoDto {
   return {
-    repoFullName: "example-org/example-repo",
+    repoFullName: "example/example-repo",
     defaultBranch: "main",
     lastPushAt: "2026-10-10T09:00:00.000Z",
     lastSha: FULL_SHA,
@@ -67,7 +67,7 @@ function repo(over: Partial<KnowledgeRepoDto> = {}): KnowledgeRepoDto {
 }
 
 const failedRepo = repo({
-  repoFullName: "example-org/failing-repo",
+  repoFullName: "example/failing-repo",
   latestIntent: {
     id: "intent-failed",
     state: "failed",
@@ -165,7 +165,7 @@ describe("KnowledgeReposTableView", () => {
   it("renders returned deliveries as a nested register under the diagnosed row", () => {
     const html = render({
       diagnose: {
-        repoFullName: "example-org/example-repo",
+        repoFullName: "example/example-repo",
         status: "success",
         deliveries: [
           {

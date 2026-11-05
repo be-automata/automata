@@ -161,7 +161,7 @@ describe("/api/knowledge-settings", () => {
       const t = new Date("2026-10-02T00:00:00.000Z");
       listRepoStatus.mockResolvedValue([
         {
-          repoFullName: "o/never",
+          repoFullName: "acme/never",
           defaultBranch: null,
           lastSha: null,
           observedHeadSha: null,
@@ -175,7 +175,7 @@ describe("/api/knowledge-settings", () => {
           ticketClaimCount: 0,
         },
         {
-          repoFullName: "o/failed",
+          repoFullName: "acme/failed",
           defaultBranch: "main",
           lastSha: "a".repeat(40),
           observedHeadSha: "b".repeat(40),
@@ -240,13 +240,13 @@ describe("/api/knowledge-settings", () => {
       it("reports configured / not_configured only for repos with ticket claims, no tracker call", async () => {
         vi.mocked(isOrgAdmin).mockResolvedValue(false);
         listRepoStatus.mockResolvedValue([
-          row("o/with", 2),
-          row("o/without", 1),
-          row("o/none", 0),
+          row("acme/with", 2),
+          row("acme/without", 1),
+          row("acme/none", 0),
         ]);
         vi.mocked(resolveTrackerConfig).mockImplementation(
           async ({ repoFullName }) =>
-            repoFullName === "o/with" ? ({} as never) : null,
+            repoFullName === "acme/with" ? ({} as never) : null,
         );
         const res = await GET();
         expect(res.status).toBe(200);
@@ -257,7 +257,7 @@ describe("/api/knowledge-settings", () => {
         expect(body.repos[0].ticketClaimCount).toBe(2);
         expect(resolveTrackerConfig).toHaveBeenCalledTimes(2);
         expect(resolveTrackerConfig).not.toHaveBeenCalledWith(
-          expect.objectContaining({ repoFullName: "o/none" }),
+          expect.objectContaining({ repoFullName: "acme/none" }),
         );
         expect(resolveTrackerConfig).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -270,7 +270,7 @@ describe("/api/knowledge-settings", () => {
 
       it("does not resolve anything when no repo has ticket claims", async () => {
         vi.mocked(isOrgAdmin).mockResolvedValue(false);
-        listRepoStatus.mockResolvedValue([row("o/none", 0)]);
+        listRepoStatus.mockResolvedValue([row("acme/none", 0)]);
         await GET();
         expect(getOrganizationOwnerUserId).not.toHaveBeenCalled();
         expect(resolveTrackerConfig).not.toHaveBeenCalled();
@@ -278,7 +278,7 @@ describe("/api/knowledge-settings", () => {
 
       it("a throwing resolver reads as not_configured and the GET still answers 200", async () => {
         vi.mocked(isOrgAdmin).mockResolvedValue(false);
-        listRepoStatus.mockResolvedValue([row("o/boom", 1)]);
+        listRepoStatus.mockResolvedValue([row("acme/boom", 1)]);
         vi.mocked(resolveTrackerConfig).mockRejectedValue(
           new Error("invalid YOUTRACK_URL"),
         );
@@ -291,7 +291,7 @@ describe("/api/knowledge-settings", () => {
 
       it("an org without an owner reads as not_configured", async () => {
         vi.mocked(isOrgAdmin).mockResolvedValue(false);
-        listRepoStatus.mockResolvedValue([row("o/x", 1)]);
+        listRepoStatus.mockResolvedValue([row("acme/x", 1)]);
         vi.mocked(getOrganizationOwnerUserId).mockResolvedValue(null);
         const body = await (await GET()).json();
         expect(body.repos[0].ticketSource).toBe("not_configured");

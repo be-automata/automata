@@ -10,7 +10,7 @@ import {
 const ROW = (id: string) => ({
   id,
   organizationId: "org1",
-  repoFullName: "o/r",
+  repoFullName: "acme/r",
   targetSha: "abc",
 });
 
@@ -28,7 +28,7 @@ function makeDeps(
       code: "dispatch_failed" as const,
       becameFailed: false,
       organizationId: "org1",
-      repoFullName: "o/r",
+      repoFullName: "acme/r",
     })),
     trigger: vi.fn(async () => undefined),
     alert: vi.fn(async () => undefined),
@@ -56,7 +56,7 @@ describe("runKnowledgeReconcileSweep", () => {
         {
           id: "i1",
           organizationId: "org1",
-          repoFullName: "o/r",
+          repoFullName: "acme/r",
           attempts: 8,
           code: "max_attempts" as const,
           state: "failed" as const,
@@ -65,7 +65,7 @@ describe("runKnowledgeReconcileSweep", () => {
         {
           id: "i2",
           organizationId: "org1",
-          repoFullName: "o/r",
+          repoFullName: "acme/r",
           attempts: 2,
           code: "lease_expired" as const,
           state: "pending" as const,
@@ -79,7 +79,7 @@ describe("runKnowledgeReconcileSweep", () => {
     expect(deps.alert).toHaveBeenCalledTimes(1);
     expect(deps.alert).toHaveBeenCalledWith({
       organizationId: "org1",
-      repoFullName: "o/r",
+      repoFullName: "acme/r",
       code: "max_attempts",
       attempts: 8,
     });
@@ -121,7 +121,7 @@ describe("runKnowledgeReconcileSweep", () => {
         code: "dispatch_failed" as const,
         becameFailed: true,
         organizationId: "org1",
-        repoFullName: "o/r",
+        repoFullName: "acme/r",
       })),
     });
     const r = await runKnowledgeReconcileSweep(deps);
@@ -192,9 +192,9 @@ describe("runKnowledgeReconcileSweep head check (D-03 / PD-19)", () => {
     const now = new Date(Date.UTC(2026, 10, 2, 12, 7)); // minute 7 of the hour
     const minuteIndex = Math.floor(now.getTime() / 60_000);
     const deps = makeDeps({
-      listHeadCandidates: vi.fn(async () => [CAND("o/a"), CAND("o/b")]),
+      listHeadCandidates: vi.fn(async () => [CAND("acme/a"), CAND("acme/b")]),
       readHead: vi.fn(async (row) =>
-        row.repoFullName === "o/a"
+        row.repoFullName === "acme/a"
           ? { kind: "ok" as const, sha: HEAD, defaultBranch: "main" }
           : { kind: "no_access" as const },
       ),
@@ -230,7 +230,7 @@ describe("runKnowledgeReconcileSweep head check (D-03 / PD-19)", () => {
     let i = 0;
     const deps = makeDeps({
       listHeadCandidates: vi.fn(async () =>
-        outcomes.map((_, n) => CAND(`o/r${n}`)),
+        outcomes.map((_, n) => CAND(`acme/r${n}`)),
       ),
       readHead: vi.fn(async () => ({
         kind: "ok" as const,
@@ -286,7 +286,7 @@ describe("runKnowledgeReconcileSweep head check (D-03 / PD-19)", () => {
   it("logs by error name and keeps dispatch results when readHead or recover throws", async () => {
     const deps = makeDeps({
       claimDue: vi.fn(async () => [ROW("a")]),
-      listHeadCandidates: vi.fn(async () => [CAND("o/a"), CAND("o/b")]),
+      listHeadCandidates: vi.fn(async () => [CAND("acme/a"), CAND("acme/b")]),
       readHead: vi
         .fn()
         .mockRejectedValueOnce(new TypeError("boom"))
@@ -328,10 +328,10 @@ describe("runKnowledgeReconcileSweep head check (D-03 / PD-19)", () => {
     const deadlines: number[] = [];
     const deps = makeDeps({
       listHeadCandidates: vi.fn(async () => [
-        CAND("o/a"),
-        CAND("o/b"),
-        CAND("o/c"),
-        CAND("o/d"),
+        CAND("acme/a"),
+        CAND("acme/b"),
+        CAND("acme/c"),
+        CAND("acme/d"),
       ]),
       readHead: vi.fn(
         (_row, signal: AbortSignal) =>

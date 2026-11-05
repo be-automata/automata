@@ -43,7 +43,7 @@ function makeDeps(
 
 const input = (over: Record<string, unknown> = {}) => ({
   organizationId: "org1",
-  repoFullName: "fixture-owner/repo-a",
+  repoFullName: "acme/repo-a",
   defaultBranch: "main" as string | null,
   signal: new AbortController().signal,
   ...over,
@@ -61,9 +61,7 @@ describe("readDefaultBranchHead", () => {
       string,
       RequestInit,
     ];
-    expect(url).toBe(
-      "https://api.github.com/repos/fixture-owner/repo-a/commits/main",
-    );
+    expect(url).toBe("https://api.github.com/repos/acme/repo-a/commits/main");
     expect(init.redirect).toBe("manual");
     expect((init.headers as Record<string, string>)["Accept"]).toBe(
       "application/vnd.github.sha",
