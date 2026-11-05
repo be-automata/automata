@@ -63,7 +63,8 @@ function guardedFiles(): string[] {
   return [...files].filter((f) => existsSync(path.join(REPO_ROOT, f))).sort();
 }
 
-const OWNER_LINE = /repoFullName|repo_full_name|owner|repo:/;
+// `repo://path` is an evidence URI scheme, not a repo key.
+const OWNER_LINE = /repoFullName|repo_full_name|owner|repo:(?!\/\/)/;
 const OWNER_LITERAL = /["'`]([A-Za-z0-9_.-]+)\/[A-Za-z0-9_.-]+["'`]/g;
 const ORG_NAME =
   /createTest(?:Org|Organization)\([^)]*?name:\s*["'`]([^"'`]+)["'`]/g;
@@ -175,6 +176,13 @@ describe("knowledge fixture guard", () => {
       'const a = { repoFullName: "other-co/docs" };\nconst e = "x@corp.io";',
     );
     assert.equal(bad.length, 2);
+    assert.deepEqual(
+      structuralFailures(
+        "scratch.ts",
+        'const u = ["docs/a.md", "repo://a.ts"];',
+      ),
+      [],
+    );
     for (const message of bad) assert.ok(!message.includes("other-co"));
   });
 });

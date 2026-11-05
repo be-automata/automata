@@ -131,3 +131,97 @@ describe("runKnowledgePurgeSweep", () => {
     expect(deps.log.error).toHaveBeenCalled();
   });
 });
+
+describe("runKnowledgePurgeSweep mirror purge dispatch", () => {
+  const CFG_A = { apiUrl: "https://a.example", tenantId: "t1", apiToken: "x" };
+  const CFG_B = { apiUrl: "https://a.example", tenantId: "t2", apiToken: "x" };
+
+  function mirrorDeps(overrides: Partial<KnowledgePurgeSweepDeps> = {}) {
+    return makeDeps({
+      listDue: vi.fn(async () => ["A"]),
+      listRepos: vi.fn(async () => ["a/x", "b/y"]),
+      resolveConfig: vi.fn(async () => CFG_A),
+      triggerMirrorPurge: vi.fn(async () => undefined),
+      alertMirrorPurgeFailed: vi.fn(async () => undefined),
+      ...overrides,
+    });
+  }
+
+  it("sends one trigger when both repos resolve to the same tenant", async () => {
+    const deps = mirrorDeps();
+    await runKnowledgePurgeSweep(deps);
+    expect(deps.triggerMirrorPurge).toHaveBeenCalledTimes(1);
+    expect(deps.triggerMirrorPurge).toHaveBeenCalledWith(CFG_A, "A");
+  });
+
+  it("sends one trigger per distinct tenant and never resolves repo '*'", async () => {
+    const resolveConfig = vi.fn(async (_o: string, repo: string) =>
+      repo === "a/x" ? CFG_A : CFG_B,
+    );
+    const deps = mirrorDeps({ resolveConfig });
+    await runKnowledgePurgeSweep(deps);
+    expect(deps.triggerMirrorPurge).toHaveBeenCalledTimes(2);
+    expect(resolveConfig.mock.calls.map((c) => c[1])).toEqual(["a/x", "b/y"]);
+  });
+
+  it("reads the repos before the purge and sends nothing when the purge fails", async () => {
+    const order: string[] = [];
+    const deps = mirrorDeps({
+      listRepos: vi.fn(async () => {
+        order.push("list");
+        return ["a/x"];
+      }),
+      purge: vi.fn(async () => {
+        order.push("purge");
+        throw new Error("db");
+      }),
+    });
+    const r = await runKnowledgePurgeSweep(deps);
+    expect(order).toEqual(["list", "purge"]);
+    expect(r.failed).toBe(1);
+    expect(deps.triggerMirrorPurge).not.toHaveBeenCalled();
+  });
+
+  it("records a routing failure, still triggers the resolvable tenant, alerts once", async () => {
+    const resolveConfig = vi.fn(async (_o: string, repo: string) => {
+      if (repo === "b/y") throw new Error("bad row");
+      return CFG_A;
+    });
+    const deps = mirrorDeps({ resolveConfig });
+    const r = await runKnowledgePurgeSweep(deps);
+    expect(r.purged).toBe(1);
+    expect(deps.triggerMirrorPurge).toHaveBeenCalledTimes(1);
+    expect(deps.log.error).toHaveBeenCalledWith(
+      "[cron:knowledge-purge] mirror purge dispatch failed",
+      { organizationId: "A", reason: "routing_unresolved", count: 1 },
+    );
+    expect(deps.alertMirrorPurgeFailed).toHaveBeenCalledTimes(1);
+    expect(deps.alertMirrorPurgeFailed).toHaveBeenCalledWith({
+      organizationId: "A",
+      reason: "routing_unresolved",
+      count: 1,
+    });
+  });
+
+  it("records a trigger failure without changing the purge result", async () => {
+    const deps = mirrorDeps({
+      triggerMirrorPurge: vi.fn(async () => {
+        throw new Error("502");
+      }),
+    });
+    const r = await runKnowledgePurgeSweep(deps);
+    expect(r).toEqual({ purged: 1, failed: 0, timedOut: 0 });
+    expect(deps.log.error).toHaveBeenCalledWith(
+      "[cron:knowledge-purge] mirror purge dispatch failed",
+      { organizationId: "A", reason: "trigger_failed", count: 1 },
+    );
+    expect(deps.alertMirrorPurgeFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("an org with no cursor repos triggers and alerts nothing", async () => {
+    const deps = mirrorDeps({ listRepos: vi.fn(async () => []) });
+    await runKnowledgePurgeSweep(deps);
+    expect(deps.triggerMirrorPurge).not.toHaveBeenCalled();
+    expect(deps.alertMirrorPurgeFailed).not.toHaveBeenCalled();
+  });
+});

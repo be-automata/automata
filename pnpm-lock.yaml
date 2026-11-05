@@ -476,6 +476,9 @@ importers:
       '@terragon/env':
         specifier: workspace:*
         version: link:../../packages/env
+      '@terragon/knowledge':
+        specifier: workspace:*
+        version: link:../../packages/knowledge
       '@terragon/r2':
         specifier: workspace:*
         version: link:../../packages/r2
@@ -1292,6 +1295,9 @@ importers:
       '@terragon/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@terragon/knowledge':
+        specifier: workspace:*
+        version: link:../knowledge
       '@terragon/utils':
         specifier: workspace:*
         version: link:../utils

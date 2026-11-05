@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   getStalledThreads: vi.fn(),
   selfHeal: vi.fn(),
   purge: vi.fn(),
+  reconcile: vi.fn(),
+  dueThreads: vi.fn(async (): Promise<unknown[]> => []),
   due: vi.fn(async (): Promise<unknown[]> => []),
   runAutomation: vi.fn(),
   admit: vi.fn(),
@@ -25,7 +27,7 @@ vi.mock("@terragon/shared/model/threads", () => ({
   }),
   getUserIdsWithThreadsStuckInQueue: h.stuckUsers,
   getUserIdsWithThreadsReadyToProcess: vi.fn(async () => []),
-  getScheduledThreadChatsDueToRun: vi.fn(async () => []),
+  getScheduledThreadChatsDueToRun: h.dueThreads,
 }));
 vi.mock("@terragon/shared/model/automations", () => ({
   getScheduledAutomationsDueToRun: h.due,
@@ -64,6 +66,9 @@ vi.mock("@terragon/shared/model/egress-events", () => ({
 }));
 vi.mock("@/server-lib/audit/self-heal-cron", () => ({
   runSelfHealCron: h.selfHeal,
+}));
+vi.mock("@/server-lib/knowledge/reconcile-sweep", () => ({
+  runKnowledgeReconcileSweep: h.reconcile,
 }));
 vi.mock("@/server-lib/knowledge/purge-sweep", () => ({
   runKnowledgePurgeSweep: h.purge,
@@ -352,5 +357,59 @@ describe("runAutomationsCron self-heal admission", () => {
     expect(h.runAutomation).toHaveBeenCalledTimes(2);
     expect(h.setHolder).not.toHaveBeenCalled();
     expect(h.release).not.toHaveBeenCalled();
+  });
+});
+
+/** D-12 / PD-7: the reconcile sweep rides the every-minute tick, last, fail-soft. */
+describe("runScheduledTasksCron knowledge reconcile sweep", () => {
+  let runScheduledTasksCron: () => Promise<void>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ runScheduledTasksCron } = await import("./cron"));
+    h.reconcile.mockReset();
+    h.reconcile.mockResolvedValue(undefined);
+    h.dueThreads.mockReset();
+    h.dueThreads.mockResolvedValue([]);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("runs the sweep exactly once, after scheduled-thread processing", async () => {
+    h.dueThreads.mockImplementation(async () => {
+      h.order.push("due-threads");
+      return [];
+    });
+    h.reconcile.mockImplementation(async () => {
+      h.order.push("reconcile");
+    });
+    h.order.length = 0;
+    await runScheduledTasksCron();
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
+    expect(h.order.slice(-2)).toEqual(["due-threads", "reconcile"]);
+  });
+
+  it("still runs the sweep when thread processing throws, and the error propagates", async () => {
+    h.dueThreads.mockRejectedValue(new Error("db down"));
+    await expect(runScheduledTasksCron()).rejects.toThrow("db down");
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing sweep is logged and does not change the outcome", async () => {
+    h.reconcile.mockRejectedValue(new Error("sweep down"));
+    await expect(runScheduledTasksCron()).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      "[cron:knowledge-reconcile] failed (non-fatal)",
+      expect.any(Error),
+    );
+  });
+
+  it("the */1 pattern reaches the sweep once", async () => {
+    const { runScheduledCron } = await import("./cron");
+    await runScheduledCron("*/1 * * * *");
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
   });
 });

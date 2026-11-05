@@ -146,3 +146,24 @@ export async function listKnowledgeOrgsDueForPurge({
     .limit(limit);
   return rows.map((r) => r.organizationId);
 }
+
+/**
+ * Distinct repos the org has a reconcile cursor for. Read BEFORE the purge
+ * (which deletes the cursors) to find the engine tenants holding mirrors.
+ * Names only, bounded.
+ */
+export async function listKnowledgeRepoNamesForPurge({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ repoFullName: knowledgeCursor.repoFullName })
+    .from(knowledgeCursor)
+    .where(eq(knowledgeCursor.organizationId, organizationId))
+    .orderBy(asc(knowledgeCursor.repoFullName))
+    .limit(500);
+  return rows.map((r) => r.repoFullName);
+}

@@ -139,6 +139,19 @@ export const env = envsafe({
   SUPERSEDE_SWEEP_CANCELLED_AFTER_MS: str({ default: "", allowEmpty: true }),
   SUPERSEDE_SWEEP_ORPHAN_AFTER_MS: str({ default: "", allowEmpty: true }),
 
+  // Phase 13 knowledge reconcile. Dedicated worker->www secret for the internal
+  // knowledge reconcile endpoints. Empty = those endpoints answer 401 and the
+  // sweep dispatches no reconcile; mirror purge never reads it (PD-20).
+  // Rotation: set the new value in the worker env and restart via
+  // automata-worker-safe-restart, then set the www secret; intents in flight
+  // during the gap lease-expire once (+1 attempt each). Never reuse
+  // INTERNAL_SHARED_SECRET or daemon tokens.
+  KNOWLEDGE_RECONCILE_SECRET: str({ default: "", allowEmpty: true }),
+  // Platform ops Slack incoming webhook, the same channel as the worker's #373
+  // growth-trigger WORKER_ALERT_WEBHOOK_URL (D-15). Empty = log only. A
+  // credential: never logged.
+  OPS_ALERT_WEBHOOK_URL: str({ default: "", allowEmpty: true }),
+
   // Posthog
   NEXT_PUBLIC_POSTHOG_KEY: str({
     default: "",

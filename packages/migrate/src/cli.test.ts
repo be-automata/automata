@@ -62,21 +62,21 @@ describe("deploy/migrate.ts", () => {
 
     const dry = runCli([], db.url);
     expect(dry.status).toBe(0);
-    expect(dry.stdout).toContain("16 pending");
+    expect(dry.stdout).toContain("17 pending");
     expect(dry.stdout).toContain("pending  0000-baseline [baseline]");
 
     const apply = runCli(["--apply"], db.url);
     expect(apply.status).toBe(0);
-    expect(apply.stdout).toContain("applied 16 migration(s)");
+    expect(apply.stdout).toContain("applied 17 migration(s)");
 
     const again = runCli(["--apply"], db.url);
     expect(again.status).toBe(0);
-    expect(again.stdout).toContain("16 applied, 0 pending");
+    expect(again.stdout).toContain("17 applied, 0 pending");
     expect(again.stdout).toContain("applied 0 migration(s)");
 
     const c = await db.connect();
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(16);
+    expect(ledger).toHaveLength(17);
     expect(ledger[0]?.appliedBy).toMatch(/^ci-bot@/);
   });
 

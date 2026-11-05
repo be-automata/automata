@@ -121,6 +121,7 @@ describe("deploy/migrations", () => {
       "2026-11-01-better-auth-1-7-columns",
       "2026-11-02-github-repo-org-binding",
       "2026-11-02-review-mode-on-update",
+      "2026-11-05-knowledge-reconcile",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);

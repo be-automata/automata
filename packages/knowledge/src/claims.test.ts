@@ -8,6 +8,7 @@ import {
   applyDraft,
   checkPage,
   HumanEditedPageError,
+  pageVersionOf,
   reconcile,
   retargetOp,
   stubUpdater,
@@ -513,5 +514,27 @@ describe("D-4: op ids", () => {
       after: undefined,
       why: "low confidence",
     });
+  });
+});
+
+describe("pageVersionOf", () => {
+  it("equals the engine page hash: a matching version is not human-edited", () => {
+    const { root, sc } = useCorpus();
+    const md = pageOf(root);
+    const report = checkPage(root, md, {
+      ...sc,
+      pageVersion: pageVersionOf(md),
+    });
+    expect(report.humanEdited).toBe(false);
+  });
+
+  it("flags a page that differs from the version", () => {
+    const { root, sc } = useCorpus();
+    const md = pageOf(root);
+    const report = checkPage(root, `${md}\nedit`, {
+      ...sc,
+      pageVersion: pageVersionOf(md),
+    });
+    expect(report.humanEdited).toBe(true);
   });
 });

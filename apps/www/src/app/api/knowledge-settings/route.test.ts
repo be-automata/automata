@@ -12,8 +12,13 @@ import {
   KnowledgeControlsConflictError,
   KnowledgeOffboardedError,
 } from "@terragon/shared/model/knowledge-controls";
+import { forKnowledge } from "@terragon/shared/model/knowledge-access";
 import { listKnowledgeAdminActions } from "@terragon/shared/model/knowledge-admin-log";
-import { getOrganizationById } from "@terragon/shared/model/organizations";
+import {
+  getOrganizationById,
+  getOrganizationOwnerUserId,
+} from "@terragon/shared/model/organizations";
+import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 
 vi.mock("@/lib/auth-server", () => ({
   getTenantContextOrNull: vi.fn(),
@@ -25,8 +30,19 @@ const captureMock = vi.fn();
 vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: captureMock }),
 }));
+vi.mock("@terragon/shared/model/knowledge-access", () => ({
+  forKnowledge: vi.fn(),
+}));
 vi.mock("@terragon/shared/model/organizations", () => ({
   getOrganizationById: vi.fn(),
+  getOrganizationOwnerUserId: vi.fn(),
+}));
+vi.mock("@/server-lib/tracker/tracker-config", () => ({
+  resolveTrackerConfig: vi.fn(),
+}));
+const createTrackerClient = vi.fn();
+vi.mock("@/server-lib/tracker/tracker-client", () => ({
+  createTrackerClient: (...a: unknown[]) => createTrackerClient(...a),
 }));
 vi.mock("@terragon/shared/model/knowledge-admin-log", () => ({
   listKnowledgeAdminActions: vi.fn(),
@@ -44,6 +60,7 @@ vi.mock("@terragon/shared/model/knowledge-controls", async () => {
   };
 });
 
+const listRepoStatus = vi.fn();
 const ORG = "org_1";
 const USER = "user_1";
 const UPDATED = new Date("2026-10-01T00:00:00.000Z");
@@ -107,6 +124,13 @@ describe("/api/knowledge-settings", () => {
     vi.mocked(getOrganizationById).mockResolvedValue({
       slug: "acme",
     } as never);
+    listRepoStatus.mockResolvedValue([]);
+    vi.mocked(getOrganizationOwnerUserId).mockResolvedValue("owner_1");
+    vi.mocked(resolveTrackerConfig).mockReset();
+    createTrackerClient.mockReset();
+    vi.mocked(forKnowledge).mockReturnValue({
+      admin: { listRepoStatus },
+    } as never);
   });
 
   describe("GET", () => {
@@ -128,6 +152,150 @@ describe("/api/knowledge-settings", () => {
         spend: null,
         actions: [],
         viewer: { isOrgAdmin: false, isPlatformAdmin: false },
+        repos: [],
+      });
+    });
+
+    it("returns repo liveness rows to a member, ISO dates, scoped to the session org", async () => {
+      vi.mocked(isOrgAdmin).mockResolvedValue(false);
+      const t = new Date("2026-10-02T00:00:00.000Z");
+      listRepoStatus.mockResolvedValue([
+        {
+          repoFullName: "acme/never",
+          defaultBranch: null,
+          lastSha: null,
+          observedHeadSha: null,
+          lastPushAt: null,
+          latestIntent: null,
+          pending: false,
+          pendingSince: null,
+          affectedClaimCount: 0,
+          excludedDocClaims: 0,
+          excludedInvalidClaims: 0,
+          ticketClaimCount: 0,
+        },
+        {
+          repoFullName: "acme/failed",
+          defaultBranch: "main",
+          lastSha: "a".repeat(40),
+          observedHeadSha: "b".repeat(40),
+          lastPushAt: t,
+          latestIntent: {
+            id: "i1",
+            state: "failed",
+            attempts: 8,
+            lastErrorCode: "fetch_failed",
+            targetSha: "b".repeat(40),
+            createdAt: t,
+            processedAt: null,
+          },
+          pending: true,
+          pendingSince: t,
+          affectedClaimCount: 3,
+          excludedDocClaims: 2,
+          excludedInvalidClaims: 1,
+          ticketClaimCount: 0,
+        },
+      ]);
+      const body = await (await GET()).json();
+      expect(forKnowledge).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: ORG }),
+      );
+      expect(body.repos[0].lastPushAt).toBeNull();
+      expect(body.repos[0].latestIntent).toBeNull();
+      expect(body.repos[1].lastPushAt).toBe(t.toISOString());
+      expect(body.repos[1].latestIntent).toEqual({
+        id: "i1",
+        state: "failed",
+        attempts: 8,
+        lastErrorCode: "fetch_failed",
+        targetSha: "b".repeat(40),
+        createdAt: t.toISOString(),
+        processedAt: null,
+      });
+      expect(body.repos[1].pending).toBe(true);
+      expect(body.repos[1].pendingSince).toBe(t.toISOString());
+      expect(body.repos[1].affectedClaimCount).toBe(3);
+      expect(body.repos[1].excludedDocClaims).toBe(2);
+      expect(body.repos[1].excludedInvalidClaims).toBe(1);
+      expect(body.repos[1].ticketSource).toBeNull();
+    });
+
+    describe("ticket source (PD-24)", () => {
+      const row = (repoFullName: string, ticketClaimCount: number) => ({
+        repoFullName,
+        defaultBranch: "main",
+        lastSha: null,
+        observedHeadSha: null,
+        lastPushAt: null,
+        latestIntent: null,
+        pending: false,
+        pendingSince: null,
+        affectedClaimCount: 0,
+        excludedDocClaims: 0,
+        excludedInvalidClaims: 0,
+        ticketClaimCount,
+      });
+
+      it("reports configured / not_configured only for repos with ticket claims, no tracker call", async () => {
+        vi.mocked(isOrgAdmin).mockResolvedValue(false);
+        listRepoStatus.mockResolvedValue([
+          row("acme/with", 2),
+          row("acme/without", 1),
+          row("acme/none", 0),
+        ]);
+        vi.mocked(resolveTrackerConfig).mockImplementation(
+          async ({ repoFullName }) =>
+            repoFullName === "acme/with" ? ({} as never) : null,
+        );
+        const res = await GET();
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(
+          body.repos.map((r: { ticketSource: unknown }) => r.ticketSource),
+        ).toEqual(["configured", "not_configured", null]);
+        expect(body.repos[0].ticketClaimCount).toBe(2);
+        expect(resolveTrackerConfig).toHaveBeenCalledTimes(2);
+        expect(resolveTrackerConfig).not.toHaveBeenCalledWith(
+          expect.objectContaining({ repoFullName: "acme/none" }),
+        );
+        expect(resolveTrackerConfig).toHaveBeenCalledWith(
+          expect.objectContaining({
+            userId: "owner_1",
+            organizationId: ORG,
+          }),
+        );
+        expect(createTrackerClient).not.toHaveBeenCalled();
+      });
+
+      it("does not resolve anything when no repo has ticket claims", async () => {
+        vi.mocked(isOrgAdmin).mockResolvedValue(false);
+        listRepoStatus.mockResolvedValue([row("acme/none", 0)]);
+        await GET();
+        expect(getOrganizationOwnerUserId).not.toHaveBeenCalled();
+        expect(resolveTrackerConfig).not.toHaveBeenCalled();
+      });
+
+      it("a throwing resolver reads as not_configured and the GET still answers 200", async () => {
+        vi.mocked(isOrgAdmin).mockResolvedValue(false);
+        listRepoStatus.mockResolvedValue([row("acme/boom", 1)]);
+        vi.mocked(resolveTrackerConfig).mockRejectedValue(
+          new Error("invalid YOUTRACK_URL"),
+        );
+        const res = await GET();
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.repos[0].ticketSource).toBe("not_configured");
+        expect(JSON.stringify(body)).not.toContain("YOUTRACK_URL");
+      });
+
+      it("an org without an owner reads as not_configured", async () => {
+        vi.mocked(isOrgAdmin).mockResolvedValue(false);
+        listRepoStatus.mockResolvedValue([row("acme/x", 1)]);
+        vi.mocked(getOrganizationOwnerUserId).mockResolvedValue(null);
+        const body = await (await GET()).json();
+        expect(body.repos[0].ticketSource).toBe("not_configured");
+        expect(resolveTrackerConfig).not.toHaveBeenCalled();
       });
     });
 

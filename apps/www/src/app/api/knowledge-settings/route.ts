@@ -10,13 +10,21 @@ import {
   updateKnowledgeControls,
   type KnowledgeControls,
 } from "@terragon/shared/model/knowledge-controls";
+import { forKnowledge } from "@terragon/shared/model/knowledge-access";
 import { listKnowledgeAdminActions } from "@terragon/shared/model/knowledge-admin-log";
-import { getOrganizationById } from "@terragon/shared/model/organizations";
+import {
+  getOrganizationById,
+  getOrganizationOwnerUserId,
+} from "@terragon/shared/model/organizations";
+import type { KnowledgeRepoStatusRow } from "@terragon/shared/model/knowledge-repo-status";
 
 import { getTenantContextOrNull, isPlatformAdmin } from "@/lib/auth-server";
 import { db } from "@/lib/db";
 import { isOrgAdmin } from "@/lib/org-role";
 import { controlsToDto } from "@/server-lib/knowledge/controls-dto";
+import type { KnowledgeTicketSource } from "@/components/settings/knowledge/knowledge-form";
+import { toKnowledgeRepoDto } from "@/server-lib/knowledge/repos-dto";
+import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 import { getPostHogServer } from "@/lib/posthog-server";
 
 /**
@@ -31,6 +39,50 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * (any value up to the absolute max, logged with via "platform_admin").
  */
 
+/**
+ * PD-24: whether a tracker config resolves for each repo that has ticket
+ * claims. Reads stored config only: no tracker client is built and no tracker
+ * HTTP call is made on page load. A resolution failure reads as not configured
+ * and never fails the page.
+ */
+async function resolveTicketSources({
+  organizationId,
+  repos,
+}: {
+  organizationId: string;
+  repos: KnowledgeRepoStatusRow[];
+}): Promise<Map<string, KnowledgeTicketSource>> {
+  const withTickets = repos.filter((r) => r.ticketClaimCount > 0);
+  const sources = new Map<string, KnowledgeTicketSource>();
+  if (withTickets.length === 0) return sources;
+  let userId: string | null = null;
+  try {
+    userId = await getOrganizationOwnerUserId({ db, organizationId });
+  } catch {
+    userId = null;
+  }
+  await Promise.all(
+    withTickets.map(async (r) => {
+      let configured = false;
+      if (userId !== null) {
+        try {
+          configured =
+            (await resolveTrackerConfig({
+              db,
+              userId,
+              organizationId,
+              repoFullName: r.repoFullName,
+            })) !== null;
+        } catch {
+          configured = false;
+        }
+      }
+      sources.set(r.repoFullName, configured ? "configured" : "not_configured");
+    }),
+  );
+  return sources;
+}
+
 export async function GET(): Promise<NextResponse> {
   const ctx = await getTenantContextOrNull();
   if (!ctx) {
@@ -43,10 +95,11 @@ export async function GET(): Promise<NextResponse> {
       spend: null,
       actions: [],
       viewer: { isOrgAdmin: false, isPlatformAdmin: false },
+      repos: [],
     });
   }
   const organizationId = ctx.organizationId;
-  const [controls, spend, actions, org, orgAdmin, platformAdmin] =
+  const [controls, spend, actions, org, orgAdmin, platformAdmin, repos] =
     await Promise.all([
       getKnowledgeControls({ db, organizationId }),
       getKnowledgeSpend({ db, organizationId }),
@@ -54,7 +107,9 @@ export async function GET(): Promise<NextResponse> {
       getOrganizationById({ db, organizationId }),
       isOrgAdmin({ db, organizationId, userId: ctx.userId }),
       isPlatformAdmin(),
+      forKnowledge({ db, organizationId }).admin.listRepoStatus(),
     ]);
+  const ticketSources = await resolveTicketSources({ organizationId, repos });
   return NextResponse.json({
     orgSlug: org?.slug ?? null,
     controls: controlsToDto(controls),
@@ -76,6 +131,9 @@ export async function GET(): Promise<NextResponse> {
       createdAt: a.createdAt.toISOString(),
     })),
     viewer: { isOrgAdmin: orgAdmin, isPlatformAdmin: platformAdmin },
+    repos: repos.map((r) =>
+      toKnowledgeRepoDto(r, ticketSources.get(r.repoFullName) ?? null),
+    ),
   });
 }
 
