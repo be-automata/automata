@@ -104,6 +104,13 @@ export const JIRA_READY_FOR_QA = "Ready for QA";
 export const JIRA_CODE_REVIEW = "Code Review";
 
 const READY_FOR_QA_RE = /ready for qa/i;
+/**
+ * A workflow whose QA status carries no "Ready for" prefix (plain `QA`,
+ * `In QA`, `Testing`, `Ready for Testing`): the same stage under another name,
+ * so it is the target itself, never a fallback. Whole-name match only, so
+ * `QA Failed` or `Ready to Deploy` never qualify.
+ */
+const QA_STAGE_RE = /^(?:qa|in qa|testing|in testing|ready for test(?:ing)?)$/i;
 const REVIEW_RE = /\b(?:code review|in review|ready for review|pr review)\b/i;
 /** At or past QA: the merge has nothing left to move. */
 const QA_OR_PAST_RE =
@@ -194,9 +201,12 @@ export const jiraStagePolicy: TrackerStagePolicy = {
     };
     switch (target) {
       case JIRA_READY_FOR_QA:
-        // A workflow without a QA status still records the merge as reviewed
-        // — a fallback: the ticket is NOT ready for QA.
-        return first(READY_FOR_QA_RE) ?? first(REVIEW_RE, true);
+        // A plain `QA` status is the same stage. A workflow with no QA status
+        // at all still records the merge as reviewed — a fallback: the ticket
+        // is NOT ready for QA.
+        return (
+          first(READY_FOR_QA_RE) ?? first(QA_STAGE_RE) ?? first(REVIEW_RE, true)
+        );
       case JIRA_CODE_REVIEW:
         return first(REVIEW_RE);
       case PROMOTION_TARGET:

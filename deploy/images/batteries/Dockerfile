@@ -84,6 +84,11 @@ ARG GITLEAKS_VERSION=8.30.1
 ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 ARG SHELLCHECK_VERSION=0.11.0
 ARG SHELLCHECK_SHA256=b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+# roborev: the review daemon dev-execution's "roborev last" step drives through
+# the vendor's roborev-guard. Same version and linux/amd64 tarball sha256 the
+# vendor installer pins (vendors/somnio/scripts/install.sh at VENDOR_SKILLS_SHA).
+ARG ROBOREV_VERSION=0.68.1
+ARG ROBOREV_SHA256=4c560a49c3738a59ce4d3ea1f663ca5d6235e8adec43d35f62c1eed60cde331d
 
 # The runtime account. Fixed, non-root, outside every range the host uses
 # (system 100-999, slot accounts 2000+), so a bind-mounted file's owner is never
@@ -157,7 +162,10 @@ RUN fetch-verified "https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSI
     fetch-verified "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz" \
       "${SHELLCHECK_SHA256}" /tmp/shellcheck.tgz; \
     tar -xzf /tmp/shellcheck.tgz -C /tmp; install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck; \
-    chown root:root /usr/local/bin/actionlint /usr/local/bin/gitleaks; \
+    fetch-verified "https://github.com/kenn-io/roborev/releases/download/v${ROBOREV_VERSION}/roborev_${ROBOREV_VERSION}_linux_amd64.tar.gz" \
+      "${ROBOREV_SHA256}" /tmp/roborev.tgz; \
+    tar -xzf /tmp/roborev.tgz -C /usr/local/bin roborev; chmod 0755 /usr/local/bin/roborev; \
+    chown root:root /usr/local/bin/actionlint /usr/local/bin/gitleaks /usr/local/bin/roborev; \
     rm -rf /tmp/*
 
 # ── Claude Code CLI (exact version) ─────────────────────────────────────────
@@ -285,6 +293,7 @@ USER ${AGENT_USER}
 WORKDIR /home/${AGENT_USER}
 ENV HOME=/home/${AGENT_USER} \
     GSTACK_SESSION_KIND=spawned \
+    ROBOREV_TELEMETRY_ENABLED=0 \
     MCP_TIMEOUT=30000
 
 # Flutter: first run unpacks its tool snapshot; analytics off for good.
@@ -377,7 +386,7 @@ RUN printf '%s\n' \
       "CHROMIUM_VERSION=${CHROMIUM_VERSION}" "BUN_VERSION=${BUN_VERSION}" \
       "FLUTTER_VERSION=${FLUTTER_VERSION}" "SOMNIO_VERSION_LINE='${SOMNIO_VERSION_LINE}'" \
       "ACTIONLINT_VERSION=${ACTIONLINT_VERSION}" "GITLEAKS_VERSION=${GITLEAKS_VERSION}" \
-      "SHELLCHECK_VERSION=${SHELLCHECK_VERSION}" >/opt/automata/pins.env; \
+      "SHELLCHECK_VERSION=${SHELLCHECK_VERSION}" "ROBOREV_VERSION=${ROBOREV_VERSION}" >/opt/automata/pins.env; \
     chmod 0444 /opt/automata/pins.env
 USER ${AGENT_USER}
 WORKDIR /workspace

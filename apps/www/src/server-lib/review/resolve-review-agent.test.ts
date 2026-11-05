@@ -40,6 +40,7 @@ function row(
   return {
     repoFullName,
     reviewMode: null,
+    reviewModeOnUpdate: null,
     reviewBatteries: null,
     reviewRunTests: null,
     reviewCommandTimeoutS: null,
@@ -63,6 +64,7 @@ function resolve(overrides: Partial<ResolveArgs>) {
     orgDefault: undefined,
     trust: TRUSTED,
     trustedAuthorThreshold: "MEMBER",
+    trigger: "open",
     ...overrides,
   });
 }
@@ -102,6 +104,7 @@ describe("resolveReviewAgentSettings — precedence and defaults", () => {
       repo: row({ reviewRunTests: true }),
       orgDefault: orgRow({
         reviewMode: "orchestrated",
+        reviewModeOnUpdate: null,
         reviewBatteries: ["somnio-review"],
         reviewMaxTurns: 50,
       }),
@@ -281,6 +284,83 @@ describe("resolveReviewAgentSettings — invalid stored values throw", () => {
   });
 });
 
+describe("resolveReviewAgentSettings — reviewModeOnUpdate (trigger)", () => {
+  it("an open run uses reviewMode and ignores reviewModeOnUpdate", () => {
+    expect(
+      resolve({
+        repo: row({
+          reviewMode: "orchestrated",
+          reviewModeOnUpdate: "classic",
+        }),
+        trigger: "open",
+      }).mode,
+    ).toBe("orchestrated");
+  });
+
+  it("an update run uses reviewModeOnUpdate", () => {
+    const result = resolve({
+      repo: row({ reviewMode: "orchestrated", reviewModeOnUpdate: "classic" }),
+      trigger: "update",
+    });
+    expect(result).toEqual({
+      mode: "classic",
+      batteries: ALL_PACKS,
+      runTests: false,
+      commandTimeoutMs: 60000,
+    });
+  });
+
+  it("an update run with reviewModeOnUpdate NULL everywhere falls back to reviewMode", () => {
+    expect(
+      resolve({ repo: row({ reviewMode: "orchestrated" }), trigger: "update" })
+        .mode,
+    ).toBe("orchestrated");
+    expect(resolve({ trigger: "update" }).mode).toBe("classic");
+  });
+
+  it("inherits reviewModeOnUpdate from the '*' row, per field", () => {
+    const result = resolve({
+      repo: row({ reviewMode: "orchestrated" }),
+      orgDefault: orgRow({ reviewModeOnUpdate: "classic" }),
+      trigger: "update",
+    });
+    expect(result.mode).toBe("classic");
+    // The repo row's own value wins over the '*' row's.
+    expect(
+      resolve({
+        repo: row({ reviewModeOnUpdate: "orchestrated" }),
+        orgDefault: orgRow({ reviewModeOnUpdate: "classic" }),
+        trigger: "update",
+      }).mode,
+    ).toBe("orchestrated");
+  });
+
+  it("orchestrated on update keeps the orchestrated knobs", () => {
+    expect(
+      resolve({
+        repo: row({
+          reviewMode: "classic",
+          reviewModeOnUpdate: "orchestrated",
+          reviewMaxTurns: 40,
+        }),
+        trigger: "update",
+      }),
+    ).toEqual({
+      mode: "orchestrated",
+      batteries: ALL_PACKS,
+      runTests: false,
+      commandTimeoutMs: 300000,
+      maxTurns: 40,
+    });
+  });
+
+  it("an invalid stored reviewModeOnUpdate throws, even on an open run", () => {
+    expect(() =>
+      resolve({ repo: row({ reviewModeOnUpdate: "turbo" }), trigger: "open" }),
+    ).toThrow(/reviewModeOnUpdate/);
+  });
+});
+
 describe("resolveReviewAgentForDispatch (real DB)", () => {
   const db = createDb(env.DATABASE_URL!);
   let orgId: string;
@@ -320,6 +400,7 @@ describe("resolveReviewAgentForDispatch (real DB)", () => {
       organizationId: orgId,
       repoFullName: REPO,
       trustContext,
+      trigger: "open",
     });
     expect(result).toEqual({
       mode: "orchestrated",
@@ -351,6 +432,7 @@ describe("resolveReviewAgentForDispatch (real DB)", () => {
         organizationId: orgId,
         repoFullName: REPO,
         trustContext,
+        trigger: "open",
       }),
     ).rejects.toThrow(/reviewMode/);
   });
@@ -377,6 +459,7 @@ describe("resolveReviewAgentForDispatch (real DB)", () => {
       organizationId: orgId,
       repoFullName: REPO,
       trustContext,
+      trigger: "open",
     });
     expect(result).toEqual({
       mode: "orchestrated",

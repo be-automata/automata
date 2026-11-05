@@ -38,6 +38,8 @@ export type InvitationInsert = typeof schema.invitation.$inferInsert;
 export type GithubInstallation = typeof schema.githubInstallation.$inferSelect;
 export type GithubInstallationInsert =
   typeof schema.githubInstallation.$inferInsert;
+export type GithubRepoOrgBinding =
+  typeof schema.githubRepoOrgBinding.$inferSelect;
 
 export type ThreadVisibility = "private" | "link" | "repo";
 
@@ -164,9 +166,23 @@ export type ThreadSourceMetadata =
       // reads it: a bare `comment` from a run told "draft" is its draft
       // verdict even if the PR left draft mid-run. Absent on older threads.
       reviewIsDraft?: boolean;
+      // PR-review runs: set ONLY when the run was started by an UPDATE (a
+      // pushed head, a retarget, a re-dispatch at the current head). The
+      // prompt render and the dispatch both resolve the review mode with this
+      // trigger, so they pick the same mode. Absent = an open (opened /
+      // ready_for_review / manual), today's object unchanged.
+      reviewTrigger?: "update";
       // #509 delivery loop: set ONLY on fix-cycle threads. The cycle-finish
       // hook settles the cycle row it names.
       delivery?: DeliveryLaneStamp;
+    }
+  // A plain-message (user_message) PR-review automation run started by an
+  // UPDATE (#560). Written ONLY for update runs, so an open run's thread keeps
+  // no stamp (today's object). The dispatch reads it to pick
+  // `reviewModeOnUpdate`, exactly like the automation-skill stamp.
+  | {
+      type: "automation-message";
+      reviewTrigger: "update";
     };
 
 /**
@@ -313,7 +329,9 @@ export type ThreadErrorType =
   | "queue-limit-exceeded"
   | "provider-unavailable"
   | "queue-retired"
-  | "out-of-memory";
+  | "out-of-memory"
+  /** #561: the box had no memory headroom; the agent never ran. */
+  | "box-at-capacity";
 export type ThreadErrorMessage = ThreadErrorType | string;
 export type GithubPRStatus = "draft" | "open" | "closed" | "merged";
 export type GithubCheckRunConclusion =

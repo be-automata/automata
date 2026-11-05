@@ -701,6 +701,28 @@ export const githubInstallation = pgTable(
   ],
 );
 
+// Per-repo org override for a SHARED installation: one GitHub account whose
+// repos belong to more than one org (e.g. an agency account hosting a client
+// org's repos). A row routes that repo's installation-resolved events
+// (mentions, mirror intake, merged-PR audits) to its own org instead of the
+// installation's. No row = the installation's org, exactly as before. The
+// mode (shadow/active) still comes from the installation. Operator-written
+// only (deploy/bind-repo-to-org.ts); repo_full_name is stored lower-cased.
+export const githubRepoOrgBinding = pgTable("github_repo_org_binding", {
+  id: text("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  repoFullName: text("repo_full_name").notNull().unique(),
+  organizationId: text("organization_id")
+    .notNull()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
 export const userSettings = pgTable(
   "user_settings",
   {
@@ -1583,6 +1605,13 @@ export const repoReviewSettings = pgTable(
      * precedent). Nothing on the worker consumes them until Phase 5.
      */
     reviewMode: text("review_mode"),
+    /**
+     * The mode an UPDATE review run (a pushed head or a retarget) uses instead
+     * of reviewMode. Same family and inherit chain (repo row → '*' row); NULL
+     * on both = use reviewMode (today's behaviour). Open runs never read it.
+     * NO column default.
+     */
+    reviewModeOnUpdate: text("review_mode_on_update"),
     reviewBatteries: text("review_batteries").array(),
     reviewRunTests: boolean("review_run_tests"),
     reviewCommandTimeoutS: integer("review_command_timeout_s"),

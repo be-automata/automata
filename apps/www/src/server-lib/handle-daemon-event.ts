@@ -38,6 +38,8 @@ import {
   classifyProviderResult,
   PROVIDER_UNAVAILABLE_ERROR,
 } from "@/agent/msg/classify-provider-result";
+import { BOX_AT_CAPACITY_ERROR } from "@/agent/msg/classify-box-capacity";
+import { isAdmissionExhaustedText } from "@terragon/utils/box-capacity";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import {
@@ -387,6 +389,10 @@ export async function handleDaemonEvent({
     } else if (providerUnavailable) {
       threadChatUpdates.errorMessage = PROVIDER_UNAVAILABLE_ERROR;
       threadChatUpdates.errorMessageInfo = JSON.stringify(providerUnavailable);
+    } else if (isAdmissionExhaustedText(customErrorMessage)) {
+      // #561: the box refused admission; the agent never ran.
+      threadChatUpdates.errorMessage = BOX_AT_CAPACITY_ERROR;
+      threadChatUpdates.errorMessageInfo = customErrorMessage;
     } else if (customErrorMessage) {
       threadChatUpdates.errorMessage = "agent-generic-error";
       threadChatUpdates.errorMessageInfo = customErrorMessage;

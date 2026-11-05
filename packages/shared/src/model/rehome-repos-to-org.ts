@@ -103,6 +103,9 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "apikey",
   "subscription",
   "github_installation",
+  // Operator routing config, rebound by hand like the installation
+  // (deploy/bind-repo-to-org.ts), never moved by the tool.
+  "github_repo_org_binding",
   "slack_installation",
   "user_credits",
   "usage_events",

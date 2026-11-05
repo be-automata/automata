@@ -113,6 +113,34 @@ describe("jiraStagePolicy.resolveTarget", () => {
     expect(resolveTarget("Ready for QA", ["Done", "Closed"])).toBeNull();
   });
 
+  it("takes a plain QA status as the Ready for QA stage, not a fallback", () => {
+    const cuc = ["Ready to Deploy", "QA", "To Do", "In Progress", "Done"];
+    expect(resolveTarget("Ready for QA", cuc)).toEqual({
+      stage: "QA",
+      fallback: false,
+    });
+    expect(resolveTarget("Ready for QA", ["In Testing", "Done"])).toEqual({
+      stage: "In Testing",
+      fallback: false,
+    });
+    // "Ready for QA" still wins over a plain QA status.
+    expect(
+      resolveTarget("Ready for QA", ["QA", "Ready for QA", "Done"]),
+    ).toEqual({ stage: "Ready for QA", fallback: false });
+    // A plain QA status wins over the review fallback.
+    expect(resolveTarget("Ready for QA", ["Code Review", "QA"])).toEqual({
+      stage: "QA",
+      fallback: false,
+    });
+  });
+
+  it("never takes a QA-ish status that is not the QA stage", () => {
+    expect(
+      resolveTarget("Ready for QA", ["QA Failed", "Ready to Deploy", "Done"]),
+    ).toBeNull();
+    expect(jiraStagePolicy.reached("QA", "QA")).toBe(true);
+  });
+
   it("Code Review matches any review-ish status, never Done", () => {
     expect(resolveTarget("Code Review", ["Done", "Ready for Review"])).toEqual({
       stage: "Ready for Review",

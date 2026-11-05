@@ -7,6 +7,8 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
+import { getPullRequestAutomationsForRepo } from "@terragon/shared/model/automations";
+import { isCompanionAutomation } from "@terragon/shared/automations";
 import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
 import type { ReviewLogger } from "@terragon/review/state/review-github-client";
 import { effectiveShadow } from "@/lib/github-side-effects";
@@ -27,6 +29,10 @@ import {
   providerUnavailableOfChat,
   type ProviderUnavailable,
 } from "@/agent/msg/classify-provider-result";
+import {
+  BOX_AT_CAPACITY_SENTENCE,
+  boxAtCapacityOfChat,
+} from "@/agent/msg/classify-box-capacity";
 
 /**
  * The PR companion lane's terminal writer (emit-only, like the review and
@@ -61,6 +67,13 @@ export interface CompanionReportRun {
   stamp: CompanionLaneStamp;
   /** The run's thread creation time, epoch ms: orders two runs' reports. */
   requestedAt: number;
+  /**
+   * #559: whether the repo has an enabled PR review automation besides the
+   * companion. False on a companion-only repo (e.g. an infra repo where the
+   * bot must never approve): the comment then never claims a review exists.
+   * Absent = true (the companion runs next to a review).
+   */
+  hasReview?: boolean;
 }
 
 /** The hidden marker of a (PR, skill) report about `stamp.headSha`. */
@@ -184,7 +197,10 @@ function renderHeader(
     companionReportMarker(run),
     `### PR companion: \`${stamp.skillName}\``,
     `Advisory notes for commit \`${stamp.headSha}\`. This is not a review ` +
-      `and carries no verdict; the review of this PR is posted separately.`,
+      "and carries no verdict; " +
+      (run.hasReview === false
+        ? "this repository has no automated review, so a person reviews and approves this PR."
+        : "the review of this PR is posted separately."),
   ];
   if (currentHeadSha && currentHeadSha !== stamp.headSha) {
     lines.push(
@@ -241,14 +257,21 @@ export function renderCompanionNotice(
   run: CompanionReportRun,
   currentHeadSha: string | null,
   providerUnavailable?: ProviderUnavailable | null,
+  /** #561: the execution box never admitted the run. */
+  boxAtCapacity = false,
 ): string {
+  const reviewNote =
+    run.hasReview === false ? "" : " The review of this PR is not affected.";
   return [
     ...renderHeader(run, currentHeadSha),
     providerUnavailable
       ? `The companion run for this commit could not run. ${describeProviderUnavailable(providerUnavailable)} ` +
-        "There are no notes this time. The review of this PR is not affected."
-      : "The companion run finished without a usable report for this commit, " +
-        "so there are no notes this time. The review of this PR is not affected.",
+        `There are no notes this time.${reviewNote}`
+      : boxAtCapacity
+        ? `The companion run for this commit could not run. ${BOX_AT_CAPACITY_SENTENCE} ` +
+          `There are no notes this time; the next push runs it again.${reviewNote}`
+        : "The companion run finished without a usable report for this commit, " +
+          `so there are no notes this time.${reviewNote}`,
   ].join("\n\n");
 }
 
@@ -318,6 +341,7 @@ export async function executeCompanionReport({
   terminalText,
   currentHeadSha,
   providerUnavailable,
+  boxAtCapacity = false,
   logger,
 }: {
   github: CompanionReportGitHub;
@@ -330,6 +354,8 @@ export async function executeCompanionReport({
    * edited in place as for any changed body.
    */
   providerUnavailable?: ProviderUnavailable | null;
+  /** #561: the execution box never admitted the run; read only when no report parsed. */
+  boxAtCapacity?: boolean;
   logger?: ReviewLogger;
 }): Promise<CompanionReportOutcome> {
   const { stamp, requestedAt } = run;
@@ -372,7 +398,12 @@ export async function executeCompanionReport({
   const parsed = parseCompanionReport(terminalText);
   const body = parsed.ok
     ? renderCompanionReport(parsed.value, run, currentHeadSha)
-    : renderCompanionNotice(run, currentHeadSha, providerUnavailable);
+    : renderCompanionNotice(
+        run,
+        currentHeadSha,
+        providerUnavailable,
+        boxAtCapacity,
+      );
   if (existing !== null && existing.body === body) {
     logger?.info("companion: report unchanged; skipping", meta);
     return { outcome: "skipped_unchanged" };
@@ -521,6 +552,39 @@ const logger: ReviewLogger = {
 };
 
 /**
+ * #559: does the repo have an enabled PR review automation (not a companion)
+ * in this org? A failed lookup answers true, keeping the wording the comment
+ * had before #559.
+ */
+export async function repoHasReviewAutomation({
+  db,
+  organizationId,
+  repoFullName,
+}: {
+  db: DB;
+  organizationId: string | null;
+  repoFullName: string;
+}): Promise<boolean> {
+  try {
+    const automations = await getPullRequestAutomationsForRepo({
+      db,
+      repoFullName,
+    });
+    return automations.some(
+      (automation) =>
+        automation.organizationId === organizationId &&
+        !isCompanionAutomation(automation),
+    );
+  } catch (error) {
+    logger.warn("review-automation lookup failed; assuming a review", {
+      repoFullName,
+      error: errorMessage(error),
+    });
+    return true;
+  }
+}
+
+/**
  * The finish-hook entry: a no-op for every thread a companion automation did
  * not start. Shadow mode and GITHUB_SIDE_EFFECTS_ENABLED write nothing.
  * Never throws.
@@ -581,10 +645,19 @@ export async function handleCompanionReportAtFinish({
     }
     const outcome = await executeCompanionReport({
       github: createOctokitCompanionReportClient(octokit, stamp.repoFullName),
-      run: { stamp, requestedAt: new Date(thread.createdAt).getTime() },
+      run: {
+        stamp,
+        requestedAt: new Date(thread.createdAt).getTime(),
+        hasReview: await repoHasReviewAutomation({
+          db,
+          organizationId: thread.organizationId ?? null,
+          repoFullName: stamp.repoFullName,
+        }),
+      },
       terminalText,
       currentHeadSha,
       providerUnavailable: providerUnavailableOfChat(threadChat),
+      boxAtCapacity: boxAtCapacityOfChat(threadChat),
       logger,
     });
     getPostHogServer().capture({

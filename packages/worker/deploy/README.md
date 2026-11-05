@@ -194,9 +194,25 @@ refuses boot.
   streak and the last tool, the same way the idle watchdog ends it.
 
 The limit is written to the run env after the repo env, and `TOOL_FAILURE_STREAK_LIMIT` is a reserved
-repo-env key, so an owner cannot lift it. Pick the limit from the observe logs (or the telemetry above)
-once they show where working runs peak: a `grep` with no match or a failing test also counts as a
-failure.
+repo-env key, so an owner cannot lift it. A `grep` with no match or a failing test also counts as a failure.
+
+**Production value: 12** (`automata-exec-1`, since 2026-11-02). It was measured, not guessed:
+
+- **Working agents.** Across 894 real Claude Code sessions (≥ 20 tool calls each, 166,500 calls, 6,423
+  failed), the longest run of consecutive failed calls in any session was **6**: p50 1, p99 3, none at 10
+  or more. 12 is twice that maximum.
+- **Drill on the box** (issue #551). The agent was told to run 15–30 failing `ls` calls, one per call:
+
+  | Limit | Result                                    |
+  | :---- | :---------------------------------------- |
+  | 25    | the agent stopped by itself at 22, no cut |
+  | 10    | cut, with 9 failures recorded             |
+  | 3     | cut after the first turn, 14 s            |
+
+  A killed run loses its last telemetry batch, so expect limit − 1 recorded failures.
+
+Re-check the value against the telemetry (`claude_code.tool_result` `success` per run, in Maple) when run
+types change.
 
 ## Payload seal key (#380)
 

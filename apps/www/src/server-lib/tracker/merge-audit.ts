@@ -2,6 +2,7 @@ import {
   describeProviderUnavailable,
   type ProviderUnavailable,
 } from "@/agent/msg/classify-provider-result";
+import { BOX_AT_CAPACITY_SENTENCE } from "@/agent/msg/classify-box-capacity";
 import { escapeRegExp } from "./extract-ticket-keys";
 import type {
   CriterionVerdict,
@@ -567,6 +568,17 @@ export function renderProviderAuditNotice(
   provider: ProviderUnavailable,
 ): string {
   return `The audit run for ${keys.join(", ")} could not run. ${describeProviderUnavailable(provider)} No ticket was changed. Check the acceptance criteria by hand.`;
+}
+
+/**
+ * #561: the notice for a run the execution box never admitted (no memory
+ * headroom). Shares the "could not run." head, so a later notice or a later
+ * good audit replaces it in place.
+ */
+export function renderBoxAtCapacityAuditNotice(
+  keys: readonly string[],
+): string {
+  return `The audit run for ${keys.join(", ")} could not run. ${BOX_AT_CAPACITY_SENTENCE} No ticket was changed. Re-run the audit (redeliver the merge event) once the box has room.`;
 }
 
 const REPLACEABLE_NOTICE_LINE =

@@ -30,6 +30,8 @@ import {
 } from "@/lib/daemon-token";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { repoReviewSettings } from "@terragon/shared/db/schema";
+import { reviewTriggerForPrAction } from "@terragon/shared/model/review-agent-settings";
+import { resolveReviewPromptMode } from "@/server-lib/review/resolve-review-prompt-mode";
 import { createTestRemoteRun } from "@terragon/shared/model/test-helpers";
 import { eq } from "drizzle-orm";
 import { env } from "@terragon/env/apps-www";
@@ -1055,6 +1057,81 @@ describe("dispatchAgentRun — phase 4 reviewAgent payload", () => {
     const t = await makeReviewThread(904);
     const input = await dispatchAndRead(t);
     expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+  });
+
+  const stampUpdateTrigger = (threadId: string) =>
+    db
+      .update(threadTable)
+      .set({
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-ops",
+          contentSha: "sha",
+          source: "db-version",
+          reviewTrigger: "update",
+        },
+      })
+      .where(eq(threadTable.id, threadId));
+
+  const orchestratedOpenClassicUpdate = () =>
+    upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewMode: "orchestrated", reviewModeOnUpdate: "classic" },
+    });
+
+  it("an open review thread runs reviewMode, not reviewModeOnUpdate", async () => {
+    await orchestratedOpenClassicUpdate();
+    const t = await makeReviewThread(910);
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toMatchObject({ mode: "orchestrated" });
+  });
+
+  it("an update-stamped review thread runs reviewModeOnUpdate, as its prompt rendered", async () => {
+    await orchestratedOpenClassicUpdate();
+    const t = await makeReviewThread(911);
+    await stampUpdateTrigger(t.threadId);
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+    // The render path resolves a synchronize with the same settings to the
+    // same mode: prompt and dispatch never disagree.
+    const prompt = await resolveReviewPromptMode({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      trustContext: null,
+      trigger: reviewTriggerForPrAction("synchronize"),
+    });
+    expect(input.reviewAgent).toMatchObject({ mode: prompt.mode });
+  });
+
+  // #560: a plain-message (user_message) review automation stamps its own
+  // update trigger; the dispatch honours it like the skill stamp.
+  it("a plain-message update-stamped review thread runs reviewModeOnUpdate", async () => {
+    await orchestratedOpenClassicUpdate();
+    const t = await makeReviewThread(913);
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: { type: "automation-message", reviewTrigger: "update" },
+      })
+      .where(eq(threadTable.id, t.threadId));
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toEqual(CLASSIC_DEFAULTS);
+  });
+
+  it("an update-stamped thread with no reviewModeOnUpdate anywhere keeps reviewMode", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: REPO,
+      patch: { reviewMode: "orchestrated" },
+    });
+    const t = await makeReviewThread(912);
+    await stampUpdateTrigger(t.threadId);
+    const input = await dispatchAndRead(t);
+    expect(input.reviewAgent).toMatchObject({ mode: "orchestrated" });
   });
 
   it("plain org thread carries no reviewAgent even with an orchestrated '*' row", async () => {

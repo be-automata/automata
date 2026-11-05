@@ -13,6 +13,7 @@ import {
   renderNoticeComment,
   renderPrComment,
   renderPromotionComment,
+  renderBoxAtCapacityAuditNotice,
   renderProviderAuditNotice,
   renderTrackerComment,
   renderUnusableAuditNotice,
@@ -440,6 +441,7 @@ export async function executeMergeAudit({
   pr,
   terminalText,
   providerUnavailable,
+  boxAtCapacity = false,
   config,
   tracker,
   comments,
@@ -455,6 +457,11 @@ export async function executeMergeAudit({
    * notice an earlier run left.
    */
   providerUnavailable?: ProviderUnavailable | null;
+  /**
+   * #561: the execution box never admitted the run (no memory headroom).
+   * Consulted only when no usable intent parsed, like the provider cause.
+   */
+  boxAtCapacity?: boolean;
   config: TrackerConfig | null;
   tracker: TrackerClient | null;
   comments: AuditCommentClient;
@@ -513,6 +520,13 @@ export async function executeMergeAudit({
           outcome: "degraded_comment",
           reason: `provider_unavailable: ${providerUnavailable.kind}`,
         },
+        "replace-notice",
+      );
+    }
+    if (boxAtCapacity) {
+      return await postNotice(
+        renderBoxAtCapacityAuditNotice(extraction.auditKeys),
+        { outcome: "degraded_comment", reason: "box_at_capacity" },
         "replace-notice",
       );
     }

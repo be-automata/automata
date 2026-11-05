@@ -242,6 +242,14 @@ export const THREAD_ERROR_RULES = {
     reason: "agent_error",
     execPlaneSignal: false,
   },
+  // #561: the box refused admission (no memory headroom) — the agent never
+  // tried, so the attempt is refunded. Not a breaker signal: a busy box is
+  // load, not a broken plane, and a burst must not stop the loop.
+  "box-at-capacity": {
+    class: "infra",
+    reason: "box_at_capacity",
+    execPlaneSignal: false,
+  },
 } as const satisfies Record<ThreadErrorType, CauseRule>;
 
 /** Free-text quota / 401 messages the agents emit (Claude, Codex, the API). */

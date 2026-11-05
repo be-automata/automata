@@ -25,6 +25,9 @@
  *   4. Rebind the GitHub App installation to the new org — this tool never
  *      touches github_installation:
  *        pnpm exec tsx deploy/bind-github-installation.ts <installationId> <to-slug> [shadow|active]
+ *      A repo with a per-repo org override (github_repo_org_binding) keeps
+ *      routing to its bound org until it is rebound or removed:
+ *        pnpm exec tsx deploy/bind-repo-to-org.ts <owner/repo> <to-slug> --apply
  *   5. Re-mint CLI tokens: API keys are org-scoped and stay with --from, so
  *      users who drive these repos from the CLI run `terry auth` again with
  *      the new org active.

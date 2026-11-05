@@ -1,5 +1,6 @@
 import type { DB } from "@terragon/shared/db";
 import type { ThreadTrustContext } from "@terragon/shared/db/types";
+import type { ReviewTrigger } from "@terragon/shared/model/review-agent-settings";
 
 import { resolveReviewAgentForDispatch } from "./resolve-review-agent";
 import { CLASSIC_REVIEW_PROMPT, type ReviewPromptMode } from "./review-skill";
@@ -17,6 +18,9 @@ import { CLASSIC_REVIEW_PROMPT, type ReviewPromptMode } from "./review-skill";
  * runs quietly. The log is a fixed string plus the org and repo — never the
  * resolver's message, which embeds the stored value.
  *
+ * The trigger is the one the thread is stamped with (`reviewTrigger`), which
+ * dispatch reads back, so both resolve the same mode for the same settings.
+ *
  * Render time and dispatch time can disagree when the settings flip in
  * between. Both combinations are safe: the classic argv denies `Agent`, so an
  * orchestrated prompt there degrades to a single-agent review, and an
@@ -27,11 +31,13 @@ export async function resolveReviewPromptMode({
   organizationId,
   repoFullName,
   trustContext,
+  trigger,
 }: {
   db: DB;
   organizationId: string;
   repoFullName: string;
   trustContext: ThreadTrustContext | null;
+  trigger: ReviewTrigger;
 }): Promise<ReviewPromptMode> {
   try {
     const dispatch = await resolveReviewAgentForDispatch({
@@ -39,6 +45,7 @@ export async function resolveReviewPromptMode({
       organizationId,
       repoFullName,
       trustContext,
+      trigger,
     });
     // Returning ReviewMode as the local literal union is the compile-time
     // drift check: a third mode fails tsc here.

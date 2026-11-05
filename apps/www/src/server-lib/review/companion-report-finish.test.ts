@@ -7,6 +7,7 @@ import {
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
+import { getPullRequestAutomationsForRepo } from "@terragon/shared/model/automations";
 import {
   COMPANION_MARKER_PREFIX,
   companionReportMarker,
@@ -14,6 +15,7 @@ import {
   handleCompanionReportAtFinish,
   parseCompanionMarker,
   parseCompanionReport,
+  repoHasReviewAutomation,
   type CompanionReportGitHub,
   type CompanionReportRun,
 } from "./companion-report-finish";
@@ -71,6 +73,18 @@ vi.mock(
     getOrganizationInstallationMode: vi.fn(async () => "active"),
   }),
 );
+vi.mock("@terragon/shared/model/automations", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@terragon/shared/model/automations")
+  >()),
+  getPullRequestAutomationsForRepo: vi.fn(async () => [
+    {
+      organizationId: "o-1",
+      triggerType: "pull_request",
+      triggerConfig: { filter: {}, on: { open: true } },
+    },
+  ]),
+}));
 vi.mock("@/lib/posthog-server", () => ({
   getPostHogServer: () => ({ capture: vi.fn() }),
 }));
@@ -622,6 +636,116 @@ describe("handleCompanionReportAtFinish (routing by stamp)", () => {
     await handleCompanionReportAtFinish(args);
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
   });
+
+  // Card: protects=#559, a companion-only repo's comment never claims a
+  // review; fails_when=it says "posted separately" with no review automation;
+  // no_claim=GitHub.
+  it("a companion-only repo: the comment says a person reviews, never 'posted separately'", async () => {
+    vi.mocked(getThreadMinimal).mockResolvedValue(companionThread as never);
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValueOnce([
+      {
+        organizationId: "o-1",
+        triggerType: "pull_request",
+        triggerConfig: { filter: { companion: true }, on: { open: true } },
+      },
+    ] as never);
+    await handleCompanionReportAtFinish(args);
+    const call = octokit.rest.issues.createComment.mock.calls[0] as unknown as [
+      { body: string },
+    ];
+    expect(call[0].body).toContain("this repository has no automated review");
+    expect(call[0].body).not.toContain("posted separately");
+  });
+
+  it("a repo with a review automation keeps 'posted separately'", async () => {
+    vi.mocked(getThreadMinimal).mockResolvedValue(companionThread as never);
+    await handleCompanionReportAtFinish(args);
+    const call = octokit.rest.issues.createComment.mock.calls[0] as unknown as [
+      { body: string },
+    ];
+    expect(call[0].body).toContain(
+      "the review of this PR is posted separately",
+    );
+  });
+});
+
+describe("repoHasReviewAutomation (#559)", () => {
+  // Card: protects=only an enabled non-companion PR automation of the SAME
+  // org counts as a review; a failed lookup keeps the old wording;
+  // fails_when=a companion or another org's review counts; no_claim=the query.
+  const review = (organizationId: string) => ({
+    organizationId,
+    triggerType: "pull_request",
+    triggerConfig: { filter: {}, on: { open: true } },
+  });
+  const companion = {
+    organizationId: "o-1",
+    triggerType: "pull_request",
+    triggerConfig: { filter: { companion: true }, on: { open: true } },
+  };
+  const ask = () =>
+    repoHasReviewAutomation({
+      db: {} as never,
+      organizationId: "o-1",
+      repoFullName: "acme/widgets",
+    });
+
+  it("a review automation in the org → true", async () => {
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValueOnce([
+      companion,
+      review("o-1"),
+    ] as never);
+    expect(await ask()).toBe(true);
+  });
+
+  it("only a companion → false", async () => {
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValueOnce([
+      companion,
+    ] as never);
+    expect(await ask()).toBe(false);
+  });
+
+  it("a review in another org only → false", async () => {
+    vi.mocked(getPullRequestAutomationsForRepo).mockResolvedValueOnce([
+      companion,
+      review("o-2"),
+    ] as never);
+    expect(await ask()).toBe(false);
+  });
+
+  it("a failed lookup → true (the old wording)", async () => {
+    vi.mocked(getPullRequestAutomationsForRepo).mockRejectedValueOnce(
+      new Error("db down"),
+    );
+    expect(await ask()).toBe(true);
+  });
+});
+
+describe("companion comment without a review (#559)", () => {
+  it("report and notice never mention a review that does not exist", async () => {
+    const run = { ...RUN, hasReview: false };
+    const parsed = fakeGitHub();
+    await executeCompanionReport({
+      github: parsed,
+      run,
+      terminalText: block(REPORT),
+      currentHeadSha: SHA_A,
+    });
+    expect(parsed.comments[0]!.body).toContain(
+      "this repository has no automated review, so a person reviews and approves this PR.",
+    );
+    expect(parsed.comments[0]!.body).not.toContain("posted separately");
+
+    const notice = fakeGitHub();
+    await executeCompanionReport({
+      github: notice,
+      run,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+    });
+    expect(notice.comments[0]!.body).toContain("without a usable report");
+    expect(notice.comments[0]!.body).not.toContain("review of this PR");
+  });
 });
 
 describe("companion skill validators", () => {
@@ -799,5 +923,26 @@ describe("executeCompanionReport — provider_unavailable (#441)", () => {
       "The companion run for this commit could not run. Automata's Claude credential for this organization was rejected by the provider, so the agent could not start; an org admin must reconnect it.",
     );
     expect(body).not.toContain("without a usable report");
+  });
+
+  // Card: protects=#561, a companion run the box never admitted says the box
+  // was at capacity and that the next push runs it again; fails_when=it says
+  // "without a usable report"; no_claim=classification.
+  it("a run the box never admitted says the box was at capacity", async () => {
+    const github = fakeGitHub();
+    await executeCompanionReport({
+      github,
+      run: RUN,
+      terminalText: "",
+      currentHeadSha: SHA_A,
+      boxAtCapacity: true,
+    });
+    const body = github.comments[0]!.body;
+    expect(body).toContain(
+      "The companion run for this commit could not run. The execution box was at capacity",
+    );
+    expect(body).toContain("the next push runs it again");
+    expect(body).not.toContain("without a usable report");
+    expect(body).not.toContain("MemAvailable");
   });
 });

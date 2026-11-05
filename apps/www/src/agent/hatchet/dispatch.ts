@@ -5,7 +5,10 @@ import {
   getReadOnlyInstallationToken,
   lookupInstallationId,
 } from "@terragon/shared/github-app";
-import { packsRequire } from "@terragon/shared/model/review-agent-settings";
+import {
+  packsRequire,
+  reviewTriggerOfSourceMetadata,
+} from "@terragon/shared/model/review-agent-settings";
 import { redactSecrets } from "@terragon/utils/redact";
 import {
   parsePlanePublicKey,
@@ -544,11 +547,15 @@ async function planReviewRun({
   }
   const { organizationId, rows } = reviewContext;
   const snapshot = supersedeFromRows({ organizationId, ...rows });
+  // The render-time stamp, so the dispatch picks the mode the prompt was
+  // rendered with (open vs update → reviewModeOnUpdate).
+  const reviewTrigger = reviewTriggerOfSourceMetadata(thread?.sourceMetadata);
   const reviewAgent = await resolveReviewAgentFromRows({
     db,
     organizationId,
     ...rows,
     trustContext: thread?.trustContext ?? null,
+    trigger: reviewTrigger,
   });
   const repo = normalizeRepo(repoFullName);
   const sourceMetadata = thread?.sourceMetadata;
@@ -594,6 +601,7 @@ async function planReviewRun({
   });
   console.log("[hatchet] review-agent settings", {
     threadId,
+    trigger: reviewTrigger,
     mode: reviewAgent.mode,
     runTests: reviewAgent.runTests,
     runTestsDowngradedReason: reviewAgent.runTestsDowngradedReason,

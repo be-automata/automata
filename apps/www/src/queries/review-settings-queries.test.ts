@@ -25,6 +25,7 @@ function dto(
     supersedePolicy: null,
     recheckOnComplete: false,
     reviewMode: null,
+    reviewModeOnUpdate: null,
     reviewBatteries: null,
     reviewRunTests: null,
     reviewCommandTimeoutS: null,

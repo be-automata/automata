@@ -15,6 +15,7 @@ import { getOctokitForApp } from "@/lib/github";
 import { reconcilePrReviews } from "@/server-lib/reconcile-pr-reviews";
 import { runMergeAuditAtFinish } from "@/server-lib/tracker/merge-audit-finish";
 import { providerUnavailableOfChat } from "@/agent/msg/classify-provider-result";
+import { boxAtCapacityOfChat } from "@/agent/msg/classify-box-capacity";
 import {
   createFileAtCommitReader,
   createOctokitReviewClient,
@@ -345,6 +346,7 @@ async function handleMergeAuditAtFinish({
     terminalText: extractTerminalAgentText(threadChat?.messages ?? null),
     botLogin: resolveBotLogin(),
     providerUnavailable: providerUnavailableOfChat(threadChat),
+    boxAtCapacity: boxAtCapacityOfChat(threadChat),
   });
   getPostHogServer().capture({
     distinctId: userId,

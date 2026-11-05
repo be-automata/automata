@@ -34,6 +34,7 @@ export interface ReviewAgentOverrideRow extends ReviewAgentValues {
 /** "Restore default": clear every family field (REVIEW_AGENT_FIELDS) back to inherit. */
 export const REVIEW_AGENT_CLEAR_PATCH = {
   reviewMode: null,
+  reviewModeOnUpdate: null,
   reviewBatteries: null,
   reviewRunTests: null,
   reviewCommandTimeoutS: null,
@@ -48,6 +49,18 @@ export const NO_REVIEW_AGENT_VALUES: ReviewAgentValues = {
 export const MAX_TURNS_LABEL = "Max turns (lead agent)";
 export const MAX_TURNS_NOTE =
   "Limits the lead reviewer's turns. Sub-agent turns are not counted, so this is not a cost limit.";
+
+/**
+ * The mode update runs use: the draft's value, else the inherited one, else
+ * the block's own Mode (NULL everywhere = same as Mode).
+ */
+export function effectiveUpdateMode(
+  draftValue: ReviewMode | null,
+  inheritedValue: ReviewMode | null | undefined,
+  mode: ReviewMode,
+): ReviewMode {
+  return draftValue ?? inheritedValue ?? mode;
+}
 
 /** True when the row carries at least one review-agent override (an empty pack list counts). */
 export function hasReviewAgentOverride(row: ReviewAgentValues): boolean {
@@ -94,6 +107,8 @@ export function parseOptionalInt(text: string): number | null | undefined {
 /** Editable form state for one block (org default or one repo). */
 export interface ReviewAgentDraft {
   reviewMode: ReviewMode | null;
+  /** The mode for update runs (pushes, retargets); null = inherit. */
+  reviewModeOnUpdate: ReviewMode | null;
   reviewBatteries: ReviewBatteryPackId[] | null;
   reviewRunTests: boolean | null;
   timeoutText: string;
@@ -118,6 +133,7 @@ export function toggleIn<Id extends string>(
 export function draftFromValues(values: ReviewAgentValues): ReviewAgentDraft {
   return {
     reviewMode: values.reviewMode,
+    reviewModeOnUpdate: values.reviewModeOnUpdate,
     reviewBatteries: values.reviewBatteries,
     reviewRunTests: values.reviewRunTests,
     timeoutText: values.reviewCommandTimeoutS?.toString() ?? "",
@@ -178,6 +194,9 @@ export function draftToPatch(
   const patch: ReviewAgentPatch = {};
   if (draft.reviewMode !== stored.reviewMode) {
     patch.reviewMode = draft.reviewMode;
+  }
+  if (draft.reviewModeOnUpdate !== stored.reviewModeOnUpdate) {
+    patch.reviewModeOnUpdate = draft.reviewModeOnUpdate;
   }
   if (!isEqual(draft.reviewBatteries, stored.reviewBatteries)) {
     patch.reviewBatteries = draft.reviewBatteries;

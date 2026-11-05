@@ -13,7 +13,7 @@ import {
   getUserSettings,
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
-import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
+import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
 import { requireAppAccess } from "./webhook-skip";
@@ -72,9 +72,10 @@ export async function handleAppMention({
   // mode). Shadow: ingest the mention and create the (dashboard-visible) thread
   // row, but produce ZERO GitHub side effects — no eyes reaction, no billing
   // comment, and no agent run. Reads (branch lookup) are fine.
-  const { organizationId, mode } = await getInstallationOrgAndMode({
+  const { organizationId, mode } = await getRepoOrgAndMode({
     db,
     installationId,
+    repoFullName,
   });
   // Per-installation mode, folded with the deployment-level side-effects
   // kill-switch (switch off → force shadow for every install).

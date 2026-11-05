@@ -4,7 +4,7 @@ import type { MentionLaneStamp } from "@terragon/shared";
 import type { Automation, DBUserMessage } from "@terragon/shared";
 import type { GitHubMentionTriggerConfig } from "@terragon/shared/automations";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
-import { getInstallationOrgAndMode } from "@terragon/shared/model/github-installation";
+import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { db } from "@/lib/db";
 import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
@@ -297,19 +297,20 @@ export async function handleOrgLaneMention(
     log("skip: the App is not installed on this repo", meta);
     return true;
   }
-  const { organizationId, mode } = await getInstallationOrgAndMode({
+  const { organizationId, mode } = await getRepoOrgAndMode({
     db,
     installationId,
+    repoFullName,
   });
   const automation = automations.find(
     (candidate) =>
       organizationId !== null && candidate.organizationId === organizationId,
   );
   if (!automation) {
-    log("skip: no org-lane automation belongs to the installation's org", {
+    log("skip: no org-lane automation belongs to the repo's org", {
       ...meta,
       installationId,
-      installationOrg: organizationId,
+      repoOrg: organizationId,
       automationOrgs: automations.map((a) => a.organizationId),
     });
     return true;

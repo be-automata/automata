@@ -52,4 +52,5 @@ export const allThreadErrors: Record<ThreadErrorType, boolean> = {
   "provider-unavailable": true,
   "queue-retired": true,
   "out-of-memory": true,
+  "box-at-capacity": true,
 };

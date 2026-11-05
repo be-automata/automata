@@ -9,6 +9,8 @@ import {
   providerUnavailableRetryWhen,
   type ProviderUnavailable,
 } from "@/agent/msg/classify-provider-result";
+import { BOX_AT_CAPACITY_SENTENCE } from "@/agent/msg/classify-box-capacity";
+import { isAdmissionExhaustedText } from "@terragon/utils/box-capacity";
 
 /**
  * The no-verdict notice (ADR-009). A review run that produced NO verdict — the
@@ -174,6 +176,10 @@ function describeCause(cause: NoVerdictCause, reason: string): string {
     case "queue_retired":
       return `this review was retired from the queue without running: ${detail}`;
     case "run_failed":
+      // #561: the box never admitted the run — say so, not the raw memory dump.
+      if (isAdmissionExhaustedText(reason)) {
+        return `the review run could not start. ${BOX_AT_CAPACITY_SENTENCE}`;
+      }
       return detail.length > 0
         ? `the review run failed before the agent produced a verdict: ${detail}`
         : "the review run failed before the agent produced a verdict.";

@@ -8,7 +8,10 @@ import {
   createOrganization,
   addOrganizationMember,
 } from "@terragon/shared/model/organizations";
-import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
+import {
+  bindGithubInstallationToOrg,
+  bindRepoToOrg,
+} from "@terragon/shared/model/github-installation";
 import { createRepoSkillVersion } from "@terragon/shared/model/repo-skills";
 import { nanoid } from "nanoid";
 import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
@@ -100,6 +103,45 @@ describe("createMirrorTask (mirror-intake)", () => {
     expect(args.sourceType).toBe("automation");
     const text = args.message.parts.map((p: any) => p.text ?? "").join(" ");
     expect(text).toContain("Review requested on PR #42");
+  });
+
+  it("a repo bound to another org: the task belongs to that org, mode from the installation", async () => {
+    const { org: sharedOrg, instId } = await seedBoundOrg("shadow");
+    const { user: clientOwner } = await createTestUser({ db });
+    const clientOrg = await createOrganization({
+      db,
+      name: "Client",
+      slug: `client-${nanoid(8).toLowerCase()}`,
+    });
+    await addOrganizationMember({
+      db,
+      organizationId: clientOrg.id,
+      userId: clientOwner.id,
+      role: "owner",
+    });
+    const repo = `shared-owner/client-${nanoid(6).toLowerCase()}`;
+    await bindRepoToOrg({
+      db,
+      repoFullName: repo,
+      organizationId: clientOrg.id,
+    });
+
+    await createMirrorTask({
+      repoFullName: repo,
+      installationId: instId,
+      intent: {
+        kind: "pr-review-requested",
+        prNumber: 3,
+        headBranch: "feature",
+        baseBranch: "develop",
+      },
+    });
+
+    const args = vi.mocked(newThreadInternal).mock.calls[0]![0];
+    expect(args.organizationId).toBe(clientOrg.id);
+    expect(args.organizationId).not.toBe(sharedOrg.id);
+    expect(args.userId).toBe(clientOwner.id);
+    expect(args.shadow).toBe(true);
   });
 
   it("active-bound: creates a non-shadow task", async () => {
