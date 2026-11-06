@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Client } from "pg";
 import {
+  ConcurrencyLimitStrategy,
+  type Hatchet,
+  type Worker,
+} from "@hatchet-dev/typescript-sdk";
+import { loadWorkerConfig } from "./config";
+import { AGENT_RUN_VARIANTS, buildAgentRunDefinition } from "./definition";
+import {
+  bootstrapTenant,
   SCHEMA_READY_DELETE_TRIGGER_FN,
   SCHEMA_READY_TABLES,
   composeDownV,
@@ -16,8 +27,8 @@ import {
   detectStepConcurrencyRot,
   detectWorkflowConcurrencyRot,
   reclaimEngineSlots,
-  repairConcurrencyRot,
 } from "./scheduling-health";
+import { runMaintenanceTick } from "./scheduling-maintenance";
 import type { PgLike } from "./engine-db";
 
 /**
@@ -32,22 +43,15 @@ import type { PgLike } from "./engine-db";
  * manually with `docker compose down -v`, confirm via `docker compose ls`
  * that you are targeting `automata-hatchet-it`, never `automata-hatchet`.
  *
- * DEVIATION RECORDED (spec §7.2.1's own escape hatch, and §10 risk 1): the
- * full live-worker register-until-rot-then-deadlock reproduction (§7.2.1
- * steps 1-8) requires spawning real Hatchet-SDK worker child processes that
- * register distinct concurrency shapes against a live engine and proving a
- * triggered run actually deadlocks with a demonstrably live worker present.
- * That harness is substantial standalone infrastructure and, per the spec's
- * own words, is "the dominant cost and main risk. Budget a spike if step 5
- * doesn't reproduce" (§10). It is left here as `it.skip` with the concrete
- * steps documented inline rather than a half-working implementation that
- * would give false confidence. What IS implemented and executable under
- * HATCHET_IT=1 are: (a) the SQL-level detector/repair round-trip against a
- * REAL isolated hatchet-lite Postgres (proves the queries in §3.1.2-§3.1.4
- * compile and behave against the real schema, which is the part most likely
- * to drift across hatchet-lite versions), and (b) the AC-8d/AC-8e negative
- * fixtures for slot reclamation. Taking this fallback weakens AC-4 exactly as
- * §7.2.1 anticipates and is recorded here, not silently adopted.
+ * CONCURRENCY-STRATEGY LINKS (#570). The #69 register-until-rot loop (the old
+ * `it.skip`) is gone with the repair it was meant to justify: its premise —
+ * that a step row's parent and a workflow row's children point within their
+ * own tables — misread the engine schema. What runs instead registers the
+ * #570 repro workflow and every agent-run variant through a real SDK worker,
+ * asserts the detectors flag none of those rows (while the #69 predicates do),
+ * then breaks one link of each kind inside a rolled-back transaction and
+ * asserts each is flagged exactly and that a tick with repair `on` writes
+ * nothing. The slot-reclamation fixtures (AC-8d/AC-8e) are unchanged.
  */
 /**
  * Migrations belong to hatchet-lite, not postgres — and they land in stages,
@@ -174,53 +178,259 @@ describe.skipIf(!itEnabled)(
       await composeDownV();
     }, 60_000);
 
-    describe("7.2.1 — concurrency-group rot: SQL round-trip against a real isolated engine schema", () => {
-      it("AC-1: detectors return nothing against freshly-migrated, empty concurrency tables", async () => {
-        const stepFindings = await detectStepConcurrencyRot(db, { tenantId });
-        const workflowFindings = await detectWorkflowConcurrencyRot(db, {
-          tenantId,
+    describe("concurrency-strategy links: real registrations are never rot (#570)", () => {
+      // The #570 repro shape: one workflow-level key over two dependent tasks.
+      const REPRO = "rot-check-570";
+      /**
+       * The #69 detector predicates, kept verbatim as the regression witness:
+       * against the same rows they flag valid links, which proves this fixture
+       * would have caught #570 (a fixture both predicates agree on proves
+       * nothing).
+       */
+      /** A step strategy joined to its parent the way the engine joins it (v1-core.sql:869). */
+      const LINKED = `FROM v1_step_concurrency c
+        JOIN v1_workflow_concurrency w
+          ON w.workflow_id = c.workflow_id
+         AND w.workflow_version_id = c.workflow_version_id
+         AND w.id = c.parent_strategy_id`;
+      const OLD_STEP_PREDICATE = `
+        SELECT count(*)::int AS n FROM v1_step_concurrency c
+          LEFT JOIN v1_step_concurrency p
+                 ON p.id = c.parent_strategy_id AND p.tenant_id = c.tenant_id
+         WHERE c.tenant_id = $1::uuid AND c.is_active
+           AND c.parent_strategy_id IS NOT NULL
+           AND (p.id IS NULL OR NOT p.is_active OR p.step_id <> c.step_id)`;
+      const OLD_WORKFLOW_PREDICATE = `
+        SELECT count(DISTINCT c.id)::int AS n FROM v1_workflow_concurrency c
+         CROSS JOIN LATERAL unnest(COALESCE(c.child_strategy_ids, '{}'::bigint[])) x(child_id)
+          LEFT JOIN v1_workflow_concurrency k
+                 ON k.id = x.child_id AND k.workflow_id = c.workflow_id
+                AND k.workflow_version_id = c.workflow_version_id
+         WHERE c.tenant_id = $1::uuid AND c.is_active AND k.id IS NULL`;
+
+      let engineTenantId: string;
+      let hatchet: Hatchet;
+      let worker: Worker | undefined;
+      /** One workflow row per stacked key: repro 1, legacy agent-run 2, each variant 3. */
+      const variantNames = Object.keys(
+        AGENT_RUN_VARIANTS,
+      ) as (keyof typeof AGENT_RUN_VARIANTS)[];
+      const expectedWorkflowRows =
+        1 +
+        variantNames.reduce(
+          (n, v) => n + (AGENT_RUN_VARIANTS[v] === null ? 2 : 3),
+          0,
+        );
+      /** Repro: 2 tasks under 1 key. agent-run: 1 task under each key. */
+      const expectedLinkedStepRows = 2 + expectedWorkflowRows - 1;
+
+      const count = async (sql: string): Promise<number> =>
+        (await pg.query<{ n: number }>(sql, [engineTenantId])).rows[0]?.n ?? 0;
+
+      beforeAll(async () => {
+        let token: string;
+        ({ tenantId: engineTenantId, token } = await bootstrapTenant(pg));
+        process.env.HATCHET_CLIENT_TOKEN = token;
+        process.env.HATCHET_CLIENT_TLS_STRATEGY = "none";
+        const sdk = await import("@hatchet-dev/typescript-sdk");
+        hatchet = sdk.Hatchet.init();
+
+        const repro = hatchet.workflow({
+          name: REPRO,
+          concurrency: {
+            expression: "'all'",
+            maxRuns: 1,
+            limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
+          },
         });
-        expect(stepFindings).toEqual([]);
-        expect(workflowFindings).toEqual([]);
+        const a = repro.task({ name: "a", fn: async () => ({ ok: true }) });
+        repro.task({ name: "b", parents: [a], fn: async () => ({ ok: true }) });
+
+        const agentRuns = variantNames.map((name) => {
+          const def = buildAgentRunDefinition(name, AGENT_RUN_VARIANTS[name]);
+          const wf = hatchet.workflow(def.workflow);
+          wf.task({ ...def.task, fn: async () => ({ ok: true }) });
+          return wf;
+        });
+
+        worker = await hatchet.worker("it-rot-570-worker", {
+          workflows: [repro, ...agentRuns],
+          slots: 2,
+        });
+        void worker.start();
+        await worker.waitUntilReady(60_000);
+        await pollUntil(
+          "registered concurrency strategies",
+          async () => ({
+            workflowRows: await count(
+              "SELECT count(*)::int AS n FROM v1_workflow_concurrency WHERE tenant_id = $1::uuid",
+            ),
+            linkedStepRows: await count(
+              "SELECT count(*)::int AS n FROM v1_step_concurrency WHERE tenant_id = $1::uuid AND parent_strategy_id IS NOT NULL",
+            ),
+          }),
+          (r) =>
+            r.workflowRows >= expectedWorkflowRows &&
+            r.linkedStepRows >= expectedLinkedStepRows,
+          60_000,
+          250,
+        );
+      }, 240_000);
+
+      afterAll(async () => {
+        await worker?.stop().catch(() => {});
+      }, 60_000);
+
+      it("the fixture holds real cross-table links, and the #69 predicates misread them (regression witness)", async () => {
+        expect(
+          await count(
+            `SELECT count(*)::int AS n ${LINKED} WHERE c.tenant_id = $1::uuid`,
+          ),
+        ).toBeGreaterThanOrEqual(expectedLinkedStepRows);
+        expect(await count(OLD_STEP_PREDICATE)).toBeGreaterThan(0);
+        expect(await count(OLD_WORKFLOW_PREDICATE)).toBeGreaterThan(0);
+        // The README's manual reverse-link query is empty on a healthy engine too.
+        expect(
+          await count(
+            `SELECT count(*)::int AS n ${LINKED}
+              WHERE c.tenant_id = $1::uuid AND c.is_active
+                AND NOT (c.id = ANY(COALESCE(w.child_strategy_ids, '{}'::bigint[])))`,
+          ),
+        ).toBe(0);
       });
 
-      it("repairConcurrencyRot is a strict no-op on the empty fixture and idempotent", async () => {
-        const before = await pg.query(
-          "SELECT count(*)::int AS c FROM v1_step_concurrency",
-        );
-        const result = await repairConcurrencyRot(db, { tenantId, mode: "on" });
-        const after = await pg.query(
-          "SELECT count(*)::int AS c FROM v1_step_concurrency",
-        );
-        expect(result.stepRepair.touched).toBe(0);
-        expect(result.workflowRepair.touched).toBe(0);
-        expect(before.rows[0].c).toBe(after.rows[0].c);
+      it("AC-1/AC-2/AC-3: neither detector flags the repro or the stacked agent-run registrations", async () => {
+        expect(
+          await detectStepConcurrencyRot(db, { tenantId: engineTenantId }),
+        ).toEqual([]);
+        expect(
+          await detectWorkflowConcurrencyRot(db, { tenantId: engineTenantId }),
+        ).toEqual([]);
       });
 
-      it.skip("register-until-rot loop reproduces §2.3's corruption, and repair unblocks a QUEUED run that stays wedged with a live worker present (AC-2, AC-3, AC-4, AC-6, AC-8c)", async () => {
-        // NOT IMPLEMENTED — see the file-level DEVIATION note. Steps, verbatim
-        // from spec §7.2.1, for whoever picks this up:
-        //   1. Fresh engine (this beforeAll already brings up an isolated
-        //      postgres-only project — the harness now also runs hatchet-lite
-        //      on isolated ports 28888/27077).
-        //   2. shapeGenerator(i) => distinct concurrency-group expression
-        //      arrays for a probe workflow `rot-probe`.
-        //   3. FOR i in 1..12: spawn a real @hatchet-dev/typescript-sdk
-        //      worker child process registering `rot-probe` with shapes[i]
-        //      against the isolated engine (HATCHET_CLIENT_TOKEN minted for
-        //      the isolated tenant), wait for its rows in
-        //      v1_step_concurrency, SIGTERM it, call
-        //      detectStepConcurrencyRot/detectWorkflowConcurrencyRot; break
-        //      on first non-empty result, recording `registrationsToRot`.
-        //      FAIL LOUDLY (not skip) if the loop exhausts without rot.
-        //   5. Spawn a live worker on the CURRENT shape, trigger a
-        //      `rot-probe` run, assert it stays QUEUED >=30s while the live
-        //      worker's Worker.lastHeartbeatAt stays fresh.
-        //   6-8. repairConcurrencyRot(mode:'on'); assert 0 findings remain,
-        //      same-version links survived (AC-8c), the run reaches RUNNING
-        //      within 30s (AC-4), and a second repair pass touches 0 rows
-        //      (AC-6). Record whether the in-place repair fired or the
-        //      §3.1.3 quiescence precondition deferred it to the boot path.
+      it("AC-4/AC-5/AC-6: a broken link of each kind is flagged exactly, and a tick with repair 'on' writes nothing", async () => {
+        const snapshotRows = async () =>
+          (
+            await pg.query<{ t: string; id: string; h: string }>(
+              `SELECT 'step' AS t, id::text, md5(c::text) AS h FROM v1_step_concurrency c
+                UNION ALL
+               SELECT 'workflow', id::text, md5(w::text) FROM v1_workflow_concurrency w
+                ORDER BY 1, 2`,
+            )
+          ).rows;
+        const root = mkdtempSync(path.join(tmpdir(), "rot-570-it-"));
+        await pg.query("BEGIN");
+        try {
+          const target = (
+            await pg.query<{ wf_id: number; step_id: number }>(
+              `SELECT w.id AS wf_id, c.id AS step_id ${LINKED}
+                 JOIN "Workflow" f ON f.id = w.workflow_id AND f.name = $2
+                WHERE w.tenant_id = $1::uuid
+                ORDER BY c.id LIMIT 1`,
+              [engineTenantId, REPRO],
+            )
+          ).rows[0];
+          expect(target).toBeDefined();
+          const wfId = Number(target?.wf_id);
+          const stepId = Number(target?.step_id);
+          const stepIds = async () =>
+            (
+              await detectStepConcurrencyRot(db, { tenantId: engineTenantId })
+            ).map((r) => Number(r.id));
+          const workflowIds = async () =>
+            (
+              await detectWorkflowConcurrencyRot(db, {
+                tenantId: engineTenantId,
+              })
+            ).map((r) => Number(r.id));
+          const breakStep = () =>
+            pg.query(
+              `UPDATE v1_step_concurrency
+                SET parent_strategy_id = (SELECT max(id) + 1000 FROM v1_workflow_concurrency)
+              WHERE id = $1`,
+              [stepId],
+            );
+          // AC-5 on a DIFFERENT workflow row (a stacked agent-run key).
+          const otherWfId = Number(
+            (
+              await pg.query<{ id: number }>(
+                `SELECT id FROM v1_workflow_concurrency
+                  WHERE tenant_id = $1::uuid AND id <> $2 AND is_active
+                  ORDER BY id LIMIT 1`,
+                [engineTenantId, wfId],
+              )
+            ).rows[0]?.id,
+          );
+          const breakWorkflow = () =>
+            pg.query(
+              `UPDATE v1_workflow_concurrency
+                  SET child_strategy_ids = child_strategy_ids || (SELECT max(id) + 1000 FROM v1_step_concurrency)
+                WHERE id = $1`,
+              [otherWfId],
+            );
+
+          // AC-4 alone. The re-pointed step row also leaves its old parent
+          // (wfId) with a child that no longer points back, so that workflow
+          // row is the only other finding.
+          await pg.query("SAVEPOINT ac4");
+          await breakStep();
+          expect(await stepIds()).toEqual([stepId]);
+          expect(await workflowIds()).toEqual([wfId]);
+          await pg.query("ROLLBACK TO SAVEPOINT ac4");
+
+          // AC-5 alone: exactly the edited workflow row, no step finding.
+          await pg.query("SAVEPOINT ac5");
+          await breakWorkflow();
+          expect(await stepIds()).toEqual([]);
+          expect(await workflowIds()).toEqual([otherWfId]);
+          await pg.query("ROLLBACK TO SAVEPOINT ac5");
+
+          // AC-6 with both links broken.
+          await breakStep();
+          await breakWorkflow();
+
+          const before = await snapshotRows();
+          const snapshot = await runMaintenanceTick({
+            config: loadWorkerConfig({
+              WORKER_BATTERIES_IMAGE: `ghcr.io/be-automata/automata-batteries@sha256:${"ab".repeat(32)}`,
+              WORKER_RUN_MEMORY_MAX: "1500M",
+              HATCHET_ENGINE_DATABASE_URL: "postgresql://in-transaction",
+              HATCHET_ENGINE_TENANT_ID: engineTenantId,
+              WORKER_RUN_NAMESPACE_ROOT: root,
+              WORKER_CONCURRENCY_ROT_REPAIR: "on",
+              WORKER_SLOT_RECLAIM: "off",
+            }),
+            selfWorkerId: null,
+            log: () => {},
+            // Same connection, same open transaction: the tick sees the
+            // corruption above and any write it made would show below.
+            engineDb: {
+              query: db.query,
+              withConnection: async (fn) => fn(db),
+              withAdvisoryLock: async (fn) => ({
+                acquired: true,
+                result: await fn(db),
+              }),
+              close: async () => {},
+            },
+          });
+          expect(await snapshotRows()).toEqual(before);
+          expect(snapshot.rot).toEqual({
+            stepLevel: 1,
+            workflowLevel: 2,
+            repaired: 0,
+            mode: "dry-run",
+          });
+        } finally {
+          await pg.query("ROLLBACK");
+          rmSync(root, { recursive: true, force: true });
+        }
+        expect(
+          await detectStepConcurrencyRot(db, { tenantId: engineTenantId }),
+        ).toEqual([]);
+        expect(
+          await detectWorkflowConcurrencyRot(db, { tenantId: engineTenantId }),
+        ).toEqual([]);
       });
     });
 

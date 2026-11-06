@@ -10,7 +10,7 @@ import {
   detectStuckQueued,
   nominalRecoveryLatencySeconds,
   reclaimEngineSlots,
-  repairConcurrencyRot,
+  detectConcurrencyRot,
   type MaintenanceMode,
 } from "./scheduling-health";
 
@@ -31,6 +31,23 @@ import {
 
 export type Logger = (line: Record<string, unknown>) => void;
 
+/**
+ * Concurrency-rot checks are detection only (#570): `WORKER_CONCURRENCY_ROT_REPAIR`
+ * still turns them off, but a resolved `on` no longer writes to the engine. It
+ * runs (and reports) as `dry-run`, and `startMaintenanceLoop` says so once.
+ */
+function resolveRotMode(config: WorkerConfig): "off" | "dry-run" {
+  return rotModeRequested(config) === "off" ? "off" : "dry-run";
+}
+
+/** The rot mode the operator configured, before #570's detection-only clamp. */
+function rotModeRequested(config: WorkerConfig): "off" | "dry-run" | "on" {
+  return resolveMechanismMode(
+    config.concurrencyRotRepairMode,
+    config.schedulingMaintenanceMode,
+  );
+}
+
 const defaultLogger: Logger = (line) => console.log(JSON.stringify(line));
 
 export interface SchedulingHealthSnapshot {
@@ -46,8 +63,9 @@ export interface SchedulingHealthSnapshot {
   rot: {
     stepLevel: number;
     workflowLevel: number;
-    repaired: number;
-    mode: MaintenanceMode;
+    /** Always 0: rot is detection only (#570). Kept for snapshot readers. */
+    repaired: 0;
+    mode: "off" | "dry-run";
   };
   slots: {
     filled: number;
@@ -184,10 +202,7 @@ export async function runMaintenanceTick(
   try {
     const tenantId = config.engineTenantId || (await resolveTenantId(db));
 
-    const rotMode = resolveMechanismMode(
-      config.concurrencyRotRepairMode,
-      config.schedulingMaintenanceMode,
-    );
+    const rotMode = resolveRotMode(config);
     const slotMode = resolveMechanismMode(
       config.slotReclaimMode,
       config.schedulingMaintenanceMode,
@@ -197,9 +212,8 @@ export async function runMaintenanceTick(
       const rot =
         rotMode === "off"
           ? null
-          : await repairConcurrencyRot(client, {
+          : await detectConcurrencyRot(client, {
               tenantId,
-              mode: rotMode,
               limit: config.maintBatch,
             });
 
@@ -242,8 +256,6 @@ export async function runMaintenanceTick(
 
     const stepFindingCount = rot?.stepFindings.length ?? 0;
     const workflowFindingCount = rot?.workflowFindings.length ?? 0;
-    const rotRepaired =
-      (rot?.stepRepair.touched ?? 0) + (rot?.workflowRepair.touched ?? 0);
 
     if (stepFindingCount > 0 || workflowFindingCount > 0) {
       log({
@@ -252,9 +264,6 @@ export async function runMaintenanceTick(
         workflowIds: rot?.workflowFindings.map((r) => r.id) ?? [],
         mode: rotMode,
       });
-    }
-    if (rotRepaired > 0) {
-      log({ event: "scheduling.rot_repaired", rowsTouched: rotRepaired });
     }
 
     const slotsReclaimable = slotCandidates?.rows.length ?? 0;
@@ -294,7 +303,8 @@ export async function runMaintenanceTick(
       rot: {
         stepLevel: stepFindingCount,
         workflowLevel: workflowFindingCount,
-        repaired: rotRepaired,
+        // Kept for snapshot readers; nothing repairs rot since #570.
+        repaired: 0,
         mode: rotMode,
       },
       slots: {
@@ -345,6 +355,16 @@ export function startMaintenanceLoop(
   if (!config.engineDatabaseUrl) {
     // Master gate (AC-13): no timer started, no listener opened.
     return { stop: () => {}, healthServer: null };
+  }
+
+  // After the master gate on purpose: without an engine URL nothing runs at
+  // all, so there is no repair for the operator to miss.
+  if (rotModeRequested(config) === "on") {
+    log({
+      event: "scheduling.rot_repair_removed",
+      detail:
+        "concurrency-rot repair was removed (#570); rot runs as detection only",
+    });
   }
 
   const tick = () => {

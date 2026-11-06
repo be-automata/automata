@@ -200,9 +200,9 @@ export interface WorkerConfig {
   engineDatabaseUrl: string;
   /** Tenant every maintenance query scopes to. Empty → auto-resolve the single tenant at boot. */
   engineTenantId: string;
-  /** Global mode for mechanisms 1 (rot repair) & 2 (slot reclaim). */
+  /** Global mode for mechanisms 1 (rot detection, never writes since #570) & 2 (slot reclaim). */
   schedulingMaintenanceMode: "off" | "dry-run" | "on";
-  /** Per-mechanism override for rot repair. "inherit" defers to schedulingMaintenanceMode. */
+  /** Per-mechanism override for rot detection (#570: detection only; a resolved "on" runs as "dry-run"). "inherit" defers to schedulingMaintenanceMode. */
   concurrencyRotRepairMode: "off" | "dry-run" | "on" | "inherit";
   /** Per-mechanism override for slot reclaim. "inherit" defers to schedulingMaintenanceMode. */
   slotReclaimMode: "off" | "dry-run" | "on" | "inherit";

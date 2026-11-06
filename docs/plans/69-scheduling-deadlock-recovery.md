@@ -97,6 +97,17 @@ deliverable of this ticket, not a precondition.** See §3.0.
 
 ### 2.3 The rot is present in the live engine RIGHT NOW — cause NOT yet determined
 
+> **Correction (2026-11-06, #570).** This section reads `v1_step_concurrency.parent_strategy_id`
+> as a `v1_step_concurrency` id and `v1_workflow_concurrency.child_strategy_ids` as
+> `v1_workflow_concurrency` ids. The hatchet-lite `v0.94.10` schema says the reverse: the parent is
+> a `v1_workflow_concurrency` id and the children are `v1_step_concurrency` ids
+> (`sql/schema/v1-core.sql` :233, :289-290, :314-319, joined at :869). Read that way, the snapshot
+> below mostly lines up (step row 5 → workflow row 4 with child `{5}`; step row 6 → workflow row 5
+> with child `{6}`; step rows 2 and 4 → workflow rows 1 and 3). One link stays unexplained: workflow
+> row 2 lists child `{3}`, but step row 3 has a NULL parent. So the "rot" below is mostly a misread,
+> and the real cause of the QUEUED-forever symptom is still unknown. Rot detection was corrected to
+> the schema's reading and rot repair was removed.
+
 `select id, parent_strategy_id, is_active, strategy, expression, max_concurrency, step_id from v1_step_concurrency order by id;`
 
 ```
@@ -382,6 +393,11 @@ repair depends on it.
 
 #### 3.1.2 Detection — step-level
 
+> **Correction (2026-11-06, #570).** The predicate below resolves `parent_strategy_id` in
+> `v1_step_concurrency`, which flags healthy workflow-level strategies. The shipped detector resolves
+> it in `v1_workflow_concurrency` on `(workflow_id, workflow_version_id, id)`, the engine's own join.
+> The §3.1.3 repair was removed: the worker never writes to these tables.
+
 ```sql
 -- rot: an ACTIVE strategy whose parent pointer leads outside its own live chain.
 SELECT c.id, c.step_id, c.expression, c.parent_strategy_id,
@@ -476,6 +492,14 @@ fires, so this choice is made on evidence rather than guessed — see AC-4.
 
 #### 3.1.4 Detection + remediation — workflow-level
 
+> **Correction (2026-11-06, #570).** `child_strategy_ids` holds `v1_step_concurrency` ids. The
+> shipped detector flags an active workflow strategy with a child that is not a same-version step
+> strategy whose `parent_strategy_id` points back at it, and the repair below was removed. Status of
+> the implementation-verify step: (a) and (c) do not apply under the schema reading above (a NULL
+> parent means step-level-only concurrency, not a chain head; links are cross-table, not head/tail
+> pointers in one table), and (b) is the NULL/empty array the trigger writes when a workflow has no
+> DEFAULT-job steps. (d) the cause of the QUEUED-forever symptom is still open.
+
 ```sql
 -- rot: an ACTIVE strategy whose child array names a strategy that does not exist
 -- in the same (workflow_id, workflow_version_id).
@@ -562,6 +586,8 @@ plus the upstream `hatchet-dev/hatchet` queries at tag `v0.94.10`
 
 On any non-zero detection the maintenance tick emits one structured line (§3.5) with
 `event: "scheduling.rot_detected"`, the rot row ids, and whether repair ran or was suppressed by
+> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+
 dry-run. On a successful repair: `event: "scheduling.rot_repaired"`, `rowsTouched: N`.
 
 ### 3.2 Mechanism 2 — SIGKILL slot reclamation
@@ -1259,6 +1285,8 @@ findings *and nothing else*.
    `launchctl kickstart -k`, which is SIGKILL (`worker.ts:65-76`).
 2. Observe ≥24 h of `scheduling-health.json`; confirm the reported rot rows match §2.3 exactly
    and `slots.reclaimable = 0` on a healthy box.
+> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+
 3. Flip `WORKER_CONCURRENCY_ROT_REPAIR=on`, restart, confirm the one-time repair, confirm
    subsequent ticks report 0. **Prerequisite: the §3.1.4 upstream-source verification is done.**
 4. Flip `WORKER_SLOT_RECLAIM=on` separately, **at least a day later**, and only after the partition
@@ -1327,6 +1355,8 @@ behind a kill switch against a multi-week substrate migration on a pilot box.
    deterministically in a fresh container.** The fallback (synthetic rot injection + a
    strict-mode-only live deadlock test) exists so this cannot block the ticket, but taking it
    weakens AC-4 and must be a conscious, recorded decision.
+> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+
 2. **In-place rot repair may be permanently deferred by its own quiescence precondition**
    (§3.1.3) in exactly the deadlock case it exists to fix — because the blocking slot is the thing
    referencing the rotted strategy. §7.2.1 step 6 is instrumented to detect this. If it holds, the

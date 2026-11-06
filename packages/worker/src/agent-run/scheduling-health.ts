@@ -2,8 +2,8 @@ import type { PgLike } from "./engine-db";
 
 /**
  * Pure scheduling-health detectors + remediators for the Hatchet engine DB
- * (#69). This module is deliberately PURE: no `process.env`, no timers, no fs,
- * no logging — every knob arrives as a function parameter. That is the import
+ * (#69). Concurrency-strategy checks are detection only (#570). This module is
+ * deliberately PURE: no `process.env`, no timers, no fs, no logging — every knob arrives as a function parameter. That is the import
  * contract #128's anti-rot E2E depends on (§7.3) and it is asserted by
  * `scheduling-health.test.ts`.
  *
@@ -36,12 +36,6 @@ export interface WorkflowRotRow {
   childStrategyIds: number[];
 }
 
-export interface RepairResult<Row> {
-  touched: number;
-  rows: Row[];
-  deferred: boolean;
-}
-
 export interface ReclaimCandidateRow {
   taskId: string;
   taskInsertedAt: string;
@@ -69,12 +63,28 @@ export interface StuckQueuedRow {
 const DEFAULT_LIMIT = 100;
 
 // ---------------------------------------------------------------------------
-// §3.1.2 / §3.1.3 — step-level concurrency-group rot
+// §3.1 — concurrency-strategy link integrity (detection only, #570)
 // ---------------------------------------------------------------------------
+//
+// Hatchet links the two strategy tables ACROSS each other, never within one
+// (hatchet sql/schema/v1-core.sql @ v0.94.10):
+//   - v1_step_concurrency.parent_strategy_id holds a v1_workflow_concurrency.id
+//     (schema comment :233, trigger insert :289-290). The slot-insert trigger
+//     resolves it with `wc.workflow_id = ps.workflow_id AND
+//     wc.workflow_version_id = ps.workflow_version_id AND wc.id =
+//     ps.parent_strategy_id` (:869).
+//   - v1_workflow_concurrency.child_strategy_ids holds the ids of the
+//     v1_step_concurrency rows the same trigger inserted (:314-319).
+// The #69 detectors joined each column back to its own table, so a healthy
+// workflow-level strategy read as rot (#570). They now ask exactly the
+// question the engine's own join asks. The #69 repairs wrote to these tables
+// under the misread and were removed with it: nothing in this module writes
+// to v1_step_concurrency or v1_workflow_concurrency.
 
 /**
- * Rot: an ACTIVE strategy whose parent pointer leads outside its own live chain
- * — missing, inactive, or belonging to a different step (§3.1.2, §2.3).
+ * An ACTIVE step strategy whose `parent_strategy_id` does not resolve to a
+ * workflow strategy of the same workflow version — the link the engine's
+ * slot-insert trigger needs to create the workflow-level slot.
  */
 export async function detectStepConcurrencyRot(
   db: PgLike,
@@ -89,13 +99,15 @@ export async function detectStepConcurrencyRot(
   }>(
     `SELECT c.id, c.step_id, c.expression, c.parent_strategy_id
        FROM v1_step_concurrency c
-       LEFT JOIN v1_step_concurrency p
-              ON p.id = c.parent_strategy_id
-             AND p.tenant_id = c.tenant_id
       WHERE c.tenant_id = $1::uuid
         AND c.is_active
         AND c.parent_strategy_id IS NOT NULL
-        AND (p.id IS NULL OR NOT p.is_active OR p.step_id <> c.step_id)
+        -- No tenant_id clause: workflow_id is tenant-scoped and part of the key.
+        AND NOT EXISTS (
+             SELECT 1 FROM v1_workflow_concurrency w
+              WHERE w.workflow_id         = c.workflow_id
+                AND w.workflow_version_id = c.workflow_version_id
+                AND w.id                  = c.parent_strategy_id)
       ORDER BY c.id
       LIMIT $2`,
     [opts.tenantId, limit],
@@ -109,109 +121,8 @@ export async function detectStepConcurrencyRot(
 }
 
 /**
- * Repair (or, in dry-run, report) the rows `detectStepConcurrencyRot` flagged.
- * The rot predicate is re-checked inside the write's own `WHERE`, and a
- * QUIESCENCE PRECONDITION declines to touch any strategy an in-flight
- * `v1_concurrency_slot` is currently traversing via `strategy_id`,
- * `parent_strategy_id`, `next_strategy_ids` or `next_parent_strategy_ids`
- * (§3.1.3) — of either the row itself or its (dangling) parent. Deferral is
- * safe and costs at most one tick; it may be permanent in the deadlock case
- * (§3.1.3, §10 risk 2).
- */
-export async function repairStepConcurrencyRot(
-  db: PgLike,
-  opts: { tenantId: string; ids: number[]; mode: MaintenanceMode },
-): Promise<RepairResult<StepRotRow>> {
-  if (opts.ids.length === 0 || opts.mode === "off") {
-    return { touched: 0, rows: [], deferred: false };
-  }
-  const quiescenceWhere = `
-    AND NOT EXISTS (
-         SELECT 1 FROM v1_concurrency_slot s
-          WHERE s.tenant_id = c.tenant_id
-            AND (    s.strategy_id             =    c.id
-                  OR s.parent_strategy_id      =    c.id
-                  OR s.next_strategy_ids        @> ARRAY[c.id]
-                  OR s.next_parent_strategy_ids @> ARRAY[c.id]
-                  OR s.strategy_id             =    c.parent_strategy_id
-                  OR s.parent_strategy_id      =    c.parent_strategy_id
-                  OR s.next_strategy_ids        @> ARRAY[c.parent_strategy_id]
-                  OR s.next_parent_strategy_ids @> ARRAY[c.parent_strategy_id]))`;
-
-  if (opts.mode === "dry-run") {
-    const result = await db.query<{
-      id: number;
-      step_id: string;
-      expression: string;
-      parent_strategy_id: number | null;
-    }>(
-      `SELECT c.id, c.step_id, c.expression, c.parent_strategy_id
-         FROM v1_step_concurrency c
-        WHERE c.tenant_id = $1::uuid
-          AND c.id = ANY($2::bigint[])
-          AND c.is_active
-          AND c.parent_strategy_id IS NOT NULL
-          AND NOT EXISTS (
-               SELECT 1 FROM v1_step_concurrency p
-                WHERE p.id = c.parent_strategy_id
-                  AND p.tenant_id = c.tenant_id
-                  AND p.is_active
-                  AND p.step_id = c.step_id)
-          ${quiescenceWhere}`,
-      [opts.tenantId, opts.ids],
-    );
-    return {
-      touched: 0,
-      rows: result.rows.map((r) => ({
-        id: r.id,
-        stepId: r.step_id,
-        expression: r.expression,
-        parentStrategyId: r.parent_strategy_id,
-      })),
-      deferred: false,
-    };
-  }
-
-  const result = await db.query<{
-    id: number;
-    step_id: string;
-    expression: string;
-  }>(
-    `UPDATE v1_step_concurrency c
-        SET parent_strategy_id = NULL
-      WHERE c.tenant_id = $1::uuid
-        AND c.id = ANY($2::bigint[])
-        AND c.is_active
-        AND c.parent_strategy_id IS NOT NULL
-        AND NOT EXISTS (
-             SELECT 1 FROM v1_step_concurrency p
-              WHERE p.id = c.parent_strategy_id
-                AND p.tenant_id = c.tenant_id
-                AND p.is_active
-                AND p.step_id = c.step_id)
-        ${quiescenceWhere}
-      RETURNING c.id, c.step_id, c.expression`,
-    [opts.tenantId, opts.ids],
-  );
-  return {
-    touched: result.rows.length,
-    rows: result.rows.map((r) => ({
-      id: r.id,
-      stepId: r.step_id,
-      expression: r.expression,
-      parentStrategyId: null,
-    })),
-    deferred: result.rows.length < opts.ids.length,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// §3.1.4 — workflow-level concurrency-group rot
-// ---------------------------------------------------------------------------
-
-/**
- * Rot: an ACTIVE strategy whose child array names a strategy that does not
- * exist in the same `(workflow_id, workflow_version_id)` (§3.1.4).
+ * An ACTIVE workflow strategy with a `child_strategy_ids` entry that is not a
+ * step strategy of the same workflow version pointing back at it.
  */
 export async function detectWorkflowConcurrencyRot(
   db: PgLike,
@@ -224,16 +135,19 @@ export async function detectWorkflowConcurrencyRot(
     expression: string;
     child_strategy_ids: number[];
   }>(
-    `SELECT DISTINCT c.id, c.workflow_version_id, c.expression, c.child_strategy_ids
+    `SELECT c.id, c.workflow_version_id, c.expression, c.child_strategy_ids
        FROM v1_workflow_concurrency c
-       CROSS JOIN LATERAL unnest(COALESCE(c.child_strategy_ids, '{}'::bigint[])) AS x(child_id)
-       LEFT JOIN v1_workflow_concurrency k
-              ON k.id = x.child_id
-             AND k.workflow_id = c.workflow_id
-             AND k.workflow_version_id = c.workflow_version_id
       WHERE c.tenant_id = $1::uuid
         AND c.is_active
-        AND k.id IS NULL
+        AND EXISTS (
+             SELECT 1
+               FROM unnest(COALESCE(c.child_strategy_ids, '{}'::bigint[])) AS x(child_id)
+              WHERE NOT EXISTS (
+                     SELECT 1 FROM v1_step_concurrency s
+                      WHERE s.workflow_id         = c.workflow_id
+                        AND s.workflow_version_id = c.workflow_version_id
+                        AND s.id                  = x.child_id
+                        AND s.parent_strategy_id  = c.id))
       ORDER BY c.id
       LIMIT $2`,
     [opts.tenantId, limit],
@@ -246,111 +160,17 @@ export async function detectWorkflowConcurrencyRot(
   }));
 }
 
-/**
- * Repair the rows `detectWorkflowConcurrencyRot` flagged: strip any child id
- * that does not resolve within the same `(workflow_id, workflow_version_id)`,
- * keeping same-version links intact (§3.1.1 precision correction, AC-8c). Same
- * quiescence-precondition shape as the step-level repair, against
- * `v1_workflow_concurrency_slot` (§3.1.4).
- */
-export async function repairWorkflowConcurrencyRot(
+/** Both link-integrity detectors — the single call site the maintenance tick uses. */
+export async function detectConcurrencyRot(
   db: PgLike,
-  opts: { tenantId: string; ids: number[]; mode: MaintenanceMode },
-): Promise<RepairResult<WorkflowRotRow>> {
-  if (opts.ids.length === 0 || opts.mode === "off") {
-    return { touched: 0, rows: [], deferred: false };
-  }
-  const quiescenceWhere = `
-    AND NOT EXISTS (
-         SELECT 1 FROM v1_workflow_concurrency_slot s
-          WHERE s.tenant_id = c.tenant_id
-            AND (    s.strategy_id = c.id
-                  OR s.strategy_id = ANY(c.child_strategy_ids)
-                  OR s.child_strategy_ids           && c.child_strategy_ids
-                  OR s.completed_child_strategy_ids && c.child_strategy_ids))`;
-
-  if (opts.mode === "dry-run") {
-    const result = await db.query<{
-      id: number;
-      workflow_version_id: string;
-      expression: string;
-      child_strategy_ids: number[];
-    }>(
-      `SELECT c.id, c.workflow_version_id, c.expression, c.child_strategy_ids
-         FROM v1_workflow_concurrency c
-        WHERE c.tenant_id = $1::uuid
-          AND c.id = ANY($2::bigint[])
-          AND c.is_active
-          ${quiescenceWhere}`,
-      [opts.tenantId, opts.ids],
-    );
-    return {
-      touched: 0,
-      rows: result.rows.map((r) => ({
-        id: r.id,
-        workflowVersionId: r.workflow_version_id,
-        expression: r.expression,
-        childStrategyIds: r.child_strategy_ids ?? [],
-      })),
-      deferred: false,
-    };
-  }
-
-  const result = await db.query<{
-    id: number;
-    child_strategy_ids: number[];
-  }>(
-    `UPDATE v1_workflow_concurrency c
-        SET child_strategy_ids = COALESCE((
-              SELECT array_agg(x ORDER BY x)
-                FROM unnest(c.child_strategy_ids) x
-               WHERE EXISTS (SELECT 1 FROM v1_workflow_concurrency k
-                              WHERE k.id = x
-                                AND k.workflow_id = c.workflow_id
-                                AND k.workflow_version_id = c.workflow_version_id)
-            ), '{}'::bigint[])
-      WHERE c.tenant_id = $1::uuid
-        AND c.id = ANY($2::bigint[])
-        AND c.is_active
-        ${quiescenceWhere}
-      RETURNING c.id, c.child_strategy_ids`,
-    [opts.tenantId, opts.ids],
-  );
-  return {
-    touched: result.rows.length,
-    rows: result.rows.map((r) => ({
-      id: r.id,
-      workflowVersionId: "",
-      expression: "",
-      childStrategyIds: r.child_strategy_ids ?? [],
-    })),
-    deferred: result.rows.length < opts.ids.length,
-  };
-}
-
-/** Combined detect+repair across both tables — the single call site the integration harness (§7.2.1) and the maintenance tick use. */
-export async function repairConcurrencyRot(
-  db: PgLike,
-  opts: { tenantId: string; mode: MaintenanceMode; limit?: number },
+  opts: { tenantId: string; limit?: number },
 ): Promise<{
   stepFindings: StepRotRow[];
   workflowFindings: WorkflowRotRow[];
-  stepRepair: RepairResult<StepRotRow>;
-  workflowRepair: RepairResult<WorkflowRotRow>;
 }> {
   const stepFindings = await detectStepConcurrencyRot(db, opts);
   const workflowFindings = await detectWorkflowConcurrencyRot(db, opts);
-  const stepRepair = await repairStepConcurrencyRot(db, {
-    tenantId: opts.tenantId,
-    ids: stepFindings.map((r) => r.id),
-    mode: opts.mode,
-  });
-  const workflowRepair = await repairWorkflowConcurrencyRot(db, {
-    tenantId: opts.tenantId,
-    ids: workflowFindings.map((r) => r.id),
-    mode: opts.mode,
-  });
-  return { stepFindings, workflowFindings, stepRepair, workflowRepair };
+  return { stepFindings, workflowFindings };
 }
 
 // ---------------------------------------------------------------------------
