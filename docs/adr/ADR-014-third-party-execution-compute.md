@@ -74,7 +74,7 @@ Negative, to watch:
 - **Terms.** §7 of Agent37's terms needs a written reading before selling. It has had no legal review.
 - **ADR-013 I7.** "There is one execution path" becomes one path per profile, chosen only by the resolver. No setting or client input selects a path.
 - **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. For a remote cell the adapter needs three things: a bearer whose TTL is bounded by the step timeout, revocation from the boot sweep, and an idempotency key on every effect.
-- **Evidence upkeep.** ADR-013's probe evidence expires on 2026-11-24 under decision 3. Driver A in `packages/worker/deploy/README.md` has to be re-run on a schedule.
+- **Evidence upkeep.** Under decision 3, ADR-013's probe evidence expires first in production, on 2026-11-23 (probes 2 to 7, 2026-10-24 12:26Z), and then on the throwaway box, on 2026-11-24 (all seven, 2026-10-25 09:56Z). Driver A in `packages/worker/deploy/README.md` has to be re-run on a schedule.
 
 ## Testing
 
