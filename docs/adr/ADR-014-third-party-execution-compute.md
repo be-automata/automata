@@ -1,6 +1,6 @@
 # ADR-014: Third-party execution compute under Automata's account, gated by one profile resolver
 
-- **Status:** Proposed (2026-11-08). Accept only by the operator; step 5 of Testing starts after acceptance.
+- **Status:** Accepted (2026-11-09) by the operator. Proposed 2026-11-08 (#571). Step 5 of Testing starts now.
 - **Date:** 2026-11-08
 - **Context source:**
   - `docs/adr/ADR-002-per-org-execution-plane.md:97`: "we do not host or bill for execution compute".
