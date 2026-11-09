@@ -21,7 +21,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "zod": "4.1.11"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
