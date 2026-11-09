@@ -48,6 +48,11 @@ import {
 } from "./retry-classification";
 import type { WorkerConfig } from "./config";
 import type { RunLane } from "./run-lane";
+import {
+  cgroupDirForPid,
+  type ReadFileSync,
+  readMemoryAnon,
+} from "./run-memory";
 import type { RunPaths } from "./run-owned-paths";
 import { runTelemetrySettingsEnv } from "./run-telemetry";
 import { getProcessWorkerId } from "./run-namespace";
@@ -150,6 +155,8 @@ export interface ContainerDaemonDeps {
   removeAttempts?: number;
   /** First backoff between removal attempts, doubled each time (default 2 s; tests shorten it). */
   retryDelayMs?: number;
+  /** #574: sync reads of `/proc/<pid>/cgroup` and the cgroup's `memory.stat` (tests inject a fake). */
+  readFileSync?: ReadFileSync;
 }
 
 /**
@@ -234,6 +241,8 @@ export class ContainerDaemonProcess
   private stderrTail = "";
   private lastState: ContainerState | null = null;
   private refreshing: Promise<void> | null = null;
+  /** #574: the container's cgroup v2 dir, resolved once per host pid. */
+  private cgroup: { pid: number; dir: string } | null = null;
   private teardownPromise: Promise<void> | null = null;
   private startedAt = 0;
   private forwards: SocketForward[] = [];
@@ -669,6 +678,32 @@ export class ContainerDaemonProcess
     return this.lastState?.oomKilled
       ? resourceLimitFailure(this.config.memoryMaxBytes, 1)
       : null;
+  }
+
+  /**
+   * #574: the anonymous memory (`anon` + `shmem`) the kernel charges this
+   * run's container, for the #371 headroom reservation (`Reservation.observe`).
+   * SYNCHRONOUS — the admission decision that calls it must never await — so
+   * it reads the pid from the cached inspect (refreshed every poll tick by
+   * `memoryStarvation`) and two small cgroupfs files. null before the first
+   * inspect, once the container has stopped (pid 0), after teardown began, or
+   * on any read failure; the reservation then counts the whole run commit,
+   * which is the safe direction. Never throws.
+   */
+  memoryAnonBytes(): number | null {
+    if (this.teardownPromise) return null;
+    const pid = this.lastState?.pid ?? 0;
+    if (!this.lastState) void this.refreshState();
+    if (pid <= 0) return null;
+    const read = this.deps.readFileSync;
+    // Only a resolved dir is cached: a miss (a transient read failure) is
+    // retried on the next call instead of disabling the probe for the run.
+    if (this.cgroup?.pid !== pid) {
+      const dir = cgroupDirForPid(pid, read);
+      if (!dir) return null;
+      this.cgroup = { pid, dir };
+    }
+    return readMemoryAnon(this.cgroup.dir, read);
   }
 
   /** The OOM flag as last observed (teardown reads it before removal). */

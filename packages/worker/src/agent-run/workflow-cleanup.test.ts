@@ -256,6 +256,8 @@ vi.mock("./revoke-installation-tokens", () => ({
 
 // #437: what the daemon's OOM signal reports (null = no kill).
 let fakeMemoryStarvation: unknown = null;
+// #574: the stand-in container's anonymous memory (the headroom probe).
+let fakeMemoryAnon: number | null = null;
 
 // #437 Part B: the timeout salvage runs its git through runAsAgent. A case
 // that sets `agentCommandFake` scripts (and records) every call; otherwise
@@ -289,6 +291,7 @@ vi.mock("./container-daemon-process", async (importOriginal) => ({
       sendMessageCalls.push(message);
       return 42;
     });
+    memoryAnonBytes = () => fakeMemoryAnon;
     teardown = vi.fn(async () => {
       finallyOrder.push("teardown");
     });
@@ -2493,6 +2496,36 @@ Committed_AS:   12000000 kB
     ).toHaveLength(2);
     expect(logs.some((l) => l.includes("box.headroom_ok"))).toBe(true);
     // The reservation lives until the finally.
+    expect(controller.reservedBytes()).toBe(0);
+  });
+
+  // card: protects=#574 once the container daemon is up, the run's reservation counts only runCommit − the container's anonymous memory (Reservation.observe wired to memoryAnonBytes), and falls back to the whole runCommit when the probe reads nothing; fails_when=the workflow stops attaching the probe (#498 regression: every live run kept its full commit reserved and the third slot was refused); no_claim=the cgroup read itself (container-daemon-process.test.ts)
+  it("#574: a live run's reservation shrinks by its container's anonymous memory", async () => {
+    const { _setAdmissionControllerForTests } = await import("./workflow");
+    const { AdmissionController } = await import("./headroom");
+    const controller = new AdmissionController(POLICY, () => ROOMY);
+    _setAdmissionControllerForTests(controller);
+    const seen: number[] = [];
+    // The first call after the daemon is up: read the live reservation there.
+    pullNextMessage.mockImplementationOnce(async () => {
+      seen.push(controller.reservedBytes());
+      fakeMemoryAnon = 1000 * 1024 ** 2;
+      seen.push(controller.reservedBytes());
+      fakeMemoryAnon = 2000 * 1024 ** 2;
+      seen.push(controller.reservedBytes());
+      return null;
+    });
+    try {
+      await runFn(INPUT, { cancelled: false, log: vi.fn() });
+    } finally {
+      fakeMemoryAnon = null;
+    }
+    expect(seen).toEqual([
+      POLICY.runCommitBytes, // probe reads nothing yet: whole commit
+      POLICY.runCommitBytes - 1000 * 1024 ** 2,
+      0, // fully charged: never negative
+    ]);
+    // Released with the run.
     expect(controller.reservedBytes()).toBe(0);
   });
 

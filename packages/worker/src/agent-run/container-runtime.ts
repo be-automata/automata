@@ -39,6 +39,8 @@ export interface ContainerState {
   running: boolean;
   exitCode: number;
   oomKilled: boolean;
+  /** `.State.Pid`: the container's init as a HOST pid (rootless docker shares the pid namespace); 0 when stopped. */
+  pid: number;
 }
 
 /** A failed runtime operation, with the docker CLI's own stderr (no secret ever rides it). */
@@ -277,6 +279,10 @@ export class ContainerRuntime {
       running: s.Running === true,
       exitCode: typeof s.ExitCode === "number" ? s.ExitCode : -1,
       oomKilled: s.OOMKilled === true,
+      pid:
+        typeof s.Pid === "number" && Number.isInteger(s.Pid) && s.Pid > 0
+          ? s.Pid
+          : 0,
     };
   }
 
