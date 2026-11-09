@@ -108,6 +108,7 @@ export async function getAutomationHealth({
       state: runStateFor({
         status: run.status,
         hasError: run.errorMessage !== null,
+        errorMessage: run.errorMessage,
         terminalCause: run.terminalCause,
       }),
     });
