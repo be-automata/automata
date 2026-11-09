@@ -33,6 +33,8 @@
   RFC (#85), now. On release (P3): the host-uid execution model of #108 and the link-only battery
   packs of #85 for the Linux execution box. ADR-007's I4 (uid-wide kill) is rewritten, not dropped
   (see "What each host mechanism becomes").
+- **Amended by:** ADR-014 (2026-11-09): I7's single execution path becomes one path per profile,
+  chosen only by the profile resolver.
 
 ## Locked decisions (operator, 2026-10-21)
 

@@ -9,7 +9,9 @@
 - **Deciders:** operator + platform-convergence program
 - **Relates to:** ADR-001 (tenant-scoping enforcement — the *query* layer; this ADR is the
   *execution* layer)
-- **Supersedes / superseded by:** —
+- **Supersedes / superseded by:** superseded in part by ADR-014 (2026-11-09): only the Decision §2
+  sentence on hosting and billing execution compute, and the R3.8 closing phrase "without the
+  platform ever hosting agent compute". The rest stands.
 - **Revision 2 (2026-07-15, operator):** the isolation tier changed **before any implementation
   began**. Option C (shared pool of per-org containers we host) is **withdrawn** in favour of
   Option D: the **customer supplies the VPS**, in both the dedicated-VPS and BYOC modes. The core
