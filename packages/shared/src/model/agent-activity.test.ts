@@ -11,6 +11,7 @@ import {
   createTestThread,
   createTestUser,
 } from "./test-helpers";
+import { markThreadTerminal } from "./threads";
 
 const db = createDb(env.DATABASE_URL!);
 const noRepoAccess = async () => false;
@@ -200,6 +201,35 @@ describe("getOrgAgentActivity", () => {
     expect(automationRow.trigger).toBe("automation");
     expect(automationRow.starter.kind).toBe("automation");
     expect(automationRow.automationName).toBe("Test Automation");
+  });
+
+  // #575: written by the real terminal write, so the row has the shape
+  // production has (status complete, errorMessage "superseded", cause
+  // superseded) — not a hand-made fixture that could drift from it.
+  it("lists a superseded run under Recent, never under Needs you", async () => {
+    const { threadId } = await createTestThread({
+      db,
+      userId: viewerId,
+      overrides: { organizationId: orgId },
+      chatOverrides: { status: "working" },
+    });
+    expect(
+      await markThreadTerminal({ db, threadId, cause: "superseded" }),
+    ).toBe(true);
+    const activity = await getOrgAgentActivity({
+      db,
+      organizationId: orgId,
+      viewerUserId: viewerId,
+      hasRepoAccess: noRepoAccess,
+    });
+    expect(activity.needsYou).toEqual([]);
+    expect(activity.counts.needsYou).toBe(0);
+    expect(activity.recent.map((r) => r.threadId)).toEqual([threadId]);
+    expect(activity.recent[0]!.state).toEqual({
+      kind: "unverified",
+      word: "superseded",
+      reason: null,
+    });
   });
 
   it("keeps finished runs from the last day under recent", async () => {

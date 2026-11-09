@@ -206,6 +206,7 @@ export async function getOrgUsageStats({
     const state = runStateFor({
       status: row.status,
       hasError: row.errorMessage !== null,
+      errorMessage: row.errorMessage,
       terminalCause: row.terminalCause,
     });
     if (state.kind === "done") {

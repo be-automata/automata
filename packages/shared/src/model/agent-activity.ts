@@ -199,6 +199,7 @@ export async function getOrgAgentActivity({
     const state = runStateFor({
       status: row.status,
       hasError: row.errorMessage !== null,
+      errorMessage: row.errorMessage,
       terminalCause: row.terminalCause,
       bootingSubstatus: row.bootingSubstatus ?? null,
     });
