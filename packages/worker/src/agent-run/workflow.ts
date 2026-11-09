@@ -1729,6 +1729,12 @@ async function runAgentInner(
     await daemon.start();
     abnormal.daemonStarted = true;
     step(containerDaemon.spawnedLine());
+    // #371 / #574: from here the container's own cgroup says what anonymous
+    // memory the kernel already charges this run (what Committed_AS counts);
+    // the headroom reservation counts only the remainder. Without this every
+    // live run kept its full run commit reserved on top of Committed_AS, and
+    // the third slot was refused at any real load.
+    reservation?.observe(() => containerDaemon.memoryAnonBytes());
     // #6: a 4xx next-message (PR gone / permission / bad token) is terminal →
     // NonRetryableError; a 5xx/network stays retryable (classifyNextMessageError).
     let message: Awaited<ReturnType<typeof pullNextMessage>>;

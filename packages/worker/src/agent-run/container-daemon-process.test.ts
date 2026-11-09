@@ -131,6 +131,7 @@ function fakeRuntime(
           running: true,
           exitCode: 0,
           oomKilled: false,
+          pid: 4242,
         }
       );
     }),
@@ -268,6 +269,7 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
         running: false,
         exitCode: 137,
         oomKilled: true,
+        pid: 0,
       }),
     });
     const d = make("task", rt, {
@@ -297,6 +299,69 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     expect(rt.child.killed).toEqual(["SIGKILL"]);
   });
 
+  // card: protects=#574 the headroom probe reads anon+shmem of the container's own cgroup v2 dir (resolved from the cached inspect's host pid) synchronously, caches the dir per pid, retries a failed resolve, and is null before the first inspect, for a stopped container and after teardown; fails_when=the probe throws, awaits, reads memory.current, or keeps reporting after teardown; no_claim=the cgroup layout of a real rootless daemon (measured on the box, issue #574)
+  it("memoryAnonBytes: anon+shmem of the container cgroup, null until known", async () => {
+    const scope =
+      "/user.slice/user-995.slice/user@995.service/user.slice/docker-abc.scope";
+    const reads: string[] = [];
+    let cgroupFile: string | null = `0::${scope}\n`;
+    const readFileSync = (file: string): string => {
+      reads.push(file);
+      if (file === "/proc/4242/cgroup") {
+        if (cgroupFile === null) throw new Error("ENOENT");
+        return cgroupFile;
+      }
+      if (file === `/sys/fs/cgroup${scope}/memory.stat`) {
+        return "anon 1000\nfile 999999\nshmem 24\n";
+      }
+      throw new Error(`unexpected read ${file}`);
+    };
+    const rt = fakeRuntime();
+    const d = make("task", rt, { readFileSync });
+    // Before the container exists: null, never a throw.
+    expect(d.memoryAnonBytes()).toBeNull();
+    await d.start();
+    await d.refresh();
+    expect(d.memoryAnonBytes()).toBe(1024);
+    expect(d.memoryAnonBytes()).toBe(1024);
+    expect(reads.filter((f) => f.endsWith("/cgroup"))).toHaveLength(1);
+    // Teardown begun: no more readings.
+    await d.teardown();
+    expect(d.memoryAnonBytes()).toBeNull();
+    // A failed resolve is not cached: the next call resolves again.
+    const d2 = make("task", fakeRuntime(), { readFileSync });
+    await d2.start();
+    await d2.refresh();
+    cgroupFile = null;
+    expect(d2.memoryAnonBytes()).toBeNull();
+    cgroupFile = `0::${scope}\n`;
+    expect(d2.memoryAnonBytes()).toBe(1024);
+  });
+
+  // card: protects=#574 a stopped container (pid 0) reports no anonymous memory, so its reservation stays whole; fails_when=pid 0 reads /proc/0; no_claim=nothing
+  it("memoryAnonBytes: a stopped container (pid 0) is null without a read", async () => {
+    const reads: string[] = [];
+    const rt = fakeRuntime({
+      state: () => ({
+        status: "exited",
+        running: false,
+        exitCode: 0,
+        oomKilled: false,
+        pid: 0,
+      }),
+    });
+    const d = make("task", rt, {
+      readFileSync: (f: string) => {
+        reads.push(f);
+        return "";
+      },
+    });
+    await d.start().catch(() => {});
+    await d.refresh();
+    expect(d.memoryAnonBytes()).toBeNull();
+    expect(reads).toEqual([]);
+  });
+
   // card: protects=a stopped container is not exec'd (it cannot be) and the skip is logged; removal still happens; fails_when=teardown execs a stopped container or the skip is silent; no_claim=cleanup of what the stopped run left (cleanupWorkdir logs it)
   it("teardown: a stopped container skips the hand-back, logged, and is still removed", async () => {
     const lines: string[] = [];
@@ -306,6 +371,7 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
         running: false,
         exitCode: 137,
         oomKilled: true,
+        pid: 0,
       }),
     });
     const d = make("task", rt, { log: (l: string) => lines.push(l) });
@@ -395,6 +461,7 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
         running: true,
         exitCode: 0,
         oomKilled: oom,
+        pid: 4242,
       }),
     });
     const d = make("task", rt);

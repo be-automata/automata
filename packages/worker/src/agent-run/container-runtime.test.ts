@@ -177,6 +177,7 @@ describe("ContainerRuntime: the CLI against ONE configured socket", () => {
                 Running: false,
                 ExitCode: 137,
                 OOMKilled: true,
+                Pid: 0,
               }),
             },
       ).exec,
@@ -186,8 +187,33 @@ describe("ContainerRuntime: the CLI against ONE configured socket", () => {
       running: false,
       exitCode: 137,
       oomKilled: true,
+      pid: 0,
     });
     await expect(rt.inspectState("gone")).resolves.toBeNull();
+  });
+
+  // card: protects=#574 inspect carries the container's host pid for the headroom probe, and anything but a positive integer reads as 0 (no pid); fails_when=a missing, negative or fractional Pid becomes a pid the probe would read /proc for; no_claim=that the pid is a host pid (measured on the box)
+  it("inspectState: Pid is a positive integer or 0", async () => {
+    for (const [pid, want] of [
+      [31337, 31337],
+      [0, 0],
+      [-5, 0],
+      [1.5, 0],
+      ["7", 0],
+      [undefined, 0],
+    ] as const) {
+      const rt = new ContainerRuntime({
+        socketPath: SOCK,
+        exec: fakeExec(() => ({
+          stdout: JSON.stringify({
+            Status: "running",
+            Running: true,
+            Pid: pid,
+          }),
+        })).exec,
+      });
+      await expect(rt.inspectState("c1")).resolves.toMatchObject({ pid: want });
+    }
   });
 
   // card: protects=copyOut reports an absent source as false (the image may lack settings.batteries.json) and any other failure throws; fails_when=absence throws or a daemon error reads as absence; no_claim=nothing
