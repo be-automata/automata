@@ -1,12 +1,12 @@
 # ADR-014: Third-party execution compute under Automata's account, gated by one profile resolver
 
-- **Status:** Proposed (2026-11-08). Accept only by the operator; step 5 of Testing starts after acceptance.
+- **Status:** Accepted (2026-11-09) by the operator. Proposed 2026-11-08 (#571). Step 5 of Testing starts now.
 - **Date:** 2026-11-08
 - **Context source:**
-  - `docs/adr/ADR-002-per-org-execution-plane.md:97`: "we do not host or bill for execution compute".
-  - `docs/adr/ADR-002-per-org-execution-plane.md:459`: R3.8, Tier C, the customer's own provider account.
+  - `docs/adr/ADR-002-per-org-execution-plane.md:99`: "we do not host or bill for execution compute".
+  - `docs/adr/ADR-002-per-org-execution-plane.md:461`: R3.8, Tier C, the customer's own provider account.
   - `docs/adr/ADR-005-monotone-permission-and-posture-floors.md:69` (§3b, single shared resolver) and `:83` (§5, enforced at the seam).
-  - `docs/adr/ADR-013-image-per-run-execution.md:142` (Decision 5), `:150` (Decision 6), `:287` (acceptance record) and `:390` (I7, one execution path).
+  - `docs/adr/ADR-013-image-per-run-execution.md:144` (Decision 5), `:152` (Decision 6), `:289` (acceptance record) and `:392` (I7, one execution path).
   - `packages/worker/src/agent-run/container-argv.ts` (`buildContainerCreateArgv`, `assertHardenedArgv`).
   - `packages/worker/src/agent-run/egress-proxy.ts` (`decide` before lookup in `handleConnect`).
   - `packages/worker/deploy/linux/container-security-probes.sh`.
@@ -27,7 +27,7 @@ Conformance was measured on 2026-11-08 by a CLI script over Agent37's API, gViso
 - **Credentials in the guest:** every instance gets Agent37 credentials in its environment (`AGENT37_MANAGED_TOKEN`, `AGENT37_STARTER_TOKEN`, `OPENCLAW_STARTER_TOKEN`), even on `agent37-base`.
 - **What holds:** metadata, the host gateway and other instances are unreachable, edge auth is enforced, and teardown is verified.
 
-Automata's own box is the baseline every profile is compared against. ADR-013's acceptance record is its evidence (`ADR-013…md:287`):
+Automata's own box is the baseline every profile is compared against. ADR-013's acceptance record is its evidence (`ADR-013…md:289`):
 
 - **Production, 2026-10-24:** probes 2 to 7 pass.
 - **Throwaway box with enforced egress, 2026-10-25:** all seven pass.
