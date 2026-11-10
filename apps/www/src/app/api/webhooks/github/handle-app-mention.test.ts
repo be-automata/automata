@@ -45,10 +45,18 @@ vi.mock("@/server-lib/follow-up", () => ({
   queueFollowUpInternal: vi.fn(),
 }));
 
+// Mirrors the global mock in test-helpers/test-setup.ts (a local vi.mock
+// replaces it wholesale) and adds the repo installation lookup (#579).
+// Implementations live in vi.fn() so vi.restoreAllMocks() keeps them.
 vi.mock("@terragon/shared/github-app", () => ({
-  getRepoInstallationId: vi.fn(),
+  getRepoInstallationId: vi.fn(async (): Promise<number | null> => null),
   getInstallationToken: vi.fn(async () => "mock-github-token"),
+  getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
   lookupInstallationId: vi.fn(async () => 424242),
+  getReadOnlyInstallationToken: vi.fn(async () => ({
+    token: "mock-github-read-token",
+    expiresAt: "2026-10-04T03:00:00Z",
+  })),
 }));
 
 describe("handleAppMention", () => {
@@ -479,6 +487,23 @@ describe("handleAppMention", () => {
           organizationId: await createTestOrg({ db, name: "Bound" }),
         });
         await expectFailsClosed(repoFullName);
+      });
+
+      it("T8: fails closed when the payload installation is unmapped and the repo is claimed", async () => {
+        const repoFullName = uniqueRepo();
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "Claimed" }),
+        });
+        await expect(
+          mention(repoFullName, 7, { installationId: 987_654_321 }),
+        ).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "unmapped_installation",
+        );
+        expect(getRepoInstallationId).not.toHaveBeenCalled();
+        expect(newThreadInternal).not.toHaveBeenCalled();
       });
 
       it("T4: a payload installationId skips the repo lookup", async () => {

@@ -48,11 +48,13 @@ was rejected: it only works when an automation matched and can disagree with the
    (parse owner/repo first — already done at L71), then pass `resolvedInstallationId` to
    `getRepoOrgAndMode`. A lookup error other than 404 propagates (the delivery shows
    failed and can be redelivered), matching the other lanes. Update the inline comment.
-2. Fail closed: if `organizationId === null` **and** the repo has at least one
-   `repo_review_settings` row (any org), throw
+2. Fail closed: if `organizationId === null` **and** some org has claimed the repo — at
+   least one `repo_review_settings` row (any org) **or** a `github_repo_org_binding` row
+   (added in refinement: a bound repo whose installation has no org is the same bypass) —
+   throw
    `new WebhookSkip("unmapped_installation", …, { installationId: resolvedInstallationId ?? null, repoFullName })`
    before any side effect (before the octokit/branch lookup, reaction, billing comment or
-   thread creation). A repo with no settings rows keeps today's behavior (null-org thread),
+   thread creation). This also covers a payload installation with no org mapping. A repo no org has claimed keeps today's behavior (null-org thread),
    so un-onboarded repos are not broken.
 3. New shared helper in `packages/shared/src/model/repo-review-settings.ts`:
    `repoHasReviewSettings({ db, repoFullName }): Promise<boolean>` — existence check across
@@ -71,9 +73,10 @@ was rejected: it only works when an automation matched and can disagree with the
 
 ## Tests
 
-`apps/www/src/app/api/webhooks/github/handle-app-mention.test.ts` (add
-`vi.mock("@terragon/shared/github-app", () => ({ getRepoInstallationId: vi.fn() }))`,
-default `mockResolvedValue(null)` in `beforeEach`):
+`apps/www/src/app/api/webhooks/github/handle-app-mention.test.ts` (a local
+`vi.mock("@terragon/shared/github-app")` that mirrors all four exports of the global mock in
+`test-helpers/test-setup.ts` and adds `getRepoInstallationId`, implementations inside `vi.fn`;
+default `null` in `beforeEach`; the shared default repo's claim rows are cleared in `beforeEach`):
 
 - T1 (AC1/AC3): no `installationId`, lookup returns an id bound to org X (active) →
   `getRepoInstallationId` called with `(owner, repo)`, `newThreadInternal` called with
@@ -85,6 +88,10 @@ default `mockResolvedValue(null)` in `beforeEach`):
   `unmapped_installation`; `newThreadInternal` and `getOctokitForApp` not called.
 - T4: payload `installationId` present → `getRepoInstallationId` not called.
 - T5: lookup throws a non-404 error → `handleAppMention` rejects with it.
+- T7 (fail closed): no `installationId`, lookup returns `null`, repo bound to an org via
+  `github_repo_org_binding` → same `WebhookSkip`; nothing created.
+- T8 (fail closed): payload `installationId` with no org mapping on a claimed repo →
+  `WebhookSkip`; `getRepoInstallationId` not called.
 - T6: no `installationId`, lookup returns `null`, repo has **no** settings row →
   thread created with `organizationId: null`, `shadow: false` (un-onboarded repos keep working).
 
