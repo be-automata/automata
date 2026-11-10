@@ -15,6 +15,7 @@ import {
   boxConfigurationFor,
   cellFactsForRun,
   isTrustedPrContent,
+  readRepoVisibility,
   recordShadowCellDecision,
   resolveCellDecision,
   type CellRunFacts,
@@ -318,5 +319,73 @@ describe("recordShadowCellDecision", () => {
       expect.anything(),
     );
     warn.mockRestore();
+  });
+});
+
+describe("readRepoVisibility: one deadline over the whole lookup", () => {
+  type GetOctokit = NonNullable<
+    Parameters<typeof readRepoVisibility>[1]
+  >["getOctokit"];
+  const octokitReturning = (isPrivate: boolean, seen?: AbortSignal[]) =>
+    (async () => ({
+      rest: {
+        repos: {
+          get: async ({ request }: { request: { signal: AbortSignal } }) => {
+            seen?.push(request.signal);
+            return { data: { private: isPrivate } };
+          },
+        },
+      },
+    })) as unknown as GetOctokit;
+
+  it("a token mint that never resolves gives null within the deadline", async () => {
+    const started = Date.now();
+    const result = await readRepoVisibility("acme/repo", {
+      getOctokit: (() => new Promise(() => {})) as unknown as GetOctokit,
+      timeoutMs: 50,
+    });
+    expect(result).toBeNull();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("a repos.get that hangs past the deadline gives null and is aborted", async () => {
+    let signal: AbortSignal | undefined;
+    const getOctokit = (async () => ({
+      rest: {
+        repos: {
+          get: ({ request }: { request: { signal: AbortSignal } }) => {
+            signal = request.signal;
+            return new Promise(() => {});
+          },
+        },
+      },
+    })) as unknown as GetOctokit;
+    await expect(
+      readRepoVisibility("acme/repo", { getOctokit, timeoutMs: 50 }),
+    ).resolves.toBeNull();
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("reads the flag when GitHub answers in time", async () => {
+    const seen: AbortSignal[] = [];
+    await expect(
+      readRepoVisibility("acme/repo", {
+        getOctokit: octokitReturning(false, seen),
+      }),
+    ).resolves.toBe("public");
+    await expect(
+      readRepoVisibility("acme/repo", { getOctokit: octokitReturning(true) }),
+    ).resolves.toBe("private");
+    expect(seen[0]?.aborted).toBe(false);
+  });
+
+  it("a mint error gives null (fail closed downstream)", async () => {
+    await expect(
+      readRepoVisibility("acme/repo", {
+        getOctokit: (async () => {
+          throw new Error("no installation");
+        }) as unknown as GetOctokit,
+      }),
+    ).resolves.toBeNull();
   });
 });

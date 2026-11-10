@@ -170,21 +170,46 @@ export function resetCellPolicyForTests(): void {
   policyPromise = null;
 }
 
-/** GitHub's `private` flag for the repo; null when it cannot be read in time. */
+/**
+ * GitHub's `private` flag for the repo; null when it cannot be read in time.
+ * One deadline covers the whole lookup, the installation-token mint inside
+ * `getOctokitForApp` included, so a slow or hung GitHub never delays a
+ * dispatch (shadow mode must not cost a run anything). Null is read as
+ * private downstream (fail closed).
+ */
 export async function readRepoVisibility(
   repoFullName: string,
+  deps: {
+    getOctokit?: typeof getOctokitForApp;
+    timeoutMs?: number;
+  } = {},
 ): Promise<RepoVisibility | null> {
-  try {
+  const timeoutMs = deps.timeoutMs ?? VISIBILITY_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+  const lookup = (async (): Promise<RepoVisibility | null> => {
     const [owner, repo] = parseRepoFullName(repoFullName);
-    const octokit = await getOctokitForApp({ owner, repo });
+    const octokit = await (deps.getOctokit ?? getOctokitForApp)({
+      owner,
+      repo,
+    });
     const { data } = await octokit.rest.repos.get({
       owner,
       repo,
-      request: { signal: AbortSignal.timeout(VISIBILITY_TIMEOUT_MS) },
+      request: { signal: controller.signal },
     });
     return data.private ? "private" : "public";
-  } catch {
-    return null;
+  })().catch(() => null);
+  try {
+    return await Promise.race([lookup, deadline]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
