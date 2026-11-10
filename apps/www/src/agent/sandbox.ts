@@ -19,7 +19,7 @@ import type {
   CreateSandboxOptions,
   ISandboxSession,
 } from "@terragon/sandbox/types";
-import type { SandboxProvider, SandboxSize } from "@terragon/types/sandbox";
+import type { SandboxProvider } from "@terragon/types/sandbox";
 import {
   getOrCreateSandbox as getOrCreateSandboxInternal,
   hibernateSandbox as hibernateSandboxInternal,
@@ -41,7 +41,6 @@ import { generateBranchName } from "@/server-lib/generate-branch-name";
 import { sandboxTimeoutMs } from "@terragon/sandbox/constants";
 import { getAndVerifyCredentials } from "./credentials";
 import { DEFAULT_SANDBOX_SIZE } from "@/lib/subscription-tiers";
-import type { UserSettings } from "@terragon/shared";
 import { ensureAgent } from "@terragon/agent/utils";
 import { getLastUserMessageModel } from "@/lib/db-message-helpers";
 
@@ -672,46 +671,43 @@ export async function maybeHibernateSandboxById({
   }
 }
 
-export async function getSandboxProvider({
-  userSetting,
-  sandboxSize,
-  userId,
+/**
+ * The provider a NEW thread (or a threadless setup-script sandbox) is stamped
+ * with. Server-only: ADR-014 amends ADR-013 I7 to "one path per profile,
+ * chosen only by the resolver; no setting or client input selects a path", so
+ * the former user setting (`user_settings.sandbox_provider`) and the
+ * `forceDaytonaSandbox` flag no longer take part (operator decision
+ * 2026-11-10). Until the resolver is wired, the value is the deployment
+ * default that the "default" setting already produced:
+ * - tests → "mock";
+ * - an `E2B_API_KEY` deployment → "e2b";
+ * - otherwise → "docker". Production sets no E2B key, so it stamps "docker"
+ *   and runs every thread on the execution plane via `HATCHET_ENABLED`
+ *   (`hatchetDispatchEnabled`, unchanged).
+ * Existing threads keep whatever `threads.sandbox_provider` they were stamped
+ * with: resume, hibernate, the terminal and dispatch read the thread row, not
+ * this function.
+ */
+export function serverDefaultSandboxProvider({
+  isTest,
+  e2bApiKey,
 }: {
-  userSetting: UserSettings["sandboxProvider"];
-  sandboxSize: SandboxSize;
-  userId: string;
-}): Promise<SandboxProvider> {
-  if (process.env.NODE_ENV === "test") {
+  isTest: boolean;
+  e2bApiKey: string;
+}): SandboxProvider {
+  if (isTest) {
     return "mock";
   }
+  // Without an E2B key the remote provider can never work; fall back to the
+  // local Docker provider so a SaaS-free install boots and runs.
+  return e2bApiKey ? "e2b" : "docker";
+}
 
-  // Check if user has forceDaytonaSandbox feature flag enabled
-  const featureFlags = await getFeatureFlagsForUser({ db, userId });
-  if (featureFlags.forceDaytonaSandbox) {
-    return "daytona";
-  }
-
-  switch (userSetting) {
-    case "default":
-      // Without an E2B key the remote provider can never work; fall back to
-      // the local Docker provider so a SaaS-free install boots and runs.
-      return env.E2B_API_KEY ? "e2b" : "docker";
-    case "e2b":
-      return "e2b";
-    case "daytona":
-      return "daytona";
-    case "docker":
-      return "docker";
-    case "mock":
-      return "mock";
-    case "hatchet-remote":
-      // ADR-003: a thread pinned to remote dispatch keeps that provider; the local
-      // boot path is never taken for it.
-      return "hatchet-remote";
-    default:
-      const _exhaustiveCheck: never = userSetting;
-      throw new Error(`Unknown sandbox provider: ${_exhaustiveCheck}`);
-  }
+export function getSandboxProvider(): SandboxProvider {
+  return serverDefaultSandboxProvider({
+    isTest: process.env.NODE_ENV === "test",
+    e2bApiKey: env.E2B_API_KEY,
+  });
 }
 
 export async function getOrCreateSandbox(

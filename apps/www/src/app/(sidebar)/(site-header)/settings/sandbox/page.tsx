@@ -11,12 +11,14 @@ export const metadata: Metadata = {
 
 export default async function SandboxSettingsPage() {
   const userId = await getUserIdOrRedirect();
-  const daytonaOptionsForSandboxProvider = await getFeatureFlagForUser({
+  // The page holds the sandbox size only: the provider is server-chosen
+  // (ADR-014 / ADR-013 I7), so the size flag gates it.
+  const largeSandboxSizeEnabled = await getFeatureFlagForUser({
     db,
     userId,
-    flagName: "daytonaOptionsForSandboxProvider",
+    flagName: "enableLargeSandboxSize",
   });
-  if (!daytonaOptionsForSandboxProvider) {
+  if (!largeSandboxSizeEnabled) {
     redirect("/settings");
   }
   return <SandboxSettings />;
