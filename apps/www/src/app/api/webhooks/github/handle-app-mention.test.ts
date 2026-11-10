@@ -516,13 +516,16 @@ describe("handleAppMention", () => {
         );
       });
 
-      it("T5: a non-404 lookup error propagates", async () => {
+      it("T5: a non-404 lookup error is an App-access skip (WI-8), not a 500", async () => {
         const fresh = await createTestGitHubPR({ db });
         vi.mocked(getRepoInstallationId).mockRejectedValue(
           new Error("github 500"),
         );
-        await expect(mention(fresh.repoFullName, fresh.number)).rejects.toThrow(
-          "github 500",
+        await expect(
+          mention(fresh.repoFullName, fresh.number),
+        ).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "app_access_unavailable",
         );
         expect(newThreadInternal).not.toHaveBeenCalled();
       });

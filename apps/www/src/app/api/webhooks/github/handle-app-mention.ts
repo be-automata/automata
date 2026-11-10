@@ -78,10 +78,18 @@ export async function handleAppMention({
   // row, but produce ZERO GitHub side effects — no eyes reaction, no billing
   // comment, and no agent run. Reads (branch lookup) are fine.
   // Repo-level webhooks carry no `installation` (#579): resolve it from the
-  // repo, as the org-mention and mirror lanes do (null on 404; other errors
-  // propagate so the delivery can be redelivered).
+  // repo, as the org-mention and mirror lanes do (null when the App is not
+  // installed). Any other failure is App access being unavailable, which this
+  // handler has always turned into a 2xx skip (WI-8, below), so the lookup
+  // goes through requireAppAccess too; a skip starts no run, so it still
+  // fails closed.
   const resolvedInstallationId =
-    installationId ?? (await getRepoInstallationId(owner, repo));
+    installationId ??
+    (await requireAppAccess(() => getRepoInstallationId(owner, repo), {
+      repoFullName,
+      issueOrPrType,
+      issueOrPrNumber,
+    }));
   const { organizationId, mode } = await getRepoOrgAndMode({
     db,
     installationId: resolvedInstallationId,

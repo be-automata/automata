@@ -46,8 +46,11 @@ was rejected: it only works when an automation matched and can disagree with the
 
 1. `handleAppMention`: `const resolvedInstallationId = installationId ?? (await getRepoInstallationId(owner, repo));`
    (parse owner/repo first — already done at L71), then pass `resolvedInstallationId` to
-   `getRepoOrgAndMode`. A lookup error other than 404 propagates (the delivery shows
-   failed and can be redelivered), matching the other lanes. Update the inline comment.
+   `getRepoOrgAndMode`. The lookup runs inside `requireAppAccess` (roborev round 2): a
+   failure other than 404 becomes a `WebhookSkip("app_access_unavailable")` (2xx), which
+   is how this handler already treated the same GitHub call via `getOctokitForApp` (WI-8).
+   This deliberately differs from org-mention-lane/mirror-intake, which propagate a 500.
+   Update the inline comment.
 2. Fail closed: if `organizationId === null` **and** some org has claimed the repo — at
    least one `repo_review_settings` row (any org) **or** a `github_repo_org_binding` row
    (added in refinement: a bound repo whose installation has no org is the same bypass) —
@@ -87,7 +90,8 @@ default `null` in `beforeEach`; the shared default repo's claim rows are cleared
   `repo_review_settings` row → rejects with a `WebhookSkip` of category
   `unmapped_installation`; `newThreadInternal` and `getOctokitForApp` not called.
 - T4: payload `installationId` present → `getRepoInstallationId` not called.
-- T5: lookup throws a non-404 error → `handleAppMention` rejects with it.
+- T5: lookup throws a non-404 error → rejects with a `WebhookSkip` of category
+  `app_access_unavailable`; nothing created.
 - T7 (fail closed): no `installationId`, lookup returns `null`, repo bound to an org via
   `github_repo_org_binding` → same `WebhookSkip`; nothing created.
 - T8 (fail closed): payload `installationId` with no org mapping on a claimed repo →
