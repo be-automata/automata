@@ -50,15 +50,15 @@ pnpm -s --filter @terragon/worker provision:tenant --name "BeAutomata UAT 374" \
   --slug beautomata-uat-374 --token-name www --expires-in 720h > /root/.automata/tenant-uat-374.json
 ```
 
-| Time (UTC) | Check                                                       | Result                                              |
-| :--------- | :---------------------------------------------------------- | :-------------------------------------------------- |
-| 23:47:00   | exit code                                                   | 0; stderr `tenant a76d9a6e-… created; minting`      |
-| 23:47:00   | output file                                                 | `-rw------- root root`, one JSON line               |
-| 23:47:00   | `Tenant` rows                                               | `internal`, `default`, `beautomata-uat-374`, all V1 |
-| 23:47:00   | token `exp`                                                 | 2026-11-25T23:47:00Z (720 h)                        |
-| 23:47:01   | new token, windowed read of **its own** tenant              | **200**, 0 rows                                     |
-| 23:47:01   | new token, windowed read of the default tenant `707d0855-…` | **403**                                             |
-| 08:09:53   | the box's default-tenant token, read of the new tenant      | **403**                                             |
+| Time (UTC)     | Check                                                       | Result                                              |
+| :------------- | :---------------------------------------------------------- | :-------------------------------------------------- |
+| 23:47:00       | exit code                                                   | 0; stderr `tenant a76d9a6e-… created; minting`      |
+| 23:47:00       | output file                                                 | `-rw------- root root`, one JSON line               |
+| 23:47:00       | `Tenant` rows                                               | `internal`, `default`, `beautomata-uat-374`, all V1 |
+| 23:47:00       | token `exp`                                                 | 2026-11-25T23:47:00Z (720 h)                        |
+| 23:47:01       | new token, windowed read of **its own** tenant              | **200**, 0 rows                                     |
+| 23:47:01       | new token, windowed read of the default tenant `707d0855-…` | **403**                                             |
+| 10-27 08:09:53 | the box's default-tenant token, read of the new tenant      | **403**                                             |
 
 The tenant id is `a76d9a6e-7cbd-46a8-a821-0f8c24586427`. **Pass.**
 
