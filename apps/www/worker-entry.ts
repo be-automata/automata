@@ -20,6 +20,16 @@
 // build state: absent in a clean CI typecheck (import errors → suppressed), present after
 // a local build (no error → @ts-expect-error would itself fail TS2578). @ts-ignore tolerates both.
 import openNextWorker from "./.open-next/worker.js";
+// ADR-014: the allow_cell policy, compiled by OPA to WASM. workerd refuses to
+// compile WASM from bytes at runtime, so the module is a static import that
+// wrangler precompiles (CompiledWasm), handed to the OpenNext bundle through a
+// global (the two are separate module graphs in one isolate). The resolver
+// reads it with registeredCellPolicyModule(); fetch stays a passthrough.
+import cellPolicyWasm from "@terragon/shared/cell-policy/cell.wasm";
+import { CELL_POLICY_WASM_GLOBAL } from "@terragon/shared/cell-policy/cell-policy-global";
+
+(globalThis as Record<symbol, unknown>)[CELL_POLICY_WASM_GLOBAL] =
+  cellPolicyWasm;
 
 interface OpenNextWorker {
   fetch(request: Request, env: unknown, ctx: unknown): Promise<Response>;

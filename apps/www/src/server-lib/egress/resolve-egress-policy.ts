@@ -37,7 +37,7 @@ export type EgressPlane = "worker" | "sandbox";
  * (per-agent/per-lane entries resolved from the run's harness at dispatch);
  * deliberately deferred until the harness identity is available here.
  */
-function systemEgressHosts(plane: EgressPlane): string[] {
+export function systemEgressHosts(plane: EgressPlane): string[] {
   const callbackHost = new URL(nonLocalhostPublicAppUrl()).host;
   // Worker plane (#66 AC4): this allowlist fences the AGENT RUN's egress (the
   // brokered daemon/agent env behind the egress proxy). Within that fence the

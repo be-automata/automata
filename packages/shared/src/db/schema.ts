@@ -3112,3 +3112,121 @@ export const knowledgeUsageWindow = pgTable(
     }),
   ],
 );
+
+/**
+ * ADR-014 Decision 2: an execution profile is (provider, tier, configuration).
+ * A cell runs on a profile only when the `allow_cell` resolver allows it
+ * (packages/shared/src/cell-policy). Catalog rows, operator-written.
+ * `config_hash` is the SHA-256 of the canonical JSON of `configuration`
+ * (`executionProfileConfigHash`), so a lookup by configuration is one indexed
+ * equality and two rows can never describe the same profile.
+ */
+export const executionProfile = pgTable(
+  "execution_profile",
+  {
+    /** A readable catalog id, e.g. `automata-box/observe`. */
+    id: text("id").primaryKey(),
+    /** Who runs the compute: `automata-box`, `agent37`, … */
+    provider: text("provider").notNull(),
+    /** `customer_box` (the customer's or Automata's own box) or `managed` (third-party). */
+    tier: text("tier").$type<"customer_box" | "managed">().notNull(),
+    configuration: jsonb("configuration")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    configHash: text("config_hash").notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("execution_profile_provider_tier_config_index").on(
+      table.provider,
+      table.tier,
+      table.configHash,
+    ),
+  ],
+);
+
+/**
+ * ADR-014 Decision 3: one row per measured capability of a profile. A
+ * capability without current evidence counts as absent, and evidence expires
+ * 30 days after it was measured: `expires_at` is GENERATED from `measured_at`,
+ * so no writer can stretch it. Rows are append-only; the newest row per
+ * (profile, capability) is the current one.
+ */
+export const profileEvidence = pgTable(
+  "profile_evidence",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => executionProfile.id, { onDelete: "cascade" }),
+    /** A capability name the policy reads, e.g. `metadata_blocked`, `egress`. */
+    capability: text("capability").notNull(),
+    measuredAt: timestamp("measured_at", { mode: "date" }).notNull(),
+    expiresAt: timestamp("expires_at", { mode: "date" })
+      .notNull()
+      .generatedAlwaysAs(sql`measured_at + interval '30 days'`),
+    /** `conformance` for a conformance run; anything else is not evidence to the policy. */
+    source: text("source").notNull(),
+    /** Digest of what was measured with (probe batteries image, results file). */
+    artifactDigest: text("artifact_digest"),
+    /** The platform revision the measurement ran against. */
+    platformSha: text("platform_sha"),
+    /** `{ value, ... }`: `value` is what the policy reads; the rest is provenance. */
+    result: jsonb("result").$type<{ value: unknown }>().notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("profile_evidence_profile_capability_index").on(
+      table.profileId,
+      table.capability,
+      table.measuredAt,
+    ),
+  ],
+);
+
+/**
+ * ADR-014 step 5: one row per `allow_cell` decision taken at a seam
+ * (`dispatch` today; `compile` and `resume` later). In `shadow` mode the
+ * decision is recorded and the run proceeds whatever it says. `input` is the
+ * exact policy input (secret NAMES only, never values), so a decision can be
+ * replayed against a later policy.
+ */
+export const cellDecision = pgTable(
+  "cell_decision",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    threadChatId: text("thread_chat_id").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "set null",
+    }),
+    /** Null when no profile matched (the policy then denies `unknown_profile`). */
+    profileId: text("profile_id").references(() => executionProfile.id, {
+      onDelete: "set null",
+    }),
+    allowed: boolean("allowed").notNull(),
+    reasons: text("reasons").array().notNull(),
+    evidenceIds: text("evidence_ids").array().notNull(),
+    seam: text("seam").$type<"dispatch" | "compile" | "resume">().notNull(),
+    mode: text("mode").$type<"shadow" | "enforce">().notNull(),
+    input: jsonb("input").$type<Record<string, unknown>>(),
+    decidedAt: timestamp("decided_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("cell_decision_thread_id_index").on(table.threadId),
+    index("cell_decision_org_decided_at_index").on(
+      table.organizationId,
+      table.decidedAt,
+    ),
+  ],
+);

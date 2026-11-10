@@ -65,6 +65,8 @@ export const REHOME_MOVE_BY_THREAD: readonly RehomeByThreadTable[] = [
   { table: "thread_chat", threadColumn: "thread_id", idColumn: "id" },
   { table: "thread_visibility", threadColumn: "thread_id", idColumn: "id" },
   { table: "egress_events", threadColumn: "thread_id", idColumn: "id" },
+  // ADR-014: allow_cell decisions belong to the run's thread, like its egress.
+  { table: "cell_decision", threadColumn: "thread_id", idColumn: "id" },
   {
     table: "self_heal_slot",
     threadColumn: "holder_thread_id",
