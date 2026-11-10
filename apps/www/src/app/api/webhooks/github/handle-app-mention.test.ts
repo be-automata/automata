@@ -1,8 +1,10 @@
 import { describe, expect, it, vi, beforeEach, beforeAll } from "vitest";
 import { handleAppMention } from "./handle-app-mention";
 import { User, GitHubPR } from "@terragon/shared";
+import { eq } from "drizzle-orm";
 import {
   createTestGitHubPR,
+  createTestOrg,
   createTestThread,
   createTestUser,
   setFeatureFlagOverrideForTest,
@@ -23,7 +25,14 @@ import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getDiffContextStr } from "./utils";
 import { createAutomation } from "@terragon/shared/model/automations";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
+import {
+  bindGithubInstallationToOrg,
+  bindRepoToOrg,
+  unbindRepoFromOrg,
+} from "@terragon/shared/model/github-installation";
+import { setRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
+import { findWebhookSkip } from "./webhook-skip";
 import { convertToPlainText } from "@/lib/db-message-helpers";
 import { redis } from "@/lib/redis";
 import { nanoid } from "nanoid";
@@ -34,6 +43,12 @@ vi.mock("@/server-lib/new-thread-internal", () => ({
 
 vi.mock("@/server-lib/follow-up", () => ({
   queueFollowUpInternal: vi.fn(),
+}));
+
+vi.mock("@terragon/shared/github-app", () => ({
+  getRepoInstallationId: vi.fn(),
+  getInstallationToken: vi.fn(async () => "mock-github-token"),
+  lookupInstallationId: vi.fn(async () => 424242),
 }));
 
 describe("handleAppMention", () => {
@@ -64,6 +79,23 @@ describe("handleAppMention", () => {
   });
 
   beforeEach(async () => {
+    // The fail-closed guard (#579) reads repo claims. Other files in this
+    // shared test database (e.g. server-lib/automations.test.ts) leave
+    // settings rows on the helpers' default repo; clear them so these cases
+    // do not depend on file order.
+    // createTestGitHubPR always uses the same repo, so one cleanup covers
+    // pr and prWithNoThread.
+    await Promise.all([
+      db
+        .delete(schema.repoReviewSettings)
+        .where(
+          eq(
+            schema.repoReviewSettings.repoFullName,
+            prWithNoThread.repoFullName.toLowerCase(),
+          ),
+        ),
+      unbindRepoFromOrg({ db, repoFullName: prWithNoThread.repoFullName }),
+    ]);
     // Clear Redis batch keys to ensure test isolation
     const keys = await redis.keys("thread-batch:*");
     if (keys.length > 0) {
@@ -97,6 +129,7 @@ describe("handleAppMention", () => {
       },
     };
     vi.clearAllMocks();
+    vi.mocked(getRepoInstallationId).mockResolvedValue(null);
     vi.mocked(getOctokitForBackground).mockResolvedValue(mockOctokit as any);
     vi.mocked(getOctokitForApp).mockResolvedValue(mockOctokit as any);
     // Reset newThreadInternal to successful state
@@ -353,6 +386,130 @@ describe("handleAppMention", () => {
       expect(
         mockOctokit.rest.reactions.createForIssueComment,
       ).toHaveBeenCalled();
+    });
+
+    describe("repo-level webhook without installation (#579)", () => {
+      async function bindOrg(mode: "active" | "shadow") {
+        const orgId = await createTestOrg({ db, name: "RepoHook" });
+        const installationId = Math.floor(Math.random() * 1_000_000_000);
+        await bindGithubInstallationToOrg({
+          db,
+          installationId,
+          organizationId: orgId,
+          mode,
+        });
+        return { orgId, installationId };
+      }
+
+      // A unique repo: createTestGitHubPR reuses one name, so a claim on it
+      // would leak into the other cases.
+      function uniqueRepo(): string {
+        return `claimed-owner/repo-${nanoid(8).toLowerCase()}`;
+      }
+
+      async function expectFailsClosed(repoFullName: string) {
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await expect(mention(repoFullName, 7)).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "unmapped_installation",
+        );
+        expect(newThreadInternal).not.toHaveBeenCalled();
+        expect(getOctokitForApp).not.toHaveBeenCalled();
+      }
+
+      async function mention(
+        repoFullName: string,
+        number: number,
+        extra: { installationId?: number } = {},
+      ) {
+        await handleAppMention({
+          repoFullName,
+          issueOrPrNumber: number,
+          issueOrPrType: "pull_request",
+          commentId: 223457,
+          commentType: "issue_comment",
+          commentGitHubUsername: "commenter",
+          commentBody: "Hey @app, please help with this",
+          commentGitHubAccountId: githubAccountId,
+          ...extra,
+        });
+      }
+
+      it("T1: resolves the installation from the repo and uses its org (active)", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("active");
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(fresh.repoFullName, fresh.number);
+        const [owner, repo] = fresh.repoFullName.split("/");
+        expect(getRepoInstallationId).toHaveBeenCalledWith(owner, repo);
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: false }),
+        );
+      });
+
+      it("T2: a shadow installation resolved from the repo creates a shadow thread, no reaction", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("shadow");
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(fresh.repoFullName, fresh.number);
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: true }),
+        );
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).not.toHaveBeenCalled();
+      });
+
+      it("T3: fails closed when no org resolves and the repo has a policy row", async () => {
+        const repoFullName = uniqueRepo();
+        await setRepoReviewSetting({
+          db,
+          organizationId: await createTestOrg({ db, name: "Policy" }),
+          repoFullName,
+          blockTolerance: "error",
+        });
+        await expectFailsClosed(repoFullName);
+      });
+
+      it("T7: fails closed when no org resolves and the repo is bound to an org", async () => {
+        const repoFullName = uniqueRepo();
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "Bound" }),
+        });
+        await expectFailsClosed(repoFullName);
+      });
+
+      it("T4: a payload installationId skips the repo lookup", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("active");
+        await mention(fresh.repoFullName, fresh.number, { installationId });
+        expect(getRepoInstallationId).not.toHaveBeenCalled();
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId }),
+        );
+      });
+
+      it("T5: a non-404 lookup error propagates", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        vi.mocked(getRepoInstallationId).mockRejectedValue(
+          new Error("github 500"),
+        );
+        await expect(mention(fresh.repoFullName, fresh.number)).rejects.toThrow(
+          "github 500",
+        );
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
+      it("T6: an un-onboarded repo (no policy row) still creates a null-org thread", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await mention(fresh.repoFullName, fresh.number);
+        const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+        expect(callArgs?.organizationId ?? null).toBeNull();
+        expect(callArgs?.shadow).toBe(false);
+      });
     });
 
     it("should create new thread when no existing thread is found", async () => {

@@ -13,10 +13,15 @@ import {
   getUserSettings,
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
-import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
+import {
+  getRepoOrgAndMode,
+  getRepoOrgBinding,
+} from "@terragon/shared/model/github-installation";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
+import { repoHasReviewSettings } from "@terragon/shared/model/repo-review-settings";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
-import { requireAppAccess } from "./webhook-skip";
+import { WebhookSkip, requireAppAccess } from "./webhook-skip";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
 import { GitHubMentionTriggerConfig } from "@terragon/shared/automations";
@@ -63,7 +68,7 @@ export async function handleAppMention({
   commentContext?: string;
   issueContext?: string;
   // GitHub App installation id from the webhook payload — resolves the tenant
-  // (WI-5). Optional/nullable-safe: unmapped or absent → null org.
+  // (WI-5). Absent on repo-level webhooks; resolved from the repo below.
   installationId?: number | string | null;
 }): Promise<void> {
   // Get branch names upfront
@@ -72,11 +77,28 @@ export async function handleAppMention({
   // mode). Shadow: ingest the mention and create the (dashboard-visible) thread
   // row, but produce ZERO GitHub side effects — no eyes reaction, no billing
   // comment, and no agent run. Reads (branch lookup) are fine.
+  // Repo-level webhooks carry no `installation` (#579): resolve it from the
+  // repo, as the org-mention and mirror lanes do (null on 404; other errors
+  // propagate so the delivery can be redelivered).
+  const resolvedInstallationId =
+    installationId ?? (await getRepoInstallationId(owner, repo));
   const { organizationId, mode } = await getRepoOrgAndMode({
     db,
-    installationId,
+    installationId: resolvedInstallationId,
     repoFullName,
   });
+  // Fail closed (#579): no org resolved, but some org has claimed the repo
+  // (a repo_review_settings row, which is where its egress policy lives, or a
+  // github_repo_org_binding row). A null-org thread reads no repo settings and
+  // runs unenforced, so skip before any side effect. A repo no org has claimed
+  // keeps the null-org behavior.
+  if (organizationId === null && (await isRepoClaimedByAnOrg(repoFullName))) {
+    throw new WebhookSkip(
+      "unmapped_installation",
+      `No org resolved for a mention on ${repoFullName}, which an org has claimed`,
+      { installationId: resolvedInstallationId, repoFullName },
+    );
+  }
   // Per-installation mode, folded with the deployment-level side-effects
   // kill-switch (switch off → force shadow for every install).
   const shadow = effectiveShadow(mode);
@@ -188,6 +210,14 @@ export async function handleAppMention({
       }),
     ),
   );
+}
+
+async function isRepoClaimedByAnOrg(repoFullName: string): Promise<boolean> {
+  const [hasSettings, binding] = await Promise.all([
+    repoHasReviewSettings({ db, repoFullName }),
+    getRepoOrgBinding({ db, repoFullName }),
+  ]);
+  return hasSettings || binding !== undefined;
 }
 
 function getUserMessageText({
