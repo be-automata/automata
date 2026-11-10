@@ -20,6 +20,12 @@ import {
   pickSelfHealFields,
   type SelfHealFieldsPatch,
 } from "@terragon/shared/model/self-heal-settings";
+import {
+  EGRESS_POLICY_LEVELS,
+  effectiveEgressFields,
+  findEgressPolicyError,
+  isEgressPolicyLevel,
+} from "@terragon/shared/model/egress-policy";
 import { recordSelfHealAdminAction } from "@terragon/shared/model/self-heal-admin-log";
 import type { DB } from "@terragon/shared/db";
 
@@ -40,6 +46,8 @@ export function toRepoReviewSettingDto(row: RepoReviewSetting) {
     reviewDraftPrs: row.reviewDraftPrs,
     supersedePolicy: row.supersedePolicy,
     recheckOnComplete: row.recheckOnComplete,
+    egressPolicy: row.egressPolicy,
+    egressAllowlist: row.egressAllowlist,
     ...pickReviewAgentFields(row),
     ...pickSelfHealFields(row),
     updatedAt: row.updatedAt,
@@ -248,4 +256,91 @@ export async function recordSelfHealSettingsChange({
       : "settings_change",
     target: { repoFullName, fields },
   });
+}
+
+export type EgressPatch = {
+  egressPolicy?: string | null;
+  egressAllowlist?: string[] | null;
+};
+
+/**
+ * Validate the types of the #66 egress fields of a per-repo PUT body:
+ * `egressPolicy` is null (clears = no enforcement) or a level, and
+ * `egressAllowlist` is null (clears) or an array of strings. Whether the
+ * entries fit the level is checked by {@link findEgressPatchErrorResponse},
+ * which needs the stored row.
+ */
+export function parseEgressPatch(body: {
+  egressPolicy?: unknown;
+  egressAllowlist?: unknown;
+}): { patch: EgressPatch } | { errorResponse: NextResponse } {
+  const patch: EgressPatch = {};
+  if (body.egressPolicy !== undefined) {
+    if (
+      body.egressPolicy !== null &&
+      !(
+        typeof body.egressPolicy === "string" &&
+        isEgressPolicyLevel(body.egressPolicy)
+      )
+    ) {
+      return {
+        errorResponse: NextResponse.json(
+          {
+            error: `egressPolicy must be null or one of ${EGRESS_POLICY_LEVELS.join(", ")}`,
+          },
+          { status: 400 },
+        ),
+      };
+    }
+    patch.egressPolicy = body.egressPolicy;
+  }
+  if (body.egressAllowlist !== undefined) {
+    if (
+      body.egressAllowlist !== null &&
+      !(
+        Array.isArray(body.egressAllowlist) &&
+        body.egressAllowlist.every((entry) => typeof entry === "string")
+      )
+    ) {
+      return {
+        errorResponse: NextResponse.json(
+          { error: "egressAllowlist must be null or an array of strings" },
+          { status: 400 },
+        ),
+      };
+    }
+    patch.egressAllowlist = body.egressAllowlist as string[] | null;
+  }
+  return { patch };
+}
+
+/**
+ * Refuse an egress write that would store a policy the dispatch cannot build.
+ * Runs the same validator `egressPolicyFromRow` runs (via
+ * findEgressPolicyError) on the fields the row would hold after the write: a
+ * partial patch is paired with the stored other half, so entries are always
+ * checked against the level they will be enforced at. The row is read only
+ * when the patch sends exactly one of the two fields.
+ */
+export async function findEgressPatchErrorResponse({
+  db,
+  organizationId,
+  repoFullName,
+  patch,
+}: {
+  db: DB;
+  organizationId: string;
+  repoFullName: string;
+  patch: EgressPatch;
+}): Promise<NextResponse | undefined> {
+  const sentPolicy = patch.egressPolicy !== undefined;
+  const sentAllowlist = patch.egressAllowlist !== undefined;
+  if (!sentPolicy && !sentAllowlist) return undefined;
+  const stored =
+    sentPolicy && sentAllowlist
+      ? undefined
+      : await getRepoReviewSetting({ db, organizationId, repoFullName });
+  const error = findEgressPolicyError(effectiveEgressFields(patch, stored));
+  if (error === undefined) return undefined;
+  return NextResponse.json({ error }, { status: 400 });
 }

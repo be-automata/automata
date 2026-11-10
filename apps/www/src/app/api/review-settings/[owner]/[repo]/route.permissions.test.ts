@@ -1,6 +1,7 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
 import { PUT, DELETE } from "./route";
+import { egressPolicyFromRow } from "@/server-lib/egress/resolve-egress-policy";
 import { db } from "@/lib/db";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { checkRepoAdmin } from "@/lib/repo-admin";
@@ -218,6 +219,64 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
       vi.mocked(checkRepoAdmin).mockResolvedValue("lookup-failed");
       const res = await put({ reviewRunTests: true });
       expect(res.status).toBe(403);
+    });
+  });
+
+  describe("egress fields (#66)", () => {
+    it("a plain member who is not a repo admin is 403'd and nothing is stored", async () => {
+      await actor("member");
+      const res = await put({
+        egressPolicy: "domain",
+        egressAllowlist: ["registry.npmjs.org"],
+      });
+      expect(res.status).toBe(403);
+      const row = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(row).toBeUndefined();
+    });
+
+    it("an org admin's write is stored and the dispatch builds it without throwing", async () => {
+      await actor("admin");
+      const res = await put({
+        egressPolicy: "domain",
+        egressAllowlist: ["Registry.NPMJS.org", "*.example.com:8443"],
+      });
+      expect(res.status).toBe(200);
+      const row = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(row?.egressPolicy).toBe("domain");
+      const shape = egressPolicyFromRow(row, "worker");
+      expect(shape?.level).toBe("domain");
+      expect(shape?.allowlist).toEqual(
+        expect.arrayContaining(["registry.npmjs.org", "*.example.com:8443"]),
+      );
+
+      // An allowlist-only write pairs with the stored 'domain' level: an
+      // entry that is not a host is refused and the stored row is unchanged.
+      const bad = await put({ egressAllowlist: ["not a host"] });
+      expect(bad.status).toBe(400);
+      const after = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(after?.egressAllowlist).toEqual(row?.egressAllowlist);
+
+      // null clears: no enforcement at dispatch.
+      const cleared = await put({ egressPolicy: null, egressAllowlist: null });
+      expect(cleared.status).toBe(200);
+      const clearedRow = await getRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: REPO,
+      });
+      expect(egressPolicyFromRow(clearedRow, "worker")).toBeNull();
     });
   });
 });

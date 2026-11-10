@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildEgressPolicyShape } from "./egress-policy";
+import {
+  buildEgressPolicyShape,
+  effectiveEgressFields,
+  findEgressPolicyError,
+} from "./egress-policy";
 
 /**
  * Pure shape-builder tests (#66 spec §3.2): level mapping, system-host merge +
@@ -148,5 +152,54 @@ describe("buildEgressPolicyShape", () => {
         { systemHosts },
       ),
     ).toEqual({ level: "domain", allowlist: systemHosts });
+  });
+});
+
+describe("findEgressPolicyError (write-side face of the builder)", () => {
+  it("undefined for valid fields and for a cleared level", () => {
+    expect(
+      findEgressPolicyError({
+        egressPolicy: "domain",
+        egressAllowlist: ["registry.npmjs.org", "*.example.com:443"],
+      }),
+    ).toBeUndefined();
+    expect(
+      findEgressPolicyError({ egressPolicy: null, egressAllowlist: ["x"] }),
+    ).toBeUndefined();
+  });
+
+  it("returns the builder's own message for what the builder throws on", () => {
+    for (const fields of [
+      { egressPolicy: "everything", egressAllowlist: null },
+      { egressPolicy: "ip_port", egressAllowlist: ["example.com"] },
+      { egressPolicy: "domain", egressAllowlist: ["example.com:0"] },
+    ]) {
+      const message = findEgressPolicyError(fields);
+      expect(message).toBeDefined();
+      expect(() =>
+        buildEgressPolicyShape(fields, { systemHosts: ["github.com"] }),
+      ).toThrow(message);
+    }
+  });
+});
+
+describe("effectiveEgressFields", () => {
+  const stored = { egressPolicy: "ip_port", egressAllowlist: ["10.0.0.1"] };
+
+  it("a sent field wins, an unsent one keeps the stored half", () => {
+    expect(
+      effectiveEgressFields({ egressAllowlist: ["1.2.3.4"] }, stored),
+    ).toEqual({ egressPolicy: "ip_port", egressAllowlist: ["1.2.3.4"] });
+    expect(effectiveEgressFields({ egressPolicy: null }, stored)).toEqual({
+      egressPolicy: null,
+      egressAllowlist: ["10.0.0.1"],
+    });
+  });
+
+  it("no stored row → unsent halves are null", () => {
+    expect(effectiveEgressFields({ egressPolicy: "none" }, undefined)).toEqual({
+      egressPolicy: "none",
+      egressAllowlist: null,
+    });
   });
 });
