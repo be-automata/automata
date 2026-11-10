@@ -36,17 +36,21 @@ sandbox size, `egressPolicy` shape (see §3), feature flags, and an
 Selection happens in **two stages**:
 
 1. **Which provider value** a thread gets is decided once, at thread creation, by
-   `getSandboxProvider(...)` in `apps/www/src/agent/sandbox.ts:405` (called from
-   `apps/www/src/server-lib/new-thread-shared.ts:205`) and persisted on the thread
-   row. Resolution order:
-   - `NODE_ENV === "test"` → `"mock"` (`sandbox.ts:409`).
-   - `featureFlags.forceDaytonaSandbox` → `"daytona"`, overriding the user setting
-     (`sandbox.ts:414`).
-   - user setting `"default"` → `env.E2B_API_KEY ? "e2b" : "docker"`
-     (`sandbox.ts:421`).
-   - otherwise the explicit value (`e2b` / `daytona` / `docker` / `mock` /
-     `hatchet-remote`) passes through.
-   - DB column default is `"e2b"` (`packages/shared/src/db/schema.ts:367`).
+   `getSandboxProvider()` in `apps/www/src/agent/sandbox.ts` (called from
+   `apps/www/src/server-lib/new-thread-shared.ts` and the setup-script route) and
+   persisted on the thread row. It is **server-only**: ADR-014 amends ADR-013 I7
+   ("one path per profile, chosen only by the resolver; no setting or client input
+   selects a path"), so the former user setting and the `forceDaytonaSandbox` flag
+   are retired (2026-11-10). `serverDefaultSandboxProvider` returns:
+   - `NODE_ENV === "test"` → `"mock"`.
+   - `env.E2B_API_KEY` set → `"e2b"`; otherwise `"docker"` (production sets no E2B
+     key, so it stamps `"docker"` and dispatches every thread through
+     `HATCHET_ENABLED`).
+   - An existing thread keeps the value it was stamped with (`e2b`, `daytona`,
+     `docker`, `hatchet-remote`): resume, hibernate, the terminal and dispatch
+     read the thread row. `user_settings.sandbox_provider` is no longer read or
+     written; the column drop is a follow-up.
+   - DB column default is `"e2b"` (`packages/shared/src/db/schema.ts`).
 2. **Which class** implements that value is resolved at boot by
    `getSandboxProvider(provider)` in [`src/provider.ts:8`](src/provider.ts) — a
    `switch` mapping `"e2b" → E2BProvider`, `"docker" → DockerProvider`,
@@ -134,9 +138,10 @@ covers the worker substrate.
 
 ### Daytona — [`src/providers/daytona-provider.ts`](src/providers/daytona-provider.ts)
 
-- **What:** managed sandbox provider (`@daytonaio/sdk` `0.205.1`). Optional prod
-  provider, gated by the `daytonaOptionsForSandboxProvider` UI flag and/or the
-  `forceDaytonaSandbox` override; needs `DAYTONA_API_KEY` (`daytona-provider.ts:94`).
+- **What:** managed sandbox provider (`@daytonaio/sdk` `0.205.1`). No new thread
+  is stamped `daytona` since the provider setting and the `forceDaytonaSandbox`
+  flag were retired (ADR-014 / ADR-013 I7); the provider stays for threads already
+  stamped with it. Needs `DAYTONA_API_KEY` (`daytona-provider.ts:94`).
 - **Create:** `daytona.create({ snapshot: templateId, autoStopInterval: 15,
 autoArchiveInterval: 5, autoDeleteInterval: 30d, … })` (`daytona-provider.ts:70`),
   then `setupDaytonaOneTime` seeds a login-shell prompt. Commands run through

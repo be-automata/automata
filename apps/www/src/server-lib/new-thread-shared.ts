@@ -15,7 +15,6 @@ import {
 } from "@terragon/shared";
 import { modelToAgent } from "@terragon/agent/utils";
 import { UserFacingError } from "@/lib/server-actions";
-import { getUserSettings } from "@terragon/shared/model/user";
 import { waitUntil } from "@/lib/wait-until";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
 import { getSandboxProvider } from "@/agent/sandbox";
@@ -131,7 +130,6 @@ export async function createNewThread({
   }
   const [
     modelOrDefault,
-    userSettings,
     sandboxSize,
     enableThreadChatCreation,
     _enableEnvironmentCreation,
@@ -141,8 +139,6 @@ export async function createNewThread({
     (async () => {
       return message.model ?? (await getDefaultModel({ userId }));
     })(),
-    // Get user settings for sandbox provider
-    getUserSettings({ db, userId }),
     // Get sandbox size for user
     getSandboxSizeForUser(userId),
     // Get feature flag for user
@@ -212,11 +208,8 @@ export async function createNewThread({
     ]),
   );
 
-  const sandboxProvider = await getSandboxProvider({
-    userSetting: userSettings?.sandboxProvider,
-    sandboxSize,
-    userId,
-  });
+  // Server-only (ADR-014 / ADR-013 I7): no user setting or flag picks it.
+  const sandboxProvider = getSandboxProvider();
 
   // Generate an initial thread name
   const automationThreadName = automation
