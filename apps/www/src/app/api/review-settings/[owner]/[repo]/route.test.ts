@@ -1,6 +1,7 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
 import { PUT, DELETE } from "./route";
+import { egressPolicyFromRow } from "@/server-lib/egress/resolve-egress-policy";
 import { getTenantContextOrNull } from "@/lib/auth-server";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import {
@@ -683,6 +684,147 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       recordActionMock.mockClear();
       await PUT(putReq({ reviewMode: "classic" }), { params });
       expect(recordActionMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("egress fields (#66)", () => {
+    /** The row the route would store: the mocked upsert's returned row,
+     * overlaid with the patch the route sent it. */
+    function storedRow() {
+      const call = vi.mocked(upsertRepoReviewSetting).mock.calls.at(-1)![0];
+      return { egressPolicy: null, egressAllowlist: null, ...call.patch } as {
+        egressPolicy: string | null;
+        egressAllowlist: string[] | null;
+      };
+    }
+
+    it("sets the level and allowlist, returns both in the DTO", async () => {
+      const res = await PUT(
+        putReq({
+          egressPolicy: "domain",
+          egressAllowlist: ["registry.npmjs.org", "*.example.com:8443"],
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patch: {
+            egressPolicy: "domain",
+            egressAllowlist: ["registry.npmjs.org", "*.example.com:8443"],
+          },
+        }),
+      );
+      const json = (await res.json()) as { setting: Record<string, unknown> };
+      expect("egressPolicy" in json.setting).toBe(true);
+      expect("egressAllowlist" in json.setting).toBe(true);
+      // Both fields were sent: no stored half to pair with, no read.
+      expect(getRepoReviewSetting).not.toHaveBeenCalled();
+      expect(captureMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            changed: ["egressPolicy", "egressAllowlist"],
+          }),
+        }),
+      );
+    });
+
+    it("a stored value round-trips through egressPolicyFromRow without throwing", async () => {
+      for (const body of [
+        { egressPolicy: "domain", egressAllowlist: ["Registry.NPMJS.org "] },
+        {
+          egressPolicy: "ip_port",
+          egressAllowlist: ["10.0.0.1", "1.2.3.4:443"],
+        },
+        { egressPolicy: "none", egressAllowlist: null },
+      ]) {
+        const res = await PUT(putReq(body), { params });
+        expect(res.status).toBe(200);
+        const shape = egressPolicyFromRow(storedRow(), "worker");
+        expect(shape?.level).toBe(body.egressPolicy);
+      }
+    });
+
+    it("null clears the level (= no enforcement) and the allowlist", async () => {
+      const res = await PUT(
+        putReq({ egressPolicy: null, egressAllowlist: null }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          patch: { egressPolicy: null, egressAllowlist: null },
+        }),
+      );
+      expect(egressPolicyFromRow(storedRow(), "worker")).toBeNull();
+    });
+
+    it.each([
+      ["egressPolicy", "everything"],
+      ["egressPolicy", 1],
+      ["egressAllowlist", "registry.npmjs.org"],
+      ["egressAllowlist", ["registry.npmjs.org", 7]],
+    ])("400 on %s = %j, nothing written", async (field, value) => {
+      const res = await PUT(putReq({ [field]: value }), { params });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toContain(field);
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["domain", ["not a host"]],
+      ["domain", ["example.com:99999"]],
+      ["ip_port", ["registry.npmjs.org"]],
+      ["ip_port", ["300.1.1.1"]],
+    ])(
+      "400 on a %s allowlist entry the dispatch would reject (%j), nothing written",
+      async (level, allowlist) => {
+        const res = await PUT(
+          putReq({ egressPolicy: level, egressAllowlist: allowlist }),
+          { params },
+        );
+        expect(res.status).toBe(400);
+        const json = (await res.json()) as { error: string };
+        expect(json.error).toMatch(/Invalid egress allowlist entry/);
+        expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+      },
+    );
+
+    it("an allowlist-only write is checked against the STORED level", async () => {
+      vi.mocked(getRepoReviewSetting).mockResolvedValueOnce({
+        egressPolicy: "ip_port",
+        egressAllowlist: ["10.0.0.1"],
+      } as never);
+      const res = await PUT(
+        putReq({ egressAllowlist: ["registry.npmjs.org"] }),
+        { params },
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        'for level "ip_port"',
+      );
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("a level-only write is checked against the STORED allowlist", async () => {
+      vi.mocked(getRepoReviewSetting).mockResolvedValueOnce({
+        egressPolicy: null,
+        egressAllowlist: ["registry.npmjs.org"],
+      } as never);
+      const bad = await PUT(putReq({ egressPolicy: "ip_port" }), { params });
+      expect(bad.status).toBe(400);
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+
+      vi.mocked(getRepoReviewSetting).mockResolvedValueOnce({
+        egressPolicy: null,
+        egressAllowlist: ["registry.npmjs.org"],
+      } as never);
+      const ok = await PUT(putReq({ egressPolicy: "domain" }), { params });
+      expect(ok.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ patch: { egressPolicy: "domain" } }),
+      );
     });
   });
 });
