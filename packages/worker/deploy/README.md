@@ -596,9 +596,10 @@ printed) from the run's own processes, as the agent could. Then the audit half o
 the database the www app writes (`start=` is printed on the script's first line):
 
 ```sql
-select run_id, destination_host, action, mode, created_at from egress_events
+select thread_id, destination_host, action, mode, created_at from egress_events
  where destination_host = 'example.org' and created_at >= '<start>' order by created_at;
--- expect one action='deny', mode='enforce' row per probed container
+-- expect one action='deny', mode='enforce' row per probed container;
+-- thread_id is the worker's run id (automata.run label); run_id holds the constant 'legacy-thread-chat-id'
 ```
 
 **Driver B, standalone (probes 2-7, no live run needed).** Mirrors the run argv (labels and
