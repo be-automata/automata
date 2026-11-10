@@ -450,6 +450,12 @@ describe("handleAppMention", () => {
         await mention(fresh.repoFullName, fresh.number);
         const [owner, repo] = fresh.repoFullName.split("/");
         expect(getRepoInstallationId).toHaveBeenCalledWith(owner, repo);
+        // The resolved id is reused, not looked up a second time.
+        expect(getOctokitForApp).toHaveBeenCalledWith({
+          owner,
+          repo,
+          installationId,
+        });
         expect(newThreadInternal).toHaveBeenCalledWith(
           expect.objectContaining({ organizationId: orgId, shadow: false }),
         );

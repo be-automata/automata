@@ -114,7 +114,15 @@ export async function handleAppMention({
   // installed / bad creds), that's a business rejection — skip with a 2xx, not
   // a 500 that GitHub retries and eventually disables the webhook over.
   const octokit = await requireAppAccess(
-    () => getOctokitForApp({ owner, repo }),
+    () =>
+      getOctokitForApp({
+        owner,
+        repo,
+        installationId:
+          typeof resolvedInstallationId === "number"
+            ? resolvedInstallationId
+            : undefined,
+      }),
     { repoFullName, issueOrPrType, issueOrPrNumber },
   );
   let branchName: string;

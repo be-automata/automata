@@ -241,11 +241,19 @@ export async function updateGitHubPR({
 export async function getOctokitForApp({
   owner,
   repo,
+  installationId,
 }: {
   owner: string;
   repo: string;
+  // The repo's installation id when the caller already resolved it; saves
+  // the GET /repos/{owner}/{repo}/installation round-trip.
+  installationId?: number;
 }): Promise<Octokit> {
-  const githubAccessToken = await getInstallationToken(owner, repo);
+  // Only pass the id when known, so existing callers' call shape is unchanged.
+  const githubAccessToken =
+    installationId === undefined
+      ? await getInstallationToken(owner, repo)
+      : await getInstallationToken(owner, repo, installationId);
   return new Octokit({ auth: githubAccessToken });
 }
 
