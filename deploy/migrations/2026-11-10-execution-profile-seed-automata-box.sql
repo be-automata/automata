@@ -13,15 +13,17 @@
 -- Evidence (docs/adr/ADR-014-third-party-execution-compute.md, Consequences,
 -- "Evidence upkeep", and ADR-013's acceptance record):
 --   automata-box/observe  production, driver B on automata-exec-1,
---                         2026-11-08 17:48Z, probes 2 to 7 (12/12), platform
---                         1f58cf7. Probe 1 not re-measured: egress stays open,
+--                         2026-11-10 17:21Z, probes 2 to 7 (12/12), platform
+--                         4085a7b. Probe 1 not measured: egress stays open,
 --                         and the policy says egress_open for egress_mode
---                         observe anyway. Expires 2026-12-08.
---   automata-box/enforce  throwaway box with enforced egress, driver A,
---                         2026-10-25 09:56Z, all seven probes. Expires
---                         2026-11-24. dns_closed is read from the design
---                         (--network none, decide() before lookup) on top of
---                         probe 1, as the ADR records it.
+--                         observe anyway. Expires 2026-12-10.
+--   automata-box/enforce  production, driver A on automata-exec-1: live
+--                         review runs on a repo with a domain policy,
+--                         2026-11-10 16:30Z, all seven probes (7/7) and a
+--                         deny/enforce egress_events row, platform 4085a7b.
+--                         Expires 2026-12-10. dns_closed is read from the
+--                         design (--network none, decide() before lookup) on
+--                         top of probe 1, as the ADR records it.
 -- The batteries image digest is recorded truncated in the ADR, so
 -- artifact_digest stays NULL rather than carrying a guess.
 
@@ -36,30 +38,30 @@ ON CONFLICT ("id") DO NOTHING;
 INSERT INTO "profile_evidence" ("profile_id", "capability", "measured_at", "source", "platform_sha", "result")
 SELECT e.profile_id, e.capability, e.measured_at, 'conformance', e.platform_sha, e.result
 FROM (VALUES
-  ('automata-box/observe', 'metadata_blocked', timestamp '2026-11-08 17:48:00', '1f58cf7',
+  ('automata-box/observe', 'metadata_blocked', timestamp '2026-11-10 17:21:00', '4085a7b',
    '{"value": true, "probes": "2-7", "driver": "B", "host": "automata-exec-1"}'::jsonb),
-  ('automata-box/observe', 'peer_isolated', timestamp '2026-11-08 17:48:00', '1f58cf7',
+  ('automata-box/observe', 'peer_isolated', timestamp '2026-11-10 17:21:00', '4085a7b',
    '{"value": true, "probes": "2-7", "driver": "B", "host": "automata-exec-1"}'::jsonb),
-  ('automata-box/observe', 'teardown_verified', timestamp '2026-11-08 17:48:00', '1f58cf7',
+  ('automata-box/observe', 'teardown_verified', timestamp '2026-11-10 17:21:00', '4085a7b',
    '{"value": true, "probes": "2-7", "driver": "B", "host": "automata-exec-1"}'::jsonb),
-  ('automata-box/observe', 'secret_brokering', timestamp '2026-11-08 17:48:00', '1f58cf7',
+  ('automata-box/observe', 'secret_brokering', timestamp '2026-11-10 17:21:00', '4085a7b',
    '{"value": true, "probes": "2-7", "driver": "B", "host": "automata-exec-1"}'::jsonb),
-  ('automata-box/observe', 'provider_creds_in_guest', timestamp '2026-11-08 17:48:00', '1f58cf7',
+  ('automata-box/observe', 'provider_creds_in_guest', timestamp '2026-11-10 17:21:00', '4085a7b',
    '{"value": false, "probes": "2-7", "driver": "B", "host": "automata-exec-1"}'::jsonb),
-  ('automata-box/enforce', 'metadata_blocked', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": true, "probes": "1-7", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'peer_isolated', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": true, "probes": "1-7", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'teardown_verified', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": true, "probes": "1-7", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'secret_brokering', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": true, "probes": "1-7", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'provider_creds_in_guest', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": false, "probes": "1-7", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'egress', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": "allowlist", "probes": "1", "driver": "A", "host": "throwaway"}'::jsonb),
-  ('automata-box/enforce', 'dns_closed', timestamp '2026-10-25 09:56:00', '1f58cf7',
-   '{"value": true, "probes": "1", "driver": "A", "host": "throwaway", "basis": "--network none leaves no resolver; the proxy decides before any lookup"}'::jsonb)
+  ('automata-box/enforce', 'metadata_blocked', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": true, "probes": "1-7", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'peer_isolated', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": true, "probes": "1-7", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'teardown_verified', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": true, "probes": "1-7", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'secret_brokering', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": true, "probes": "1-7", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'provider_creds_in_guest', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": false, "probes": "1-7", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'egress', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": "allowlist", "probes": "1", "driver": "A", "host": "automata-exec-1"}'::jsonb),
+  ('automata-box/enforce', 'dns_closed', timestamp '2026-11-10 16:30:00', '4085a7b',
+   '{"value": true, "probes": "1", "driver": "A", "host": "automata-exec-1", "basis": "--network none leaves no resolver; the proxy decides before any lookup"}'::jsonb)
 ) AS e(profile_id, capability, measured_at, platform_sha, result)
 WHERE NOT EXISTS (
   SELECT 1 FROM "profile_evidence" p
