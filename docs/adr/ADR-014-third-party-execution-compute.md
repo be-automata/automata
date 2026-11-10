@@ -75,8 +75,10 @@ Negative, to watch:
 - **ADR-013 I7.** "There is one execution path" becomes one path per profile, chosen only by the resolver. No setting or client input selects a path.
 - **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. For a remote cell the adapter needs three things: a bearer whose TTL is bounded by the step timeout, revocation from the boot sweep, and an idempotency key on every effect.
 - **Evidence upkeep.** Under decision 3, box evidence expires 30 days after it is measured.
-  - **Throwaway box (enforced egress):** all seven probes, 2026-10-25 09:56Z, expires on 2026-11-24. Renewing it needs driver A on a repo with an enforced policy.
-  - **Production:** the ADR-013 record (2026-10-24 12:26Z) would have expired on 2026-11-23. It was renewed on 2026-11-08 17:48Z by driver B on `automata-exec-1` (probes 2 to 7 in two concurrent review containers, 12/12), so it now expires on 2026-12-08. Driver B does not re-measure probe 1, so production stays open egress for the resolver.
+  - **Throwaway box (enforced egress):** all seven probes, 2026-10-25 09:56Z, expires on 2026-11-24. It is not renewed; the enforced-egress case is now measured in production (next line).
+  - **Production:** the ADR-013 record (2026-10-24 12:26Z) would have expired on 2026-11-23. It was renewed on 2026-11-08 17:48Z by driver B, then again on 2026-11-10 on `automata-exec-1`, so both profiles now expire on 2026-12-10:
+    - observe: driver B, probes 2 to 7 in two concurrent containers, 12/12, 17:21Z. Driver B does not measure probe 1, so a repo without a policy stays open egress for the resolver;
+    - enforce: driver A, all seven probes in live review runs on a repo with a `domain` policy, 7/7 on two runs with a `deny` audit row each, 16:24Z and 16:30Z.
   - The probes in `packages/worker/deploy/README.md` have to be re-run on a schedule.
 
 ## Testing
