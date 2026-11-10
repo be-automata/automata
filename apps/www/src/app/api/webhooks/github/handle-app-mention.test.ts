@@ -527,6 +527,12 @@ describe("handleAppMention", () => {
           userId: user.id,
           overrides: { githubRepoFullName: repoFullName, githubPRNumber: 7 },
         });
+        // Control: unclaimed, the same mention IS a follow-up into the seeded
+        // thread, so the assertion below proves the guard's position.
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await mention(repoFullName, 7);
+        expect(queueFollowUpInternal).toHaveBeenCalledTimes(1);
+        vi.clearAllMocks(); // call history only; implementations stay
         await bindRepoToOrg({
           db,
           repoFullName,

@@ -278,6 +278,10 @@ export type RepoOrgSource = "repo_binding" | "installation";
  * installation keeps `organizationId: null`, so a binding never bypasses a
  * lane's unmapped-installation rejection. Every installation-resolved
  * webhook lane uses this, so they agree on a repo's org.
+ *
+ * `boundOrganizationId` reports the repo's binding whether or not it was
+ * applied, so a lane can tell "no org, but an org claimed this repo" (the
+ * mention lane's fail-closed guard, #579) without reading the binding again.
  */
 export async function getRepoOrgAndMode({
   db,
@@ -291,17 +295,20 @@ export async function getRepoOrgAndMode({
   organizationId: string | null;
   mode: InstallationMode;
   source: RepoOrgSource;
+  boundOrganizationId: string | null;
 }> {
   const [binding, installation] = await Promise.all([
     getRepoOrgBinding({ db, repoFullName }),
     getInstallationOrgAndMode({ db, installationId }),
   ]);
+  const boundOrganizationId = binding?.organizationId ?? null;
   if (binding && installation.organizationId !== null) {
     return {
       organizationId: binding.organizationId,
       mode: installation.mode,
       source: "repo_binding",
+      boundOrganizationId,
     };
   }
-  return { ...installation, source: "installation" };
+  return { ...installation, source: "installation", boundOrganizationId };
 }

@@ -13,10 +13,7 @@ import {
   getUserSettings,
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
-import {
-  getRepoOrgAndMode,
-  getRepoOrgBinding,
-} from "@terragon/shared/model/github-installation";
+import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { repoHasReviewSettings } from "@terragon/shared/model/repo-review-settings";
 import { effectiveShadow } from "@/lib/github-side-effects";
@@ -90,11 +87,13 @@ export async function handleAppMention({
       issueOrPrType,
       issueOrPrNumber,
     }));
-  const { organizationId, mode } = await getRepoOrgAndMode({
-    db,
-    installationId: resolvedInstallationId,
-    repoFullName,
-  });
+  const { organizationId, mode, boundOrganizationId } = await getRepoOrgAndMode(
+    {
+      db,
+      installationId: resolvedInstallationId,
+      repoFullName,
+    },
+  );
   // Fail closed (#579): no org resolved, but some org has claimed the repo
   // (a repo_review_settings row, which is where its egress policy lives, or a
   // github_repo_org_binding row). A null-org thread reads no repo settings and
@@ -102,7 +101,11 @@ export async function handleAppMention({
   // before the existing-thread (follow-up) path too: mention threads created
   // before #579 carry a null org, and a follow-up would run them unenforced.
   // A repo no org has claimed keeps the null-org behavior.
-  if (organizationId === null && (await isRepoClaimedByAnOrg(repoFullName))) {
+  if (
+    organizationId === null &&
+    (boundOrganizationId !== null ||
+      (await repoHasReviewSettings({ db, repoFullName })))
+  ) {
     throw new WebhookSkip(
       "unmapped_installation",
       `No org resolved for a mention on ${repoFullName}, which an org has claimed`,
@@ -228,14 +231,6 @@ export async function handleAppMention({
       }),
     ),
   );
-}
-
-async function isRepoClaimedByAnOrg(repoFullName: string): Promise<boolean> {
-  const [hasSettings, binding] = await Promise.all([
-    repoHasReviewSettings({ db, repoFullName }),
-    getRepoOrgBinding({ db, repoFullName }),
-  ]);
-  return hasSettings || binding !== undefined;
 }
 
 function getUserMessageText({
