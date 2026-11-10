@@ -1,0 +1,9 @@
+// Test-only wrangler config for cell-policy.workerd.test.ts: runs the
+// allow_cell WASM under workerd with www's exact compatibility settings (see
+// apps/www/wrangler.jsonc). Never deployed.
+{
+  "name": "cell-policy-workerd-it",
+  "main": "cell-policy-workerd.worker.ts",
+  "compatibility_date": "2026-06-05",
+  "compatibility_flags": ["nodejs_compat"],
+}

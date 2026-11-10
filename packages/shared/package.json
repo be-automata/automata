@@ -16,12 +16,15 @@
     "prod-env": "dotenv -e .env.production.local --",
     "tsc-watch": "tsc --noEmit --watch --preserveWatchOutput",
     "tsc-check": "tsc --noEmit",
+    "cell-policy:build": "scripts/build-cell-policy.sh",
+    "cell-policy:check": "scripts/build-cell-policy.sh --check",
     "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
     "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
   },
   "exports": {
     ".": "./src/index.ts",
     "./*": "./src/*.ts",
+    "./cell-policy/cell.wasm": "./src/cell-policy/cell.wasm",
     "./automations": "./src/automations/index.ts",
     "./db": "./src/db/index.ts"
   },
@@ -32,6 +35,7 @@
     "@date-fns/tz": "^1.2.0",
     "@neondatabase/serverless": "^1.1.0",
     "@octokit/app": "^16.0.1",
+    "@open-policy-agent/opa-wasm": "1.10.0",
     "@opennextjs/cloudflare": "^1.20.1",
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
