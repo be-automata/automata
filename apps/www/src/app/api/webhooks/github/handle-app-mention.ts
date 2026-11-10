@@ -98,8 +98,10 @@ export async function handleAppMention({
   // Fail closed (#579): no org resolved, but some org has claimed the repo
   // (a repo_review_settings row, which is where its egress policy lives, or a
   // github_repo_org_binding row). A null-org thread reads no repo settings and
-  // runs unenforced, so skip before any side effect. A repo no org has claimed
-  // keeps the null-org behavior.
+  // runs unenforced, so skip before any side effect. This deliberately runs
+  // before the existing-thread (follow-up) path too: mention threads created
+  // before #579 carry a null org, and a follow-up would run them unenforced.
+  // A repo no org has claimed keeps the null-org behavior.
   if (organizationId === null && (await isRepoClaimedByAnOrg(repoFullName))) {
     throw new WebhookSkip(
       "unmapped_installation",

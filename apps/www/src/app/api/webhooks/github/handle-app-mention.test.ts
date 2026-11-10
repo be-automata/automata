@@ -512,6 +512,30 @@ describe("handleAppMention", () => {
         expect(newThreadInternal).not.toHaveBeenCalled();
       });
 
+      it("T9: fails closed for a follow-up to an existing (null-org) thread too", async () => {
+        // singleThreadForGitHubMentions is on in this describe. Mention
+        // threads created before #579 carry organization_id = null, so a
+        // follow-up into one would run unenforced: the guard runs before the
+        // existing-thread path on purpose.
+        const repoFullName = uniqueRepo();
+        await createTestGitHubPR({
+          db,
+          overrides: { repoFullName, number: 7 },
+        });
+        await createTestThread({
+          db,
+          userId: user.id,
+          overrides: { githubRepoFullName: repoFullName, githubPRNumber: 7 },
+        });
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "FollowUp" }),
+        });
+        await expectFailsClosed(repoFullName);
+        expect(queueFollowUpInternal).not.toHaveBeenCalled();
+      });
+
       it("T4: a payload installationId skips the repo lookup", async () => {
         const fresh = await createTestGitHubPR({ db });
         const { orgId, installationId } = await bindOrg("active");
