@@ -86,6 +86,10 @@ Negative, to watch:
    - Locally, ADR-013's flags pass and Docker with default settings fails.
    - On the box, ADR-013's acceptance record stands: probes 2 to 7 in production, all seven on the throwaway box.
    - Renewed in production on 2026-11-08 17:48Z: driver B, probes 2 to 7, 12/12 PASS (batteries `sha256:da029c44…`, platform `1f58cf7`).
+   - Renewed in production on 2026-11-10, platform `4085a7b`, same batteries image:
+     - enforce profile, driver A, 16:24Z and 16:30Z: two review runs on a throwaway repo with a `domain` policy, 7/7 PASS each, one `deny`/`enforce` row for `example.org` per container in `egress_events`;
+     - observe profile, driver B, 17:21Z: probes 2 to 7, 12/12 PASS.
+   - Found during the renewal: a thread started by an `@mention` gets no organization on repo webhooks, so it runs with no egress policy (#579).
 3. **Done 2026-11-08: the `allow_cell` rule in OPA.** 17/17 tests. The matrix covers eight profiles, including the box in observe and enforce mode. With the clock moved past expiry, every profile is denied with `evidence_expired`.
 4. **Done 2026-11-08: `kind: cell` in a local Hatchet spike, 25/25.** Covered:
    - resolution at compile and again at dispatch;
