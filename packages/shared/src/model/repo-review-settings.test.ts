@@ -15,6 +15,7 @@ import {
   listRepoReviewSettings,
   RepoReviewSettingConflictError,
   getRepoReviewSettingWithOrgDefault,
+  repoHasReviewSettings,
 } from "./repo-review-settings";
 import type { ReviewAgentFieldsPatch } from "./review-agent-settings";
 import { SELF_HEAL_FIELDS } from "./self-heal-settings";
@@ -1394,5 +1395,49 @@ describe("optimistic-concurrency fence at millisecond precision", () => {
     });
     expect(result).toEqual({ removed: false, conflict: true });
     expect((await read())?.blockTolerance).toBe("error");
+  });
+});
+
+describe("repoHasReviewSettings (#579, cross-org boolean)", () => {
+  it("is true for a repo row under any org, case-insensitively", async () => {
+    const orgId = await makeOrg("globex");
+    const repo = `Acme/Probe-${nanoid(8)}`;
+    await setRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: repo,
+      blockTolerance: "error",
+    });
+    expect(
+      await repoHasReviewSettings({ db, repoFullName: repo.toUpperCase() }),
+    ).toBe(true);
+    expect(
+      await repoHasReviewSettings({ db, repoFullName: repo.toLowerCase() }),
+    ).toBe(true);
+  });
+
+  it("is false for an unknown repo", async () => {
+    expect(
+      await repoHasReviewSettings({
+        db,
+        repoFullName: `acme/unknown-${nanoid(8)}`,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false when only the org-default sentinel row exists", async () => {
+    const orgId = await makeOrg("acme");
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgId,
+      repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      patch: { supersedePolicy: "complete-run-queue" },
+    });
+    expect(
+      await repoHasReviewSettings({
+        db,
+        repoFullName: ORG_DEFAULT_REPO_SENTINEL,
+      }),
+    ).toBe(false);
   });
 });
