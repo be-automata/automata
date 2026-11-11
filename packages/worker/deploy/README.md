@@ -639,6 +639,55 @@ wait; cat a.out b.out; sudo rm -rf /var/tmp/automata-probe
 A green P2 (and the post-release check) is driver A with every line `PASS` (probe 6 `SKIP` on the
 task container), plus the `deny` rows.
 
+### Scheduled evidence renewal: `linux/box-evidence-probes.sh` (ADR-014 evidence upkeep)
+
+Box evidence expires 30 days after it is measured (ADR-014 decision 3), and an expired profile is
+denied `evidence_expired`. A weekly systemd timer re-runs driver B and lets www renew the
+`automata-box/observe` evidence:
+
+- `automata-box-evidence.timer` fires Sundays 04:00 UTC (plus up to 30 min of jitter), and with
+  `Persistent=true` a run missed while the box was down fires on the next boot.
+- `automata-box-evidence.service` (oneshot, root, no `Restart=`) runs `box-evidence-probes.sh`. It runs
+  driver B exactly as above, with the image pinned in `WORKER_BATTERIES_IMAGE`, fresh random
+  `--self`/`--peer` tokens and a 600 s bound per container. Then it posts the verdict lines of both
+  containers to `POST <www>/api/internal/profile-evidence/box`.
+- www decides what the lines prove (`packages/shared/src/model/box-evidence.ts`).
+  - A full pass is exactly one `PASS` for each of probes 2 to 7 in both containers, and nothing
+    else. It writes the five observe capabilities as new `conformance` rows, `trigger: "schedule"`.
+  - Anything else writes nothing and posts an ops alert (`OPS_ALERT_WEBHOOK_URL`). The unit also
+    exits non-zero, so it shows in `systemctl --failed`.
+  - A report dated more than 2 h in the past or 5 min in the future is refused, because
+    `measured_at` sets `expires_at`.
+- Driver B does not measure probe 1, so the timer never renews `automata-box/enforce`. That profile
+  still needs driver A until probe 1 runs against the enforce proxy on its own.
+- Every day at 13:00 UTC, the hourly www cron posts an ops alert listing each profile whose earliest
+  current evidence expires within 7 days, or that has none.
+
+Install (once per box, as root). The secret is a new random value, set on both sides. It is
+dedicated: never reuse `INTERNAL_SHARED_SECRET` or a worker credential. It lives in a root-only
+file, not in `worker-box.env`, so the worker and the agent uid never hold it:
+
+```bash
+# 1. www (from a machine logged in to the Cloudflare account; reads the value from stdin)
+npx wrangler secret put PROFILE_EVIDENCE_SECRET --name automata-www
+# 2. the box, same value, typed or piped; never on a command line
+install -d -m 0700 /etc/automata
+( umask 077; cat > /etc/automata/profile-evidence.env ) <<'ENV'
+AUTOMATA_WWW_URL=https://<www host>
+PROFILE_EVIDENCE_SECRET=<value>
+ENV
+# 3. the units, from the deployed checkout
+install -m 0644 /opt/automata-platform/packages/worker/deploy/linux/automata-box-evidence.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now automata-box-evidence.timer
+# 4. prove it: a dry run posts nothing; a real run renews and prints the new expiry
+/opt/automata-platform/packages/worker/deploy/linux/box-evidence-probes.sh --dry-run
+systemctl start automata-box-evidence.service && journalctl -u automata-box-evidence -n 30 --no-pager
+```
+
+Run it when the box is idle (no `automata.box` containers): the two probe containers take up to
+2 x 1500 MB and 2 CPUs while they run. Rotation: write the new value to the box file first, then
+`wrangler secret put`. A run that lands in the gap fails loudly, and the evidence lasts 30 days.
+
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
 The worker consumes the compiled daemon (`packages/daemon/dist/`), not its source.

@@ -119,3 +119,14 @@ async function postAlertText(
     };
   }
 }
+
+/**
+ * Any other ops alert on the same channel (ADR-014 evidence upkeep). The
+ * caller builds the text from ids, enums and dates only. Never throws.
+ */
+export async function postOpsAlert(
+  payload: { text: string },
+  deps: OpsAlertDeps = {},
+): Promise<OpsAlertResult> {
+  return postAlertText(payload, deps);
+}

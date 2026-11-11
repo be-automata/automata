@@ -80,6 +80,9 @@ Negative, to watch:
     - observe: driver B, probes 2 to 7 in two concurrent containers, 12/12, 17:21Z. Driver B does not measure probe 1, so a repo without a policy stays open egress for the resolver;
     - enforce: driver A, all seven probes in live review runs on a repo with a `domain` policy, 7/7 on two runs with a `deny` audit row each, 16:24Z and 16:30Z.
   - The probes in `packages/worker/deploy/README.md` have to be re-run on a schedule.
+    - Weekly: a systemd timer on the box runs driver B and posts the probe lines to www, which renews `automata-box/observe` on a full pass and raises an ops alert otherwise (README, "Scheduled evidence renewal").
+    - Daily at 13:00 UTC, www raises an ops alert for any profile whose evidence expires within 7 days.
+    - `automata-box/enforce` is not renewed by the timer, because driver B does not measure probe 1. It needs driver A until probe 1 runs against the enforce proxy on its own.
 
 ## Testing
 
@@ -104,4 +107,4 @@ Negative, to watch:
    - the resolver at the shared seam (ADR-005 §3b);
    - the Agent37 adapter over the existing run path;
    - the remote-cell crash case;
-   - a scheduled re-run of the box probes.
+   - a scheduled re-run of the box probes: weekly driver B for the observe profile, with an expiry alert 7 days ahead. Probe 1 for the enforce profile is still open.

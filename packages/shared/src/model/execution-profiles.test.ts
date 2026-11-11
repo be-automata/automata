@@ -7,9 +7,12 @@ import {
   executionProfileConfigHash,
   getCellDecisionsForThread,
   getCurrentProfileEvidence,
+  getExecutionProfile,
   getExecutionProfileByConfiguration,
   insertCellDecision,
   insertProfileEvidence,
+  insertProfileEvidenceRows,
+  listExecutionProfiles,
   profileRecordForPolicy,
   upsertExecutionProfile,
 } from "./execution-profiles";
@@ -186,5 +189,41 @@ describe("execution profiles and evidence (DB)", () => {
       seam: "dispatch",
       mode: "shadow",
     });
+  });
+});
+
+describe("evidence renewal helpers (DB)", () => {
+  it("inserts a batch of rows and reads the profile back by id", async () => {
+    const p = await upsertExecutionProfile({
+      db,
+      id: `test/${nanoid(8)}`,
+      provider: `prov-${nanoid(6)}`,
+      tier: "customer_box",
+      configuration: { egress_mode: "observe" },
+    });
+    expect((await getExecutionProfile({ db, id: p.id }))?.id).toBe(p.id);
+    expect(await getExecutionProfile({ db, id: `test/${nanoid(8)}` })).toBe(
+      undefined,
+    );
+    expect(
+      (await listExecutionProfiles({ db })).some((row) => row.id === p.id),
+    ).toBe(true);
+
+    const measuredAt = new Date("2026-11-15T04:00:00Z");
+    const rows = await insertProfileEvidenceRows({
+      db,
+      rows: ["metadata_blocked", "peer_isolated"].map((capability) => ({
+        profileId: p.id,
+        capability,
+        measuredAt,
+        source: "conformance",
+        result: { value: true },
+      })),
+    });
+    expect(rows.map((r) => r.expiresAt.toISOString())).toEqual([
+      "2026-12-15T04:00:00.000Z",
+      "2026-12-15T04:00:00.000Z",
+    ]);
+    expect(await insertProfileEvidenceRows({ db, rows: [] })).toEqual([]);
   });
 });

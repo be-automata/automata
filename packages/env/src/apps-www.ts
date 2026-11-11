@@ -147,6 +147,12 @@ export const env = envsafe({
   // during the gap lease-expire once (+1 attempt each). Never reuse
   // INTERNAL_SHARED_SECRET or daemon tokens.
   KNOWLEDGE_RECONCILE_SECRET: str({ default: "", allowEmpty: true }),
+  // ADR-014 evidence upkeep: authorizes only POST /api/internal/profile-evidence/box,
+  // which the box's weekly probe timer calls. Dedicated, never INTERNAL_SHARED_SECRET
+  // or a worker credential; it lives on the box in root-only
+  // /etc/automata/profile-evidence.env, not in worker-box.env. Empty = the route
+  // refuses everything (the timer then fails loudly and evidence expires on its own).
+  PROFILE_EVIDENCE_SECRET: str({ default: "", allowEmpty: true }),
   // Platform ops Slack incoming webhook, the same channel as the worker's #373
   // growth-trigger WORKER_ALERT_WEBHOOK_URL (D-15). Empty = log only. A
   // credential: never logged.
