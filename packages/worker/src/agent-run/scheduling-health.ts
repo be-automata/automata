@@ -3,9 +3,9 @@ import type { PgLike } from "./engine-db";
 /**
  * Pure scheduling-health detectors + remediators for the Hatchet engine DB
  * (#69). Concurrency-strategy checks are detection only (#570). This module is
- * deliberately PURE: no `process.env`, no timers, no fs, no logging — every knob arrives as a function parameter. That is the import
- * contract #128's anti-rot E2E depends on (§7.3) and it is asserted by
- * `scheduling-health.test.ts`.
+ * deliberately PURE: no `process.env`, no timers, no fs, no logging — every
+ * knob arrives as a function parameter. That is the import contract #128's
+ * anti-rot E2E depends on (§7.3).
  *
  * Every exported detector/remediator is `(db: PgLike, opts) => Promise<...>`,
  * unit-testable against a fake `PgLike` with zero docker.
