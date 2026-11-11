@@ -37,7 +37,8 @@ was rejected: it only works when an automation matched and can disagree with the
   `handleAppMention` with no `installationId`, so `handle-app-mention.test.ts` needs a local
   mock with the same shape as `org-mention-lane.test.ts` L57-L61 (all three exports), with
   `getRepoInstallationId` defaulting to `null` ("not installed"), which keeps their
-  current expectations.
+  current expectations. (Since then the global mock itself carries `getRepoInstallationId`,
+  defaulting to `null`, and the local mock was dropped; see Tests.)
 - No index starts with `repo_full_name` (the unique index is `(organization_id, repo_full_name)`),
   so the cross-org existence check scans the table. That is acceptable at today's size; the
   helper's doc says so.
@@ -56,15 +57,21 @@ was rejected: it only works when an automation matched and can disagree with the
    (added in refinement: a bound repo whose installation has no org is the same bypass) —
    throw
    `new WebhookSkip("unmapped_installation", …, { installationId: resolvedInstallationId ?? null, repoFullName })`
-   before any side effect (before the octokit/branch lookup, reaction, billing comment or
-   thread creation). This also covers a payload installation with no org mapping. A repo no org has claimed keeps today's behavior (null-org thread),
+   before any side effect (before the octokit/branch lookup, reaction, billing comment,
+   thread creation or a follow-up into an existing thread: mention threads created before
+   #579 carry a null org). This also covers a payload installation with no org mapping. A repo no org has claimed keeps today's behavior (null-org thread),
    so un-onboarded repos are not broken.
 3. New shared helper in `packages/shared/src/model/repo-review-settings.ts`:
    `repoHasReviewSettings({ db, repoFullName }): Promise<boolean>` — existence check across
    orgs on `normalizeRepo(repoFullName)`, excluding `ORG_DEFAULT_REPO_SENTINEL`, `limit(1)`. Documented as deliberately cross-org
    (it returns a boolean only, never another org's row).
-4. Nothing else changes: `handlers.ts`, `org-mention-lane.ts`, `dispatch.ts`,
-   `getRepoOrgAndMode` semantics, other lanes.
+4. Two additive seams (pre-landing review): `getRepoOrgAndMode` also returns
+   `boundOrganizationId` (the repo's `github_repo_org_binding` org, applied or not), which the
+   guard reads instead of querying the binding again; `getOctokitForApp`
+   (`apps/www/src/lib/github.ts`) takes an optional `installationId`, so the mention's App
+   client reuses the resolved id instead of a second `GET /repos/{owner}/{repo}/installation`.
+5. Nothing else changes: `handlers.ts`, `org-mention-lane.ts`, `dispatch.ts`,
+   `getRepoOrgAndMode`'s org/mode semantics, other lanes.
 
 ## Acceptance criteria
 
@@ -76,10 +83,10 @@ was rejected: it only works when an automation matched and can disagree with the
 
 ## Tests
 
-`apps/www/src/app/api/webhooks/github/handle-app-mention.test.ts` (a local
-`vi.mock("@terragon/shared/github-app")` that mirrors all four exports of the global mock in
-`test-helpers/test-setup.ts` and adds `getRepoInstallationId`, implementations inside `vi.fn`;
-default `null` in `beforeEach`; the shared default repo's claim rows are cleared in `beforeEach`):
+`apps/www/src/app/api/webhooks/github/handle-app-mention.test.ts` (the global
+`vi.mock("@terragon/shared/github-app")` in `test-helpers/test-setup.ts` carries
+`getRepoInstallationId`, implementation inside `vi.fn`, default `null`; the test re-sets
+`null` in `beforeEach`; the shared default repo's claim rows are cleared in `beforeEach`):
 
 - T1 (AC1/AC3): no `installationId`, lookup returns an id bound to org X (active) →
   `getRepoInstallationId` called with `(owner, repo)`, `newThreadInternal` called with
@@ -98,10 +105,21 @@ default `null` in `beforeEach`; the shared default repo's claim rows are cleared
   `WebhookSkip`; `getRepoInstallationId` not called.
 - T6: no `installationId`, lookup returns `null`, repo has **no** settings row →
   thread created with `organizationId: null`, `shadow: false` (un-onboarded repos keep working).
+- T9 (fail closed): a follow-up to an existing null-org thread on a claimed repo →
+  `WebhookSkip`; `queueFollowUpInternal` not called (unclaimed control: it is called).
+- T10: a claimed repo (binding and settings row) whose installation resolves to the claiming
+  org → thread created with that org, `shadow: false` (no skip).
 
 `packages/shared/src/model/repo-review-settings.test.ts`: `repoHasReviewSettings` true for a
 repo row (case-insensitive name), false for an unknown repo, false when only the org-default
 sentinel exists.
+
+`packages/shared/src/model/github-installation.test.ts`: `getRepoOrgAndMode` reports
+`boundOrganizationId`, including a binding it did not apply.
+
+`apps/www/src/lib/github-background-token.test.ts`: `getOctokitForApp` passes a known
+`installationId` through to `getInstallationToken`, and calls it with `(owner, repo)` only
+without one.
 
 ## UAT
 
