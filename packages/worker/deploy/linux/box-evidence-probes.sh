@@ -63,7 +63,10 @@ gid=$(id -g automata-runner) || fail "no automata-runner user"
 uid=$(id -u automata-runner)
 pub=$(ip -4 -o addr show scope global | awk '{split($4,a,"/"); print a[1]; exit}')
 [ -n "$pub" ] || fail "no public IPv4 address"
-sha=$(git -C "$PLATFORM" log -1 --format=%h) || fail "no platform checkout at $PLATFORM"
+# The checkout belongs to automata and this runs as root. systemd starts the unit with no
+# HOME, so root's global safe.directory is not read and git refuses the repo as "dubious
+# ownership": name the one directory here instead.
+sha=$(git -c safe.directory="$PLATFORM" -C "$PLATFORM" log -1 --format=%h) || fail "no platform checkout at $PLATFORM"
 host=$(hostname -s)
 at=$(date -u +%FT%TZ)
 log "host=$host at=$at platform=$sha image=$digest"
