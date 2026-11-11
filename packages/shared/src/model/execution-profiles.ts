@@ -204,3 +204,49 @@ export async function insertProfileEvidence({
   const [row] = await db.insert(profileEvidence).values(evidence).returning();
   return row!;
 }
+
+/**
+ * Several evidence rows in one statement, so a renewal is all or nothing:
+ * a profile never ends up with half its capabilities re-measured.
+ */
+export async function insertProfileEvidenceRows({
+  db,
+  rows,
+}: {
+  db: DB;
+  rows: Array<{
+    profileId: string;
+    capability: string;
+    measuredAt: Date;
+    source: string;
+    result: { value: unknown } & Record<string, unknown>;
+    artifactDigest?: string | null;
+    platformSha?: string | null;
+  }>;
+}): Promise<ProfileEvidence[]> {
+  if (rows.length === 0) return [];
+  return db.insert(profileEvidence).values(rows).returning();
+}
+
+export async function listExecutionProfiles({
+  db,
+}: {
+  db: DB;
+}): Promise<ExecutionProfile[]> {
+  return db.select().from(executionProfile).orderBy(asc(executionProfile.id));
+}
+
+export async function getExecutionProfile({
+  db,
+  id,
+}: {
+  db: DB;
+  id: string;
+}): Promise<ExecutionProfile | undefined> {
+  const rows = await db
+    .select()
+    .from(executionProfile)
+    .where(eq(executionProfile.id, id))
+    .limit(1);
+  return rows[0];
+}

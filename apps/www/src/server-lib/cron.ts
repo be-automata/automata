@@ -392,8 +392,13 @@ export async function runScheduledCron(cron: string): Promise<void> {
           // CRON-01: LAST, so self-heal work can never delay or skip recovery.
           await runSelfHealCronSafe("hourly");
         } finally {
-          // OPS-04: LAST, after recovery and self-heal; purge can never delay or skip them.
-          await runKnowledgePurgeSweepSafe();
+          try {
+            // OPS-04: after recovery and self-heal; purge can never delay or skip them.
+            await runKnowledgePurgeSweepSafe();
+          } finally {
+            // ADR-014 evidence upkeep: once a day (the 13:00 UTC run), LAST.
+            await runProfileEvidenceExpiryCheckSafe();
+          }
         }
       }
       return;
@@ -476,5 +481,32 @@ async function runKnowledgePurgeSweepSafe(): Promise<void> {
     await runKnowledgePurgeSweep();
   } catch (error) {
     console.error("[cron:knowledge-purge] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * ADR-014 evidence upkeep (step 5): warn a week before an execution
+ * profile's evidence expires. Acts only on the 13:00 UTC hourly run; dynamic
+ * import, every failure logged and swallowed, like the sweeps above.
+ */
+async function runProfileEvidenceExpiryCheckSafe(): Promise<void> {
+  try {
+    const { runProfileEvidenceExpiryCheck } = await import(
+      "@/server-lib/compute/profile-evidence-expiry"
+    );
+    const { postOpsAlert } = await import("@/server-lib/knowledge/ops-alert");
+    const result = await runProfileEvidenceExpiryCheck({
+      db,
+      now: new Date(),
+      alert: postOpsAlert,
+    });
+    if (result.ran) {
+      console.log("[cron:profile-evidence] expiry check", {
+        expiring: result.expiring.map((p) => p.profileId),
+        alerted: result.alerted,
+      });
+    }
+  } catch (error) {
+    console.error("[cron:profile-evidence] failed (non-fatal)", error);
   }
 }
