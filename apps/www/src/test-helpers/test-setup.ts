@@ -125,6 +125,9 @@ vi.mock("@/server-lib/generate-session-summary", () => ({
 // from a describe's second case on (#380 found it: the sealer refused the
 // empty token the legacy payload used to drop silently).
 vi.mock("@terragon/shared/github-app", () => ({
+  // null = the App is not installed on the repo; a test that needs a repo
+  // installation lookup (#579) sets its own value.
+  getRepoInstallationId: vi.fn(async (): Promise<number | null> => null),
   getInstallationToken: vi.fn(async () => "mock-github-token"),
   getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
   lookupInstallationId: vi.fn(async () => 424242),
@@ -178,6 +181,9 @@ index 1234567..89abcdef 100644
 // from a describe's second case on (#380 found it: the sealer refused the
 // empty token the legacy payload used to drop silently).
 vi.mock("@terragon/shared/github-app", () => ({
+  // null = the App is not installed on the repo; a test that needs a repo
+  // installation lookup (#579) sets its own value.
+  getRepoInstallationId: vi.fn(async (): Promise<number | null> => null),
   getInstallationToken: vi.fn(async () => "mock-github-token"),
   getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
   lookupInstallationId: vi.fn(async () => 424242),

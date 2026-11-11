@@ -15,7 +15,7 @@
 export type WebhookSkipCategory =
   | "app_access_unavailable" // couldn't get an installation client (not installed / bad creds)
   | "no_mapped_users" // no platform user mapped to this GitHub actor/repo
-  | "unmapped_installation" // installation id has no org binding
+  | "unmapped_installation" // installation id has no org binding, or (#579) a repo an org has claimed resolved no org, App not installed included
   | "unconfigured_repo" // no default repo / settings for this workspace
   | "shadow_mode"; // installation is in shadow mode — ingest only, no side effects
 

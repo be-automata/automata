@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getUserOrNull } from "@/lib/auth-server";
 import { getEnvironment } from "@terragon/shared/model/environments";
 import { db } from "@/lib/db";
-import { getUserSettings } from "@terragon/shared/model/user";
 import { getFeatureFlagsForUser } from "@terragon/shared/model/feature-flags";
 import { getOrCreateSandbox, getSandboxProvider } from "@/agent/sandbox";
 import { CreateSandboxOptions } from "@terragon/sandbox/types";
@@ -90,13 +89,11 @@ export async function POST(request: NextRequest) {
     try {
       await sendStatus("preparing");
       const [
-        userSettings,
         githubAccessToken,
         preferredSandboxSize,
         featureFlags,
         defaultBranch,
       ] = await Promise.all([
-        getUserSettings({ db, userId }),
         // Background-capable: App installation token fallback for identity-less owners.
         getGitHubTokenForBackground({
           userId,
@@ -113,11 +110,8 @@ export async function POST(request: NextRequest) {
         await sendError("GitHub access token not found");
         return;
       }
-      const sandboxProvider = await getSandboxProvider({
-        userSetting: userSettings?.sandboxProvider,
-        sandboxSize: preferredSandboxSize,
-        userId,
-      });
+      // Server-only (ADR-014 / ADR-013 I7): no user setting or flag picks it.
+      const sandboxProvider = getSandboxProvider();
       // #114: this is a CREATE path — carry the broker shape so a brokered
       // Docker sandbox never receives the raw installation token (Docker + flag
       // on only; null otherwise = today's behavior).

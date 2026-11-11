@@ -1,8 +1,10 @@
 import { describe, expect, it, vi, beforeEach, beforeAll } from "vitest";
 import { handleAppMention } from "./handle-app-mention";
 import { User, GitHubPR } from "@terragon/shared";
+import { eq } from "drizzle-orm";
 import {
   createTestGitHubPR,
+  createTestOrg,
   createTestThread,
   createTestUser,
   setFeatureFlagOverrideForTest,
@@ -23,7 +25,14 @@ import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getDiffContextStr } from "./utils";
 import { createAutomation } from "@terragon/shared/model/automations";
 import { createOrganization } from "@terragon/shared/model/organizations";
-import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-installation";
+import {
+  bindGithubInstallationToOrg,
+  bindRepoToOrg,
+  unbindRepoFromOrg,
+} from "@terragon/shared/model/github-installation";
+import { setRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
+import { findWebhookSkip } from "./webhook-skip";
 import { convertToPlainText } from "@/lib/db-message-helpers";
 import { redis } from "@/lib/redis";
 import { nanoid } from "nanoid";
@@ -64,6 +73,23 @@ describe("handleAppMention", () => {
   });
 
   beforeEach(async () => {
+    // The fail-closed guard (#579) reads repo claims. Other files in this
+    // shared test database (e.g. server-lib/automations.test.ts) leave
+    // settings rows on the helpers' default repo; clear them so these cases
+    // do not depend on file order.
+    // createTestGitHubPR always uses the same repo, so one cleanup covers
+    // pr and prWithNoThread.
+    await Promise.all([
+      db
+        .delete(schema.repoReviewSettings)
+        .where(
+          eq(
+            schema.repoReviewSettings.repoFullName,
+            prWithNoThread.repoFullName.toLowerCase(),
+          ),
+        ),
+      unbindRepoFromOrg({ db, repoFullName: prWithNoThread.repoFullName }),
+    ]);
     // Clear Redis batch keys to ensure test isolation
     const keys = await redis.keys("thread-batch:*");
     if (keys.length > 0) {
@@ -97,6 +123,7 @@ describe("handleAppMention", () => {
       },
     };
     vi.clearAllMocks();
+    vi.mocked(getRepoInstallationId).mockResolvedValue(null);
     vi.mocked(getOctokitForBackground).mockResolvedValue(mockOctokit as any);
     vi.mocked(getOctokitForApp).mockResolvedValue(mockOctokit as any);
     // Reset newThreadInternal to successful state
@@ -353,6 +380,214 @@ describe("handleAppMention", () => {
       expect(
         mockOctokit.rest.reactions.createForIssueComment,
       ).toHaveBeenCalled();
+    });
+
+    describe("repo-level webhook without installation (#579)", () => {
+      async function bindOrg(mode: "active" | "shadow") {
+        const orgId = await createTestOrg({ db, name: "RepoHook" });
+        const installationId = Math.floor(Math.random() * 1_000_000_000);
+        await bindGithubInstallationToOrg({
+          db,
+          installationId,
+          organizationId: orgId,
+          mode,
+        });
+        return { orgId, installationId };
+      }
+
+      // A unique repo: createTestGitHubPR reuses one name, so a claim on it
+      // would leak into the other cases.
+      function uniqueRepo(): string {
+        return `claimed-owner/repo-${nanoid(8).toLowerCase()}`;
+      }
+
+      async function expectFailsClosed(repoFullName: string) {
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await expect(mention(repoFullName, 7)).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "unmapped_installation",
+        );
+        expect(newThreadInternal).not.toHaveBeenCalled();
+        expect(getOctokitForApp).not.toHaveBeenCalled();
+      }
+
+      async function mention(
+        repoFullName: string,
+        number: number,
+        extra: { installationId?: number } = {},
+      ) {
+        await handleAppMention({
+          repoFullName,
+          issueOrPrNumber: number,
+          issueOrPrType: "pull_request",
+          commentId: 223457,
+          commentType: "issue_comment",
+          commentGitHubUsername: "commenter",
+          commentBody: "Hey @app, please help with this",
+          commentGitHubAccountId: githubAccountId,
+          ...extra,
+        });
+      }
+
+      it("T1: resolves the installation from the repo and uses its org (active)", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("active");
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(fresh.repoFullName, fresh.number);
+        const [owner, repo] = fresh.repoFullName.split("/");
+        expect(getRepoInstallationId).toHaveBeenCalledWith(owner, repo);
+        // The resolved id is reused, not looked up a second time.
+        expect(getOctokitForApp).toHaveBeenCalledWith({
+          owner,
+          repo,
+          installationId,
+        });
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: false }),
+        );
+      });
+
+      it("T2: a shadow installation resolved from the repo creates a shadow thread, no reaction", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("shadow");
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(fresh.repoFullName, fresh.number);
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: true }),
+        );
+        expect(
+          mockOctokit.rest.reactions.createForIssueComment,
+        ).not.toHaveBeenCalled();
+      });
+
+      it("T3: fails closed when no org resolves and the repo has a policy row", async () => {
+        const repoFullName = uniqueRepo();
+        await setRepoReviewSetting({
+          db,
+          organizationId: await createTestOrg({ db, name: "Policy" }),
+          repoFullName,
+          blockTolerance: "error",
+        });
+        await expectFailsClosed(repoFullName);
+      });
+
+      it("T7: fails closed when no org resolves and the repo is bound to an org", async () => {
+        const repoFullName = uniqueRepo();
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "Bound" }),
+        });
+        await expectFailsClosed(repoFullName);
+      });
+
+      it("T8: fails closed when the payload installation is unmapped and the repo is claimed", async () => {
+        const repoFullName = uniqueRepo();
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "Claimed" }),
+        });
+        await expect(
+          mention(repoFullName, 7, { installationId: 987_654_321 }),
+        ).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "unmapped_installation",
+        );
+        expect(getRepoInstallationId).not.toHaveBeenCalled();
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
+      it("T9: fails closed for a follow-up to an existing (null-org) thread too", async () => {
+        // singleThreadForGitHubMentions is on in this describe. Mention
+        // threads created before #579 carry organization_id = null, so a
+        // follow-up into one would run unenforced: the guard runs before the
+        // existing-thread path on purpose.
+        const repoFullName = uniqueRepo();
+        await createTestGitHubPR({
+          db,
+          overrides: { repoFullName, number: 7 },
+        });
+        await createTestThread({
+          db,
+          userId: user.id,
+          overrides: { githubRepoFullName: repoFullName, githubPRNumber: 7 },
+        });
+        // Control: unclaimed, the same mention IS a follow-up into the seeded
+        // thread, so the assertion below proves the guard's position.
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await mention(repoFullName, 7);
+        expect(queueFollowUpInternal).toHaveBeenCalledTimes(1);
+        vi.clearAllMocks(); // call history only; implementations stay
+        await bindRepoToOrg({
+          db,
+          repoFullName,
+          organizationId: await createTestOrg({ db, name: "FollowUp" }),
+        });
+        await expectFailsClosed(repoFullName);
+        expect(queueFollowUpInternal).not.toHaveBeenCalled();
+      });
+
+      it("T4: a payload installationId skips the repo lookup", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        const { orgId, installationId } = await bindOrg("active");
+        await mention(fresh.repoFullName, fresh.number, { installationId });
+        expect(getRepoInstallationId).not.toHaveBeenCalled();
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId }),
+        );
+      });
+
+      it("T5: a non-404 lookup error is an App-access skip (WI-8), not a 500", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        vi.mocked(getRepoInstallationId).mockRejectedValue(
+          new Error("github 500"),
+        );
+        await expect(
+          mention(fresh.repoFullName, fresh.number),
+        ).rejects.toSatisfy(
+          (e: unknown) =>
+            findWebhookSkip(e)?.category === "app_access_unavailable",
+        );
+        expect(newThreadInternal).not.toHaveBeenCalled();
+      });
+
+      it("T6: an un-onboarded repo (no policy row) still creates a null-org thread", async () => {
+        const fresh = await createTestGitHubPR({ db });
+        vi.mocked(getRepoInstallationId).mockResolvedValue(null);
+        await mention(fresh.repoFullName, fresh.number);
+        const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
+        expect(callArgs?.organizationId ?? null).toBeNull();
+        expect(callArgs?.shadow).toBe(false);
+      });
+
+      // Value: protects=a claimed repo whose installation resolves to the
+      // claiming org still runs (no fail-closed skip); fails_when=the guard's
+      // organizationId===null clause is dropped or inverted; why_new=T1-T4 run
+      // on unclaimed repos; seam=none; no_claim=GitHub install lookup (mocked
+      // getRepoInstallationId; unit only).
+      it("T10: a claimed repo whose installation resolves to the claiming org runs", async () => {
+        const repoFullName = uniqueRepo();
+        await createTestGitHubPR({
+          db,
+          overrides: { repoFullName, number: 7 },
+        });
+        const { orgId, installationId } = await bindOrg("active");
+        // Both claim kinds, so only the organizationId===null clause keeps
+        // the guard from skipping.
+        await bindRepoToOrg({ db, repoFullName, organizationId: orgId });
+        await setRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName,
+          blockTolerance: "error",
+        });
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(repoFullName, 7);
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: false }),
+        );
+      });
     });
 
     it("should create new thread when no existing thread is found", async () => {

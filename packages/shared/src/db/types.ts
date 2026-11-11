@@ -638,3 +638,8 @@ export type OpenAIProviderMetadata = {
 export type AgentProviderMetadata =
   | ClaudeAgentProviderMetadata
   | OpenAIProviderMetadata;
+
+export type ExecutionProfile = typeof schema.executionProfile.$inferSelect;
+export type ProfileEvidence = typeof schema.profileEvidence.$inferSelect;
+export type CellDecisionRow = typeof schema.cellDecision.$inferSelect;
+export type CellDecisionInsert = typeof schema.cellDecision.$inferInsert;

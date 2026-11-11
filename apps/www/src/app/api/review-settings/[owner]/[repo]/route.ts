@@ -9,7 +9,9 @@ import {
   getRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 import {
+  findEgressPatchErrorResponse,
   findHarnessPacksGateResponse,
+  parseEgressPatch,
   parseReviewAgentPatch,
   parseReviewDraftPrs,
   parseSelfHealPatch,
@@ -105,6 +107,8 @@ export async function PUT(
     reviewDraftPrs?: unknown;
     supersedePolicy?: unknown;
     recheckOnComplete?: unknown;
+    egressPolicy?: unknown;
+    egressAllowlist?: unknown;
     expectedUpdatedAt?: unknown;
   } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
@@ -118,6 +122,8 @@ export async function PUT(
     reviewDraftPrs?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
+    egressPolicy?: string | null;
+    egressAllowlist?: string[] | null;
   } & ReviewAgentFieldsPatch &
     SelfHealFieldsPatch = {};
   if (body.blockTolerance !== undefined) {
@@ -138,6 +144,9 @@ export async function PUT(
   const supersede = parseSupersedePatch(body);
   if ("errorResponse" in supersede) return supersede.errorResponse;
   Object.assign(patch, supersede.patch);
+  const egress = parseEgressPatch(body);
+  if ("errorResponse" in egress) return egress.errorResponse;
+  Object.assign(patch, egress.patch);
   const reviewAgent = parseReviewAgentPatch(body);
   if ("errorResponse" in reviewAgent) return reviewAgent.errorResponse;
   Object.assign(patch, reviewAgent.patch);
@@ -148,7 +157,7 @@ export async function PUT(
     return NextResponse.json(
       {
         error:
-          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete and/or a review-agent field or self-heal field",
+          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete, egressPolicy, egressAllowlist and/or a review-agent field or self-heal field",
       },
       { status: 400 },
     );
@@ -174,6 +183,15 @@ export async function PUT(
     patch,
   });
   if (harnessGate) return harnessGate;
+  // #66: the stored egress policy is read at every dispatch and THROWS there
+  // when invalid, so the write is refused here with the same validator.
+  const egressError = await findEgressPatchErrorResponse({
+    db,
+    organizationId: ctx.organizationId,
+    repoFullName,
+    patch,
+  });
+  if (egressError) return egressError;
 
   // Optimistic concurrency, enforced by the DATABASE in the write itself
   // (ON CONFLICT … DO UPDATE … WHERE updated_at = expected): two admins who
@@ -261,6 +279,8 @@ export async function PUT(
       reviewDraftPrs: row.reviewDraftPrs,
       supersedePolicy: row.supersedePolicy,
       recheckOnComplete: row.recheckOnComplete,
+      // The level only: allowlist entries may name internal hosts.
+      egressPolicy: row.egressPolicy,
       // What THIS write changed — the audit trail must show the delta, not
       // just the resulting row.
       changed: Object.keys(patch),

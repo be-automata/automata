@@ -1,0 +1,16 @@
+# Weekly renewal of the box's ADR-014 evidence (box-evidence-probes.sh).
+# Evidence lasts 30 days; weekly leaves three missed runs before it expires, and
+# www alerts 7 days ahead. Persistent=true: a run missed while the box was down
+# fires on the next boot instead of being skipped in silence.
+
+[Unit]
+Description=Weekly ADR-014 box evidence renewal (driver B probes)
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+Unit=automata-box-evidence.service
+
+[Install]
+WantedBy=timers.target

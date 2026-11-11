@@ -53,6 +53,21 @@ export const FAILURE_TERMINAL_CAUSES = [
   "timeout",
 ] as const;
 
+/**
+ * #575: terminal causes that are the per-PR newest-wins POLICY doing its job,
+ * not a failure. The terminal write records `superseded` as the thread's
+ * `errorMessage` too (`defaultErrorMessageForCause`), so a caller passing
+ * `hasError` from that column must also pass `errorMessage`: when it is
+ * nothing but the cause's own marker, the run is not an error.
+ * Never add `out-of-memory` here: its marker equals its cause name and it IS a
+ * failure.
+ */
+const POLICY_TERMINAL_CAUSES: readonly string[] = [
+  "superseded",
+  "discarded",
+  "stale-skipped",
+];
+
 function statusWord(status: ThreadStatus): string {
   switch (status) {
     case "draft":
@@ -127,16 +142,20 @@ function bootingReason(substatus: BootingSubstatus | null): string | null {
 /**
  * The run state for a thread's effective status. Pass `hasError` whenever the
  * thread carries an error message: running and waiting states still win, so a
- * live run with a stale message keeps reading as running.
+ * live run with a stale message keeps reading as running. Pass the message
+ * itself as `errorMessage` too, so a policy terminal's own marker (#575) is
+ * not read as a failure.
  */
 export function runStateFor({
   status,
   hasError = false,
+  errorMessage = null,
   terminalCause = null,
   bootingSubstatus = null,
 }: {
   status: ThreadStatus;
   hasError?: boolean;
+  errorMessage?: string | null;
   terminalCause?: string | null;
   bootingSubstatus?: BootingSubstatus | null;
 }): RunState {
@@ -153,7 +172,17 @@ export function runStateFor({
   const failedCause =
     terminalCause !== null &&
     (FAILURE_TERMINAL_CAUSES as readonly string[]).includes(terminalCause);
-  if (ERROR_STATUSES.includes(status) || hasError || failedCause) {
+  // #575: the only "error" is the policy cause's own marker (superseded), so
+  // nobody has anything to do.
+  const policyMarkerOnly =
+    terminalCause !== null &&
+    POLICY_TERMINAL_CAUSES.includes(terminalCause) &&
+    errorMessage === terminalCause;
+  if (
+    ERROR_STATUSES.includes(status) ||
+    (hasError && !policyMarkerOnly) ||
+    failedCause
+  ) {
     return {
       kind: "needs-you",
       word: "error",

@@ -237,6 +237,7 @@ describe("github-installation", () => {
         organizationId: orgId,
         mode: "active",
         source: "installation",
+        boundOrganizationId: null,
       });
       expect(
         await getRepoOrgAndMode({
@@ -248,6 +249,7 @@ describe("github-installation", () => {
         organizationId: null,
         mode: "active",
         source: "installation",
+        boundOrganizationId: null,
       });
     });
 
@@ -276,6 +278,7 @@ describe("github-installation", () => {
         organizationId: client.id,
         mode: "shadow",
         source: "repo_binding",
+        boundOrganizationId: client.id,
       });
     });
 
@@ -287,10 +290,12 @@ describe("github-installation", () => {
         repoFullName: name,
         organizationId: client.id,
       });
+      // Not applied, but still reported: a lane can see the repo is claimed.
       const unmapped = {
         organizationId: null,
         mode: "active",
         source: "installation",
+        boundOrganizationId: client.id,
       };
       expect(
         await getRepoOrgAndMode({

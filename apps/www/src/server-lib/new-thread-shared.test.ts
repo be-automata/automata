@@ -6,6 +6,8 @@ import { User, DBUserMessage } from "@terragon/shared";
 import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
 import { getThread } from "@terragon/shared/model/threads";
 import { startAgentMessage } from "@/agent/msg/startAgentMessage";
+import { updateUserSettings } from "@terragon/shared/model/user";
+import { getSandboxProvider } from "@/agent/sandbox";
 
 vi.mock("@/agent/msg/startAgentMessage", () => ({
   startAgentMessage: vi.fn(() => Promise.resolve()),
@@ -63,6 +65,32 @@ describe("createNewThread", () => {
       expect(thread!.repoBaseBranchName).toBe("main");
       expect(thread!.branchName).toBe("feature/test-branch");
     });
+  });
+
+  describe("sandbox provider (ADR-014 / ADR-013 I7)", () => {
+    it.each(["e2b", "daytona", "docker", "hatchet-remote"] as const)(
+      "a stored user setting %s does not choose the provider: the thread gets the server default",
+      async (legacySetting) => {
+        await updateUserSettings({
+          db,
+          userId: user.id,
+          updates: { sandboxProvider: legacySetting },
+        });
+        await mockWaitUntil();
+        const { threadId } = await createNewThread({
+          userId: user.id,
+          message: mockMessage,
+          githubRepoFullName: repoFullName,
+          baseBranchName: "main",
+          headBranchName: null,
+          sourceType: "www",
+        });
+        await waitUntilResolved();
+
+        const thread = await getThread({ db, userId: user.id, threadId });
+        expect(thread!.sandboxProvider).toBe(getSandboxProvider());
+      },
+    );
   });
 
   describe("shadow mode (Somnio pilot)", () => {

@@ -1,0 +1,25 @@
+# Weekly driver B probes (ADR-013 probes 2-7) reported to www, which renews
+# automata-box/observe evidence on a full pass (ADR-014 evidence upkeep).
+#
+# Oneshot, driven by automata-box-evidence.timer. Root: it starts containers on
+# the rootless engine as `automata` and reads root-only
+# /etc/automata/profile-evidence.env. A failure is LOUD by design: no Restart=,
+# so a failed run stays `failed` for `systemctl --failed`; www alerts as well.
+
+[Unit]
+Description=Renew the box's ADR-014 evidence (driver B probes)
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/box-evidence-probes.sh
+# automata-runner-docker is a user unit of automata-runner, so it cannot be a
+# dependency here; the script fails loudly when its socket does not answer.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/automata-platform/packages/worker/deploy/linux/box-evidence-probes.sh
+# Two probe containers, each bounded to 600 s inside the script.
+TimeoutStartSec=900
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-box-evidence

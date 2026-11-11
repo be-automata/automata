@@ -34,9 +34,7 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { activeOrganization } = useActiveOrganization();
-  const daytonaOptionsForSandboxProviderEnabled = useFeatureFlag(
-    "daytonaOptionsForSandboxProvider",
-  );
+  const largeSandboxSizeEnabled = useFeatureFlag("enableLargeSandboxSize");
   useRealtimeUser({
     matches: (message) => !!message.data.userSettings,
     onMessage: () => router.refresh(),
@@ -85,7 +83,8 @@ export function SettingsLayout({ children }: { children: React.ReactNode }) {
       icon: <CreditCard className="w-4 h-4" />,
     },
   ];
-  if (daytonaOptionsForSandboxProviderEnabled) {
+  // The Sandbox page holds the size only (the provider is server-chosen).
+  if (largeSandboxSizeEnabled) {
     navItems.push({
       href: "/settings/sandbox",
       scope: "account",

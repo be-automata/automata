@@ -75,9 +75,14 @@ Negative, to watch:
 - **ADR-013 I7.** "There is one execution path" becomes one path per profile, chosen only by the resolver. No setting or client input selects a path.
 - **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. For a remote cell the adapter needs three things: a bearer whose TTL is bounded by the step timeout, revocation from the boot sweep, and an idempotency key on every effect.
 - **Evidence upkeep.** Under decision 3, box evidence expires 30 days after it is measured.
-  - **Throwaway box (enforced egress):** all seven probes, 2026-10-25 09:56Z, expires on 2026-11-24. Renewing it needs driver A on a repo with an enforced policy.
-  - **Production:** the ADR-013 record (2026-10-24 12:26Z) would have expired on 2026-11-23. It was renewed on 2026-11-08 17:48Z by driver B on `automata-exec-1` (probes 2 to 7 in two concurrent review containers, 12/12), so it now expires on 2026-12-08. Driver B does not re-measure probe 1, so production stays open egress for the resolver.
+  - **Throwaway box (enforced egress):** all seven probes, 2026-10-25 09:56Z, expires on 2026-11-24. It is not renewed; the enforced-egress case is now measured in production (next line).
+  - **Production:** the ADR-013 record (2026-10-24 12:26Z) would have expired on 2026-11-23. It was renewed on 2026-11-08 17:48Z by driver B, then again on 2026-11-10 on `automata-exec-1`, so both profiles now expire on 2026-12-10:
+    - observe: driver B, probes 2 to 7 in two concurrent containers, 12/12, 17:21Z. Driver B does not measure probe 1, so a repo without a policy stays open egress for the resolver;
+    - enforce: driver A, all seven probes in live review runs on a repo with a `domain` policy, 7/7 on two runs with a `deny` audit row each, 16:24Z and 16:30Z.
   - The probes in `packages/worker/deploy/README.md` have to be re-run on a schedule.
+    - Weekly: a systemd timer on the box runs driver B and posts the probe lines to www, which renews `automata-box/observe` on a full pass and raises an ops alert otherwise (README, "Scheduled evidence renewal").
+    - Daily at 13:00 UTC, www raises an ops alert for any profile whose evidence expires within 7 days.
+    - `automata-box/enforce` is not renewed by the timer, because driver B does not measure probe 1. It needs driver A until probe 1 runs against the enforce proxy on its own.
 
 ## Testing
 
@@ -86,6 +91,10 @@ Negative, to watch:
    - Locally, ADR-013's flags pass and Docker with default settings fails.
    - On the box, ADR-013's acceptance record stands: probes 2 to 7 in production, all seven on the throwaway box.
    - Renewed in production on 2026-11-08 17:48Z: driver B, probes 2 to 7, 12/12 PASS (batteries `sha256:da029c44…`, platform `1f58cf7`).
+   - Renewed in production on 2026-11-10, platform `4085a7b`, same batteries image:
+     - enforce profile, driver A, 16:24Z and 16:30Z: two review runs on a throwaway repo with a `domain` policy, 7/7 PASS each, one `deny`/`enforce` row for `example.org` per container in `egress_events`;
+     - observe profile, driver B, 17:21Z: probes 2 to 7, 12/12 PASS.
+   - Found during the renewal: a thread started by an `@mention` gets no organization on repo webhooks, so it runs with no egress policy (#579).
 3. **Done 2026-11-08: the `allow_cell` rule in OPA.** 17/17 tests. The matrix covers eight profiles, including the box in observe and enforce mode. With the clock moved past expiry, every profile is denied with `evidence_expired`.
 4. **Done 2026-11-08: `kind: cell` in a local Hatchet spike, 25/25.** Covered:
    - resolution at compile and again at dispatch;
@@ -98,4 +107,4 @@ Negative, to watch:
    - the resolver at the shared seam (ADR-005 §3b);
    - the Agent37 adapter over the existing run path;
    - the remote-cell crash case;
-   - a scheduled re-run of the box probes.
+   - a scheduled re-run of the box probes: weekly driver B for the observe profile, with an expiry alert 7 days ahead. Probe 1 for the enforce profile is still open.

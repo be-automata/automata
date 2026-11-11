@@ -140,3 +140,51 @@ export function buildEgressPolicyShape(
     allowlist: canonicalizeEntries([...userEntries, ...systemHosts]),
   };
 }
+
+/** The two stored egress columns of a repo_review_settings row. */
+export type EgressPolicyFields = {
+  egressPolicy: string | null;
+  egressAllowlist: string[] | null;
+};
+
+/**
+ * The egress fields a write would leave on the row: a partial patch keeps the
+ * stored other half, so allowlist entries are always checked against the
+ * level they will be enforced at. `undefined` in the patch = not sent.
+ */
+export function effectiveEgressFields(
+  patch: {
+    egressPolicy?: string | null;
+    egressAllowlist?: string[] | null;
+  },
+  stored: EgressPolicyFields | undefined,
+): EgressPolicyFields {
+  return {
+    egressPolicy:
+      patch.egressPolicy !== undefined
+        ? patch.egressPolicy
+        : (stored?.egressPolicy ?? null),
+    egressAllowlist:
+      patch.egressAllowlist !== undefined
+        ? patch.egressAllowlist
+        : (stored?.egressAllowlist ?? null),
+  };
+}
+
+/**
+ * The write-side face of {@link buildEgressPolicyShape}: the message it would
+ * throw for these stored fields, or undefined when they are valid. It runs
+ * the SAME builder the dispatch runs (no second parser), so a value this
+ * accepts can never make `egressPolicyFromRow` throw later. System hosts are
+ * never validated by the builder, so an empty list loses nothing.
+ */
+export function findEgressPolicyError(
+  fields: EgressPolicyFields,
+): string | undefined {
+  try {
+    buildEgressPolicyShape(fields, { systemHosts: [] });
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}

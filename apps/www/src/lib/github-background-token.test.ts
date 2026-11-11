@@ -8,8 +8,11 @@ import { getInstallationToken } from "@terragon/shared/github-app";
 
 // Use the REAL helpers (bypassing the test-setup @/lib/github mock) so their
 // user-token→App-installation-token fallback is exercised for real.
-const { getOctokitForBackground, getGitHubTokenForBackground } =
-  (await vi.importActual("@/lib/github")) as typeof import("@/lib/github");
+const {
+  getOctokitForBackground,
+  getGitHubTokenForBackground,
+  getOctokitForApp,
+} = (await vi.importActual("@/lib/github")) as typeof import("@/lib/github");
 
 describe("getOctokitForBackground — App installation token fallback", () => {
   beforeEach(() => {
@@ -41,7 +44,10 @@ describe("getOctokitForBackground — App installation token fallback", () => {
     // Fallback succeeded — an Octokit is returned (no "No github access token" throw)…
     expect(octokit).toBeInstanceOf(Octokit);
     // …minted via the App installation token for the repo's owner.
-    expect(getInstallationToken).toHaveBeenCalledWith("be-automata", "automata");
+    expect(getInstallationToken).toHaveBeenCalledWith(
+      "be-automata",
+      "automata",
+    );
   });
 });
 
@@ -72,6 +78,41 @@ describe("getGitHubTokenForBackground — sandbox git-clone token fallback", () 
     });
 
     expect(token).toBe("mock-github-token");
-    expect(getInstallationToken).toHaveBeenCalledWith("be-automata", "automata");
+    expect(getInstallationToken).toHaveBeenCalledWith(
+      "be-automata",
+      "automata",
+    );
+  });
+});
+
+// Value: protects=a resolved installation id reaches getInstallationToken (no
+// second lookup); fails_when=the id is dropped or always passed as undefined;
+// why_new=getOctokitForApp is mocked everywhere else; seam=none;
+// no_claim=token minting (mocked @terragon/shared/github-app; unit only).
+describe("getOctokitForApp — installation id pass-through (#579)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getInstallationToken).mockResolvedValue("mock-github-token");
+  });
+
+  it("passes a known installationId through to getInstallationToken", async () => {
+    const octokit = await getOctokitForApp({
+      owner: "be-automata",
+      repo: "automata",
+      installationId: 4242,
+    });
+    expect(octokit).toBeInstanceOf(Octokit);
+    expect(getInstallationToken).toHaveBeenCalledWith(
+      "be-automata",
+      "automata",
+      4242,
+    );
+  });
+
+  it("without an installationId, calls getInstallationToken(owner, repo) only", async () => {
+    await getOctokitForApp({ owner: "be-automata", repo: "automata" });
+    expect(vi.mocked(getInstallationToken).mock.calls).toEqual([
+      ["be-automata", "automata"],
+    ]);
   });
 });

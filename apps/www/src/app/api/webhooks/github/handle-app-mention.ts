@@ -14,9 +14,11 @@ import {
 } from "@terragon/shared/model/user";
 import { db } from "@/lib/db";
 import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
+import { getRepoInstallationId } from "@terragon/shared/github-app";
+import { repoHasReviewSettings } from "@terragon/shared/model/repo-review-settings";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { getThreadForGithubPRAndUser } from "@terragon/shared/model/github";
-import { requireAppAccess } from "./webhook-skip";
+import { WebhookSkip, requireAppAccess } from "./webhook-skip";
 import { queueFollowUpInternal } from "@/server-lib/follow-up";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
 import { GitHubMentionTriggerConfig } from "@terragon/shared/automations";
@@ -63,7 +65,7 @@ export async function handleAppMention({
   commentContext?: string;
   issueContext?: string;
   // GitHub App installation id from the webhook payload — resolves the tenant
-  // (WI-5). Optional/nullable-safe: unmapped or absent → null org.
+  // (WI-5). Absent on repo-level webhooks; resolved from the repo below.
   installationId?: number | string | null;
 }): Promise<void> {
   // Get branch names upfront
@@ -72,11 +74,44 @@ export async function handleAppMention({
   // mode). Shadow: ingest the mention and create the (dashboard-visible) thread
   // row, but produce ZERO GitHub side effects — no eyes reaction, no billing
   // comment, and no agent run. Reads (branch lookup) are fine.
-  const { organizationId, mode } = await getRepoOrgAndMode({
-    db,
-    installationId,
-    repoFullName,
-  });
+  // Repo-level webhooks carry no `installation` (#579): resolve it from the
+  // repo, as the org-mention and mirror lanes do (null when the App is not
+  // installed). Any other failure is App access being unavailable, which this
+  // handler has always turned into a 2xx skip (WI-8, below), so the lookup
+  // goes through requireAppAccess too; a skip starts no run, so it still
+  // fails closed.
+  const resolvedInstallationId =
+    installationId ??
+    (await requireAppAccess(() => getRepoInstallationId(owner, repo), {
+      repoFullName,
+      issueOrPrType,
+      issueOrPrNumber,
+    }));
+  const { organizationId, mode, boundOrganizationId } = await getRepoOrgAndMode(
+    {
+      db,
+      installationId: resolvedInstallationId,
+      repoFullName,
+    },
+  );
+  // Fail closed (#579): no org resolved, but some org has claimed the repo
+  // (a repo_review_settings row, which is where its egress policy lives, or a
+  // github_repo_org_binding row). A null-org thread reads no repo settings and
+  // runs unenforced, so skip before any side effect. This deliberately runs
+  // before the existing-thread (follow-up) path too: mention threads created
+  // before #579 carry a null org, and a follow-up would run them unenforced.
+  // A repo no org has claimed keeps the null-org behavior.
+  if (
+    organizationId === null &&
+    (boundOrganizationId !== null ||
+      (await repoHasReviewSettings({ db, repoFullName })))
+  ) {
+    throw new WebhookSkip(
+      "unmapped_installation",
+      `No org resolved for a mention on ${repoFullName}, which an org has claimed`,
+      { installationId: resolvedInstallationId, repoFullName },
+    );
+  }
   // Per-installation mode, folded with the deployment-level side-effects
   // kill-switch (switch off → force shadow for every install).
   const shadow = effectiveShadow(mode);
@@ -84,7 +119,15 @@ export async function handleAppMention({
   // installed / bad creds), that's a business rejection — skip with a 2xx, not
   // a 500 that GitHub retries and eventually disables the webhook over.
   const octokit = await requireAppAccess(
-    () => getOctokitForApp({ owner, repo }),
+    () =>
+      getOctokitForApp({
+        owner,
+        repo,
+        installationId:
+          typeof resolvedInstallationId === "number"
+            ? resolvedInstallationId
+            : undefined,
+      }),
     { repoFullName, issueOrPrType, issueOrPrNumber },
   );
   let branchName: string;

@@ -79,9 +79,11 @@ describe("deploy/migrations on a fresh database", () => {
       "2026-11-02-github-repo-org-binding",
       "2026-11-02-review-mode-on-update",
       "2026-11-05-knowledge-reconcile",
+      "2026-11-10-execution-profile-cell-decision",
+      "2026-11-10-execution-profile-seed-automata-box",
     ]);
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(17);
+    expect(ledger).toHaveLength(19);
     expect(ledger.every((row) => row.mode === "applied")).toBe(true);
     expect(ledger.every((row) => row.appliedBy === "test@0")).toBe(true);
 
@@ -110,7 +112,7 @@ describe("deploy/migrations on a fresh database", () => {
 
     const second = await applyDir(c, REPO_MIGRATIONS);
     expect(second.applied).toEqual([]);
-    expect(await readLedger(c)).toHaveLength(17);
+    expect(await readLedger(c)).toHaveLength(19);
   });
 
   it("refuses the baseline on a database that already has tables", async () => {

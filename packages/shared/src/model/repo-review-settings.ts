@@ -13,7 +13,7 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import { buildEgressPolicyShape } from "./egress-policy";
+import { effectiveEgressFields, findEgressPolicyError } from "./egress-policy";
 import {
   REVIEW_AGENT_FIELDS,
   findReviewAgentFieldError,
@@ -91,6 +91,38 @@ export const DEFAULT_SUPERSEDE_POLICY: SupersedePolicy = "newest-wins";
  * collide with a real repo override.
  */
 export const ORG_DEFAULT_REPO_SENTINEL = "*";
+
+/**
+ * Does ANY org hold a per-repo settings row for this repo (any field: review
+ * mode, tolerance, egress policy...)? A row means an org has claimed the repo.
+ * Deliberately cross-org: it returns a boolean only, never another org's row
+ * or id, so no tenant data leaks. The org-default sentinel row is excluded (it
+ * is not a repo). Used by the mention lane's fail-closed guard (#579): a
+ * webhook that resolves no org must not run a claimed repo on the null-org
+ * path, which reads no repo settings (so no egress enforcement).
+ *
+ * No index is led by `repo_full_name` (the unique index is
+ * `(organization_id, repo_full_name)`), so this scans the table; fine at
+ * current size.
+ */
+export async function repoHasReviewSettings({
+  db,
+  repoFullName,
+}: {
+  db: DB;
+  repoFullName: string;
+}): Promise<boolean> {
+  const repo = normalizeRepo(repoFullName);
+  if (repo === ORG_DEFAULT_REPO_SENTINEL) {
+    return false;
+  }
+  const rows = await db
+    .select({ id: repoReviewSettings.id })
+    .from(repoReviewSettings)
+    .where(eq(repoReviewSettings.repoFullName, repo))
+    .limit(1);
+  return rows.length > 0;
+}
 
 export function isSupersedePolicy(value: string): value is SupersedePolicy {
   return (SUPERSEDE_POLICIES as readonly string[]).includes(value);
@@ -343,22 +375,17 @@ export async function upsertRepoReviewSetting({
   // stored other half so entries are always checked against the effective
   // level. Dispatch-time validation (resolveEgressPolicy) stays as backstop.
   if (patch.egressPolicy !== undefined || patch.egressAllowlist !== undefined) {
-    let level = patch.egressPolicy;
-    let allowlist = patch.egressAllowlist;
-    if (level === undefined || allowlist === undefined) {
-      const existing = await getRepoReviewSetting({
-        db,
-        organizationId,
-        repoFullName,
-      });
-      if (level === undefined) level = existing?.egressPolicy ?? null;
-      if (allowlist === undefined)
-        allowlist = existing?.egressAllowlist ?? null;
-    }
-    buildEgressPolicyShape(
-      { egressPolicy: level, egressAllowlist: allowlist },
-      { systemHosts: [] },
+    const needsStored =
+      patch.egressPolicy === undefined || patch.egressAllowlist === undefined;
+    const stored = needsStored
+      ? await getRepoReviewSetting({ db, organizationId, repoFullName })
+      : undefined;
+    const egressError = findEgressPolicyError(
+      effectiveEgressFields(patch, stored),
     );
+    if (egressError !== undefined) {
+      throw new Error(egressError);
+    }
   }
   // #127: an unknown policy must never land in the table (dispatch throws on
   // read as backstop, but the write boundary is the right place to reject).

@@ -75,6 +75,8 @@ import {
   type HatchetTriggerConfig,
 } from "./transport";
 import { resolveHatchetConfig } from "./tenant-resolver";
+import { resolveRunDisplayLane } from "@terragon/utils/run-lane";
+import { recordShadowCellDecision } from "@/server-lib/compute/resolve-cell-decision";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
 const TRIGGER_MAX_ATTEMPTS = 3;
@@ -1118,6 +1120,36 @@ export async function dispatchAgentRun({
       taskPlan !== undefined &&
       selfHealPlan.selfHeal === undefined &&
       !isCompanionRun;
+    // ADR-014 step 5 (slice 1): the allow_cell resolver, SHADOW mode. The
+    // lane is known here and nothing secret has been read yet (the repo env
+    // below), which is where an enforcing seam will refuse. In shadow it
+    // records one cell_decision row and a log line, and the dispatch goes on
+    // whatever it says: recordShadowCellDecision never throws. Secret NAMES
+    // are what this run may receive (repoEnv when it is eligible for it).
+    await recordShadowCellDecision({
+      db,
+      threadId,
+      threadChatId,
+      organizationId: thread?.organizationId ?? null,
+      repoFullName,
+      lane: resolveRunDisplayLane({
+        ...baseInput,
+        ...plan?.inputExtension,
+        selfHeal: selfHealPlan.selfHeal ?? null,
+      }),
+      isCompanionRun,
+      trustContext: thread?.trustContext,
+      sourceType: thread?.sourceMetadata?.type,
+      secretNames: [
+        "installationToken",
+        "daemonToken",
+        ...Object.keys(taskPlan?.secrets ?? {}),
+        ...(isPlainTaskRun ? ["repoEnv"] : []),
+        ...(selfHealPlan.selfHeal !== undefined ? ["selfHealToken"] : []),
+      ],
+      egressPolicy,
+      repoRow: orgSettings?.rows.repo,
+    });
     const repoEnv = isPlainTaskRun
       ? await getExecutionPlaneRunEnvironment({
           db,

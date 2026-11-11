@@ -51,12 +51,6 @@ export const featureFlagsDefinitions = {
     description:
       "Shows a neutral context usage chip in chat (replaces warning). Always visible for Claude Code when enabled.",
   },
-  daytonaOptionsForSandboxProvider: {
-    defaultValue: false,
-    enabledForPreview: false,
-    description:
-      "Enables the Daytona sandbox provider option in settings, allowing users to select Daytona as their sandbox provider.",
-  },
   mcpPermissionPrompt: {
     defaultValue: false,
     enabledForPreview: false,
@@ -77,12 +71,6 @@ export const featureFlagsDefinitions = {
   enableLargeSandboxSize: {
     defaultValue: false,
     description: "Enables choosing a large sandbox size in the settings.",
-  },
-  forceDaytonaSandbox: {
-    defaultValue: false,
-    enabledForPreview: false,
-    description:
-      "Forces the user to use Daytona sandbox provider regardless of their sandbox provider setting.",
   },
   batchGitHubMentions: {
     defaultValue: false,

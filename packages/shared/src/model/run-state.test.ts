@@ -47,6 +47,49 @@ describe("runStateFor", () => {
     ).toEqual({ kind: "unverified", word: "superseded", reason: null });
     expect(runStateFor({ status: "complete" }).kind).toBe("done");
   });
+
+  // #575: the production shape — the terminal write also stores the cause's
+  // marker as errorMessage, and every caller derives hasError from it.
+  it("does not call a superseded run an error when its only error is the cause's own marker", () => {
+    expect(
+      runStateFor({
+        status: "complete",
+        hasError: true,
+        errorMessage: "superseded",
+        terminalCause: "superseded",
+      }),
+    ).toEqual({ kind: "unverified", word: "superseded", reason: null });
+  });
+
+  it("still treats a superseded run with a real error, or an error status, as needs-you", () => {
+    expect(
+      runStateFor({
+        status: "complete",
+        hasError: true,
+        errorMessage: "agent-generic-error",
+        terminalCause: "superseded",
+      }).kind,
+    ).toBe("needs-you");
+    expect(
+      runStateFor({
+        status: "error",
+        hasError: true,
+        errorMessage: "superseded",
+        terminalCause: "superseded",
+      }).kind,
+    ).toBe("needs-you");
+  });
+
+  it("never exempts out-of-memory, whose marker equals its cause name", () => {
+    expect(
+      runStateFor({
+        status: "complete",
+        hasError: true,
+        errorMessage: "out-of-memory",
+        terminalCause: "out-of-memory",
+      }).kind,
+    ).toBe("needs-you");
+  });
 });
 
 describe("explainNeedsYou", () => {
