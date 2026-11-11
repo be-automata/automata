@@ -73,7 +73,17 @@ Negative, to watch:
 - **Margin and abuse.** Compute margin and abuse handling become our concern.
 - **Terms.** §7 of Agent37's terms needs a written reading before selling. It has had no legal review.
 - **ADR-013 I7.** "There is one execution path" becomes one path per profile, chosen only by the resolver. No setting or client input selects a path.
-- **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. For a remote cell the adapter needs three things: a bearer whose TTL is bounded by the step timeout, revocation from the boot sweep, and an idempotency key on every effect.
+- **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. A remote cell outlives its worker: on Agent37, a create still completes when its client dies after the request has left (Testing 6). The adapter needs five things. The crash spike showed that the first three alone are not enough:
+  - **A bearer whose TTL is bounded by the step timeout.** A longer TTL is refused at mint.
+  - **An attempt fence in the durable broker.** A new attempt's lease refuses every older attempt's bearer. It is the strongest layer, because it holds even when the sweep cannot find the cell.
+  - **An idempotency key on every effect.** A redelivered attempt gets the stored result instead of making a second effect.
+  - **An effect budget per step.** The broker enforces it, derived from the step's declared tool. Idempotency only stops a repeated key. Until redelivery the old attempt is still the current one, and a zombie loop commits new keys: 6 extra effects in 1.3 s in the spike, and dozens at the engine's real detection time.
+  - **A reconciler in the control plane.** A boot sweep runs only if the worker comes back. Agent37 has no provider-side TTL, so a worker that never returns leaves its instance running, and billing, after the bearer has expired.
+- **How a remote cell is swept.**
+  - **Tagging:** each cell is tagged in the create call itself (worker, epoch, mission, step, attempt, expiry). Create has no idempotency key, so a crash before the response loses the id.
+  - **Selection:** the boot sweep and the reconciler both select cells by that metadata, filtering client-side. Agent37's list ignores `limit` and query filters and returns no cursor.
+  - **Order:** revoke, then quarantine (`deny-all`), then delete. The first two are fast and cannot strand the cell. `deny-all` is also the only way to cut the starter tokens in the guest's environment.
+  - **Repeated delete:** it answers 404, which counts as gone.
 - **Evidence upkeep.** Under decision 3, box evidence expires 30 days after it is measured.
   - **Throwaway box (enforced egress):** all seven probes, 2026-10-25 09:56Z, expires on 2026-11-24. It is not renewed; the enforced-egress case is now measured in production (next line).
   - **Production:** the ADR-013 record (2026-10-24 12:26Z) would have expired on 2026-11-23. It was renewed on 2026-11-08 17:48Z by driver B, then again on 2026-11-10 on `automata-exec-1`, so both profiles now expire on 2026-12-10:
@@ -105,6 +115,15 @@ Negative, to watch:
    - a hash-chained ledger that detects tampering.
 5. **After acceptance:**
    - the resolver at the shared seam (ADR-005 §3b);
-   - the Agent37 adapter over the existing run path;
-   - the remote-cell crash case;
+   - the Agent37 adapter over the existing run path, with the five remote-cell requirements in Consequences;
    - a scheduled re-run of the box probes: weekly driver B for the observe profile, with an expiry alert 7 days ahead. Probe 1 for the enforce profile is still open.
+6. **Done 2026-11-10 and 2026-11-11: the remote-cell crash case.**
+
+   - **Local spike, 65/65 checks in 11 scenarios.** It uses a provider simulated from Agent37's documented semantics, a durable broker, and a worker SIGKILLed at chosen points. Two negative controls fail as they should:
+     - with every layer off, the zombie's effects keep landing;
+     - an untagged orphan is never found, although its effects are still fenced.
+   - **The provider-dependent half on Agent37 itself, `agent37-base`, 14/14:**
+     - **Orphan:** a worker SIGKILLed 2 ms and 300 ms after the create body was written leaves a `running` instance both times. Each is found by worker and epoch alone in the unfiltered list.
+     - **Quarantine:** the guest polls the internet, a bare IP and `api.agent37.com` every 250 ms. `deny-all` answers 200 in 0.6 to 0.9 s, and no request succeeds after it returns. Exec still works under it.
+     - **Reconciler:** an expired cell is found by its metadata, with no worker involved, then quarantined and deleted. Delete takes about 0.5 s. Right after it, a repeat delete, an exec and a get all answer 404.
+   - **Not covered:** a real guest calling the broker, a 503 on delete, and the list of an account with more instances than one page. Agent37 has to say how a large account's list is paged before the adapter relies on a single call.
