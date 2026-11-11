@@ -144,11 +144,9 @@ describe.skipIf(!itEnabled)(
         query: (text: string, params?: unknown[]) => pg.query(text, params),
       };
       // A fresh hatchet-lite Postgres has run migrations but has no tenant
-      // until hatchet-lite itself bootstraps one; for the SQL-only fixtures
-      // below we mint one directly since no engine process is running
-      // against this isolated stack (postgres-only, by design — see the
-      // DEVIATION note above for why the full engine + worker harness is
-      // scoped out).
+      // until hatchet-lite itself bootstraps one; the SQL-only fixtures
+      // below mint their own tenant row directly. (The real-registration
+      // suite further down uses the engine's own tenant instead.)
       tenantId = randomUUID();
       await pg
         .query(
@@ -227,6 +225,11 @@ describe.skipIf(!itEnabled)(
       const count = async (sql: string): Promise<number> =>
         (await pg.query<{ n: number }>(sql, [engineTenantId])).rows[0]?.n ?? 0;
 
+      const savedEnv = {
+        HATCHET_CLIENT_TOKEN: process.env.HATCHET_CLIENT_TOKEN,
+        HATCHET_CLIENT_TLS_STRATEGY: process.env.HATCHET_CLIENT_TLS_STRATEGY,
+      };
+
       beforeAll(async () => {
         let token: string;
         ({ tenantId: engineTenantId, token } = await bootstrapTenant(pg));
@@ -279,6 +282,10 @@ describe.skipIf(!itEnabled)(
 
       afterAll(async () => {
         await worker?.stop().catch(() => {});
+        for (const [key, value] of Object.entries(savedEnv)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
       }, 60_000);
 
       it("the fixture holds real cross-table links, and the #69 predicates misread them (regression witness)", async () => {
@@ -510,10 +517,11 @@ describe.skipIf(!itEnabled)(
       });
 
       it.skip("full SIGKILL-of-a-real-child-process repro frees exactly 1 leaked slot and the queued run reaches RUNNING within 30s (AC-5)", async () => {
-        // NOT IMPLEMENTED — see the file-level DEVIATION note; steps 1-11
-        // of spec §7.2.2 verbatim, to be implemented against
-        // reclaimEngineSlots imported above once the isolated project also
-        // runs hatchet-lite (not just postgres).
+        // NOT IMPLEMENTED (deviation recorded against spec §7.2.2): a real
+        // SIGKILLed child-process worker is substantial standalone
+        // infrastructure; the AC-8d/AC-8e negative fixtures above cover the
+        // reclaim SQL. Steps 1-11 of §7.2.2 stay the implementation recipe,
+        // against reclaimEngineSlots imported above.
       });
     });
   },

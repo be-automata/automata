@@ -586,9 +586,9 @@ plus the upstream `hatchet-dev/hatchet` queries at tag `v0.94.10`
 
 On any non-zero detection the maintenance tick emits one structured line (§3.5) with
 `event: "scheduling.rot_detected"`, the rot row ids, and whether repair ran or was suppressed by
-> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
-
 dry-run. On a successful repair: `event: "scheduling.rot_repaired"`, `rowsTouched: N`.
+
+> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
 
 ### 3.2 Mechanism 2 — SIGKILL slot reclamation
 
@@ -1285,10 +1285,11 @@ findings *and nothing else*.
    `launchctl kickstart -k`, which is SIGKILL (`worker.ts:65-76`).
 2. Observe ≥24 h of `scheduling-health.json`; confirm the reported rot rows match §2.3 exactly
    and `slots.reclaimable = 0` on a healthy box.
-> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+3. ~~Flip `WORKER_CONCURRENCY_ROT_REPAIR=on`, restart, confirm the one-time repair, confirm
+   subsequent ticks report 0. **Prerequisite: the §3.1.4 upstream-source verification is done.**~~
 
-3. Flip `WORKER_CONCURRENCY_ROT_REPAIR=on`, restart, confirm the one-time repair, confirm
-   subsequent ticks report 0. **Prerequisite: the §3.1.4 upstream-source verification is done.**
+   > **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+
 4. Flip `WORKER_SLOT_RECLAIM=on` separately, **at least a day later**, and only after the partition
    guard (§3.2.1) has been reviewed for this box's network topology. A box on flaky connectivity
    should stay at `dry-run` indefinitely — detection still works, and the runbook's manual
@@ -1355,13 +1356,14 @@ behind a kill switch against a multi-week substrate migration on a pilot box.
    deterministically in a fresh container.** The fallback (synthetic rot injection + a
    strict-mode-only live deadlock test) exists so this cannot block the ticket, but taking it
    weakens AC-4 and must be a conscious, recorded decision.
-> **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
-
 2. **In-place rot repair may be permanently deferred by its own quiescence precondition**
    (§3.1.3) in exactly the deadlock case it exists to fix — because the blocking slot is the thing
    referencing the rotted strategy. §7.2.1 step 6 is instrumented to detect this. If it holds, the
    ticket ships the **boot-only** repair path instead, which costs a worker restart of recovery
    latency and should be stated plainly in the runbook rather than quietly adopted.
+
+   > **Superseded (2026-11-06, #570):** rot repair was removed; rot is detection only.
+
 3. **The §2.3 root cause is unresolved.** This ticket ships a repairer, not a preventer, and that
    is a deliberate scope choice — but it means rot will keep recurring at whatever rate
    registration produces it, and the repairer is load-bearing indefinitely until either the

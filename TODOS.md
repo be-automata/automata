@@ -62,3 +62,10 @@ Each item lists its re-entry trigger.
   - **Context:** eng D10 kept the org route as an accepted shortcut. The fix: accept knowledge approvals only on the platform route, or confirm on a signed-in Automata page.
   - **Re-entry:** an org-app partner onboards for knowledge approvals, or a buyer audits approval provenance.
   - **Effort:** M / S. **Priority:** P2. **Depends on:** the M1 approval flow.
+
+## Scheduling health (#570)
+
+- [ ] **Read `scheduling-health.json` on the first box that runs maintenance (#570 U4).**
+  - **Why:** #570 corrected the concurrency-rot detectors and removed rot repair, but no deployed box has run them yet. On 2026-11-11 neither `automata-exec-1` nor `automata-exec-throwaway-1` set `HATCHET_ENGINE_DATABASE_URL`, so the maintenance tick is master-gated off on both.
+  - **Check:** after the #570 merge is deployed to a box with `HATCHET_ENGINE_DATABASE_URL` set, `rot.stepLevel` and `rot.workflowLevel` in `scheduling-health.json` are `0`. Any finding must be confirmed with the diagnosis query in `packages/worker/deploy/README.md` before anyone acts on it.
+  - **Re-entry:** the engine URL is set on any worker box. **Effort:** S. **Priority:** P2.
