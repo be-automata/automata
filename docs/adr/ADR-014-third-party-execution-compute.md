@@ -73,10 +73,11 @@ Negative, to watch:
 - **Margin and abuse.** Compute margin and abuse handling become our concern.
 - **Terms.** §7 of Agent37's terms needs a written reading before selling. It has had no legal review.
 - **ADR-013 I7.** "There is one execution path" becomes one path per profile, chosen only by the resolver. No setting or client input selects a path.
-- **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. A remote cell outlives its worker: on Agent37, a create still completes when its client dies after the request has left (Testing 6). The adapter needs five things. The crash spike showed that the first three alone are not enough:
+- **Remote cells cannot rely on the worker heap.** On our box, a worker crash takes its brokers with it. A dead worker's containers are removed by label at boot, and a redelivered run removes its predecessor by slot name. A remote cell outlives its worker: on Agent37, a create still completes when its client dies after the request has left (Testing 6). The adapter needs six things. The crash spike showed that the three originally listed here (the first three below) are needed but not enough, and added the other three:
   - **A bearer whose TTL is bounded by the step timeout.** A longer TTL is refused at mint.
-  - **An attempt fence in the durable broker.** A new attempt's lease refuses every older attempt's bearer. It is the strongest layer, because it holds even when the sweep cannot find the cell.
+  - **Revocation from the boot sweep.** The sweep revokes a dead attempt's bearer before it touches the cell.
   - **An idempotency key on every effect.** A redelivered attempt gets the stored result instead of making a second effect.
+  - **An attempt fence in the durable broker.** A new attempt's lease refuses every older attempt's bearer. It is the strongest layer, because it holds even when the sweep cannot find the cell.
   - **An effect budget per step.** The broker enforces it, derived from the step's declared tool. Idempotency only stops a repeated key. Until redelivery the old attempt is still the current one, and a zombie loop commits new keys: 6 extra effects in 1.3 s in the spike, and dozens at the engine's real detection time.
   - **A reconciler in the control plane.** A boot sweep runs only if the worker comes back. Agent37 has no provider-side TTL, so a worker that never returns leaves its instance running, and billing, after the bearer has expired.
 - **How a remote cell is swept.**
@@ -115,7 +116,7 @@ Negative, to watch:
    - a hash-chained ledger that detects tampering.
 5. **After acceptance:**
    - the resolver at the shared seam (ADR-005 §3b);
-   - the Agent37 adapter over the existing run path, with the five remote-cell requirements in Consequences;
+   - the Agent37 adapter over the existing run path, with the six remote-cell requirements in Consequences;
    - a scheduled re-run of the box probes: weekly driver B for the observe profile, with an expiry alert 7 days ahead. Probe 1 for the enforce profile is still open.
 6. **Done 2026-11-10 and 2026-11-11: the remote-cell crash case.**
 
