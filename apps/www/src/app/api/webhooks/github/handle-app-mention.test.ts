@@ -45,20 +45,6 @@ vi.mock("@/server-lib/follow-up", () => ({
   queueFollowUpInternal: vi.fn(),
 }));
 
-// Mirrors the global mock in test-helpers/test-setup.ts (a local vi.mock
-// replaces it wholesale) and adds the repo installation lookup (#579).
-// Implementations live in vi.fn() so vi.restoreAllMocks() keeps them.
-vi.mock("@terragon/shared/github-app", () => ({
-  getRepoInstallationId: vi.fn(async (): Promise<number | null> => null),
-  getInstallationToken: vi.fn(async () => "mock-github-token"),
-  getSandboxGithubToken: vi.fn(async () => "mock-github-token"),
-  lookupInstallationId: vi.fn(async () => 424242),
-  getReadOnlyInstallationToken: vi.fn(async () => ({
-    token: "mock-github-read-token",
-    expiresAt: "2026-10-04T03:00:00Z",
-  })),
-}));
-
 describe("handleAppMention", () => {
   let user: User;
   let pr: GitHubPR;
@@ -573,6 +559,34 @@ describe("handleAppMention", () => {
         const callArgs = vi.mocked(newThreadInternal).mock.calls[0]?.[0];
         expect(callArgs?.organizationId ?? null).toBeNull();
         expect(callArgs?.shadow).toBe(false);
+      });
+
+      // Value: protects=a claimed repo whose installation resolves to the
+      // claiming org still runs (no fail-closed skip); fails_when=the guard's
+      // organizationId===null clause is dropped or inverted; why_new=T1-T4 run
+      // on unclaimed repos; seam=none; no_claim=GitHub install lookup (mocked
+      // getRepoInstallationId; unit only).
+      it("T10: a claimed repo whose installation resolves to the claiming org runs", async () => {
+        const repoFullName = uniqueRepo();
+        await createTestGitHubPR({
+          db,
+          overrides: { repoFullName, number: 7 },
+        });
+        const { orgId, installationId } = await bindOrg("active");
+        // Both claim kinds, so only the organizationId===null clause keeps
+        // the guard from skipping.
+        await bindRepoToOrg({ db, repoFullName, organizationId: orgId });
+        await setRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName,
+          blockTolerance: "error",
+        });
+        vi.mocked(getRepoInstallationId).mockResolvedValue(installationId);
+        await mention(repoFullName, 7);
+        expect(newThreadInternal).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: orgId, shadow: false }),
+        );
       });
     });
 
