@@ -33,6 +33,13 @@
   §4, R3.4) are unchanged: the GitHub token stays in the worker, and a review container holds no
   write credential. Layer 3 customization packs (R3.1, R3.3) become image contents, bumped by a
   reviewed PR to the image, not packs linked into a HOME.
+- **Revision 5 (2026-11-11, operator):** §4 now matches what shipped. The write-time rejection of
+  subscription credentials was never implemented. Since #44 and #48, the control plane stores an
+  org-scoped Claude subscription credential (`oauth` or `setup-token`) beside the API key. Rev 5
+  makes the subscription a **tolerated, org-scoped tier in our store**, keeps the API key as the
+  supported tier, and lists the conditions that make the subscription tier acceptable. It
+  supersedes the "API keys only" rule in §4, the first paragraph of R3.2, and R3.9 item 3. See
+  "Revision 5" at the end.
 
 ## Context
 
@@ -116,6 +123,10 @@ Adopt a **shared control plane / per-org execution plane** split.
    limits, and takes custody of a credential granting access to their entire Claude account rather
    than a scoped API budget. Enforce at write time, not in documentation — the two are trivially
    confusable and the failure is silent.
+
+   > **Superseded by Revision 5.** The rejection above was never enforced. The store accepts
+   > `api-key`, `oauth` and `setup-token` for Claude, fenced per org. The four objections are
+   > re-assessed in R5.2, and the subscription tier's conditions are in R5.3.
 
 5. **Never deploy Hatchet `-dev` images.** See "Deployment guard" below. Note this risk lives in
    the **control plane** (the engine/api/dashboard images), not in customer-supplied workers, so
@@ -369,6 +380,10 @@ The box is specified as four layers, each with a distinct owner and support post
 
 ### R3.2 Two-tier Anthropic auth — §4 scope clarified
 
+> **Revision 5:** the first sentence below no longer holds. The control plane does store and
+> deliver an org-scoped subscription credential (R5.1). The box-side tiers that follow still
+> apply.
+
 Decision §4's write-time rejection of `type='oauth'` stands **unchanged**: the control plane never
 stores, transports, or configures a subscription credential. What rev 3 clarifies is the case §4
 was never about — auth material that lives **only on the customer's box** and never transits us:
@@ -531,6 +546,11 @@ therefore **un-pinning and certifying**, not building:
    write-time rule extends provider-by-provider: API keys storable in `agentProviderCredentials`;
    subscription-shaped credentials rejected from **our** store — customers may still use them
    box-side under the R3.2 tolerated tier, with auth-mode telemetry naming the mode per runtime.
+   **Revision 5:** for Claude, "we do not" is wrong. We store subscription credentials per org,
+   under R5.3. Codex is in the same position: `apps/www/src/server-actions/codex-auth.ts` stores
+   ChatGPT OAuth tokens as `type: 'oauth'`, and R5.3 applies to it too. Any other provider's
+   subscription-shaped credential enters the store only through a revision that meets R5.3 for
+   that provider.
 4. **Certification is per-runtime — presence is not parity.** The UAT baseline (C8, the ADR-036
    effect-intent block) certifies the *Claude* runtime only. Every other runtime enters at
    **Tier C behind flags** and promotes only after passing its own parity gate; capacity specs
@@ -555,3 +575,69 @@ agent-run workflow variants. The one-agent-per-box budget is enforced host-side 
 admission/teardown reapers; memory ceiling deferred; `box-lock.ts`). The stale-RUNNING
 bound used by the reaper is the task's `executionTimeout`, distinct from the slot
 `schedule_timeout` above. See ADR-007.
+
+## Revision 5 — the subscription tier in our store (2026-11-11)
+
+### R5.1 What shipped
+
+§4 required the control plane to reject subscription credentials when they are written. That
+rejection was never built. The code does the opposite, on purpose:
+
+- **Three kinds per org.** `agentProviderCredentials.type` is `api-key | oauth | setup-token`
+  (`packages/shared/src/model/credential-kind.ts`). Each row is stamped with the active org (#44),
+  and run-time lookups are fenced to the thread's org (`apps/www/src/agent/credentials.ts`).
+- **The interactive Claude OAuth flow** (`apps/www/src/server-actions/claude-oauth.ts`,
+  `exchangeCode`) saves either an API key it creates, or the subscription's access and refresh
+  tokens as `type: 'oauth'` (`saveClaudeTokens`, `apps/www/src/agent/msg/claudeCredentials.ts`).
+- **A pasted `claude setup-token` token** is saved as `type: 'setup-token'` (#48,
+  `saveClaudeSetupToken`). It is a long-lived bearer with no refresh token and no expiry.
+- **Delivery.** A run receives a `json-file` credential in the `claudeAiOauth` shape. Its
+  `refreshToken` is always blank: the control plane refreshes, and the run gets only the access
+  token. A `setup-token` value goes into the run as it is.
+- **Not built:** the auth-mode telemetry that R3.2 calls mandatory. No run or registration record
+  says which kind of credential a run used.
+
+### R5.2 The four objections of §4, re-assessed
+
+| §4 objection                                       | Status under an org-scoped credential                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| One account's rate limits shared by every tenant   | **Resolved.** Each org uses its own credential. The original problem was one platform token for every org.                                                                                                                                                                                                                                                                                 |
+| No per-tenant cost attribution                     | **Resolved per org, not per invoice.** Per-run tokens come from the agent's `usage` events (`apps/www/src/app/api/daemon-event/route.ts`) under any auth kind. Under a subscription, `total_cost_usd` is an estimate, not what anyone is billed. Console usage and cost reports, spend limits, and platform-supplied inference (`apps/www/src/app/api/proxy/anthropic`) stay API-key only. |
+| Custody of a credential that opens a whole account | **Reduced, not resolved.** The refresh token never leaves the control plane, where it is encrypted under `ENCRYPTION_MASTER_KEY`. A run holds only the access token, for the life of the run. A `setup-token` is the weak point: it is a non-expiring bearer that sits in the guest for the whole run.                                                                                     |
+| The subscription terms tie usage to an individual  | **Relocated to the customer, not resolved**, as R3.2 already said for box-side use. This revision does not re-check Anthropic's or OpenAI's current terms. The operator re-checks them before the subscription tier is offered to a new customer.                                                                                                                                          |
+
+Telemetry was never one of the reasons. With an API key, the provider measures usage on its side.
+The runs themselves measure the same tokens under both kinds.
+
+### R5.3 Decision: tolerated tier, under conditions
+
+The **API key stays the supported tier.** It is the one we test, document and warrant, and the
+only one platform credits and billing may use. A **subscription credential (`oauth`,
+`setup-token`) is a tolerated, org-scoped tier in our store**, accepted only while these
+conditions hold:
+
+1. **One org, never shared.** Lookups stay fenced to the thread's org. A credential is never
+   resolved for another org or used as a platform fallback. This already holds.
+2. **The refresh token never reaches a run.** The `json-file` delivery keeps `refreshToken` blank.
+   This already holds. A test must keep it that way.
+3. **The run records which kind it used.** Every run's provenance and telemetry records
+   `credentialKind` (`api-key | oauth | setup-token`). Without it, a rate-limited or suspended
+   subscription looks like a platform bug. **Follow-up: not built.**
+4. **The terms are shown when connecting.** Connecting a subscription credential shows, in the
+   UI, that the subscription's terms are the customer's responsibility and that the API key is
+   the supported path. **Follow-up: not built.**
+5. **A quota is not a stuck agent.** A subscription's rate or weekly limit is classified as a
+   quota condition, separate from a tool-failure streak (#546) or a dead run. It is never retried
+   as if the work were stuck. **Follow-up: check the current classification.**
+6. **A `setup-token` is treated as long-lived.** The UI says it does not expire and how to revoke
+   it, and deleting the credential is the documented way to cut it off.
+
+### R5.4 Consequences
+
+- §4, R3.2 and R3.9 item 3 now describe the code. Before this revision they stated a guarantee
+  ("the control plane never stores, transports, or configures a subscription credential") that a
+  security review would have found false.
+- The tier is tolerated, not warranted. Support triages a subscription-backed failure as
+  "unsupported configuration" once condition 3 exists to name it.
+- To go back to "API keys only", build §4's write-time rejection and migrate the existing `oauth`
+  and `setup-token` rows. That needs a new revision, not an edit to this one.
