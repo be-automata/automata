@@ -139,6 +139,9 @@ tail -n +$((LOG_MARK+1)) ~/.automata/worker.log | grep 'box.escapees_reaped' | h
 # (e) Dark-deploy www (ships the executor/finish-wiring/sweep). SAFE-DARK: with the
 #     flag unset=false every new path is a no-op (reconciler-only, today's behavior).
 cd apps/www && (opennextjs-cloudflare build && wrangler deploy)
+#     No `--dangerouslyUseUnsupportedNextVersion`: @opennextjs/cloudflare >= 1.20.13
+#     (aws >= 4.1.12) treats Next 15 as supported until Next 17 ships. If the build
+#     refuses the Next version again, bump OpenNext/Next; do not add the flag.
 #     Bundle-verify: grep the built bundle for executeReviewFromIntent +
 #     handleReviewEffectAtFinish (executor present) and confirm worker-entry.ts + the
 #     4 triggers.crons survived the OpenNext build (the review sweep piggybacks the

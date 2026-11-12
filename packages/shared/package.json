@@ -36,7 +36,7 @@
     "@neondatabase/serverless": "^1.1.0",
     "@octokit/app": "^16.0.1",
     "@open-policy-agent/opa-wasm": "1.10.0",
-    "@opennextjs/cloudflare": "^1.20.1",
+    "@opennextjs/cloudflare": "^1.20.16",
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/env": "workspace:*",

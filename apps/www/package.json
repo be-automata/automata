@@ -97,7 +97,7 @@
     "loops": "^6.0.0",
     "lucide-react": "^0.511.0",
     "nanoid": "^5.1.5",
-    "next": "15.5.28",
+    "next": "15.5.29",
     "next-themes": "^0.4.6",
     "octokit": "^5.0.2",
     "openai": "^5.5.1",
@@ -132,7 +132,7 @@
   },
   "devDependencies": {
     "@ladle/react": "^5.0.3",
-    "@opennextjs/cloudflare": "^1.20.1",
+    "@opennextjs/cloudflare": "^1.20.16",
     "@playwright/test": "1.63.0",
     "@slack/web-api": "^7.10.0",
     "@tailwindcss/postcss": "^4.1.10",
@@ -144,7 +144,7 @@
     "@types/react-dom": "^19.1.6",
     "@typescript-eslint/eslint-plugin": "^8.34.1",
     "@typescript-eslint/parser": "^8.34.1",
-    "eslint-config-next": "^15.5.21",
+    "eslint-config-next": "^15.5.29",
     "eslint-plugin-react-hooks": "6.0.0-rc1",
     "postcss": "^8.5.5",
     "tailwindcss": "^4.1.10",
@@ -154,6 +154,6 @@
     "vercel-cron": "^1.3.0",
     "vite": "^6.3.5",
     "vitest": "^3.1.4",
-    "wrangler": "^4.111.0"
+    "wrangler": "^4.148.0"
   }
 }
