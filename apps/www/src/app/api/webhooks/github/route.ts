@@ -68,6 +68,31 @@ import {
 import { deferWebhookWork } from "./defer-webhook-work";
 import { handleKnowledgePush } from "./knowledge-push";
 
+/**
+ * Whether the delivery carries a valid `x-hub-signature-256`. Anything that
+ * cannot be verified is unauthenticated, never a server error: Octokit's
+ * `verify` throws a TypeError (instead of returning false) when the signature
+ * header or the body is empty, which used to surface as a 500 on an unsigned
+ * probe.
+ */
+async function isSignedDelivery(
+  webhooks: Webhooks,
+  body: string,
+  signature: string,
+): Promise<boolean> {
+  if (!signature || !body) {
+    return false;
+  }
+  try {
+    return await webhooks.verify(body, signature);
+  } catch (error) {
+    console.error("[github webhook] signature check failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 export async function POST(request: NextRequest) {
   const webhooks = new Webhooks({
     secret: env.GITHUB_WEBHOOK_SECRET,
@@ -261,14 +286,13 @@ export async function POST(request: NextRequest) {
   webhooks.onError((error) => {
     console.error("[github webhook] error", error);
   });
+  if (!(await isSignedDelivery(webhooks, body, signature))) {
+    return NextResponse.json(
+      { success: false, error: "Invalid signature" },
+      { status: 401 },
+    );
+  }
   try {
-    const isValid = await webhooks.verify(body, signature);
-    if (!isValid) {
-      return NextResponse.json(
-        { success: false, error: "Invalid signature" },
-        { status: 401 },
-      );
-    }
     await webhooks.receive({
       id: requestId,
       name: eventType as any,

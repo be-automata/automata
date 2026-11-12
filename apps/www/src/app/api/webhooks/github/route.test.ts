@@ -2,7 +2,10 @@ import { describe, expect, it, vi, beforeEach, beforeAll } from "vitest";
 import { NextRequest } from "next/server";
 import crypto from "crypto";
 import { POST } from "./route";
-import { createMockNextRequest } from "@/test-helpers/mock-next";
+import {
+  createMockNextRequest,
+  mockNextHeaders,
+} from "@/test-helpers/mock-next";
 import { db } from "@/lib/db";
 import { updateGitHubPR } from "@/lib/github";
 import { handleAppMention } from "./handle-app-mention";
@@ -156,6 +159,30 @@ describe("GitHub webhook route", () => {
       const data = await response.json();
       expect(response.status).toBe(401);
       expect(data.error).toBe("Invalid signature");
+    });
+
+    it("should return 401, not 500, when the signature header is missing", async () => {
+      const request = await createMockNextRequest(
+        { action: "opened" },
+        { "x-github-delivery": "123", "x-github-event": "pull_request" },
+      );
+      const response = await POST(request);
+      const data = await response.json();
+      expect(response.status).toBe(401);
+      expect(data.error).toBe("Invalid signature");
+    });
+
+    it("should return 401, not 500, for a signed but empty body", async () => {
+      await mockNextHeaders({
+        "x-github-delivery": "123",
+        "x-github-event": "pull_request",
+        "x-hub-signature-256": "sha256=000",
+      });
+      const request = {
+        text: vi.fn().mockResolvedValue(""),
+      } as unknown as NextRequest;
+      const response = await POST(request);
+      expect(response.status).toBe(401);
     });
 
     it("should accept valid signature", async () => {

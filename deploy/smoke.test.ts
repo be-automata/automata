@@ -38,7 +38,10 @@ function healthy(
   const url = new URL(req.url ?? "/", baseUrl);
   const path = url.pathname;
   const signedIn = req.headers.cookie === SESSION_COOKIE;
-  if (path === "/api/webhooks/slack" && req.method === "POST") {
+  if (
+    (path === "/api/webhooks/slack" || path === "/api/webhooks/github") &&
+    req.method === "POST"
+  ) {
     res.writeHead(401).end("unauthorized");
     return;
   }
@@ -132,8 +135,8 @@ describe("runSmoke", () => {
   it("passes every signed-out probe against a healthy deploy", async () => {
     const results = await runSmoke({ baseUrl, retryDelayMs: 0 });
     assert.deepEqual(failures(results), []);
-    // C16, C7, C7b, the open-redirect probes, C17, and the signed-in skip.
-    assert.equal(results.length, 3 + OPEN_REDIRECT_PROBES.length + 1 + 1);
+    // C16b, C16, C7, C7b, the open-redirect probes, C17, and the signed-in skip.
+    assert.equal(results.length, 4 + OPEN_REDIRECT_PROBES.length + 1 + 1);
     assert.equal(OPEN_REDIRECT_PROBES.length, 8);
     assert.match(byId(results, "C17").detail, new RegExp(BUILD_ID));
   });
@@ -250,6 +253,22 @@ describe("runSmoke", () => {
     const c16 = byId(await runSmoke({ baseUrl, retryDelayMs: 0 }), "C16");
     assert.equal(c16.status, "fail");
     assert.equal(c16.attempts, 1);
+  });
+
+  it("fails C16b when an unsigned GitHub webhook answers 500", async () => {
+    overrides.push((req, res) => {
+      if (req.url === "/api/webhooks/github") {
+        res.writeHead(500).end("Internal server error");
+        return true;
+      }
+      return false;
+    });
+    const c16b = byId(
+      await runSmoke({ baseUrl, retries: 1, retryDelayMs: 0 }),
+      "C16b",
+    );
+    assert.equal(c16b.status, "fail");
+    assert.match(c16b.detail, /HTTP 500/);
   });
 
   it("fails C7 when the login redirect drops the query string", async () => {
