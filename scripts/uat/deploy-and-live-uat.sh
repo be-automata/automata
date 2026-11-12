@@ -23,6 +23,7 @@ if [[ "${1:-}" != "--skip-deploy" ]]; then
     exit 1
   fi
   echo "==> Building OpenNext bundle with the prod env..."
+  # No --dangerouslyUseUnsupportedNextVersion: the pinned OpenNext accepts Next 15 (see deploy/PILOT-OPERATOR-STEPS.md).
   ( cd apps/www && pnpm exec dotenv -e .env.production.local -- opennextjs-cloudflare build )
   echo "==> Deploying automata-www (runtime secrets already set on the Worker are preserved)..."
   ( cd apps/www && pnpm exec dotenv -e .env.production.local -- opennextjs-cloudflare deploy )
