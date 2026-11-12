@@ -201,6 +201,25 @@ export async function runSmoke(options: SmokeOptions): Promise<ProbeResult[]> {
   const results: ProbeResult[] = [];
 
   results.push(
+    // No x-hub-signature-256 at all: Octokit's verify throws on an empty
+    // signature, which once surfaced as a 500 instead of a 401.
+    await probe(
+      "C16b",
+      "unsigned GitHub webhook POST is rejected",
+      async () => {
+        const response = await request("/api/webhooks/github", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        await response.body?.cancel();
+        return {
+          ok: response.status === 401,
+          transient: false,
+          detail: `${response.status}${response.status === 401 ? "" : " — want 401"}`,
+        };
+      },
+    ),
     await probe("C16", "unsigned Slack webhook POST is rejected", async () => {
       const response = await request("/api/webhooks/slack", {
         method: "POST",
