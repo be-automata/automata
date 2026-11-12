@@ -580,6 +580,14 @@ describe("knowledge head check (D-03 / PD-19)", () => {
     db = createDb(process.env.DATABASE_URL!);
     await db.delete(schema.knowledgeIntent);
     await db.delete(schema.knowledgeCursor);
+    // The candidate query spans every engine-on org, and its sources
+    // (repo_review_settings, automations) outlive earlier tests. Switch every
+    // other org off so only this test's `org` can contribute candidates (#593).
+    // Safe because the shared suite runs with --no-file-parallelism.
+    await db
+      .update(schema.organizationReviewSettings)
+      .set({ knowledgeEngine: false })
+      .where(eq(schema.organizationReviewSettings.knowledgeEngine, true));
     org = await createTestOrg({ db, name: "Acme" });
     await setEngine(org, true);
   });
