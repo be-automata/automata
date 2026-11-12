@@ -343,7 +343,7 @@ async function main() {
     process.exit(1);
   }
 
-  // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot repair + §3.3 stuck-QUEUED
+  // #69 §3.2.4 item 1 (PRIMARY path) + §3.1 rot detection (#570: detection only) + §3.3 stuck-QUEUED
   // detection. Runs AFTER registration so it observes the strategy rows THIS
   // registration just minted (§3.1.4 ordering note). Master-gated the same
   // way; starts nothing when HATCHET_ENGINE_DATABASE_URL is unset.

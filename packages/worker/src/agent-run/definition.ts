@@ -172,9 +172,9 @@ export function buildAgentRunDefinition(
           // prevent rot — the new group has since re-rotted (#69 §2.3, verified
           // live 2026-08-23). The group name is NOT rotated again (#69 §3.1.1:
           // rotation trades this deadlock for a worse one — two concurrent
-          // agent-runs on a box budgeted for one). Instead an engine-DB repairer
-          // (scheduling-maintenance.ts, opt-in, dry-run by default) detects and
-          // prunes the corrupted chain pointers behind this group name.
+          // agent-runs on a box budgeted for one). The #69 "rot" itself was
+          // mostly a misread of the engine schema (#570); scheduling-maintenance.ts
+          // (opt-in) only DETECTS a broken strategy link, it never repairs one.
           // NOT box-wide: Hatchet scopes this group PER WORKFLOW, so with the
           // variants registered it caps each variant separately (observed,
           // docs/uat/hatchet-lite-v0.94.10-observed.md §5). The box-wide

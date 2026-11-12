@@ -1,4 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ENGINE_DB_POOL_OPTIONS, type PgLike } from "./engine-db";
 import {
@@ -10,9 +13,7 @@ import {
   findReclaimableSlots,
   nominalRecoveryLatencySeconds,
   reclaimEngineSlots,
-  repairConcurrencyRot,
-  repairStepConcurrencyRot,
-  repairWorkflowConcurrencyRot,
+  detectConcurrencyRot,
 } from "./scheduling-health";
 import { loadWorkerConfig, resolveMechanismMode } from "./config";
 import {
@@ -46,11 +47,24 @@ class FakePg implements PgLike {
   }
 }
 
+/** An `EngineDb` whose advisory lock is always acquired and runs `fn` on `inner`. */
+function makeEngineDb(inner: PgLike) {
+  return {
+    query: vi.fn().mockResolvedValue({ rows: [] }),
+    withConnection: vi.fn(),
+    withAdvisoryLock: vi.fn(async (fn: (c: PgLike) => Promise<unknown>) => ({
+      acquired: true as const,
+      result: await fn(inner),
+    })),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
   describe("healthy fixture (AC-1)", () => {
     const emptyDb = new FakePg(() => ({ rows: [] }));
 
-    it("every detector returns nothing and every remediator touches nothing", async () => {
+    it("every rot detector returns nothing on an empty engine", async () => {
       const stepFindings = await detectStepConcurrencyRot(emptyDb, {
         tenantId: TENANT_ID,
       });
@@ -59,25 +73,6 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       });
       expect(stepFindings).toEqual([]);
       expect(workflowFindings).toEqual([]);
-
-      const stepRepair = await repairStepConcurrencyRot(emptyDb, {
-        tenantId: TENANT_ID,
-        ids: [],
-        mode: "on",
-      });
-      const workflowRepair = await repairWorkflowConcurrencyRot(emptyDb, {
-        tenantId: TENANT_ID,
-        ids: [],
-        mode: "on",
-      });
-      expect(stepRepair).toEqual({ touched: 0, rows: [], deferred: false });
-      expect(workflowRepair).toEqual({ touched: 0, rows: [], deferred: false });
-
-      // Empty ids → the remediators short-circuit BEFORE issuing any statement.
-      const mutating = emptyDb.calls.filter((c) =>
-        /^\s*(UPDATE|DELETE)/i.test(c.text),
-      );
-      expect(mutating).toHaveLength(0);
     });
 
     it("slot reclamation finds nothing on an empty engine", async () => {
@@ -92,105 +87,83 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
     });
   });
 
-  describe("corrupted fixture — the live §2.3 rows (AC-2)", () => {
-    const corruptedDb = new FakePg((text) => {
-      if (/FROM v1_step_concurrency c\s+LEFT JOIN/.test(text)) {
-        // Only row 5 has an active, foreign-step, or dangling parent.
-        return {
-          rows: [
-            {
-              id: 5,
-              step_id: "5c93e973",
-              expression: "'agent-run-global-memory-budget'",
-              parent_strategy_id: 4,
-            },
-          ],
-        };
-      }
-      if (/FROM v1_workflow_concurrency c\s+CROSS JOIN LATERAL/.test(text)) {
-        return {
-          rows: [
-            {
-              id: 1,
-              workflow_version_id: "01fa6942",
-              expression: "'agent-run-shared-daemon-socket'",
-              child_strategy_ids: [2],
-            },
-            {
-              id: 3,
-              workflow_version_id: "9603cb2f",
-              expression: "'agent-run-shared-daemon-socket'",
-              child_strategy_ids: [4],
-            },
-            {
-              id: 5,
-              workflow_version_id: "75e03a6f",
-              expression: "'agent-run-global-memory-budget'",
-              child_strategy_ids: [6],
-            },
-          ],
-        };
-      }
-      return { rows: [] };
+  describe("link resolution follows the engine's schema (#570)", () => {
+    // hatchet v1-core.sql @ v0.94.10: a step row's parent_strategy_id is a
+    // v1_workflow_concurrency id (:233, :289-290, joined at :869), and a
+    // workflow row's child_strategy_ids are v1_step_concurrency ids
+    // (:314-319). The #69 detectors joined each column to its own table.
+    const captureSql = async () => {
+      const db = new FakePg(() => ({ rows: [] }));
+      await detectStepConcurrencyRot(db, { tenantId: TENANT_ID });
+      await detectWorkflowConcurrencyRot(db, { tenantId: TENANT_ID });
+      const [step, workflow] = db.calls.map((c) => c.text);
+      return { step: step ?? "", workflow: workflow ?? "" };
+    };
+
+    it("the step detector resolves parent_strategy_id in v1_workflow_concurrency, on the engine's three key columns", async () => {
+      const { step } = await captureSql();
+      expect(step).toMatch(
+        /NOT EXISTS \(\s*SELECT 1 FROM v1_workflow_concurrency w\s+WHERE w\.workflow_id\s+= c\.workflow_id\s+AND w\.workflow_version_id = c\.workflow_version_id\s+AND w\.id\s+= c\.parent_strategy_id\)/,
+      );
+      expect(step).not.toMatch(/JOIN v1_step_concurrency p/);
+      expect(step).not.toMatch(/step_id <>/);
     });
 
-    it("step-level detector flags exactly id 5", async () => {
-      const findings = await detectStepConcurrencyRot(corruptedDb, {
-        tenantId: TENANT_ID,
-      });
-      expect(findings).toEqual([
+    it("the workflow detector resolves child_strategy_ids in v1_step_concurrency, same version, pointing back at the parent", async () => {
+      const { workflow } = await captureSql();
+      expect(workflow).toMatch(
+        /SELECT 1 FROM v1_step_concurrency s\s+WHERE s\.workflow_id\s+= c\.workflow_id\s+AND s\.workflow_version_id = c\.workflow_version_id\s+AND s\.id\s+= x\.child_id\s+AND s\.parent_strategy_id\s+= c\.id/,
+      );
+      expect(workflow).not.toMatch(/JOIN v1_workflow_concurrency k/);
+    });
+
+    it("maps flagged rows to the public shape", async () => {
+      const db = new FakePg((text) =>
+        /FROM v1_step_concurrency c/.test(text)
+          ? {
+              rows: [
+                {
+                  id: 2,
+                  step_id: "s2",
+                  expression: "'all'",
+                  parent_strategy_id: 9,
+                },
+              ],
+            }
+          : {
+              rows: [
+                {
+                  id: 1,
+                  workflow_version_id: "v1",
+                  expression: "'all'",
+                  child_strategy_ids: null,
+                },
+              ],
+            },
+      );
+      const found = await detectConcurrencyRot(db, { tenantId: TENANT_ID });
+      expect(found.stepFindings).toEqual([
+        { id: 2, stepId: "s2", expression: "'all'", parentStrategyId: 9 },
+      ]);
+      expect(found.workflowFindings).toEqual([
         {
-          id: 5,
-          stepId: "5c93e973",
-          expression: "'agent-run-global-memory-budget'",
-          parentStrategyId: 4,
+          id: 1,
+          workflowVersionId: "v1",
+          expression: "'all'",
+          childStrategyIds: [],
         },
       ]);
-    });
-
-    it("workflow-level detector flags ids 1, 3, 5 — id 4 (same-version child {5}) is never flagged", async () => {
-      const findings = await detectWorkflowConcurrencyRot(corruptedDb, {
-        tenantId: TENANT_ID,
-      });
-      expect(findings.map((f) => f.id)).toEqual([1, 3, 5]);
-      expect(findings.some((f) => f.id === 4)).toBe(false);
     });
   });
 
   describe("dry-run mode (AC-7)", () => {
-    it("issues zero UPDATE/DELETE statements while still reporting findings", async () => {
-      const db = new FakePg((text) => {
-        if (
-          /^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(
-            text,
-          )
-        ) {
-          return {
-            rows: [
-              {
-                id: 5,
-                step_id: "5c93e973",
-                expression: "x",
-                parent_strategy_id: 4,
-              },
-            ],
-          };
-        }
-        return { rows: [] };
-      });
-
-      const repair = await repairStepConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: [5],
-        mode: "dry-run",
-      });
-      expect(repair.touched).toBe(0);
-      expect(repair.rows.map((r) => r.id)).toEqual([5]);
-
-      const mutating = db.calls.filter((c) =>
-        /^\s*(UPDATE|DELETE)/i.test(c.text),
-      );
-      expect(mutating).toHaveLength(0);
+    it("rot detection never writes to the concurrency tables (#570)", async () => {
+      const db = new FakePg(() => ({ rows: [] }));
+      await detectConcurrencyRot(db, { tenantId: TENANT_ID });
+      expect(db.calls).toHaveLength(2);
+      for (const call of db.calls) {
+        expect(call.text).not.toMatch(/\b(UPDATE|DELETE|INSERT)\b/i);
+      }
     });
 
     it("dry-run slot reclamation issues zero DELETE statements", async () => {
@@ -242,30 +215,6 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
         expect(call.text).toMatch(/\bLIMIT\b/);
       }
     });
-
-    it("repair is bounded transitively: a 500-row fixture with batch=100 only ever repairs the 100 ids the (LIMIT-ed) detector handed it", async () => {
-      const batch = 100;
-      const fiveHundredIds = Array.from({ length: 500 }, (_, i) => i + 1);
-      const hundredIds = fiveHundredIds.slice(0, batch);
-      const db = new FakePg((text) => {
-        if (/^\s*UPDATE v1_step_concurrency/.test(text)) {
-          return {
-            rows: hundredIds.map((id) => ({
-              id,
-              step_id: "s",
-              expression: "e",
-            })),
-          };
-        }
-        return { rows: [] };
-      });
-      const repair = await repairStepConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: hundredIds,
-        mode: "on",
-      });
-      expect(repair.touched).toBe(100);
-    });
   });
 
   describe("self-exclusion / tenant-scope / NULL-heartbeat wiring (AC-8)", () => {
@@ -304,134 +253,6 @@ describe("scheduling-health.ts (#69) — pure detectors/remediators", () => {
       for (const call of db.calls) {
         expect(call.text).not.toMatch(/schedule_timeout_at/);
       }
-    });
-  });
-
-  describe("quiescence precondition present (AC-8b)", () => {
-    it("every generated step-level rot-repair statement references all four slot-pointer columns", async () => {
-      const db = new FakePg(() => ({ rows: [] }));
-      await repairStepConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: [5],
-        mode: "on",
-      });
-      const call = db.calls[0];
-      for (const col of [
-        "strategy_id",
-        "parent_strategy_id",
-        "next_strategy_ids",
-        "next_parent_strategy_ids",
-      ]) {
-        expect(call?.text).toContain(col);
-      }
-    });
-
-    it("every generated workflow-level rot-repair statement references the slot's three array-pointer columns", async () => {
-      const db = new FakePg(() => ({ rows: [] }));
-      await repairWorkflowConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: [1, 3, 5],
-        mode: "on",
-      });
-      const call = db.calls[0];
-      for (const col of [
-        "strategy_id",
-        "child_strategy_ids",
-        "completed_child_strategy_ids",
-      ]) {
-        expect(call?.text).toContain(col);
-      }
-    });
-
-    it("a repair whose predicate is quiesced by a referencing slot touches 0 rows and reports deferred (AC-8b)", async () => {
-      // Simulate: detector found 1 row, but the UPDATE's own WHERE (including the
-      // quiescence NOT EXISTS) matches nothing because a live slot references it.
-      const db = new FakePg((text) => {
-        if (/^\s*UPDATE v1_step_concurrency/.test(text)) {
-          return { rows: [] };
-        }
-        return { rows: [] };
-      });
-      const repair = await repairStepConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: [5],
-        mode: "on",
-      });
-      expect(repair.touched).toBe(0);
-      expect(repair.deferred).toBe(true);
-    });
-  });
-
-  describe("row 4's same-version child link survives repair (AC-8c)", () => {
-    it("repairWorkflowConcurrencyRot never includes id 4 in the ids it is asked to touch, and the SQL's own EXISTS clause preserves same-version children", async () => {
-      const db = new FakePg((text) => {
-        if (/^\s*UPDATE v1_workflow_concurrency/.test(text)) {
-          // The real engine would keep row 4's {5} untouched because it was
-          // never in the ids array (it isn't rotted) — asserted at the
-          // detector level in the "corrupted fixture" describe block above.
-          return {
-            rows: [
-              { id: 1, child_strategy_ids: [] },
-              { id: 3, child_strategy_ids: [] },
-              { id: 5, child_strategy_ids: [] },
-            ],
-          };
-        }
-        return { rows: [] };
-      });
-      const repair = await repairWorkflowConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        ids: [1, 3, 5],
-        mode: "on",
-      });
-      expect(repair.touched).toBe(3);
-      const call = db.calls[0];
-      expect(call?.params?.[1]).toEqual([1, 3, 5]);
-      expect((call?.params?.[1] as number[]).includes(4)).toBe(false);
-    });
-  });
-
-  describe("combined repairConcurrencyRot orchestration", () => {
-    it("detects then repairs both tables and reports idempotent 0-touch on a second pass", async () => {
-      let stepCallCount = 0;
-      const db = new FakePg((text) => {
-        if (
-          /^\s*SELECT c\.id, c\.step_id, c\.expression, c\.parent_strategy_id\s*$/m.test(
-            text,
-          )
-        ) {
-          stepCallCount += 1;
-          return stepCallCount === 1
-            ? {
-                rows: [
-                  {
-                    id: 5,
-                    step_id: "s",
-                    expression: "e",
-                    parent_strategy_id: 4,
-                  },
-                ],
-              }
-            : { rows: [] };
-        }
-        if (/^\s*UPDATE v1_step_concurrency/.test(text)) {
-          return { rows: [{ id: 5, step_id: "s", expression: "e" }] };
-        }
-        return { rows: [] };
-      });
-      const first = await repairConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        mode: "on",
-      });
-      expect(first.stepFindings).toHaveLength(1);
-      expect(first.stepRepair.touched).toBe(1);
-
-      const second = await repairConcurrencyRot(db, {
-        tenantId: TENANT_ID,
-        mode: "on",
-      });
-      expect(second.stepFindings).toHaveLength(0);
-      expect(second.stepRepair.touched).toBe(0);
     });
   });
 
@@ -583,6 +404,160 @@ describe("runMaintenanceTick — resilience and gating", () => {
   });
 });
 
+describe("concurrency rot is detection only (#570)", () => {
+  const rotRow = {
+    id: 2,
+    step_id: "s2",
+    expression: "'all'",
+    parent_strategy_id: 9,
+  };
+
+  async function tickWith(env: Record<string, string>) {
+    const root = mkdtempSync(path.join(tmpdir(), "rot-570-"));
+    try {
+      const config = loadWorkerConfig({
+        ...REQ,
+        HATCHET_ENGINE_DATABASE_URL: "postgresql://fake",
+        HATCHET_ENGINE_TENANT_ID: TENANT_ID,
+        WORKER_RUN_NAMESPACE_ROOT: root,
+        WORKER_SLOT_RECLAIM: "off",
+        ...env,
+      });
+      const inner = new FakePg((text) =>
+        /FROM v1_step_concurrency c/.test(text)
+          ? { rows: [rotRow] }
+          : { rows: [] },
+      );
+      const db = makeEngineDb(inner);
+      const log = vi.fn();
+      const snapshot = await runMaintenanceTick({
+        config,
+        selfWorkerId: null,
+        log,
+        engineDb: db as never,
+      });
+      return { snapshot, log, inner };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("WORKER_CONCURRENCY_ROT_REPAIR=on detects, reports dry-run, repairs nothing and writes nothing", async () => {
+    const { snapshot, log, inner } = await tickWith({
+      WORKER_CONCURRENCY_ROT_REPAIR: "on",
+    });
+    expect(snapshot.rot).toEqual({
+      stepLevel: 1,
+      workflowLevel: 0,
+      repaired: 0,
+      mode: "dry-run",
+    });
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "scheduling.rot_detected",
+        stepIds: [2],
+        mode: "dry-run",
+      }),
+    );
+    expect(
+      inner.calls.filter((c) => /\b(UPDATE|DELETE|INSERT)\b/i.test(c.text)),
+    ).toHaveLength(0);
+  });
+
+  it("WORKER_SCHEDULING_MAINTENANCE=on (inherited) is detection only too", async () => {
+    const { snapshot } = await tickWith({
+      WORKER_SCHEDULING_MAINTENANCE: "on",
+    });
+    expect(snapshot.rot.mode).toBe("dry-run");
+    expect(snapshot.rot.repaired).toBe(0);
+  });
+
+  it("WORKER_CONCURRENCY_ROT_REPAIR=off issues no rot query", async () => {
+    const { snapshot, inner } = await tickWith({
+      WORKER_CONCURRENCY_ROT_REPAIR: "off",
+    });
+    expect(snapshot.rot.mode).toBe("off");
+    expect(
+      inner.calls.filter((c) => /_concurrency c\b/.test(c.text)),
+    ).toHaveLength(0);
+  });
+
+  it("startMaintenanceLoop says once, at boot, that a resolved 'on' no longer repairs", () => {
+    const base = {
+      ...REQ,
+      HATCHET_ENGINE_DATABASE_URL: "postgresql://127.0.0.1:1/none",
+      HATCHET_ENGINE_TENANT_ID: TENANT_ID,
+    };
+    const removed = (log: ReturnType<typeof vi.fn>) =>
+      log.mock.calls.filter(
+        ([line]) =>
+          (line as { event?: string }).event ===
+          "scheduling.rot_repair_removed",
+      );
+
+    const onLog = vi.fn();
+    startMaintenanceLoop(
+      loadWorkerConfig({ ...base, WORKER_CONCURRENCY_ROT_REPAIR: "on" }),
+      null,
+      onLog,
+    ).stop();
+    expect(removed(onLog)).toHaveLength(1);
+
+    const dryLog = vi.fn();
+    startMaintenanceLoop(loadWorkerConfig(base), null, dryLog).stop();
+    expect(removed(dryLog)).toHaveLength(0);
+  });
+
+  // Generated by /ship coverage audit (#570).
+  // Value: protects=the boot notice follows the RESOLVED rot mode (inherit, explicit off, master gate);
+  // fails_when=the check reads concurrencyRotRepairMode directly, ignores an explicit off, or moves above the master gate;
+  // why_new=the test above covers only explicit 'on' and the default; seam=none;
+  // no_claim=no engine is reached (unroutable URL; the tick's own failure is not asserted)
+  it.each([
+    {
+      name: "inherited WORKER_SCHEDULING_MAINTENANCE=on",
+      env: { WORKER_SCHEDULING_MAINTENANCE: "on" },
+      url: "postgresql://127.0.0.1:1/none",
+      notices: 1,
+    },
+    {
+      name: "explicit off overriding a global 'on'",
+      env: {
+        WORKER_SCHEDULING_MAINTENANCE: "on",
+        WORKER_CONCURRENCY_ROT_REPAIR: "off",
+      },
+      url: "postgresql://127.0.0.1:1/none",
+      notices: 0,
+    },
+    {
+      name: "'on' behind the master gate (no engine URL)",
+      env: { WORKER_CONCURRENCY_ROT_REPAIR: "on" },
+      url: undefined,
+      notices: 0,
+    },
+  ])("boot notice for $name: $notices", ({ env, url, notices }) => {
+    const log = vi.fn();
+    startMaintenanceLoop(
+      loadWorkerConfig({
+        ...REQ,
+        ...(url ? { HATCHET_ENGINE_DATABASE_URL: url } : {}),
+        HATCHET_ENGINE_TENANT_ID: TENANT_ID,
+        WORKER_SLOT_RECLAIM: "off",
+        ...env,
+      }),
+      null,
+      log,
+    ).stop();
+    expect(
+      log.mock.calls.filter(
+        ([line]) =>
+          (line as { event?: string }).event ===
+          "scheduling.rot_repair_removed",
+      ),
+    ).toHaveLength(notices);
+  });
+});
+
 describe("the reclaim queries project evicted_at unconditionally", () => {
   /**
    * #69 guard. A compatibility shim once resolved this predicate at runtime
@@ -691,18 +666,6 @@ describe("bootTimeSlotReclaim — boot-path hygiene and gating", () => {
     HATCHET_ENGINE_TENANT_ID: TENANT_ID,
     WORKER_SLOT_RECLAIM: "on",
   });
-
-  function makeEngineDb(inner: PgLike) {
-    return {
-      query: vi.fn().mockResolvedValue({ rows: [] }),
-      withConnection: vi.fn(),
-      withAdvisoryLock: vi.fn(async (fn: (c: PgLike) => Promise<unknown>) => ({
-        acquired: true as const,
-        result: await fn(inner),
-      })),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-  }
 
   it("master gate: with engineDatabaseUrl unset, the db is never touched", async () => {
     const db = makeEngineDb(new FakePg(() => ({ rows: [] })));

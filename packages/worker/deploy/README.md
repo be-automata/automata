@@ -847,13 +847,19 @@ every tick. The webhook URL is a secret: it is never logged — keep it in
 
 ## Scheduling deadlock: diagnosis and recovery (#69)
 
-Two independent engine-side defects can wedge the box's single agent-run slot:
-**concurrency-group rot** (a corrupted strategy-chain pointer leaves the active chain
-dead-ending — tasks sit `QUEUED` forever with an idle worker) and **SIGKILL slot
-exhaustion** (a worker killed without drain never releases its `v1_concurrency_slot`
-row). Both are 100% throughput loss with no automatic recovery unless the mechanisms
-below are enabled. See `docs/plans/69-scheduling-deadlock-recovery.md` for the full
-design and the live evidence this diagnosis is built from.
+Two engine-side defects were diagnosed as able to wedge the box's single agent-run slot:
+**concurrency-group rot** (a broken link between a workflow-level strategy and its
+step-level strategies — tasks sit `QUEUED` forever with an idle worker) and **SIGKILL
+slot exhaustion** (a worker killed without drain never releases its
+`v1_concurrency_slot` row). See `docs/plans/69-scheduling-deadlock-recovery.md` for the
+design.
+
+**Rot is detection only (#570).** The #69 rot detectors and the rot repair read the
+link columns against the wrong tables, so they flagged healthy workflow-level
+strategies and the repair would have broken them. The detectors now resolve links the
+way the engine does, and the repair was removed: nothing the worker runs writes to
+`v1_step_concurrency` or `v1_workflow_concurrency`. No real rot mechanism has been
+shown; a non-empty rot finding is worth an engineer's look, not an automatic fix.
 
 ### Everything here is OFF by default
 
@@ -865,27 +871,44 @@ default.
 ### Diagnosis (read-only, works on any box with docker access — no opt-in required)
 
 ```bash
-# Step-level rot (§3.1.2) — non-empty rows mean an active strategy's parent
-# pointer leads outside its own live chain.
+# Step-level rot (#570) — a step strategy's parent_strategy_id is a
+# v1_workflow_concurrency id (hatchet v1-core.sql). Non-empty rows mean an active
+# step strategy whose parent does not exist in its own workflow version.
 docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
-  SELECT c.id, c.step_id, c.expression, c.parent_strategy_id,
-         p.id IS NULL AS parent_missing, COALESCE(p.is_active, false) AS parent_is_active,
-         p.step_id AS parent_step_id
+  SELECT c.id, c.step_id, c.expression, c.parent_strategy_id
     FROM v1_step_concurrency c
-    LEFT JOIN v1_step_concurrency p ON p.id = c.parent_strategy_id AND p.tenant_id = c.tenant_id
    WHERE c.is_active AND c.parent_strategy_id IS NOT NULL
-     AND (p.id IS NULL OR NOT p.is_active OR p.step_id <> c.step_id)
+     AND NOT EXISTS (SELECT 1 FROM v1_workflow_concurrency w
+                      WHERE w.workflow_id = c.workflow_id
+                        AND w.workflow_version_id = c.workflow_version_id
+                        AND w.id = c.parent_strategy_id)
    ORDER BY c.id;"
 
-# Workflow-level rot (§3.1.4) — non-empty rows mean an active chain names a
-# nonexistent or foreign-version child strategy.
+# Workflow-level rot (#570) — child_strategy_ids are v1_step_concurrency ids.
+# Non-empty rows mean an active workflow strategy names a child that is not a
+# step strategy of the same version pointing back at it.
 docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
   SELECT c.id, c.workflow_version_id, c.expression, c.child_strategy_ids, x.child_id
     FROM v1_workflow_concurrency c
     CROSS JOIN LATERAL unnest(COALESCE(c.child_strategy_ids, '{}'::bigint[])) AS x(child_id)
-    LEFT JOIN v1_workflow_concurrency k ON k.id = x.child_id
-           AND k.workflow_id = c.workflow_id AND k.workflow_version_id = c.workflow_version_id
-   WHERE c.is_active AND k.id IS NULL
+   WHERE c.is_active
+     AND NOT EXISTS (SELECT 1 FROM v1_step_concurrency s
+                      WHERE s.workflow_id = c.workflow_id
+                        AND s.workflow_version_id = c.workflow_version_id
+                        AND s.id = x.child_id
+                        AND s.parent_strategy_id = c.id)
+   ORDER BY c.id;"
+
+# Reverse link (#570) — an active step strategy whose parent does not list it in
+# child_strategy_ids. The engine compares that array's size when it releases a
+# workflow slot. Neither detector checks this; run it by hand when rot is suspected.
+docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
+  SELECT c.id, c.parent_strategy_id, w.child_strategy_ids
+    FROM v1_step_concurrency c
+    JOIN v1_workflow_concurrency w ON w.workflow_id = c.workflow_id
+     AND w.workflow_version_id = c.workflow_version_id AND w.id = c.parent_strategy_id
+   WHERE c.is_active
+     AND NOT (c.id = ANY(COALESCE(w.child_strategy_ids, '{}'::bigint[])))
    ORDER BY c.id;"
 
 # Leaked slots (§3.2) — a filled slot with no live runtime, or one owned by a
@@ -912,13 +935,19 @@ docker exec automata-hatchet-postgres-1 psql -U hatchet -d hatchet -c "
 Once maintenance is enabled the worker atomically writes
 `<runNamespaceRoot>/scheduling-health.json` (default `/tmp/automata-agent-run/`) on
 every tick. `healthy: true` means all detectors returned zero findings. Non-zero
-`rot.stepLevel`/`rot.workflowLevel` or `slots.reclaimable` with `mode: "dry-run"` means
-the box is corrupted or leaking but nothing has been written yet — this is expected
-during the observation window (see Promotion below). A structured log line
-(`event: "scheduling.rot_detected"` / `"scheduling.rot_repaired"` /
+`slots.reclaimable` with `mode: "dry-run"` means the box is leaking slots but nothing
+has been written yet — this is expected during the observation window (see Promotion
+below). Non-zero `rot.stepLevel`/`rot.workflowLevel` is never repaired automatically;
+see the note on rot at the top of this section. A structured log line
+(`event: "scheduling.rot_detected"` /
 `"scheduling.slots_reclaimed"` / `"scheduling.stuck_queued"` / `"scheduling.tick_error"`
 / `"scheduling.tick_skipped_locked"`) is emitted to `worker.log` on every tick with a
 non-empty finding.
+
+`rot.repaired` is always `0` and `rot.mode` is never `on`: rot is detection only (#570).
+A box that resolves `WORKER_CONCURRENCY_ROT_REPAIR` to `on` (directly, or by inheriting
+`WORKER_SCHEDULING_MAINTENANCE=on`) runs it as `dry-run` and logs
+`scheduling.rot_repair_removed` once at boot.
 
 ### Run containers instead of `box-budget.json`
 
@@ -961,16 +990,16 @@ launchctl kill TERM gui/$UID/com.automata.worker
 ```
 
 At this point `WORKER_SCHEDULING_MAINTENANCE` defaults to `dry-run`:
-mechanisms 1 (rot repair) and 2 (slot reclaim) detect and log but never write.
+mechanism 2 (slot reclaim) detects and logs but never writes. Mechanism 1 (rot) only
+ever detects (#570).
 Mechanism 3 (stuck-QUEUED detection) is read-only and on by default.
 
 ### Promotion procedure (dry-run → on)
 
-1. Observe ≥24h of `scheduling-health.json`. Confirm the reported rot rows match a
-   manual diagnosis query above and `slots.reclaimable = 0` on a healthy box.
-2. Flip `WORKER_CONCURRENCY_ROT_REPAIR=on`, restart (SIGTERM + wait), confirm the
-   one-time repair fires and subsequent ticks report `rot.repaired = 0`.
-3. Flip `WORKER_SLOT_RECLAIM=on` **separately, at least a day later**, and only after
+1. Observe ≥24h of `scheduling-health.json`. Confirm `slots.reclaimable = 0` on a
+   healthy box, and that any reported rot rows match the diagnosis queries above. There
+   is no rot step to promote: rot repair was removed (#570).
+2. Flip `WORKER_SLOT_RECLAIM=on` **separately, at least a day later**, and only after
    reviewing the partition guard (§3.2.1) against this box's network reliability. A box
    on flaky connectivity should stay at `dry-run` indefinitely for this mechanism —
    detection still works, and the manual reclaim query above covers the rare real case.
@@ -980,18 +1009,21 @@ Mechanism 3 (stuck-QUEUED detection) is read-only and on by default.
 Unset any of these and SIGTERM-restart — an untouched box (no `HATCHET_ENGINE_DATABASE_URL`)
 is the strongest rollback available, since nothing runs at all:
 
-| Env var                             | Effect when unset/off                                                    |
-| ----------------------------------- | ------------------------------------------------------------------------ |
-| `HATCHET_ENGINE_DATABASE_URL`       | Master gate. Unset → all three mechanisms inert.                         |
-| `WORKER_SCHEDULING_MAINTENANCE=off` | Mechanisms 1 & 2 fully disabled (no detect, no write).                   |
-| `WORKER_CONCURRENCY_ROT_REPAIR=off` | Rot repair specifically disabled (detection via mechanism 3 unaffected). |
-| `WORKER_SLOT_RECLAIM=off`           | Slot reclaim specifically disabled.                                      |
-| `WORKER_STUCK_QUEUED_DETECT=off`    | Read-only detection disabled (rarely needed).                            |
+| Env var                             | Effect when unset/off                                         |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `HATCHET_ENGINE_DATABASE_URL`       | Master gate. Unset → all three mechanisms inert.              |
+| `WORKER_SCHEDULING_MAINTENANCE=off` | Mechanisms 1 & 2 fully disabled (no detect, no write).        |
+| `WORKER_CONCURRENCY_ROT_REPAIR=off` | Rot detection disabled (mechanism 1 never writes since #570). |
+| `WORKER_SLOT_RECLAIM=off`           | Slot reclaim specifically disabled.                           |
+| `WORKER_STUCK_QUEUED_DETECT=off`    | Read-only detection disabled (rarely needed).                 |
 
-To roll back a repair that already happened: the repair only NULLs a dangling parent
-pointer / strips dangling child ids — it never deletes a row or flips `is_active`.
-Restarting the worker re-registers the workflow and mints a fresh chain; there is no
-state to manually restore.
+A box that ran the removed rot repair with `on` before #570 may hold real breakage it
+caused (a step strategy with `parent_strategy_id` set to NULL, or a workflow strategy
+with step ids stripped from `child_strategy_ids`). The workflow-level diagnosis query
+above shows the first case (the workflow row whose child no longer points back); the
+reverse-link query shows the second. Whether a worker restart
+re-registers fresh strategies was never tested against this case (#570); treat a box
+that ran the repair with `on` as needing an engineer.
 
 ## Engine dashboard hygiene (Linux box, hatchet-lite)
 
