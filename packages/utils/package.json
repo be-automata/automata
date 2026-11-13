@@ -11,7 +11,8 @@
     "./payload-seal": "./src/payload-seal.ts",
     "./run-lane": "./src/run-lane.ts",
     "./box-capacity": "./src/box-capacity.ts",
-    "./receive-pack-refs": "./src/receive-pack-refs.ts"
+    "./receive-pack-refs": "./src/receive-pack-refs.ts",
+    "./graphql-mutation": "./src/graphql-mutation.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",

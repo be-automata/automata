@@ -3,7 +3,9 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { graphqlHasMutation, startGhBroker, type GhBroker } from "./gh-broker";
+import { graphqlHasMutation } from "@terragon/utils/graphql-mutation";
+
+import { startGhBroker, type GhBroker } from "./gh-broker";
 
 const TOKEN = "ghs_installation_token_secret";
 const BEARER = "run-bearer-abc123";
