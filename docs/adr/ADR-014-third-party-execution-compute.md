@@ -1,6 +1,6 @@
 # ADR-014: Third-party execution compute under Automata's account, gated by one profile resolver
 
-- **Status:** Accepted (2026-11-09) by the operator. Proposed 2026-11-08 (#571). Step 5 of Testing starts now.
+- **Status:** Accepted (2026-11-09) by the operator. Proposed 2026-11-08 (#571). Step 5 of Testing starts now. Amendment 1 (customer-accepted credential injection) Proposed 2026-11-13, see the end of this record.
 - **Date:** 2026-11-08
 - **Context source:**
   - `docs/adr/ADR-002-per-org-execution-plane.md:99`: "we do not host or bill for execution compute".
@@ -128,3 +128,32 @@ Negative, to watch:
      - **Quarantine:** the guest polls the internet, a bare IP and `api.agent37.com` every 250 ms. `deny-all` answers 200 in 0.6 to 0.9 s, and no request succeeds after it returns. Exec still works under it.
      - **Reconciler:** an expired cell is found by its metadata, with no worker involved, then quarantined and deleted. Delete takes about 0.5 s. Right after it, a repeat delete, an exec and a get all answer 404.
    - **Not covered:** a real guest calling the broker, a 503 on delete, and the list of an account with more instances than one page. Agent37 has to say how a large account's list is paged before the adapter relies on a single call.
+
+## Amendment 1 (Proposed 2026-11-13): customer-accepted credential injection
+
+- **Status:** Proposed by the operator. Decision 1–5 stand; this amends two anti-deviation invariants.
+- **Amends:** the anti-deviation invariants "No long-lived credentials" (`:47`) and, for private repositories only, "Barred on a profile without proven closed egress and DNS" (`:50`).
+- **Why:** real jobs on the managed tier need the customer's own credentials: cloning a private repository, reading pull requests for DORA metrics, a model subscription token. A customer-shaped job (weekly health, security and DORA reports for a repository) was run on Agent37 on 2026-11-13 and needed both a model token and a GitHub token. Under the invariants as written, the managed tier cannot run it at all, so the customer is pushed back to a box they may not have.
+
+### Change
+
+1. **Risk acceptance is a legal record.** An organization admin may accept, in writing, that a named credential is injected into cells on a named managed profile. The record holds who accepted, when, the text version shown, the profile, the credential's name and scope as declared by the customer, and an expiry. It is stored like a provider-terms record (Decision 4), never inferred from a setting or a client request.
+2. **The resolver reads it.** `risk_acceptance` is a new server-derived input of the profile resolver (Decision 2). With a current record, and only for that organization, profile and credential, the resolver lifts:
+   - **the long-lived-credential clause of "No long-lived credentials"**, for credentials the customer supplies to act on its own repositories and model account (for example a repository token or a model subscription token). The other two clauses stay in force: cloud tokens, including the customer's own, and Automata's provider key are never injected on this tier;
+   - **the private-repository bar**.
+     Without a record, or with an expired one, both stay in force and the run is refused with a named reason.
+3. **What responsibility moves.** The customer owns the consequences of exposing _their_ credential to the third-party guest, including exfiltration through the profile's known gaps (open DNS on `{allow:[...]}`, provider credentials in the guest). The record must name those gaps in the text the admin accepts.
+4. **What stays with Automata.** Accepting risk does not lower our own duties:
+   - **Never ours.** Automata's provider key, cloud tokens and any Automata credential are still never injected.
+   - **Narrowest scope.** A credential goes into the environment of the one command that needs it when the profile allows per-command environment, and into instance environment only when it does not. It is never written to the guest's disk, to transcripts, to session checkpoints (redacted before they leave the cell) or to run artifacts.
+   - **Lifetime = the cell.** The instance is deleted at mission end with verified teardown, and never reused (existing invariant). Deletion is the removal: we do not rely on editing instance environment afterwards.
+   - **Logs.** Every injection is logged with credential name, length, profile, mission and cell, never the value.
+   - **Guidance.** The UI recommends least privilege (fine-grained, read-only, short-lived) and warns before accepting a broad or non-expiring token, without refusing it.
+5. **Still barred on the managed tier, with or without a record:** untrusted pull requests, irreversible or production steps, personal or residency-bound data, and the review lane (ADR-004). Those protect third parties and Automata's own trust guarantees, not only the customer's credential.
+
+### Consequences
+
+- **Positive:** private repositories and authenticated jobs can run with no box. The customer chooses convenience knowingly.
+- **Model key custody (supersedes the caveat above for record-holding organizations only).** A capped gateway token is still the default and preferred model credential on this tier. An organization with a current record for its model token may inject that token instead, and accepts in the record that ADR-002 §4's benefit is lost for it. Organizations without a record keep the gateway-token rule unchanged.
+- **Negative:** a leaked customer credential is still an incident on Automata's platform. The contractual shift (terms, DPA) needs legal review before it is sold; until then the record is an internal control, not a liability transfer.
+- **Evidence:** Testing gains a check that a run with an expired record is refused, and that teardown removes the injected credential with the instance.
