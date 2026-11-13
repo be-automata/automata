@@ -1,9 +1,8 @@
-import { createHash, randomBytes } from "node:crypto";
-
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 
 import { DB } from "../db";
 import { cellBearer, cellEffect, cellStep } from "../db/schema";
+import { hashOpaqueToken, mintOpaqueToken } from "../utils/opaque-token";
 
 /**
  * Durable authority for remote cells (ADR-014, "Remote cells cannot rely on the
@@ -52,9 +51,6 @@ export interface BearerContext {
 }
 
 type Executor = Pick<DB, "select">;
-
-const hashToken = (token: string): string =>
-  createHash("sha256").update(token).digest("hex");
 
 const effectKey = (stepKey: string, idempotencyKey: string) =>
   and(
@@ -212,11 +208,11 @@ export async function mintBearer({
   if (ttlMs > step.stepTimeoutMs) {
     return { ok: false, reason: "ttl_exceeds_step_timeout" };
   }
-  const token = randomBytes(32).toString("base64url");
+  const token = mintOpaqueToken();
   const inserted = await db
     .insert(cellBearer)
     .values({
-      tokenHash: hashToken(token),
+      tokenHash: hashOpaqueToken(token),
       stepKey,
       attempt,
       expiresAt: sql`now() + make_interval(secs => ${ttlMs / 1000})`,
@@ -260,7 +256,7 @@ async function resolveBearer(
     })
     .from(cellBearer)
     .innerJoin(cellStep, eq(cellStep.stepKey, cellBearer.stepKey))
-    .where(eq(cellBearer.tokenHash, hashToken(token)))
+    .where(eq(cellBearer.tokenHash, hashOpaqueToken(token)))
     .limit(1);
   const row = (
     lock ? await query.for("update", { of: cellStep }) : await query
