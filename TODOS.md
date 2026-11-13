@@ -21,7 +21,7 @@ Each item lists its re-entry trigger.
 
 - [ ] **Agent Forge: own git core, GitHub as a projection.**
   - **Why:** answers the pilot's "less GitHub dependency" ask with shipped code instead of a roadmap.
-  - **Context:** spikes 001–008 validated all of it, and the build guide is `.claude/skills/spike-findings-automata-platform/references/agent-forge-git.md`. Deferred because it is the largest independent build, and the pilot runs on GitHub through the credential broker.
+  - **Context:** spikes 001–008 validated all of it, and the build guide is the `spike-findings-automata-platform` skill (user-level), reference `agent-forge-git.md`. Deferred because it is the largest independent build, and the pilot runs on GitHub through the credential broker.
   - **Re-entry:** a GitHub limit or outage blocks agents, or a buyer requires the dependency gone.
   - **Effort:** XL (human) / L (CC). **Priority:** P2. **Depends on:** the commercial checkpoint after M2.
 - [ ] **Agency / white-label channel.**
