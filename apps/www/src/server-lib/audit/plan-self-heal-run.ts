@@ -1,5 +1,3 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-
 import { and, desc, eq, gte, isNotNull, ne } from "drizzle-orm";
 
 import type { DB } from "@terragon/shared/db";
@@ -21,6 +19,11 @@ import {
   type AuditCheckKind,
 } from "@terragon/shared/self-heal/audit-rules";
 import { denyExceptionsFor } from "@terragon/shared/self-heal/fix-paths";
+import {
+  hashOpaqueToken as hashSelfHealToken,
+  mintOpaqueToken as mintSelfHealToken,
+  opaqueTokenMatches as selfHealTokenMatches,
+} from "@terragon/shared/utils/opaque-token";
 
 import { isAuditFindingsStamp, isAuditFixStamp } from "../review/review-skill";
 import { fixBranchName } from "./fix-run-prompt";
@@ -93,24 +96,9 @@ export interface SelfHealFixRunInput {
 
 export type SelfHealRunInput = SelfHealAuditRunInput | SelfHealFixRunInput;
 
-export function mintSelfHealToken(): string {
-  return randomBytes(32).toString("base64url");
-}
-
-export function hashSelfHealToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
-/** Constant-time check of a presented token against its stored hash. */
-export function selfHealTokenMatches(
-  presented: string,
-  storedHash: string,
-): boolean {
-  const a = Buffer.from(hashSelfHealToken(presented), "utf8");
-  const b = Buffer.from(storedHash, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
+// The token format lives in @terragon/shared (#599); these names stay for
+// the self-heal callers. No implementation of their own.
+export { hashSelfHealToken, mintSelfHealToken, selfHealTokenMatches };
 
 /**
  * #277: the deterministic checks of the repo's script findings resolved in
