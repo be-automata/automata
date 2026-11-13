@@ -177,6 +177,54 @@ export async function getReadOnlyInstallationToken(
 }
 
 /**
+ * The ONLY permissions a remote-cell write token is ever minted with (#606).
+ * Contents write (git push) plus metadata read; nothing else is spread in.
+ */
+export const WRITE_TOKEN_PERMISSIONS = {
+  contents: "write",
+  metadata: "read",
+} as const;
+
+/**
+ * A contents-write installation token for exactly one repository (#606).
+ *
+ * Scope: WRITE_TOKEN_PERMISSIONS on `[repo]` only. Lifetime: GitHub caps
+ * installation tokens at one hour, so no `expires_at` is requested; the
+ * response's own expiry is returned. Used only by the remote-cell broker, for
+ * both legs of a push (the info/refs advertisement and the receive-pack POST);
+ * fetch-side calls use the read-only token. `knownInstallationId` skips the
+ * lookup, exactly as for getInstallationToken.
+ */
+export async function getWriteInstallationToken(
+  owner: string,
+  repo: string,
+  knownInstallationId?: number,
+): Promise<{ token: string; expiresAt: string }> {
+  const app = getGitHubApp();
+  let data: { token?: unknown; expires_at?: unknown };
+  try {
+    const installationId =
+      knownInstallationId ?? (await lookupInstallationId(owner, repo));
+    ({ data } = await app.octokit.request(
+      "POST /app/installations/{installation_id}/access_tokens",
+      {
+        installation_id: installationId,
+        repositories: [repo],
+        permissions: WRITE_TOKEN_PERMISSIONS,
+      },
+    ));
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
+  }
+  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
+    throw new Error(
+      "GitHub App token response has no token or no expires_at (write token)",
+    );
+  }
+  return { token: data.token, expiresAt: data.expires_at };
+}
+
+/**
  * The id of the App installation that covers a repository, or null when the
  * App is not installed on it.
  */

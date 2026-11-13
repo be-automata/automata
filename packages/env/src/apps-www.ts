@@ -104,6 +104,9 @@ export const env = envsafe({
   // reviews/reactions) regardless of per-installation mode. The pilot Workers
   // deployment sets this FALSE until the pilot binding is verified in shadow.
   GITHUB_SIDE_EFFECTS_ENABLED: bool({ default: true }),
+  // Remote-cell broker routes (/api/cell/git, /api/v3, /api/graphql) answer 404
+  // unless this is true. ADR-014 L3 PR 2 ships them dark; PR 4 turns them on.
+  CELL_BROKER_ENABLED: bool({ default: false }),
   // ADR-036: the single-writer review channel (emit-only agent → control-plane
   // posts exactly once at finish, with the per-repo tolerance floor + a grace-period
   // sweep backstop) is now UNCONDITIONAL — the former REVIEW_SINGLE_WRITER flag was
