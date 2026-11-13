@@ -12,6 +12,7 @@ import {
   markStepDone,
   mintBearer,
   openStep,
+  releaseEffect,
   revokeAttempt,
   verifyBearer,
 } from "./cell-authority";
@@ -376,5 +377,169 @@ describe("cell authority (ADR-014 remote cells)", () => {
     expect(
       await beginEffect({ db, token: current, idempotencyKey: "late" }),
     ).toEqual({ kind: "refused", reason: "step_done" });
+  });
+
+  describe("releaseEffect (#606 amendment 4)", () => {
+    async function effectRows(stepKey: string, key: string): Promise<number> {
+      const rows = await db
+        .select({ key: cellEffect.idempotencyKey })
+        .from(cellEffect)
+        .where(
+          and(
+            eq(cellEffect.stepKey, stepKey),
+            eq(cellEffect.idempotencyKey, key),
+          ),
+        );
+      return rows.length;
+    }
+
+    it("drops an unanswered claim without refunding the unit, and an identical retry claims afresh (AC12)", async () => {
+      const s = await newStep();
+      await s.open(1);
+      const token = await s.bearer(1);
+      expect((await beginEffect({ db, token, idempotencyKey: "k" })).kind).toBe(
+        "go",
+      );
+      expect(await effectsUsed(s.stepKey)).toBe(1);
+      expect(
+        await releaseEffect({
+          db,
+          stepKey: s.stepKey,
+          idempotencyKey: "k",
+          attempt: 1,
+        }),
+      ).toBe(true);
+      expect(await effectRows(s.stepKey, "k")).toBe(0);
+      expect(await effectsUsed(s.stepKey)).toBe(1);
+      expect((await beginEffect({ db, token, idempotencyKey: "k" })).kind).toBe(
+        "go",
+      );
+      expect(await effectsUsed(s.stepKey)).toBe(2);
+    });
+
+    it("leaves a completed effect alone", async () => {
+      const s = await newStep();
+      await s.open(1);
+      const token = await s.bearer(1);
+      await beginEffect({ db, token, idempotencyKey: "k" });
+      await completeEffect({
+        db,
+        stepKey: s.stepKey,
+        idempotencyKey: "k",
+        attempt: 1,
+        result: { status: 200 },
+      });
+      expect(
+        await releaseEffect({
+          db,
+          stepKey: s.stepKey,
+          idempotencyKey: "k",
+          attempt: 1,
+        }),
+      ).toBe(false);
+      expect(await beginEffect({ db, token, idempotencyKey: "k" })).toEqual({
+        kind: "replay",
+        result: { status: 200 },
+      });
+    });
+
+    it("matches nothing for the wrong attempt, and rejects a non-positive attempt", async () => {
+      const s = await newStep();
+      await s.open(1);
+      await beginEffect({
+        db,
+        token: await s.bearer(1),
+        idempotencyKey: "k",
+      });
+      expect(
+        await releaseEffect({
+          db,
+          stepKey: s.stepKey,
+          idempotencyKey: "k",
+          attempt: 2,
+        }),
+      ).toBe(false);
+      expect(await effectRows(s.stepKey, "k")).toBe(1);
+      await expect(
+        releaseEffect({
+          db,
+          stepKey: s.stepKey,
+          idempotencyKey: "k",
+          attempt: 0,
+        }),
+      ).rejects.toThrow(RangeError);
+    });
+
+    it("after a takeover, the older attempt's release returns false and the claim stays with the newer attempt", async () => {
+      const s = await newStep();
+      await s.open(1);
+      await beginEffect({
+        db,
+        token: await s.bearer(1),
+        idempotencyKey: "k",
+      });
+      await s.open(2);
+      expect(
+        (
+          await beginEffect({
+            db,
+            token: await s.bearer(2),
+            idempotencyKey: "k",
+          })
+        ).kind,
+      ).toBe("go");
+      expect(
+        await releaseEffect({
+          db,
+          stepKey: s.stepKey,
+          idempotencyKey: "k",
+          attempt: 1,
+        }),
+      ).toBe(false);
+      expect(await claimAttempt(s.stepKey, "k")).toBe(2);
+    });
+
+    it("waits for a transaction that holds the step row lock", async () => {
+      const s = await newStep();
+      await s.open(1);
+      await beginEffect({
+        db,
+        token: await s.bearer(1),
+        idempotencyKey: "k",
+      });
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let locked: (() => void) | undefined;
+      const lockTaken = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holder = db.transaction(async (tx) => {
+        await tx
+          .select({ stepKey: cellStep.stepKey })
+          .from(cellStep)
+          .where(eq(cellStep.stepKey, s.stepKey))
+          .for("update");
+        locked?.();
+        await gate;
+      });
+      await lockTaken;
+      let settled = false;
+      const pending = releaseEffect({
+        db,
+        stepKey: s.stepKey,
+        idempotencyKey: "k",
+        attempt: 1,
+      }).then((v) => {
+        settled = true;
+        return v;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+      release?.();
+      await holder;
+      expect(await pending).toBe(true);
+    });
   });
 });

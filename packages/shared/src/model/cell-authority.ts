@@ -13,7 +13,9 @@ import { hashOpaqueToken, mintOpaqueToken } from "../utils/opaque-token";
  *  2. revocation from the sweep                → `revokeAttempt`, recorded on the
  *                                                step so it also covers bearers
  *                                                that were never minted;
- *  3. an idempotency key on every effect       → `beginEffect` / `completeEffect`;
+ *  3. an idempotency key on every effect       → `beginEffect` / `completeEffect`
+ *                                                (`releaseEffect` drops a claim that
+ *                                                never got an answer);
  *  4. an attempt fence                         → `openStep` (monotone lease) +
  *                                                the bearer check under the step
  *                                                lock in `beginEffect`;
@@ -417,6 +419,48 @@ export async function completeEffect({
     )
     .returning({ key: cellEffect.idempotencyKey });
   return rows.length === 1;
+}
+
+/**
+ * Drop the pending claim of `attempt` on a key whose effect never got an
+ * answer (the transient-failure path of the broker push route, #606,
+ * amendment 4), so an identical retry can claim afresh and spend a new unit.
+ * Only an unanswered claim of exactly that attempt is deleted; a completed
+ * effect stays, and `effects_used` is never refunded. It takes the same
+ * `cell_step` row lock as `beginEffect`, so it serializes with a takeover: a
+ * release after a newer attempt took the claim over matches nothing and
+ * returns false.
+ */
+export async function releaseEffect({
+  db,
+  stepKey,
+  idempotencyKey,
+  attempt,
+}: {
+  db: DB;
+  stepKey: string;
+  idempotencyKey: string;
+  attempt: number;
+}): Promise<boolean> {
+  assertPositiveInt("attempt", attempt);
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ stepKey: cellStep.stepKey })
+      .from(cellStep)
+      .where(eq(cellStep.stepKey, stepKey))
+      .for("update");
+    const rows = await tx
+      .delete(cellEffect)
+      .where(
+        and(
+          effectKey(stepKey, idempotencyKey),
+          eq(cellEffect.attempt, attempt),
+          isNull(cellEffect.result),
+        ),
+      )
+      .returning({ key: cellEffect.idempotencyKey });
+    return rows.length === 1;
+  });
 }
 
 /** The current attempt reports the step finished. A fenced (zombie) attempt is refused. */
