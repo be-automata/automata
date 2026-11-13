@@ -1,8 +1,8 @@
 -- migrate:expand
 -- Durable authority for remote cells (ADR-014, "Remote cells cannot rely on the worker heap").
 -- cell_step: one row per run step; the current attempt holds the lease and older attempts are
--- fenced; the effect budget is per step. cell_bearer: per-attempt bearers (sha256 only), TTL
--- bounded by the step timeout, revocable. cell_effect: the create-only effect ledger.
+-- fenced; the effect budget is per step; revoked_through records the sweep's revocation. cell_bearer:
+-- per-attempt bearers (sha256 only), TTL bounded by the step timeout. cell_effect: the create-only effect ledger.
 -- Additive and idempotent: apply BEFORE deploying the www revision that reads these tables
 -- (migrate.yml does this on green main CI). Names and types match
 -- packages/shared/src/db/schema.ts exactly (schema-drift CI).
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS "cell_step" (
   "step_timeout_ms" integer NOT NULL,
   "effect_budget" integer,
   "effects_used" integer DEFAULT 0 NOT NULL,
-  "done_attempt" integer,
+  "revoked_through" integer,
   "done_at" timestamp,
   "created_at" timestamp DEFAULT now() NOT NULL,
   "updated_at" timestamp DEFAULT now() NOT NULL
@@ -32,13 +32,13 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS "cell_step_thread_id_index" ON "cell_step" USING btree ("thread_id");
+CREATE INDEX IF NOT EXISTS "cell_step_organization_id_index" ON "cell_step" USING btree ("organization_id");
 
 CREATE TABLE IF NOT EXISTS "cell_bearer" (
   "token_hash" text PRIMARY KEY NOT NULL,
   "step_key" text NOT NULL,
   "attempt" integer NOT NULL,
   "expires_at" timestamp NOT NULL,
-  "revoked_at" timestamp,
   "created_at" timestamp DEFAULT now() NOT NULL
 );
 

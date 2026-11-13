@@ -3315,7 +3315,8 @@ export const cellStep = pgTable(
     /** Null = unlimited. */
     effectBudget: integer("effect_budget"),
     effectsUsed: integer("effects_used").notNull().default(0),
-    doneAttempt: integer("done_attempt"),
+    /** Every attempt up to and including this one is revoked (the sweep's verdict). */
+    revokedThrough: integer("revoked_through"),
     doneAt: timestamp("done_at", { mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
@@ -3323,13 +3324,17 @@ export const cellStep = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (table) => [index("cell_step_thread_id_index").on(table.threadId)],
+  (table) => [
+    index("cell_step_thread_id_index").on(table.threadId),
+    index("cell_step_organization_id_index").on(table.organizationId),
+  ],
 );
 
 /**
  * A bearer the broker minted for one attempt of one step. Only the sha256 of the
- * token is stored. Its TTL is bounded by the step timeout at mint; revocation is
- * immediate and survives every worker.
+ * token is stored. Its TTL is bounded by the step timeout at mint. Revocation is
+ * recorded on the step (`cell_step.revoked_through`), so it also covers bearers
+ * that were never minted.
  */
 export const cellBearer = pgTable(
   "cell_bearer",
@@ -3340,7 +3345,6 @@ export const cellBearer = pgTable(
       .references(() => cellStep.stepKey, { onDelete: "cascade" }),
     attempt: integer("attempt").notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
-    revokedAt: timestamp("revoked_at", { mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   },
   (table) => [
