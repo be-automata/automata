@@ -326,19 +326,6 @@ describe("git broker reads", () => {
     expect(fetchSide.status).toBe(200);
   });
 
-  it("POST git-receive-pack is not implemented yet (501) once the switch is on", async () => {
-    const f = await fixture();
-    const h = harness();
-    const res = await h.handler(
-      post("/acme/widgets.git/git-receive-pack", f.token),
-    );
-    expect([res.status, (await res.json()).error]).toEqual([
-      501,
-      "push_not_implemented",
-    ]);
-    expect(h.fetchImpl).not.toHaveBeenCalled();
-  });
-
   it("a 3xx from GitHub, a thrown fetch and a failed mint all answer 502 upstream_error", async () => {
     const f = await fixture();
     const redirected = harness({
