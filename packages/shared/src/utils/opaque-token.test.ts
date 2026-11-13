@@ -42,8 +42,15 @@ describe("opaque token", () => {
   it("returns false, without throwing, for a stored hash of another length", () => {
     const token = mintOpaqueToken();
     const stored = hashOpaqueToken(token);
-    expect(opaqueTokenMatches(token, stored.slice(0, 32))).toBe(false);
-    expect(opaqueTokenMatches(token, `${stored}00`)).toBe(false);
-    expect(opaqueTokenMatches(token, "")).toBe(false);
+    for (const other of [
+      stored.slice(0, 32),
+      `${stored}00`,
+      "",
+      // 64 characters, 65 bytes: the length check is on bytes.
+      `${"a".repeat(63)}é`,
+    ]) {
+      expect(() => opaqueTokenMatches(token, other)).not.toThrow();
+      expect(opaqueTokenMatches(token, other)).toBe(false);
+    }
   });
 });

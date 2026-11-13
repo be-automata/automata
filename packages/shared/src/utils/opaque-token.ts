@@ -1,16 +1,18 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-/**
- * The one format for opaque bearer tokens: 32 random bytes as base64url,
- * stored only as the sha256 hex of the token. Self-heal check/gate tokens
- * and remote-cell bearers both use it, so a stored hash written by one
- * version keeps verifying in the next. Changing the encoding or the length
- * here invalidates every token already minted.
- */
+// The one format for opaque bearer tokens: 32 random bytes as base64url,
+// stored only as the sha256 hex of the token. Self-heal check/gate tokens
+// and remote-cell bearers both use it, so a stored hash written by one
+// version keeps verifying in the next. Changing the encoding or the length
+// here invalidates every token already minted. Self-heal verifies with
+// `opaqueTokenMatches`; cell bearers look the hash up in an indexed column.
+
+/** A fresh token: 32 random bytes, base64url (43 characters). */
 export function mintOpaqueToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/** The stored form of a token: its sha256 digest, lowercase hex. */
 export function hashOpaqueToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }

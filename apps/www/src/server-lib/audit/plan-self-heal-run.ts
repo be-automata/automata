@@ -20,9 +20,8 @@ import {
 } from "@terragon/shared/self-heal/audit-rules";
 import { denyExceptionsFor } from "@terragon/shared/self-heal/fix-paths";
 import {
-  hashOpaqueToken as hashSelfHealToken,
-  mintOpaqueToken as mintSelfHealToken,
-  opaqueTokenMatches as selfHealTokenMatches,
+  hashOpaqueToken,
+  mintOpaqueToken,
 } from "@terragon/shared/utils/opaque-token";
 
 import { isAuditFindingsStamp, isAuditFixStamp } from "../review/review-skill";
@@ -98,7 +97,11 @@ export type SelfHealRunInput = SelfHealAuditRunInput | SelfHealFixRunInput;
 
 // The token format lives in @terragon/shared (#599); these names stay for
 // the self-heal callers. No implementation of their own.
-export { hashSelfHealToken, mintSelfHealToken, selfHealTokenMatches };
+export {
+  hashOpaqueToken as hashSelfHealToken,
+  mintOpaqueToken as mintSelfHealToken,
+  opaqueTokenMatches as selfHealTokenMatches,
+} from "@terragon/shared/utils/opaque-token";
 
 /**
  * #277: the deterministic checks of the repo's script findings resolved in
@@ -215,7 +218,7 @@ export async function planSelfHealAuditRun({
       if (checks.length >= MAX_CHECKS) break;
     }
 
-    const checkToken = mintSelfHealToken();
+    const checkToken = mintOpaqueToken();
     await createAuditRunAtDispatch({
       db,
       organizationId,
@@ -223,7 +226,7 @@ export async function planSelfHealAuditRun({
       threadId,
       audit: "security-audit",
       requestedChecks: checks,
-      checkTokenHash: hashSelfHealToken(checkToken),
+      checkTokenHash: hashOpaqueToken(checkToken),
       checkTokenExpiresAt: new Date(now.getTime() + CHECK_TOKEN_TTL_MS),
     });
     return { selfHeal: { kind: "audit", checks, checkToken } };
@@ -408,13 +411,13 @@ export async function planSelfHealFixRun({
       now,
     });
 
-    const gateToken = mintSelfHealToken();
+    const gateToken = mintOpaqueToken();
     const updated = await updateFixAttempt({
       db,
       organizationId,
       id: attemptId,
       patch: {
-        gateTokenHash: hashSelfHealToken(gateToken),
+        gateTokenHash: hashOpaqueToken(gateToken),
         gateTokenExpiresAt: new Date(now.getTime() + FIX_GATE_TOKEN_TTL_MS),
       },
     });
