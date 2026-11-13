@@ -7,7 +7,7 @@ import { verifyCallbackCapability } from "@/server-lib/addon/callback-capability
 import { env } from "@terragon/env/apps-www";
 import {
   type AddonDeliveryKind,
-  getAddonCall,
+  getAddonCallForCallback,
   recordAddonDelivery,
 } from "@terragon/shared/model/addon-calls";
 
@@ -24,6 +24,9 @@ import {
  *    `tool_call_id` (subscription_event) and `group_id` → else 409. The call must
  *    have been recorded before dispatch → else 404. The RAP spec says a runtime
  *    MUST NOT inject unmatched results; a spec-following add-on does not retry 4xx.
+ *  - The call is looked up by the capability's call id only, not by organization:
+ *    a call whose thread was rehomed to another organization still receives its
+ *    in-flight results (the capability, minted before the move, names the old one).
  *  - 200 only after the delivery row is written. Any storage failure → 503, so an
  *    add-on that retries 5xx tries again.
  *  - Create-only per (call, delivery key): a retried or replayed delivery answers
@@ -95,11 +98,7 @@ export async function POST(
     header ?? `sha256:${createHash("sha256").update(raw).digest("hex")}`;
 
   try {
-    const call = await getAddonCall({
-      db,
-      callId: claims.callId,
-      organizationId: claims.organizationId,
-    });
+    const call = await getAddonCallForCallback({ db, callId: claims.callId });
     if (!call || call.groupId !== claims.groupId) {
       return reply({ error: "unknown_call" }, 404);
     }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { eq } from "drizzle-orm";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +10,7 @@ import {
   verifyCallbackCapability,
 } from "@/server-lib/addon/callback-capability";
 import { env } from "@terragon/env/apps-www";
+import { addonCall } from "@terragon/shared/db/schema";
 import * as addonCalls from "@terragon/shared/model/addon-calls";
 import { createTestOrg } from "@terragon/shared/model/test-helpers";
 
@@ -226,14 +228,27 @@ describe("POST /api/addon-callback/[capability]", () => {
     expect((await post(unrecorded, { ...result(f), id: cid })).status).toBe(
       404,
     );
-    const otherOrg = await createTestOrg({ db });
-    const crossOrg = signCallbackCapability(SECRET, {
+    expect(await deliveries(f)).toEqual([]);
+  });
+
+  it("still delivers an in-flight result after the call's thread is rehomed to another org", async () => {
+    const f = await recordedCall();
+    const newOrg = await createTestOrg({ db });
+    // What REHOME_MOVE_BY_THREAD does to the row; the add-on's URL still names the old org.
+    await db
+      .update(addonCall)
+      .set({ organizationId: newOrg })
+      .where(eq(addonCall.id, f.callId));
+    const res = await post(f.capability, result(f));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, delivery: "stored" });
+    const moved = await addonCalls.listAddonDeliveries({
+      db,
       callId: f.callId,
-      groupId: f.groupId,
-      organizationId: otherOrg,
-      expiresAt: Date.now() + 60_000,
+      organizationId: newOrg,
     });
-    expect((await post(crossOrg, result(f))).status).toBe(404);
+    expect(moved).toHaveLength(1);
+    // The old org no longer sees it.
     expect(await deliveries(f)).toEqual([]);
   });
 

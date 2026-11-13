@@ -73,6 +73,36 @@ export async function getAddonCall({
   return rows[0] ?? null;
 }
 
+/**
+ * The callback receiver's lookup, by call id only. The authority is the signed
+ * capability in the callback URL, which names this call id; the call's CURRENT
+ * organization is not part of it. A call whose thread was rehomed to another
+ * organization (REHOME_MOVE_BY_THREAD) still receives its in-flight results,
+ * which then belong to the new organization. Every other read stays fenced by
+ * organization (`getAddonCall`, `listAddonDeliveries`).
+ */
+export async function getAddonCallForCallback({
+  db,
+  callId,
+}: {
+  db: DB;
+  callId: string;
+}): Promise<AddonCallRecord | null> {
+  const rows = await db
+    .select({
+      id: addonCall.id,
+      organizationId: addonCall.organizationId,
+      threadId: addonCall.threadId,
+      transport: addonCall.transport,
+      groupId: addonCall.groupId,
+      expiresAt: addonCall.expiresAt,
+    })
+    .from(addonCall)
+    .where(eq(addonCall.id, callId))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function recordAddonDelivery({
   db,
   delivery,
