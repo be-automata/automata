@@ -67,6 +67,10 @@ export const REHOME_MOVE_BY_THREAD: readonly RehomeByThreadTable[] = [
   { table: "egress_events", threadColumn: "thread_id", idColumn: "id" },
   // ADR-014: allow_cell decisions belong to the run's thread, like its egress.
   { table: "cell_decision", threadColumn: "thread_id", idColumn: "id" },
+  // Add-on calls in flight belong to the run's thread too; their deliveries
+  // follow by call_id (no organization_id of their own). A call with no thread
+  // is not moved: it expires with its callback capability.
+  { table: "addon_call", threadColumn: "thread_id", idColumn: "id" },
   {
     table: "self_heal_slot",
     threadColumn: "holder_thread_id",
