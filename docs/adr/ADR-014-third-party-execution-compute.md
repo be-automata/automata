@@ -139,7 +139,7 @@ Negative, to watch:
 
 1. **Risk acceptance is a legal record.** An organization admin may accept, in writing, that a named credential is injected into cells on a named managed profile. The record holds who accepted, when, the text version shown, the profile, the credential's name and scope as declared by the customer, and an expiry. It is stored like a provider-terms record (Decision 4), never inferred from a setting or a client request.
 2. **The resolver reads it.** `risk_acceptance` is a new server-derived input of the profile resolver (Decision 2). With a current record, and only for that organization, profile and credential, the resolver lifts:
-   - **"No long-lived credentials"**, for customer-supplied credentials only;
+   - **the long-lived-credential clause of "No long-lived credentials"**, for credentials the customer supplies to act on its own repositories and model account (for example a repository token or a model subscription token). The other two clauses stay in force: cloud tokens, including the customer's own, and Automata's provider key are never injected on this tier;
    - **the private-repository bar**.
      Without a record, or with an expired one, both stay in force and the run is refused with a named reason.
 3. **What responsibility moves.** The customer owns the consequences of exposing _their_ credential to the third-party guest, including exfiltration through the profile's known gaps (open DNS on `{allow:[...]}`, provider credentials in the guest). The record must name those gaps in the text the admin accepts.
@@ -154,5 +154,6 @@ Negative, to watch:
 ### Consequences
 
 - **Positive:** private repositories and authenticated jobs can run with no box. The customer chooses convenience knowingly.
+- **Model key custody (supersedes the caveat above for record-holding organizations only).** A capped gateway token is still the default and preferred model credential on this tier. An organization with a current record for its model token may inject that token instead, and accepts in the record that ADR-002 §4's benefit is lost for it. Organizations without a record keep the gateway-token rule unchanged.
 - **Negative:** a leaked customer credential is still an incident on Automata's platform. The contractual shift (terms, DPA) needs legal review before it is sold; until then the record is an internal control, not a liability transfer.
 - **Evidence:** Testing gains a check that a run with an expired record is refused, and that teardown removes the injected credential with the instance.
