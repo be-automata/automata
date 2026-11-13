@@ -3290,3 +3290,88 @@ export const addonCallDelivery = pgTable(
     ),
   ],
 );
+
+/**
+ * Durable authority for remote cells (ADR-014, "Remote cells cannot rely on the
+ * worker heap"). A remote cell outlives its worker, so the broker's state lives
+ * here instead of in the worker's memory. One row per run step: the current
+ * attempt holds the lease, and every older attempt is fenced (a redelivered step
+ * takes attempt + 1). The effect budget is per step, not per attempt: a zombie
+ * attempt and its successor share it. `stepKey` is the engine's identity for the
+ * step (e.g. the workflow run id plus the step name).
+ */
+export const cellStep = pgTable(
+  "cell_step",
+  {
+    stepKey: text("step_key").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    currentAttempt: integer("current_attempt").notNull(),
+    stepTimeoutMs: integer("step_timeout_ms").notNull(),
+    /** Null = unlimited. */
+    effectBudget: integer("effect_budget"),
+    effectsUsed: integer("effects_used").notNull().default(0),
+    /** Every attempt up to and including this one is revoked (the sweep's verdict). */
+    revokedThrough: integer("revoked_through"),
+    doneAt: timestamp("done_at", { mode: "date" }),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date" })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("cell_step_thread_id_index").on(table.threadId),
+    index("cell_step_organization_id_index").on(table.organizationId),
+  ],
+);
+
+/**
+ * A bearer the broker minted for one attempt of one step. Only the sha256 of the
+ * token is stored. Its TTL is bounded by the step timeout at mint. Revocation is
+ * recorded on the step (`cell_step.revoked_through`), so it also covers bearers
+ * that were never minted.
+ */
+export const cellBearer = pgTable(
+  "cell_bearer",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    stepKey: text("step_key")
+      .notNull()
+      .references(() => cellStep.stepKey, { onDelete: "cascade" }),
+    attempt: integer("attempt").notNull(),
+    expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("cell_bearer_step_attempt_index").on(table.stepKey, table.attempt),
+  ],
+);
+
+/**
+ * The effect ledger: one row per (step, idempotency key), create-only. A
+ * redelivered attempt that repeats a key gets the stored result instead of a
+ * second effect.
+ */
+export const cellEffect = pgTable(
+  "cell_effect",
+  {
+    stepKey: text("step_key")
+      .notNull()
+      .references(() => cellStep.stepKey, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    attempt: integer("attempt").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: "cell_effect_pk",
+      columns: [table.stepKey, table.idempotencyKey],
+    }),
+  ],
+);

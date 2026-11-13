@@ -71,6 +71,9 @@ export const REHOME_MOVE_BY_THREAD: readonly RehomeByThreadTable[] = [
   // follow by call_id (no organization_id of their own). A call with no thread
   // is not moved: it expires with its callback capability.
   { table: "addon_call", threadColumn: "thread_id", idColumn: "id" },
+  // Remote-cell authority belongs to the run's thread; bearers and effects follow
+  // by step_key (no organization_id of their own).
+  { table: "cell_step", threadColumn: "thread_id", idColumn: "step_key" },
   {
     table: "self_heal_slot",
     threadColumn: "holder_thread_id",
