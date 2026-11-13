@@ -1,6 +1,6 @@
 @AGENTS.md
 
-- **Spike findings for automata-platform** (implementation patterns, constraints and gotchas from the `.planning/spikes/` experiments) → `Skill("spike-findings-automata-platform")`. It is a user-level skill, kept outside this public repo; it is absent in a fresh clone.
+- **Spike findings for automata-platform** (implementation patterns, constraints and gotchas from the `.planning/spikes/` experiments) → `Skill("spike-findings-automata-platform")`, the local user-level skill at `~/.claude/skills/spike-findings-automata-platform/`. Load it before designing or implementing anything a spike covered.
 
 ## Design System
 
