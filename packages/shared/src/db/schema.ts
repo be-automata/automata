@@ -3230,3 +3230,63 @@ export const cellDecision = pgTable(
     ),
   ],
 );
+
+/**
+ * Add-on calls, recorded BEFORE dispatch (ADR-014 managed tier; add-on contract
+ * RAP / MCP Tasks). A RAP add-on POSTs each result once to a callback URL; the
+ * receiver lives on the control plane, outside every cell, so a result survives
+ * the cell's death. A callback is accepted only for a call recorded here: the RAP
+ * spec says a runtime MUST NOT inject unmatched results. `id` is the call id we
+ * mint and send as the RAP `id`; `groupId` is the RAP `group_id`.
+ */
+export const addonCall = pgTable(
+  "addon_call",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    threadId: text("thread_id").references(() => thread.id, {
+      onDelete: "cascade",
+    }),
+    transport: text("transport").$type<"rap">().notNull(),
+    groupId: text("group_id").notNull(),
+    expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [index("addon_call_thread_id_index").on(table.threadId)],
+);
+
+/**
+ * One row per callback delivery an add-on made for a recorded call. Create-only:
+ * `(call_id, delivery_key)` is unique, so a retried or replayed delivery is never
+ * applied twice. `deliveryKey` is the add-on's stable `x-rap-delivery-id` when it
+ * sends one, else `sha256:<hex>` of the body (two genuine identical events then
+ * collapse: RAP events carry no sequence number).
+ */
+export const addonCallDelivery = pgTable(
+  "addon_call_delivery",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    callId: text("call_id")
+      .notNull()
+      .references(() => addonCall.id, { onDelete: "cascade" }),
+    deliveryKey: text("delivery_key").notNull(),
+    kind: text("kind")
+      .$type<"tool_result" | "subscription_event" | "other">()
+      .notNull(),
+    body: jsonb("body").$type<Record<string, unknown>>().notNull(),
+    final: boolean("final").notNull().default(false),
+    receivedAt: timestamp("received_at", { mode: "date" })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("addon_call_delivery_call_key_unique").on(
+      table.callId,
+      table.deliveryKey,
+    ),
+  ],
+);

@@ -153,6 +153,12 @@ export const env = envsafe({
   // /etc/automata/profile-evidence.env, not in worker-box.env. Empty = the route
   // refuses everything (the timer then fails loudly and evidence expires on its own).
   PROFILE_EVIDENCE_SECRET: str({ default: "", allowEmpty: true }),
+  // Add-on callback receiver (ADR-014 managed tier; RAP add-ons). Signs the per-call
+  // capability in each callback URL the control plane hands an add-on. Dedicated,
+  // never INTERNAL_SHARED_SECRET or a daemon token. Empty = no capability verifies and
+  // POST /api/addon-callback/* answers 401 to everything. Rotation invalidates the
+  // callback URLs of calls still in flight (their results are then refused).
+  ADDON_CALLBACK_SECRET: str({ default: "", allowEmpty: true }),
   // Platform ops Slack incoming webhook, the same channel as the worker's #373
   // growth-trigger WORKER_ALERT_WEBHOOK_URL (D-15). Empty = log only. A
   // credential: never logged.
