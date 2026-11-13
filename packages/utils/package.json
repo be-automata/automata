@@ -10,7 +10,8 @@
     "./redact": "./src/redact.ts",
     "./payload-seal": "./src/payload-seal.ts",
     "./run-lane": "./src/run-lane.ts",
-    "./box-capacity": "./src/box-capacity.ts"
+    "./box-capacity": "./src/box-capacity.ts",
+    "./receive-pack-refs": "./src/receive-pack-refs.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",
