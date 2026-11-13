@@ -1,6 +1,6 @@
 @AGENTS.md
 
-- **Spike findings for automata-platform** (implementation patterns, constraints, gotchas for knowledge claims, box templates, persistent agents, Agent Forge) → `Skill("spike-findings-automata-platform")`
+- **Spike findings for automata-platform** (implementation patterns, constraints and gotchas from the `.planning/spikes/` experiments) → `Skill("spike-findings-automata-platform")`. It is a user-level skill, kept outside this public repo; it is absent in a fresh clone.
 
 ## Design System
 
