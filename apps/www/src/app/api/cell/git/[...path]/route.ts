@@ -3,7 +3,7 @@ import { githubSideEffectsEnabled } from "@/lib/github-side-effects";
 import { cellBrokerEnabled } from "@/server-lib/cell-broker/common";
 import { createGitBrokerHandler } from "@/server-lib/cell-broker/git";
 import {
-  getReadOnlyInstallationToken,
+  getCellReadInstallationToken,
   getWriteInstallationToken,
 } from "@terragon/shared/github-app";
 
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 const handler = createGitBrokerHandler({
   db,
   fetchImpl: (input, init) => fetch(input, init),
-  mintReadToken: getReadOnlyInstallationToken,
+  mintReadToken: getCellReadInstallationToken,
   mintWriteToken: getWriteInstallationToken,
   sideEffectsEnabled: githubSideEffectsEnabled,
   enabled: cellBrokerEnabled,

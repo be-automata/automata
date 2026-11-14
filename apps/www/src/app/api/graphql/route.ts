@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { cellBrokerEnabled } from "@/server-lib/cell-broker/common";
 import { createGhBrokerHandler } from "@/server-lib/cell-broker/gh";
-import { getReadOnlyInstallationToken } from "@terragon/shared/github-app";
+import { getCellReadInstallationToken } from "@terragon/shared/github-app";
 
 /**
  * /api/graphql: read-only GitHub GraphQL for a remote cell's `gh` (ADR-014,
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 const handler = createGhBrokerHandler({
   db,
   fetchImpl: (input, init) => fetch(input, init),
-  mintReadToken: getReadOnlyInstallationToken,
+  mintReadToken: getCellReadInstallationToken,
   enabled: cellBrokerEnabled,
 });
 

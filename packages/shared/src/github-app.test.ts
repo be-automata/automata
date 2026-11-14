@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  CELL_READ_OPTIONAL_PERMISSIONS,
+  CELL_READ_REQUIRED_PERMISSIONS,
+  MissingInstallationPermissionError,
   READ_ONLY_TOKEN_PERMISSIONS,
-  WORKFLOWS_WRITE_PERMISSION,
+  WRITE_OPTIONAL_PERMISSIONS,
   WRITE_TOKEN_PERMISSIONS,
+  clearInstallationTokenCacheForTests,
+  getCellReadInstallationToken,
   getWriteInstallationToken,
   getGitHubApp,
   getInstallationToken,
@@ -19,12 +24,15 @@ describe("GitHub App", () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     resetAppInstance();
+    clearInstallationTokenCacheForTests();
   });
 
   afterEach(() => {
     process.env = originalEnv;
     vi.restoreAllMocks();
+    vi.useRealTimers();
     resetAppInstance();
+    clearInstallationTokenCacheForTests();
   });
 
   describe("getGitHubApp", () => {
@@ -66,13 +74,22 @@ describe("GitHub App", () => {
     });
   });
 
-  describe("installation tokens (#606: remote-cell write variant)", () => {
+  describe("installation tokens (#606: one mint, with presets)", () => {
     type Call = { route: string; params: Record<string, unknown> };
+    type Installation = Record<string, unknown>;
+
+    const PUSH_GRANTED = { contents: "write", metadata: "read" };
+    const MINTED = { token: "ghs_x", expires_at: "2099-01-01T00:00:00Z" };
 
     function mockRequests(
-      tokenResponse: Record<string, unknown>,
-      installation: Record<string, unknown> = { id: 42 },
-      failFirstInstallationRead = false,
+      installation: Installation | (() => Installation) = {
+        id: 42,
+        permissions: PUSH_GRANTED,
+      },
+      tokenResponse:
+        | Record<string, unknown>
+        | (() => Record<string, unknown>) = MINTED,
+      failInstallationReads = 0,
     ): Call[] {
       process.env.GITHUB_APP_ID = "123456";
       process.env.GITHUB_APP_PRIVATE_KEY = "fake-private-key";
@@ -84,33 +101,57 @@ describe("GitHub App", () => {
       ) => {
         calls.push({ route, params });
         if (route === "GET /repos/{owner}/{repo}/installation") {
-          if (failFirstInstallationRead && installationReads++ === 0) {
+          if (installationReads++ < failInstallationReads) {
             throw new Error("permissions read failed");
           }
-          return { data: installation };
+          return {
+            data:
+              typeof installation === "function"
+                ? installation()
+                : installation,
+          };
         }
-        return { data: tokenResponse };
+        return {
+          data:
+            typeof tokenResponse === "function"
+              ? tokenResponse()
+              : tokenResponse,
+        };
       }) as never);
       return calls;
     }
 
-    it("pins exactly contents:write and metadata:read as the base write permissions", () => {
+    const posts = (calls: Call[]) =>
+      calls.filter((c) => c.route.startsWith("POST"));
+    const gets = (calls: Call[]) =>
+      calls.filter((c) => c.route.startsWith("GET"));
+
+    it("pins the required and optional permission sets", () => {
       expect(WRITE_TOKEN_PERMISSIONS).toEqual({
         contents: "write",
         metadata: "read",
       });
-      expect(WORKFLOWS_WRITE_PERMISSION).toEqual({ workflows: "write" });
+      expect(WRITE_OPTIONAL_PERMISSIONS).toEqual({ workflows: "write" });
+      expect(CELL_READ_REQUIRED_PERMISSIONS).toEqual({
+        contents: "read",
+        metadata: "read",
+      });
+      expect(CELL_READ_OPTIONAL_PERMISSIONS).toEqual({
+        pull_requests: "read",
+        issues: "read",
+      });
     });
 
-    it("requests a single-repo token with exactly the write permissions and returns token + expiresAt", async () => {
-      const calls = mockRequests({
-        token: "ghs_write_test_token",
-        expires_at: "2026-10-04T03:00:00Z",
-      });
+    it("write: requests a single-repo token with exactly the required permissions and returns token + expiresAt", async () => {
+      const calls = mockRequests();
       await expect(getWriteInstallationToken("o", "r")).resolves.toEqual({
-        token: "ghs_write_test_token",
-        expiresAt: "2026-10-04T03:00:00Z",
+        token: "ghs_x",
+        expiresAt: "2099-01-01T00:00:00Z",
       });
+      expect(calls.map((c) => c.route)).toEqual([
+        "GET /repos/{owner}/{repo}/installation",
+        "POST /app/installations/{installation_id}/access_tokens",
+      ]);
       const body = calls[1]!.params;
       expect(body).toEqual({
         installation_id: 42,
@@ -120,59 +161,150 @@ describe("GitHub App", () => {
       expect("expires_at" in body).toBe(false);
     });
 
-    const MINTED = { token: "ghs_x", expires_at: "2026-10-04T03:00:00Z" };
-
-    it("adds workflows:write when the installation grants it", async () => {
-      const calls = mockRequests(MINTED, {
+    it("write: adds workflows:write when the installation grants it, omits it when read-only or absent", async () => {
+      const granted = mockRequests({
         id: 42,
-        permissions: { contents: "write", workflows: "write" },
+        permissions: { ...PUSH_GRANTED, workflows: "write" },
       });
       await getWriteInstallationToken("o", "r");
-      expect(calls[1]!.params.permissions).toEqual({
+      expect(posts(granted)[0]!.params.permissions).toEqual({
         contents: "write",
         metadata: "read",
         workflows: "write",
       });
-    });
 
-    it("stays at contents:write + metadata:read when workflows is read-only or not granted", async () => {
-      for (const permissions of [{ workflows: "read" }, {}, undefined]) {
+      for (const extra of [{ workflows: "read" }, {}]) {
         vi.restoreAllMocks();
         resetAppInstance();
-        const calls = mockRequests(MINTED, { id: 42, permissions });
+        clearInstallationTokenCacheForTests();
+        const calls = mockRequests({
+          id: 42,
+          permissions: { ...PUSH_GRANTED, ...extra },
+        });
         await getWriteInstallationToken("o", "r");
-        expect(calls[1]!.params.permissions).toEqual({
+        expect(posts(calls)[0]!.params.permissions).toEqual({
           contents: "write",
           metadata: "read",
         });
       }
     });
 
-    it("mints without workflows when reading the granted permissions fails", async () => {
-      const calls = mockRequests(MINTED, { id: 42 }, true);
-      await expect(getWriteInstallationToken("o", "r")).resolves.toEqual({
-        token: "ghs_x",
-        expiresAt: "2026-10-04T03:00:00Z",
+    it("a missing required permission throws MissingInstallationPermissionError naming it, with no POST", async () => {
+      const calls = mockRequests({
+        id: 42,
+        permissions: { metadata: "read" },
       });
-      const post = calls.find((c) => c.route.startsWith("POST"));
-      expect(post!.params.permissions).toEqual({
-        contents: "write",
+      const error = await getWriteInstallationToken("o", "r").catch((e) => e);
+      expect(error).toBeInstanceOf(MissingInstallationPermissionError);
+      expect(error).toMatchObject({
+        permission: "contents",
+        needed: "write",
+        granted: undefined,
+      });
+      expect(error.message).toContain("contents");
+      expect(posts(calls)).toHaveLength(0);
+    });
+
+    it("a permission granted below the requested level counts as missing (contents:read for a push)", async () => {
+      const calls = mockRequests({
+        id: 42,
+        permissions: { contents: "read", metadata: "read" },
+      });
+      await expect(getWriteInstallationToken("o", "r")).rejects.toMatchObject({
+        name: "MissingInstallationPermissionError",
+        permission: "contents",
+        needed: "write",
+        granted: "read",
+      });
+      expect(posts(calls)).toHaveLength(0);
+    });
+
+    it("write covers read: contents:write satisfies a read requirement", async () => {
+      const calls = mockRequests({
+        id: 42,
+        permissions: { contents: "write", metadata: "read" },
+      });
+      await getCellReadInstallationToken("o", "r");
+      expect(posts(calls)[0]!.params.permissions).toEqual({
+        contents: "read",
         metadata: "read",
       });
     });
 
-    it("a known installation id skips the lookup", async () => {
-      const calls = mockRequests({
-        token: "ghs_x",
-        expires_at: "2026-10-04T03:00:00Z",
+    it("cell read: includes pull_requests and issues when granted, omits them when not", async () => {
+      const full = mockRequests({
+        id: 42,
+        permissions: {
+          contents: "read",
+          metadata: "read",
+          pull_requests: "read",
+          issues: "write",
+        },
       });
-      await getWriteInstallationToken("o", "r", 7);
-      // One read of the granted permissions, then the mint for installation 7.
-      expect(calls.map((c) => c.route)).toEqual([
-        "GET /repos/{owner}/{repo}/installation",
-        "POST /app/installations/{installation_id}/access_tokens",
-      ]);
-      expect(calls[1]!.params).toMatchObject({ installation_id: 7 });
+      await getCellReadInstallationToken("o", "r");
+      expect(posts(full)[0]!.params.permissions).toEqual({
+        contents: "read",
+        metadata: "read",
+        pull_requests: "read",
+        issues: "read",
+      });
+
+      vi.restoreAllMocks();
+      resetAppInstance();
+      clearInstallationTokenCacheForTests();
+      const narrow = mockRequests({
+        id: 42,
+        permissions: { contents: "read", metadata: "read" },
+      });
+      await getCellReadInstallationToken("o", "r");
+      expect(posts(narrow)[0]!.params.permissions).toEqual({
+        contents: "read",
+        metadata: "read",
+      });
+    });
+
+    it("read-only preset: all four are required, a missing one throws naming it and nothing optional is added", async () => {
+      const calls = mockRequests({
+        id: 42,
+        permissions: {
+          contents: "read",
+          metadata: "read",
+          pull_requests: "read",
+        },
+      });
+      await expect(
+        getReadOnlyInstallationToken("o", "r"),
+      ).rejects.toMatchObject({
+        name: "MissingInstallationPermissionError",
+        permission: "issues",
+      });
+      expect(posts(calls)).toHaveLength(0);
+
+      vi.restoreAllMocks();
+      resetAppInstance();
+      clearInstallationTokenCacheForTests();
+      const ok = mockRequests({
+        id: 42,
+        permissions: {
+          contents: "read",
+          metadata: "read",
+          pull_requests: "read",
+          issues: "read",
+          workflows: "write",
+        },
+      });
+      await getReadOnlyInstallationToken("o", "r");
+      expect(posts(ok)[0]!.params.permissions).toEqual(
+        READ_ONLY_TOKEN_PERMISSIONS,
+      );
+    });
+
+    it("a failed permissions read throws and nothing is minted", async () => {
+      const calls = mockRequests(undefined, MINTED, 1);
+      await expect(getWriteInstallationToken("o", "r")).rejects.toThrow(
+        "permissions read failed",
+      );
+      expect(posts(calls)).toHaveLength(0);
     });
 
     it("404 -> the same 'not installed' error as the other token minters", async () => {
@@ -187,14 +319,122 @@ describe("GitHub App", () => {
     });
 
     it("rejects a response without a token or an expiry", async () => {
-      mockRequests({ token: "ghs_x" });
+      mockRequests(undefined, { token: "ghs_x" });
       await expect(getWriteInstallationToken("o", "r")).rejects.toThrow(
         /token response/,
       );
-      mockRequests({ expires_at: "2026-10-04T03:00:00Z" });
+      clearInstallationTokenCacheForTests();
+      mockRequests(undefined, { expires_at: "2099-01-01T00:00:00Z" });
       await expect(getWriteInstallationToken("o", "r")).rejects.toThrow(
         /token response/,
       );
+    });
+
+    it("a known installation id is the one minted for", async () => {
+      const calls = mockRequests();
+      await getWriteInstallationToken("o", "r", 7);
+      expect(calls.map((c) => c.route)).toEqual([
+        "GET /repos/{owner}/{repo}/installation",
+        "POST /app/installations/{installation_id}/access_tokens",
+      ]);
+      expect(calls[1]!.params).toMatchObject({ installation_id: 7 });
+    });
+
+    describe("caching", () => {
+      it("a second call within the TTL makes no new request", async () => {
+        const calls = mockRequests();
+        const first = await getWriteInstallationToken("o", "r");
+        const second = await getWriteInstallationToken("o", "r");
+        expect(second).toEqual(first);
+        expect(calls).toHaveLength(2);
+      });
+
+      it("the read-only preset never reuses a token: two calls are two POSTs with fresh tokens", async () => {
+        let n = 0;
+        const calls = mockRequests(
+          {
+            id: 42,
+            permissions: { ...READ_ONLY_TOKEN_PERMISSIONS },
+          },
+          () => ({ token: `ghs_${++n}`, expires_at: "2099-01-01T00:00:00Z" }),
+        );
+        const first = await getReadOnlyInstallationToken("o", "r");
+        const second = await getReadOnlyInstallationToken("o", "r");
+        expect([first.token, second.token]).toEqual(["ghs_1", "ghs_2"]);
+        expect(posts(calls)).toHaveLength(2);
+        // The granted-permissions read is still shared.
+        expect(gets(calls)).toHaveLength(1);
+      });
+
+      it("the broker presets reuse a token within the TTL: two calls are one POST", async () => {
+        const calls = mockRequests();
+        await getCellReadInstallationToken("o", "r");
+        await getCellReadInstallationToken("o", "r");
+        expect(posts(calls)).toHaveLength(1);
+        await getWriteInstallationToken("o", "r");
+        await getWriteInstallationToken("o", "r");
+        expect(posts(calls)).toHaveLength(2);
+      });
+
+      it("a token within five minutes of expiry is minted again, and the granted permissions are reused until their TTL", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-11-14T00:00:00Z"));
+        let n = 0;
+        const calls = mockRequests(undefined, () => ({
+          token: `ghs_${++n}`,
+          expires_at: "2026-11-14T01:00:00Z",
+        }));
+        expect((await getWriteInstallationToken("o", "r")).token).toBe("ghs_1");
+        // 3 minutes later: token fresh, permissions still cached.
+        vi.setSystemTime(new Date("2026-11-14T00:03:00Z"));
+        expect((await getWriteInstallationToken("o", "r")).token).toBe("ghs_1");
+        expect(calls).toHaveLength(2);
+        // 56 minutes in: under five minutes left, so a new token; the cached
+        // permissions are older than their TTL, so they are read again.
+        vi.setSystemTime(new Date("2026-11-14T00:56:00Z"));
+        expect((await getWriteInstallationToken("o", "r")).token).toBe("ghs_2");
+        expect(gets(calls)).toHaveLength(2);
+        expect(posts(calls)).toHaveLength(2);
+      });
+
+      it("granted permissions are read again after five minutes while a fresh token is kept", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date("2026-11-14T00:00:00Z"));
+        const calls = mockRequests(undefined, {
+          token: "ghs_x",
+          expires_at: "2026-11-14T01:00:00Z",
+        });
+        await getWriteInstallationToken("o", "r");
+        vi.setSystemTime(new Date("2026-11-14T00:06:00Z"));
+        await getWriteInstallationToken("o", "r");
+        expect(gets(calls)).toHaveLength(2);
+        expect(posts(calls)).toHaveLength(1);
+      });
+
+      it("different permission sets never share a token", async () => {
+        let n = 0;
+        const calls = mockRequests(
+          {
+            id: 42,
+            permissions: { contents: "write", metadata: "read" },
+          },
+          () => ({ token: `ghs_${++n}`, expires_at: "2099-01-01T00:00:00Z" }),
+        );
+        const write = await getWriteInstallationToken("o", "r");
+        const read = await getCellReadInstallationToken("o", "r");
+        expect(write.token).not.toBe(read.token);
+        expect(posts(calls)).toHaveLength(2);
+        expect(gets(calls)).toHaveLength(1);
+      });
+
+      it("errors are never cached", async () => {
+        const calls = mockRequests(undefined, MINTED, 1);
+        await expect(getWriteInstallationToken("o", "r")).rejects.toThrow();
+        await expect(
+          getWriteInstallationToken("o", "r"),
+        ).resolves.toMatchObject({ token: "ghs_x" });
+        expect(gets(calls)).toHaveLength(2);
+      });
     });
   });
 
@@ -207,6 +447,7 @@ describe("GitHub App", () => {
         expires_at: "2026-10-04T03:00:00Z",
       },
     ): Call[] {
+      // The installation grants the four read permissions (the preset requires them all).
       process.env.GITHUB_APP_ID = "123456";
       process.env.GITHUB_APP_PRIVATE_KEY = "fake-private-key";
       const calls: Call[] = [];
@@ -217,7 +458,9 @@ describe("GitHub App", () => {
       ) => {
         calls.push({ route, params });
         if (route === "GET /repos/{owner}/{repo}/installation") {
-          return { data: { id: 42 } };
+          return {
+            data: { id: 42, permissions: { ...READ_ONLY_TOKEN_PERMISSIONS } },
+          };
         }
         return { data: tokenResponse };
       }) as never);
@@ -300,9 +543,12 @@ describe("GitHub App", () => {
       await expect(lookupInstallationId("o", "r")).resolves.toBe(42);
       await getInstallationToken("o", "r", 7);
       await getReadOnlyInstallationToken("o", "r", 7);
+      // getInstallationToken(7) skips the lookup; the read-only mint reads the
+      // granted permissions first (one GET), then mints for installation 7.
       expect(calls.map((c) => c.route)).toEqual([
         "GET /repos/{owner}/{repo}/installation",
         "POST /app/installations/{installation_id}/access_tokens",
+        "GET /repos/{owner}/{repo}/installation",
         "POST /app/installations/{installation_id}/access_tokens",
       ]);
       expect(Object.keys(calls[1]!.params).sort()).toEqual([
@@ -314,7 +560,7 @@ describe("GitHub App", () => {
         installation_id: 7,
         repositories: ["r"],
       });
-      expect(calls[2]!.params).toEqual({
+      expect(calls[3]!.params).toEqual({
         installation_id: 7,
         repositories: ["r"],
         permissions: READ_ONLY_TOKEN_PERMISSIONS,
