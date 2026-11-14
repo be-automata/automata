@@ -74,9 +74,9 @@ export interface GitBrokerDeps {
   /** Time allowed for the upstream receive-pack POST. Defaults to 10 minutes. */
   pushTimeoutMs?: number;
   /**
-   * Keeps work running after the response is sent or the client is gone (the
-   * host's `waitUntil`). Every claim-ending write after a push was claimed
-   * (release, store) is handed to it when present.
+   * The host's `waitUntil`. The whole continuation of a claimed push (the
+   * forward, then the release or store) is registered with it, so it outlives
+   * a client disconnect; `pushTimeoutMs` bounds it.
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Time allowed for the ref advertisement fetch. Defaults to 30 s. */
@@ -299,21 +299,8 @@ function isTransientRejection(bytes: Uint8Array): boolean {
   );
 }
 
-/**
- * Hand a claim-ending write to the host's `waitUntil` (when there is one) and
- * return it so the handler can still await it. The work never rejects.
- */
-function keepAlive(deps: GitBrokerDeps, work: Promise<void>): Promise<void> {
-  deps.waitUntil?.(work);
-  return work;
-}
-
 /** Drop the claim of an effect that never got an answer. Never throws. */
-function releaseClaim(push: Push): Promise<void> {
-  return keepAlive(push.deps, releaseClaimNow(push));
-}
-
-async function releaseClaimNow(push: Push): Promise<void> {
+async function releaseClaim(push: Push): Promise<void> {
   try {
     const released = await releaseEffect({
       db: push.deps.db,
@@ -331,15 +318,7 @@ async function releaseClaimNow(push: Push): Promise<void> {
 }
 
 /** Store GitHub's answer so a retry replays it. Never throws. */
-function storeOutcome(
-  push: Push,
-  upstream: Response,
-  bytes: Uint8Array,
-): Promise<void> {
-  return keepAlive(push.deps, storeOutcomeNow(push, upstream, bytes));
-}
-
-async function storeOutcomeNow(
+async function storeOutcome(
   push: Push,
   upstream: Response,
   bytes: Uint8Array,
@@ -377,11 +356,11 @@ async function storeOutcomeNow(
  * released, 413; a transient failure (cell disconnect, network error, 5xx, 3xx,
  * oversized answer, a timeout) -> released, 502.
  *
- * The claim-ending writes go through `deps.waitUntil` so they survive a client
- * disconnect. The remaining gap is honest: a hard runtime kill between the claim
- * and its release can still leave a same-attempt claim pending. The next attempt
- * takes it over, and the reconciler (L3 PR 3) is the backstop, as in the
- * cell-authority header.
+ * The caller registers this whole continuation with `deps.waitUntil`, so it
+ * outlives a client disconnect, bounded by the push timeout. A hard runtime
+ * kill between the claim and its release can still leave a same-attempt claim
+ * pending: the next attempt takes it over, and the reconciler (L3 PR 3) is the
+ * backstop, as in the cell-authority header.
  */
 async function forwardPush(
   push: Push,
@@ -642,10 +621,19 @@ async function handlePush({
       return refusalResponse(begun.reason);
     }
     if (begun.kind === "go") {
-      return forwardPush(
+      const outcome = forwardPush(
         { deps, request, url, token, context: begun.context, idempotencyKey },
         section,
       );
+      // From here the claim must end (store or release) even if the request is
+      // cancelled: the host keeps the continuation alive.
+      deps.waitUntil?.(
+        outcome.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return await outcome;
     }
     // Replay. A stored rejection stays idempotent; a stored success is only
     // replayed while the refs still show it, otherwise the push is claimed

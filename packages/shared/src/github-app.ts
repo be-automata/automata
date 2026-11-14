@@ -44,6 +44,14 @@ function requestSignal(options?: GitHubCallOptions): {
   return options?.signal ? { request: { signal: options.signal } } : {};
 }
 
+const NOT_INSTALLED_PREFIX = "GitHub App is not installed on repository";
+
+function isNotInstalledError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.startsWith(NOT_INSTALLED_PREFIX)
+  );
+}
+
 /** Rethrow a 404 from the installation lookup as the "not installed" error. */
 function notInstalledOr(error: unknown, owner: string, repo: string): Error {
   if (
@@ -51,9 +59,7 @@ function notInstalledOr(error: unknown, owner: string, repo: string): Error {
     error !== null &&
     (error as { status?: unknown }).status === 404
   ) {
-    return new Error(
-      `GitHub App is not installed on repository ${owner}/${repo}`,
-    );
+    return new Error(`${NOT_INSTALLED_PREFIX} ${owner}/${repo}`);
   }
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -200,8 +206,11 @@ async function readGrantedPermissions(owner: string, repo: string) {
  * the read also yields the installation id). Every `required` permission must
  * be granted at the requested level or more, else
  * MissingInstallationPermissionError; each `optional` permission is added only
- * when granted. If the permissions read fails (network, 5xx) the mint throws:
- * a token's scope is never guessed. The token comes from @octokit/auth-app
+ * when granted. If the permissions read FAILS (network, 5xx, rate limit) the
+ * mint falls back to the required set alone, without optional permissions, and
+ * lets GitHub's own 422 reject a permission the installation truly lacks; a
+ * failed read is never cached, and a "not installed" answer still throws. The
+ * token comes from @octokit/auth-app
  * (`octokit.auth({ type: "installation", ... })`) for exactly the computed set
  * on `[repo]`, with no `expires_at` (GitHub caps installation tokens at one
  * hour); the response's own expiry is returned. With `cacheToken`, auth-app's
@@ -228,25 +237,35 @@ async function mintRepoInstallationToken({
   cacheToken: boolean;
   knownInstallationId?: number;
 }): Promise<{ token: string; expiresAt: string }> {
-  const granted = await readGrantedPermissions(owner, repo);
-  const permissions: Record<string, PermissionLevel> = {};
-  for (const [name, level] of Object.entries(required)) {
-    if (!grantsLevel(granted.permissions[name], level)) {
-      throw new MissingInstallationPermissionError(
-        name,
-        level,
-        granted.permissions[name],
-      );
-    }
-    permissions[name] = level;
+  let granted: Awaited<ReturnType<typeof readGrantedPermissions>> | null = null;
+  try {
+    granted = await readGrantedPermissions(owner, repo);
+  } catch (error: unknown) {
+    if (isNotInstalledError(error)) throw error;
+    // Fall back to the required set: no optional permission is guessed.
   }
-  for (const [name, level] of Object.entries(optional)) {
-    if (grantsLevel(granted.permissions[name], level)) {
-      permissions[name] = level;
+  const permissions: Record<string, PermissionLevel> = { ...required };
+  if (granted) {
+    for (const [name, level] of Object.entries(required)) {
+      if (!grantsLevel(granted.permissions[name], level)) {
+        throw new MissingInstallationPermissionError(
+          name,
+          level,
+          granted.permissions[name],
+        );
+      }
+    }
+    for (const [name, level] of Object.entries(optional)) {
+      if (grantsLevel(granted.permissions[name], level)) {
+        permissions[name] = level;
+      }
     }
   }
+  const installationId =
+    knownInstallationId ??
+    granted?.installationId ??
+    (await lookupInstallationId(owner, repo));
 
-  const installationId = knownInstallationId ?? granted.installationId;
   const authenticate = (refresh: boolean) =>
     getGitHubApp().octokit.auth({
       type: "installation",

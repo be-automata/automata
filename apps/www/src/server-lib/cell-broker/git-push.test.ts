@@ -858,7 +858,49 @@ describe("git broker push", () => {
     expect(await effectsUsed(f.stepKey)).toBe(2);
   });
 
-  it("hands the release to waitUntil when the cell disconnects, and the claim is gone once it settles", async () => {
+  it("registers the whole continuation with waitUntil while the upstream call is still pending, and it ends the claim after the handler is abandoned", async () => {
+    const f = await fixture();
+    const kept: Promise<unknown>[] = [];
+    let upstreamAborted = false;
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        await readAll(init?.body as BodyInit | null | undefined);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            upstreamAborted = true;
+            reject(new Error("aborted"));
+          });
+        });
+      },
+    );
+    const handler = createGitBrokerHandler({
+      db,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      mintReadToken: async () => ({ token: SENTINEL }),
+      mintWriteToken: async () => ({ token: SENTINEL }),
+      sideEffectsEnabled: () => true,
+      enabled: () => true,
+      pushTimeoutMs: 150,
+      waitUntil: (p) => void kept.push(p),
+    });
+    // The caller never looks at the response: the request is abandoned.
+    const abandoned = handler(push(f.token, pushBody())).catch(() => null);
+    for (let i = 0; i < 100 && kept.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(kept).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(upstreamAborted).toBe(false);
+    expect(await effectRows(f.stepKey)).toBe(1);
+
+    await Promise.all(kept);
+    expect(upstreamAborted).toBe(true);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+    await abandoned;
+  });
+
+  it("registers the continuation with waitUntil when the cell disconnects, and the claim is gone once it settles", async () => {
     const f = await fixture();
     const kept: Promise<unknown>[] = [];
     const h = harness({}, { waitUntil: (p) => void kept.push(p) });
@@ -880,7 +922,7 @@ describe("git broker push", () => {
     expect(await effectRows(f.stepKey)).toBe(0);
   });
 
-  it("hands the store of GitHub's answer to waitUntil", async () => {
+  it("registers the continuation with waitUntil on a normal push, and the answer is stored once it settles", async () => {
     const f = await fixture();
     const kept: Promise<unknown>[] = [];
     const h = harness({}, { waitUntil: (p) => void kept.push(p) });

@@ -343,12 +343,35 @@ describe("GitHub App", () => {
       );
     });
 
-    it("a failed permissions read throws and nothing is minted", async () => {
-      const calls = mockRequests(undefined, MINTED, 1);
-      await expect(getWriteInstallationToken("o", "r")).rejects.toThrow(
-        "permissions read failed",
+    it("a failed permissions read falls back to exactly the required permissions", async () => {
+      // The installation does grant workflows, but a failed read adds no optional permission.
+      const push = mockRequests(
+        {
+          id: 42,
+          permissions: { ...PUSH_GRANTED, workflows: "write" },
+        },
+        MINTED,
+        1,
       );
-      expect(posts(calls)).toHaveLength(0);
+      await getWriteInstallationToken("o", "r");
+      expect(posts(push)).toHaveLength(1);
+      expect(posts(push)[0]!.params.permissions).toEqual({
+        contents: "write",
+        metadata: "read",
+      });
+
+      vi.restoreAllMocks();
+      resetAppInstance();
+      clearInstallationTokenCacheForTests();
+      const read = mockRequests(
+        { id: 42, permissions: { ...READ_ONLY_TOKEN_PERMISSIONS } },
+        MINTED,
+        1,
+      );
+      await getReadOnlyInstallationToken("o", "r");
+      expect(posts(read)[0]!.params.permissions).toEqual(
+        READ_ONLY_TOKEN_PERMISSIONS,
+      );
     });
 
     it("404 -> the same 'not installed' error as the other token minters", async () => {
@@ -512,13 +535,13 @@ describe("GitHub App", () => {
         expect(posts(calls)).toHaveLength(2);
       });
 
-      it("errors are never cached", async () => {
+      it("a failed permissions read is not cached: the next call reads again", async () => {
         const calls = mockRequests(undefined, MINTED, 1);
-        await expect(getWriteInstallationToken("o", "r")).rejects.toThrow();
-        await expect(
-          getWriteInstallationToken("o", "r"),
-        ).resolves.toMatchObject({ token: "ghs_x" });
+        await getWriteInstallationToken("o", "r");
+        // GET 1 failed, GET 2 was the fallback lookup.
         expect(gets(calls)).toHaveLength(2);
+        await getWriteInstallationToken("o", "r");
+        expect(gets(calls)).toHaveLength(3);
       });
     });
   });
@@ -632,7 +655,7 @@ describe("GitHub App", () => {
       expect(body.repositories).toEqual(["r"]);
     });
 
-    it("a known installation id skips the lookup; both bodies keep their exact scope", async () => {
+    it("a known installation id is the one minted for; both bodies keep their exact scope", async () => {
       const calls = mockGitHub(
         { id: 42, permissions: { ...READ_ONLY_TOKEN_PERMISSIONS } },
         { token: "ghs_x", expires_at: "2026-10-04T03:00:00Z" },
