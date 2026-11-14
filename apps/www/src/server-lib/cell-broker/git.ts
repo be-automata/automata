@@ -22,6 +22,7 @@ import {
   gitAuthChallenge,
   hasUnsupportedContentEncoding,
   internalError,
+  mintFailureResponse,
   isAny3xx,
   isUnsafeSegment,
   passThrough,
@@ -270,6 +271,24 @@ interface Push {
   idempotencyKey: string;
 }
 
+/**
+ * GitHub refusals that say "try again" rather than "no": 408 and 429 behave
+ * like a 5xx, and a 2xx whose every ng reason matches TRANSIENT_NG is released
+ * instead of stored, so an identical retry claims afresh (the budget unit
+ * stays spent).
+ */
+const TRANSIENT_STATUSES = new Set([408, 429]);
+const TRANSIENT_NG =
+  /failed to lock|cannot lock ref|timed? ?out|timeout|try again/i;
+
+function isTransientRejection(bytes: Uint8Array): boolean {
+  const refs = parseReportStatus(bytes)?.refs ?? [];
+  return (
+    refs.length > 0 &&
+    refs.every((ref) => !ref.ok && TRANSIENT_NG.test(ref.reason ?? ""))
+  );
+}
+
 /** Drop the claim of an effect that never got an answer. Never throws. */
 async function releaseClaim(push: Push): Promise<void> {
   try {
@@ -392,7 +411,11 @@ async function forwardPush(
     await releaseClaim(push);
     return brokerError(413, "payload_too_large");
   }
-  if (upstream.status >= 500 || isAny3xx(upstream.status)) {
+  if (
+    upstream.status >= 500 ||
+    isAny3xx(upstream.status) ||
+    TRANSIENT_STATUSES.has(upstream.status)
+  ) {
     void upstream.body?.cancel().catch(() => undefined);
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
@@ -410,7 +433,12 @@ async function forwardPush(
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
   }
-  await storeOutcome(push, upstream, bytes);
+  if (upstream.status < 300 && isTransientRejection(bytes)) {
+    // The cell sees the rejection; nothing is stored, so a retry is forwarded.
+    await releaseClaim(push);
+  } else {
+    await storeOutcome(push, upstream, bytes);
+  }
   return new Response(bytes as BodyInit, {
     status: upstream.status,
     headers: responseHeadersForCell(upstream.headers),
@@ -535,9 +563,9 @@ async function handlePush({
   let token: string;
   try {
     token = (await deps.mintWriteToken(owner, repo)).token;
-  } catch {
+  } catch (error) {
     drop(section.reader);
-    return brokerError(502, "upstream_error");
+    return mintFailureResponse(error);
   }
 
   if (section.commands.length === 0) {
@@ -684,8 +712,8 @@ export function createGitBrokerHandler(
           ? await deps.mintWriteToken(stepOwner, stepRepo)
           : await deps.mintReadToken(stepOwner, stepRepo);
       token = minted.token;
-    } catch {
-      return brokerError(502, "upstream_error");
+    } catch (error) {
+      return mintFailureResponse(error);
     }
     try {
       return passThrough(

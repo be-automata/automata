@@ -40,6 +40,30 @@ export function brokerError(
 }
 
 /**
+ * The answer for a failed token mint. An installation that lacks a permission
+ * the token needs is a 403 `missing_permission` naming that one permission and
+ * the level needed (never the granted map or a token); any other failure is a
+ * 502. Matched by name, not `instanceof`: MissingInstallationPermissionError
+ * comes from a module that tests replace wholesale.
+ */
+export function mintFailureResponse(error: unknown): Response {
+  if (
+    error instanceof Error &&
+    error.name === "MissingInstallationPermissionError"
+  ) {
+    const { permission, needed } = error as Error & {
+      permission?: unknown;
+      needed?: unknown;
+    };
+    return Response.json(
+      { error: "missing_permission", permission, needed },
+      { status: 403 },
+    );
+  }
+  return brokerError(502, "upstream_error");
+}
+
+/**
  * 500 for a failure inside the broker (database or URL construction). Logs a
  * fixed string only: an error message could carry a URL or a token.
  */

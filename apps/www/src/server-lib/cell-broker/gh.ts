@@ -9,6 +9,7 @@ import {
   forwardRequestHeaders,
   hasUnsupportedContentEncoding,
   internalError,
+  mintFailureResponse,
   isUnsafeSegment,
   passThrough,
   readCapped,
@@ -131,8 +132,8 @@ export function createGhBrokerHandler(
     let token: string;
     try {
       token = (await deps.mintReadToken(auth.owner, auth.repo)).token;
-    } catch {
-      return brokerError(502, "upstream_error");
+    } catch (error) {
+      return mintFailureResponse(error);
     }
 
     const headers = forwardRequestHeaders(request.headers);

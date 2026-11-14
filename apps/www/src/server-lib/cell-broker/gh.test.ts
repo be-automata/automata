@@ -450,6 +450,31 @@ describe("gh broker auth and secrets", () => {
     );
   });
 
+  it("a missing required permission is a 403 missing_permission with no upstream call", async () => {
+    const f = await fixture();
+    const h = harness(
+      {},
+      {
+        mintReadToken: async () => {
+          throw Object.assign(new Error("lacks contents"), {
+            name: "MissingInstallationPermissionError",
+            permission: "contents",
+            needed: "read",
+            granted: undefined,
+          });
+        },
+      },
+    );
+    const res = await h.handler(rest("/user", f.token), "rest");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "missing_permission",
+      permission: "contents",
+      needed: "read",
+    });
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("AC7 nothing logged carries the installation token or the bearer", async () => {
     const f = await fixture();
     const logs = captureLogs();

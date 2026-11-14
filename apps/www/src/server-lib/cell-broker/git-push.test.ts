@@ -728,6 +728,94 @@ describe("git broker push", () => {
     expect(await effectsUsed(f.stepKey)).toBe(1);
   });
 
+  it("a missing installation permission is a 403 missing_permission before any claim or upstream call", async () => {
+    const f = await fixture();
+    const h = harness(
+      {},
+      {
+        mintWriteToken: async () => {
+          throw Object.assign(new Error("lacks contents"), {
+            name: "MissingInstallationPermissionError",
+            permission: "contents",
+            needed: "write",
+            granted: "read",
+          });
+        },
+      },
+    );
+    const res = await h.handler(push(f.token, pushBody()));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "missing_permission",
+      permission: "contents",
+      needed: "write",
+    });
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(0);
+  });
+
+  it.each([408, 429])(
+    "a GitHub %i is a transient failure: 502, the claim is released and an identical retry is forwarded",
+    async (status) => {
+      const f = await fixture();
+      let current = status;
+      const h = harness(() => ({ status: current }));
+      const failed = await h.handler(push(f.token, pushBody()));
+      expect([failed.status, (await json(failed)).error]).toEqual([
+        502,
+        "upstream_error",
+      ]);
+      expect(await effectRows(f.stepKey)).toBe(0);
+      expect(await effectsUsed(f.stepKey)).toBe(1);
+
+      current = 200;
+      expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+      expect(h.calls).toHaveLength(2);
+      expect(await effectsUsed(f.stepKey)).toBe(2);
+    },
+  );
+
+  it("a 200 whose every ng is transient returns GitHub's bytes but releases the claim, so a retry is forwarded", async () => {
+    const f = await fixture();
+    const lockFailure = concat(
+      pkt("unpack ok\n"),
+      pkt(`ng ${REF} failed to lock\n`),
+      FLUSH,
+    );
+    let first = true;
+    const h = harness(() => {
+      const body = first ? lockFailure : REPORT_OK;
+      first = false;
+      return { body };
+    });
+    const rejected = await h.handler(push(f.token, pushBody()));
+    expect(rejected.status).toBe(200);
+    expect(new Uint8Array(await rejected.arrayBuffer())).toEqual(lockFailure);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+
+    const retry = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await retry.arrayBuffer())).toEqual(REPORT_OK);
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
+  it("a 200 with a non-transient ng is stored and replayed as before", async () => {
+    const f = await fixture();
+    const rejection = concat(
+      pkt("unpack ok\n"),
+      pkt(`ng ${REF} non-fast-forward\n`),
+      FLUSH,
+    );
+    const h = harness({ body: rejection });
+    await h.handler(push(f.token, pushBody()));
+    const again = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await again.arrayBuffer())).toEqual(rejection);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
+  });
+
   it("AC12 a GitHub 503 releases the claim; an identical retry is forwarded and uses a second unit", async () => {
     const f = await fixture();
     let status = 503;
