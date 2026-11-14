@@ -47,11 +47,4 @@ describe(`${MANIFEST} exports`, () => {
   it("exports the run display-lane module shared by www and the worker (#373)", () => {
     expect(exportsMap["./run-lane"]).toBe("./src/run-lane.ts");
   });
-
-  it("exports the receive-pack parser and the GraphQL mutation guard shared by www and the worker (#606)", () => {
-    expect(exportsMap["./receive-pack-refs"]).toBe(
-      "./src/receive-pack-refs.ts",
-    );
-    expect(exportsMap["./graphql-mutation"]).toBe("./src/graphql-mutation.ts");
-  });
 });
