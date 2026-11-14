@@ -5,6 +5,7 @@ import {
   releaseEffect,
   type BearerContext,
 } from "@terragon/shared/model/cell-authority";
+import { hashOpaqueToken } from "@terragon/shared/utils/opaque-token";
 import {
   parseReceivePackCommands,
   type ReceivePackCommand,
@@ -12,16 +13,20 @@ import {
 
 import {
   assertOrigin,
+  authorizeCellRequest,
   brokerError,
+  concatBytes,
   decodePathSegments,
-  extractCellBearer,
   forwardRequestHeaders,
   gitAuthChallenge,
   internalError,
+  isRedirect,
   isUnsafeSegment,
+  passThrough,
+  readCapped,
   refusalResponse,
-  resolveCellStep,
   responseHeadersForCell,
+  type TokenMinter,
 } from "./common";
 import { parseReportStatus } from "./report-status";
 
@@ -47,8 +52,8 @@ const MAX_PUSH_RESPONSE_BYTES = 1024 * 1024;
 export interface GitBrokerDeps {
   db: DB;
   fetchImpl: typeof fetch;
-  mintReadToken: (owner: string, repo: string) => Promise<{ token: string }>;
-  mintWriteToken: (owner: string, repo: string) => Promise<{ token: string }>;
+  mintReadToken: TokenMinter;
+  mintWriteToken: TokenMinter;
   sideEffectsEnabled: () => boolean;
   enabled: () => boolean;
   /** Cap on a push body; tests lower it. Defaults to 32 MiB. */
@@ -64,64 +69,37 @@ function classifyLeg(
   search: URLSearchParams,
 ): Leg | null {
   if (method === "GET" && endpoint === "info/refs") {
-    const keys = [...search.keys()];
-    const service = search.getAll("service");
-    if (keys.length !== 1 || service.length !== 1) return null;
-    if (service[0] === UPLOAD_PACK) return "upload-pack";
-    if (service[0] === RECEIVE_PACK) return "receive-pack-advert";
+    if (search.size !== 1 || search.getAll("service").length !== 1) return null;
+    const service = search.get("service");
+    if (service === UPLOAD_PACK) return "upload-pack";
+    if (service === RECEIVE_PACK) return "receive-pack-advert";
     return null;
   }
-  if (method === "POST" && [...search.keys()].length === 0) {
+  if (method === "POST" && search.size === 0) {
     if (endpoint === UPLOAD_PACK) return "upload-pack";
     if (endpoint === RECEIVE_PACK) return "receive-pack-post";
   }
   return null;
 }
 
-function toHex(bytes: ArrayBuffer): string {
-  return [...new Uint8Array(bytes)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 /** The idempotency key of a push: a hash of its canonical command list. */
-export async function pushIdempotencyKey(
+export function pushIdempotencyKey(
   commands: readonly ReceivePackCommand[],
-): Promise<string> {
+): string {
   const canonical = commands
     .map((c) => `${c.oldSha} ${c.newSha} ${c.ref}`)
     .join("\n");
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(canonical),
-  );
-  return `push:${toHex(digest)}`;
-}
-
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
+  return `push:${hashOpaqueToken(canonical)}`;
 }
 
 function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
+  return Buffer.from(bytes).toString("base64");
 }
 
+/** Null unless `value` is canonical base64 (what `toBase64` writes). */
 function fromBase64(value: string): Uint8Array | null {
-  try {
-    const binary = atob(value);
-    const out = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-    return out;
-  } catch {
-    return null;
-  }
+  const bytes = Buffer.from(value, "base64");
+  return bytes.toString("base64") === value ? bytes : null;
 }
 
 interface UpstreamCall {
@@ -153,22 +131,6 @@ function callUpstream({
     // Node requires duplex for a streaming request body.
     ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
   } as RequestInit);
-}
-
-function isRedirect(status: number): boolean {
-  return status >= 300 && status < 400;
-}
-
-/** Stream GitHub's answer back to the cell (reads and the push probe). */
-function passThrough(upstream: Response): Response {
-  if (isRedirect(upstream.status)) {
-    void upstream.body?.cancel().catch(() => undefined);
-    return brokerError(502, "upstream_error");
-  }
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: responseHeadersForCell(upstream.headers),
-  });
 }
 
 type CommandSection =
@@ -218,7 +180,7 @@ async function readCommandSection(
     try {
       const chunk = await reader.read();
       if (chunk.done) streamDone = true;
-      else prefix = concat(prefix, chunk.value);
+      else prefix = concatBytes(prefix, chunk.value);
     } catch {
       return fail(400, "bad_request");
     }
@@ -250,29 +212,6 @@ function replayResponse(result: Record<string, unknown>): Response {
     status: httpStatus,
     headers: { "content-type": contentType },
   });
-}
-
-/** Read a response body fully; null when it is over `maxBytes` or unreadable. */
-async function readCapped(
-  body: ReadableStream<Uint8Array> | null,
-  maxBytes: number,
-): Promise<Uint8Array | null> {
-  if (!body) return new Uint8Array(0);
-  const reader = body.getReader();
-  let out: Uint8Array = new Uint8Array(0);
-  try {
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) return out;
-      out = concat(out, chunk.value);
-      if (out.length > maxBytes) {
-        void reader.cancel().catch(() => undefined);
-        return null;
-      }
-    }
-  } catch {
-    return null;
-  }
 }
 
 interface Push {
@@ -411,7 +350,9 @@ async function forwardPush(
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
   }
-  const bytes = await readCapped(upstream.body, MAX_PUSH_RESPONSE_BYTES);
+  const bytes = await readCapped(upstream.body, MAX_PUSH_RESPONSE_BYTES).catch(
+    () => null,
+  );
   // The cap can be crossed while the answer is still being read (GitHub
   // replies early): that is an overflow, not an upstream failure.
   if (overflowed) {
@@ -507,7 +448,7 @@ async function handlePush({
     }
   }
 
-  const idempotencyKey = await pushIdempotencyKey(section.commands);
+  const idempotencyKey = pushIdempotencyKey(section.commands);
   let begun: Awaited<ReturnType<typeof beginEffect>>;
   try {
     begun = await beginEffect({ db: deps.db, token: bearer, idempotencyKey });
@@ -533,17 +474,10 @@ export function createGitBrokerHandler(
   deps: GitBrokerDeps,
 ): (request: Request) => Promise<Response> {
   return async (request) => {
-    if (!deps.enabled()) return brokerError(404, "not_found");
-
-    const bearer = extractCellBearer(request.headers);
-    if (!bearer) return gitAuthChallenge();
-    let step: Awaited<ReturnType<typeof resolveCellStep>>;
-    try {
-      step = await resolveCellStep(deps.db, bearer);
-    } catch {
-      return internalError("resolve_step");
-    }
-    if (!step.ok) return refusalResponse(step.reason);
+    const auth = await authorizeCellRequest(deps, request, {
+      onMissingBearer: gitAuthChallenge,
+    });
+    if (!auth.ok) return auth.response;
 
     const url = new URL(request.url);
     const decoded = decodePathSegments(url.pathname, ROUTE_PREFIX);
@@ -559,7 +493,7 @@ export function createGitBrokerHandler(
       return brokerError(403, "forbidden_path");
     }
     const requestRepo = `${owner}/${repoGit.slice(0, -".git".length)}`;
-    if (requestRepo.toLowerCase() !== step.repoFullName) {
+    if (requestRepo.toLowerCase() !== auth.repoFullName) {
       return brokerError(403, "forbidden_path");
     }
 
@@ -567,14 +501,12 @@ export function createGitBrokerHandler(
     const leg = classifyLeg(request.method, endpoint, url.searchParams);
     if (!leg) return brokerError(403, "forbidden_path");
 
-    const isPush = leg !== "upload-pack";
-    if (isPush && !deps.sideEffectsEnabled()) {
+    if (leg !== "upload-pack" && !deps.sideEffectsEnabled()) {
       return brokerError(503, "side_effects_disabled");
     }
 
     // The upstream URL comes from the step's repo and the allowlisted endpoint.
-    const [stepOwner, stepRepo] = step.repoFullName.split("/");
-    if (!stepOwner || !stepRepo) return brokerError(502, "upstream_error");
+    const { owner: stepOwner, repo: stepRepo } = auth;
     const upstreamUrl = new URL("https://github.com");
     upstreamUrl.pathname = `/${encodeURIComponent(stepOwner)}/${encodeURIComponent(stepRepo)}.git/${endpoint}`;
     if (endpoint === "info/refs") {
@@ -593,8 +525,8 @@ export function createGitBrokerHandler(
       return handlePush({
         deps,
         request,
-        bearer,
-        context: step.context,
+        bearer: auth.bearer,
+        context: auth.context,
         owner: stepOwner,
         repo: stepRepo,
         url: upstreamUrl,
@@ -603,9 +535,10 @@ export function createGitBrokerHandler(
 
     let token: string;
     try {
-      const minted = isPush
-        ? await deps.mintWriteToken(stepOwner, stepRepo)
-        : await deps.mintReadToken(stepOwner, stepRepo);
+      const minted =
+        leg !== "upload-pack"
+          ? await deps.mintWriteToken(stepOwner, stepRepo)
+          : await deps.mintReadToken(stepOwner, stepRepo);
       token = minted.token;
     } catch {
       return brokerError(502, "upstream_error");

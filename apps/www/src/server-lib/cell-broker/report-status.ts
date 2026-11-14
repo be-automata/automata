@@ -10,45 +10,26 @@
  * packets), bands 2 and 3 are progress and error text and are skipped.
  */
 
+import { readPktLine } from "@terragon/utils/receive-pack-refs";
+
+import { concatBytes } from "./common";
+
 export interface ReportStatus {
   unpack: string | null;
   refs: Array<{ ref: string; ok: boolean; reason?: string }>;
 }
 
 const UTF8 = new TextDecoder("utf-8");
-const HEX_LEN = /^[0-9a-f]{4}$/;
 
 /** Split a buffer into pkt-line payloads (null = flush); null if malformed. */
 function readPkts(buf: Uint8Array): Array<Uint8Array | null> | null {
   const out: Array<Uint8Array | null> = [];
   let offset = 0;
   while (offset < buf.length) {
-    if (buf.length - offset < 4) return null;
-    let lenHex = "";
-    for (let i = 0; i < 4; i++) {
-      lenHex += String.fromCharCode(buf[offset + i] ?? 0);
-    }
-    lenHex = lenHex.toLowerCase();
-    if (!HEX_LEN.test(lenHex)) return null;
-    const len = Number.parseInt(lenHex, 16);
-    if (len === 0) {
-      out.push(null);
-      offset += 4;
-      continue;
-    }
-    if (len < 5 || buf.length - offset < len) return null;
-    out.push(buf.subarray(offset + 4, offset + len));
-    offset += len;
-  }
-  return out;
-}
-
-function concat(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
+    const pkt = readPktLine(buf, offset);
+    if (pkt.kind === "incomplete" || pkt.kind === "malformed") return null;
+    out.push(pkt.kind === "flush" ? null : pkt.payload);
+    offset = pkt.next;
   }
   return out;
 }
@@ -91,7 +72,7 @@ export function parseReportStatus(body: Uint8Array): ReportStatus | null {
       if (pkt === null) break;
       if (pkt[0] === 1) data.push(pkt.subarray(1));
     }
-    const inner = readPkts(concat(data));
+    const inner = readPkts(concatBytes(...data));
     return inner ? parseReportLines(inner) : null;
   }
   return parseReportLines(outer);

@@ -3,15 +3,15 @@ import { graphqlHasMutation } from "@terragon/utils/graphql-mutation";
 
 import {
   assertOrigin,
+  authorizeCellRequest,
   brokerError,
   decodePathSegments,
-  extractCellBearer,
-  internalError,
   forwardRequestHeaders,
+  internalError,
   isUnsafeSegment,
-  refusalResponse,
-  resolveCellStep,
-  responseHeadersForCell,
+  passThrough,
+  readCapped,
+  type TokenMinter,
 } from "./common";
 
 /**
@@ -31,7 +31,7 @@ export type GhKind = "rest" | "graphql";
 export interface GhBrokerDeps {
   db: DB;
   fetchImpl: typeof fetch;
-  mintReadToken: (owner: string, repo: string) => Promise<{ token: string }>;
+  mintReadToken: TokenMinter;
   enabled: () => boolean;
   /** Cap on a GraphQL request body. Defaults to 1 MiB. */
   maxGraphqlBytes?: number;
@@ -58,36 +58,6 @@ function restTarget(request: Request, url: URL): Built {
   return { ok: true, url: upstream };
 }
 
-/** Read the request body, refusing anything over `maxBytes`. */
-async function readBody(
-  request: Request,
-  maxBytes: number,
-): Promise<Uint8Array | null> {
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) return null;
-  if (!request.body) return new Uint8Array(0);
-  const reader = request.body.getReader();
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    total += chunk.value.length;
-    if (total > maxBytes) {
-      void reader.cancel().catch(() => undefined);
-      return null;
-    }
-    parts.push(chunk.value);
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
-}
-
 async function graphqlTarget(
   request: Request,
   maxBytes: number,
@@ -95,8 +65,14 @@ async function graphqlTarget(
   if (request.method !== "POST") {
     return { ok: false, response: brokerError(403, "forbidden_method") };
   }
-  const body = await readBody(request, maxBytes).catch(() => undefined);
-  if (body === undefined) {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return { ok: false, response: brokerError(413, "payload_too_large") };
+  }
+  let body: Uint8Array | null;
+  try {
+    body = await readCapped(request.body, maxBytes);
+  } catch {
     return { ok: false, response: brokerError(400, "bad_request") };
   }
   if (body === null) {
@@ -128,17 +104,10 @@ export function createGhBrokerHandler(
   deps: GhBrokerDeps,
 ): (request: Request, kind: GhKind) => Promise<Response> {
   return async (request, kind) => {
-    if (!deps.enabled()) return brokerError(404, "not_found");
-
-    const bearer = extractCellBearer(request.headers);
-    if (!bearer) return brokerError(401, "unauthenticated");
-    let step: Awaited<ReturnType<typeof resolveCellStep>>;
-    try {
-      step = await resolveCellStep(deps.db, bearer);
-    } catch {
-      return internalError("resolve_step");
-    }
-    if (!step.ok) return refusalResponse(step.reason);
+    const auth = await authorizeCellRequest(deps, request, {
+      onMissingBearer: () => brokerError(401, "unauthenticated"),
+    });
+    if (!auth.ok) return auth.response;
 
     const url = new URL(request.url);
     const target =
@@ -155,11 +124,9 @@ export function createGhBrokerHandler(
       return internalError("upstream_origin");
     }
 
-    const [owner, repo] = step.repoFullName.split("/");
-    if (!owner || !repo) return brokerError(502, "upstream_error");
     let token: string;
     try {
-      token = (await deps.mintReadToken(owner, repo)).token;
+      token = (await deps.mintReadToken(auth.owner, auth.repo)).token;
     } catch {
       return brokerError(502, "upstream_error");
     }
@@ -177,15 +144,6 @@ export function createGhBrokerHandler(
     } catch {
       return brokerError(502, "upstream_error");
     }
-    if (upstream.status >= 300 && upstream.status < 400) {
-      void upstream.body?.cancel().catch(() => undefined);
-      return brokerError(502, "upstream_error");
-    }
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: responseHeadersForCell(upstream.headers, {
-        rewriteLinkHost: url.host,
-      }),
-    });
+    return passThrough(upstream, { rewriteLinkHost: url.host });
   };
 }

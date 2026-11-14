@@ -9,6 +9,7 @@ import {
   type Refusal,
 } from "@terragon/shared/model/cell-authority";
 import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
+import { HOP_BY_HOP, REQUEST_OWNED } from "@terragon/utils/broker-headers";
 
 /**
  * Helpers shared by the remote-cell broker routes (git and gh, #606). Pure and
@@ -16,7 +17,11 @@ import { normalizeRepo } from "@terragon/shared/model/repo-review-settings";
  * or a token.
  */
 
-export type CellBrokerOrigin = "https://github.com" | "https://api.github.com";
+/** Mints an installation token scoped to one repository. */
+export type TokenMinter = (
+  owner: string,
+  repo: string,
+) => Promise<{ token: string }>;
 
 export function cellBrokerEnabled(): boolean {
   return env.CELL_BROKER_ENABLED;
@@ -59,10 +64,6 @@ const REFUSAL_STATUS: Record<Refusal, number> = {
   effect_in_progress: 409,
   effect_budget_exhausted: 429,
 };
-
-export function refusalStatus(reason: Refusal): number {
-  return REFUSAL_STATUS[reason];
-}
 
 export function refusalResponse(reason: Refusal): Response {
   return brokerError(REFUSAL_STATUS[reason], reason);
@@ -155,17 +156,6 @@ export function isUnsafeSegment(seg: string, mode: "git" | "gh"): boolean {
   return false;
 }
 
-// Mirrors packages/worker/src/agent-run/broker-common.ts (HOP_BY_HOP,
-// REQUEST_OWNED): www must not import the worker. Keep the two in step.
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "transfer-encoding",
-  "content-length",
-  "content-encoding",
-  "upgrade",
-]);
-const REQUEST_OWNED = new Set([...HOP_BY_HOP, "authorization", "host"]);
 // The cell's own envelope and edge headers never go upstream.
 const REQUEST_DENIED = new Set([
   "cookie",
@@ -229,8 +219,115 @@ export function responseHeadersForCell(
 }
 
 /** Throws when a built upstream URL is not on the expected fixed origin. */
-export function assertOrigin(url: URL, origin: CellBrokerOrigin): void {
+export function assertOrigin(url: URL, origin: string): void {
   if (url.origin !== origin) {
     throw new Error(`upstream origin mismatch: expected ${origin}`);
   }
+}
+
+export function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/**
+ * Hand GitHub's answer back to the cell, streamed. A redirect is never
+ * followed or forwarded: it is a 502.
+ */
+export function passThrough(
+  upstream: Response,
+  opts?: { rewriteLinkHost?: string },
+): Response {
+  if (isRedirect(upstream.status)) {
+    void upstream.body?.cancel().catch(() => undefined);
+    return brokerError(502, "upstream_error");
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: responseHeadersForCell(upstream.headers, opts),
+  });
+}
+
+export function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+/**
+ * Read a stream fully. Null when it is over `maxBytes` (the stream is
+ * cancelled); a read error propagates. A null stream is an empty body.
+ */
+export async function readCapped(
+  body: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) return concatBytes(...chunks);
+    total += chunk.value.length;
+    if (total > maxBytes) {
+      void reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(chunk.value);
+  }
+}
+
+export interface CellAuthDeps {
+  db: DB;
+  enabled: () => boolean;
+}
+
+export type CellAuthorization =
+  | {
+      ok: true;
+      bearer: string;
+      context: BearerContext;
+      /** The step's repository, normalized (`owner/repo`, lowercase). */
+      repoFullName: string;
+      owner: string;
+      repo: string;
+    }
+  | { ok: false; response: Response };
+
+/**
+ * The gate every broker request passes first: the switch (404), the cell
+ * bearer (`onMissingBearer` decides the answer), the bearer's step, and the
+ * step's repository.
+ */
+export async function authorizeCellRequest(
+  deps: CellAuthDeps,
+  request: Request,
+  opts: { onMissingBearer: () => Response },
+): Promise<CellAuthorization> {
+  if (!deps.enabled()) return { ok: false, response: notFound() };
+  const bearer = extractCellBearer(request.headers);
+  if (!bearer) return { ok: false, response: opts.onMissingBearer() };
+  let step: Awaited<ReturnType<typeof resolveCellStep>>;
+  try {
+    step = await resolveCellStep(deps.db, bearer);
+  } catch {
+    return { ok: false, response: internalError("resolve_step") };
+  }
+  if (!step.ok) return { ok: false, response: refusalResponse(step.reason) };
+  const [owner, repo] = step.repoFullName.split("/");
+  if (!owner || !repo) {
+    return { ok: false, response: brokerError(502, "upstream_error") };
+  }
+  return {
+    ok: true,
+    bearer,
+    context: step.context,
+    repoFullName: step.repoFullName,
+    owner,
+    repo,
+  };
 }
