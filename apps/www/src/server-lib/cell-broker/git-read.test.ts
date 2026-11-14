@@ -1,62 +1,21 @@
-import { randomUUID } from "node:crypto";
-
 import { describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { captureLogs, basic } from "@/test-helpers/capture-logs";
 import type { DB } from "@terragon/shared/db";
-import { thread } from "@terragon/shared/db/schema";
 import {
   markStepDone,
-  mintBearer,
-  openStep,
   revokeAttempt,
 } from "@terragon/shared/model/cell-authority";
-import {
-  createTestOrg,
-  createTestThread,
-  createTestUser,
-} from "@terragon/shared/model/test-helpers";
+import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import { createGitBrokerHandler, type GitBrokerDeps } from "./git";
 
-const STEP_TIMEOUT = 30 * 60_000;
 const SENTINEL = "ghs_SENTINEL_installation_token";
 const BASE = "https://www.example.com/api/cell/git";
 
-async function fixture(repo = "acme/widgets") {
-  const organizationId = await createTestOrg({ db });
-  const { user } = await createTestUser({ db });
-  const { threadId } = await createTestThread({
-    db,
-    userId: user.id,
-    overrides: { githubRepoFullName: repo },
-  });
-  await db
-    .update(thread)
-    .set({ organizationId })
-    .where(eq(thread.id, threadId));
-  const stepKey = `run-${randomUUID()}/agent`;
-  const open = (attempt: number) =>
-    openStep({
-      db,
-      step: {
-        stepKey,
-        organizationId,
-        threadId,
-        attempt,
-        stepTimeoutMs: STEP_TIMEOUT,
-        effectBudget: null,
-      },
-    });
-  const bearer = async (attempt: number, ttlMs = STEP_TIMEOUT) => {
-    const m = await mintBearer({ db, stepKey, attempt, ttlMs });
-    if (!m.ok) throw new Error(m.reason);
-    return m.token;
-  };
-  await open(1);
-  return { stepKey, open, bearer, token: await bearer(1) };
-}
+const fixture = (repo = "acme/widgets") =>
+  createTestCellStep({ db, repoFullName: repo });
 
 interface Upstream {
   status?: number;
@@ -92,24 +51,6 @@ function harness(upstream: Upstream = {}, over: Partial<GitBrokerDeps> = {}) {
   });
   return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
 }
-
-function captureLogs() {
-  const spies = (["error", "warn", "log"] as const).map((method) =>
-    vi.spyOn(console, method).mockImplementation(() => {}),
-  );
-  return {
-    text: () =>
-      spies
-        .flatMap((spy) => spy.mock.calls.flat())
-        .map((arg) =>
-          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
-        )
-        .join("\n"),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
-  };
-}
-
-const basic = (pass: string) => `Basic ${btoa(`x-access-token:${pass}`)}`;
 
 function get(path: string, token: string | null, init: RequestInit = {}) {
   return new Request(`${BASE}${path}`, {

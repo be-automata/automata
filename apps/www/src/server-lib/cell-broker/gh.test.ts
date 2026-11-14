@@ -1,64 +1,23 @@
-import { randomUUID } from "node:crypto";
-
 import { describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { captureLogs } from "@/test-helpers/capture-logs";
 import type { DB } from "@terragon/shared/db";
-import { thread } from "@terragon/shared/db/schema";
 import {
   markStepDone,
-  mintBearer,
-  openStep,
   revokeAttempt,
 } from "@terragon/shared/model/cell-authority";
-import {
-  createTestOrg,
-  createTestThread,
-  createTestUser,
-} from "@terragon/shared/model/test-helpers";
+import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import { createGhBrokerHandler, type GhBrokerDeps } from "./gh";
 
-const STEP_TIMEOUT = 30 * 60_000;
 const SENTINEL = "ghs_SENTINEL_read_token";
 const HOST = "www.example.com";
 const REST = `https://${HOST}/api/v3`;
 const GRAPHQL = `https://${HOST}/api/graphql`;
 
-async function fixture(repo = "acme/widgets") {
-  const organizationId = await createTestOrg({ db });
-  const { user } = await createTestUser({ db });
-  const { threadId } = await createTestThread({
-    db,
-    userId: user.id,
-    overrides: { githubRepoFullName: repo },
-  });
-  await db
-    .update(thread)
-    .set({ organizationId })
-    .where(eq(thread.id, threadId));
-  const stepKey = `run-${randomUUID()}/agent`;
-  const open = (attempt: number) =>
-    openStep({
-      db,
-      step: {
-        stepKey,
-        organizationId,
-        threadId,
-        attempt,
-        stepTimeoutMs: STEP_TIMEOUT,
-        effectBudget: null,
-      },
-    });
-  const bearer = async (attempt: number, ttlMs = STEP_TIMEOUT) => {
-    const m = await mintBearer({ db, stepKey, attempt, ttlMs });
-    if (!m.ok) throw new Error(m.reason);
-    return m.token;
-  };
-  await open(1);
-  return { stepKey, open, bearer, token: await bearer(1) };
-}
+const fixture = (repo = "acme/widgets") =>
+  createTestCellStep({ db, repoFullName: repo });
 
 interface Upstream {
   status?: number;
@@ -142,22 +101,6 @@ function graphql(
       ...headers,
     },
   });
-}
-
-function captureLogs() {
-  const spies = (["error", "warn", "log"] as const).map((method) =>
-    vi.spyOn(console, method).mockImplementation(() => {}),
-  );
-  return {
-    text: () =>
-      spies
-        .flatMap((spy) => spy.mock.calls.flat())
-        .map((arg) =>
-          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
-        )
-        .join("\n"),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
-  };
 }
 
 const gql = (query: string) => JSON.stringify({ query });

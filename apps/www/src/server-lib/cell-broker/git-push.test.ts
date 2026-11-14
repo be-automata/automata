@@ -1,21 +1,12 @@
-import { randomUUID } from "node:crypto";
-
 import { describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import { captureLogs, basic } from "@/test-helpers/capture-logs";
 import type { DB } from "@terragon/shared/db";
-import { cellEffect, cellStep, thread } from "@terragon/shared/db/schema";
-import {
-  beginEffect,
-  mintBearer,
-  openStep,
-} from "@terragon/shared/model/cell-authority";
-import {
-  createTestOrg,
-  createTestThread,
-  createTestUser,
-} from "@terragon/shared/model/test-helpers";
+import { cellEffect, cellStep } from "@terragon/shared/db/schema";
+import { beginEffect } from "@terragon/shared/model/cell-authority";
+import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import {
   createGitBrokerHandler,
@@ -24,7 +15,6 @@ import {
 } from "./git";
 import { parseReportStatus } from "./report-status";
 
-const STEP_TIMEOUT = 30 * 60_000;
 const SENTINEL = "ghs_SENTINEL_write_token";
 const URL_PUSH =
   "https://www.example.com/api/cell/git/acme/widgets.git/git-receive-pack";
@@ -64,39 +54,8 @@ const pushBody = (newSha = NEW_A) => concat(commandSection(newSha), PACK);
 
 const REPORT_OK = concat(pkt("unpack ok\n"), pkt(`ok ${REF}\n`), FLUSH);
 
-async function fixture(effectBudget: number | null = null) {
-  const organizationId = await createTestOrg({ db });
-  const { user } = await createTestUser({ db });
-  const { threadId } = await createTestThread({
-    db,
-    userId: user.id,
-    overrides: { githubRepoFullName: "acme/widgets" },
-  });
-  await db
-    .update(thread)
-    .set({ organizationId })
-    .where(eq(thread.id, threadId));
-  const stepKey = `run-${randomUUID()}/agent`;
-  const open = (attempt: number) =>
-    openStep({
-      db,
-      step: {
-        stepKey,
-        organizationId,
-        threadId,
-        attempt,
-        stepTimeoutMs: STEP_TIMEOUT,
-        effectBudget,
-      },
-    });
-  const bearer = async (attempt: number) => {
-    const m = await mintBearer({ db, stepKey, attempt, ttlMs: STEP_TIMEOUT });
-    if (!m.ok) throw new Error(m.reason);
-    return m.token;
-  };
-  await open(1);
-  return { stepKey, open, bearer, token: await bearer(1) };
-}
+const fixture = (effectBudget: number | null = null) =>
+  createTestCellStep({ db, effectBudget });
 
 async function effectsUsed(stepKey: string): Promise<number> {
   const rows = await db
@@ -181,22 +140,6 @@ function harness(
   return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
 }
 
-function captureLogs() {
-  const spies = (["error", "warn", "log"] as const).map((method) =>
-    vi.spyOn(console, method).mockImplementation(() => {}),
-  );
-  return {
-    text: () =>
-      spies
-        .flatMap((spy) => spy.mock.calls.flat())
-        .map((arg) =>
-          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
-        )
-        .join("\n"),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
-  };
-}
-
 /** The real db with some methods replaced (a failing database, in effect). */
 function dbWith(
   overrides: Record<string, (...args: unknown[]) => unknown>,
@@ -210,8 +153,6 @@ function dbWith(
     },
   }) as DB;
 }
-
-const basic = (pass: string) => `Basic ${btoa(`x-access-token:${pass}`)}`;
 
 function push(
   token: string,
