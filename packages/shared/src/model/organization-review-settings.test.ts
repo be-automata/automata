@@ -8,6 +8,7 @@ import {
   getOrganizationReviewSetting,
   upsertOrganizationReviewSetting,
   removeOrganizationReviewSetting,
+  isCellWorkflowWriteEnabled,
 } from "./organization-review-settings";
 
 const db = createDb(env.DATABASE_URL!);
@@ -175,5 +176,46 @@ describe("organization-review-settings (Neon, org-fenced)", () => {
     expect(
       await getOrganizationReviewSetting({ db, organizationId: orgB }),
     ).toBeDefined();
+  });
+
+  it("round-trips cellWorkflowWrite true, false and null", async () => {
+    for (const value of [true, false, null]) {
+      const set = await upsertOrganizationReviewSetting({
+        db,
+        organizationId: orgA,
+        patch: { cellWorkflowWrite: value },
+      });
+      expect(set.cellWorkflowWrite).toBe(value);
+      const got = await getOrganizationReviewSetting({
+        db,
+        organizationId: orgA,
+      });
+      expect(got?.cellWorkflowWrite).toBe(value);
+    }
+  });
+
+  it("leaves cellWorkflowWrite unchanged when the patch key is absent", async () => {
+    await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgA,
+      patch: { cellWorkflowWrite: true },
+    });
+    const set = await upsertOrganizationReviewSetting({
+      db,
+      organizationId: orgA,
+      patch: { blockTolerance: "error" },
+    });
+    expect(set.cellWorkflowWrite).toBe(true);
+    expect(set.blockTolerance).toBe("error");
+  });
+
+  it("isCellWorkflowWriteEnabled resolves only true to ON", () => {
+    expect(isCellWorkflowWriteEnabled(undefined)).toBe(false);
+    expect(isCellWorkflowWriteEnabled(null)).toBe(false);
+    expect(isCellWorkflowWriteEnabled({ cellWorkflowWrite: null })).toBe(false);
+    expect(isCellWorkflowWriteEnabled({ cellWorkflowWrite: false })).toBe(
+      false,
+    );
+    expect(isCellWorkflowWriteEnabled({ cellWorkflowWrite: true })).toBe(true);
   });
 });
