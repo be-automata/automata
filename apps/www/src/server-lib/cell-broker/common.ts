@@ -232,6 +232,15 @@ export function isRedirect(status: number): boolean {
   return REDIRECT_STATUSES.has(status);
 }
 
+/**
+ * Any 3xx. `passThrough` forwards a 304 (an ordinary answer to a conditional
+ * read); a push treats every 3xx as an upstream error, since a redirect is
+ * never followed and a 304 cannot answer a receive-pack POST.
+ */
+export function isAny3xx(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
 /** True for a request body encoding the broker cannot read (not identity). */
 export function hasUnsupportedContentEncoding(headers: Headers): boolean {
   const encoding = headers.get("content-encoding");

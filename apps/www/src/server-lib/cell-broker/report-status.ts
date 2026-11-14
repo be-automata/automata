@@ -10,7 +10,7 @@
  * packets), bands 2 and 3 are progress and error text and are skipped.
  */
 
-import { readPktLine } from "@terragon/utils/receive-pack-refs";
+import { isObjectName, readPktLine } from "@terragon/utils/receive-pack-refs";
 
 import { concatBytes } from "./common";
 
@@ -78,8 +78,6 @@ export function parseReportStatus(body: Uint8Array): ReportStatus | null {
   return parseReportLines(outer);
 }
 
-const REF_TIP = /^[0-9a-f]{40,64}$/;
-
 /**
  * The ref tips in a receive-pack advertisement (`GET info/refs`): an optional
  * `# service=...` pkt and its flush, then `<sha> <ref>` pkts (the first with
@@ -108,7 +106,7 @@ export function parseAdvertisedRefs(
     const space = text.indexOf(" ");
     const sha = text.slice(0, space).toLowerCase();
     const ref = text.slice(space + 1);
-    if (space === -1 || !REF_TIP.test(sha) || ref === "") return null;
+    if (space === -1 || !isObjectName(sha) || ref === "") return null;
     if (ref !== "capabilities^{}") tips.set(ref, sha);
   }
   return null;

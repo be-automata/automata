@@ -7,6 +7,7 @@ import {
 } from "@terragon/shared/model/cell-authority";
 import { hashOpaqueToken } from "@terragon/shared/utils/opaque-token";
 import {
+  isZeroObjectName,
   parseReceivePackCommands,
   type ReceivePackCommand,
 } from "@terragon/utils/receive-pack-refs";
@@ -21,6 +22,7 @@ import {
   gitAuthChallenge,
   hasUnsupportedContentEncoding,
   internalError,
+  isAny3xx,
   isUnsafeSegment,
   passThrough,
   readCapped,
@@ -28,7 +30,11 @@ import {
   responseHeadersForCell,
   type TokenMinter,
 } from "./common";
-import { parseAdvertisedRefs, parseReportStatus } from "./report-status";
+import {
+  parseAdvertisedRefs,
+  parseReportStatus,
+  type ReportStatus,
+} from "./report-status";
 
 /**
  * Remote-cell git broker (#606): a smart-HTTP proxy that lets a cell clone,
@@ -49,6 +55,7 @@ const MAX_PUSH_BYTES = 32 * 1024 * 1024;
 const MAX_COMMAND_SECTION_BYTES = 64 * 1024;
 const MAX_PUSH_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ADVERTISEMENT_BYTES = 8 * 1024 * 1024;
+const ADVERTISEMENT_TIMEOUT_MS = 30_000;
 /** How many times one command list may be claimed anew after its stored success went stale. */
 const MAX_PUSH_GENERATIONS = 20;
 
@@ -61,6 +68,8 @@ export interface GitBrokerDeps {
   enabled: () => boolean;
   /** Cap on a push body; tests lower it. Defaults to 32 MiB. */
   maxPushBytes?: number;
+  /** Time allowed for the ref advertisement fetch. Defaults to 30 s. */
+  advertisementTimeoutMs?: number;
 }
 
 type Leg = "upload-pack" | "receive-pack-advert" | "receive-pack-post";
@@ -93,6 +102,28 @@ export function pushIdempotencyKey(
     .map((c) => `${c.oldSha} ${c.newSha} ${c.ref}`)
     .join("\n");
   return `push:${hashOpaqueToken(canonical)}`;
+}
+
+/** Stop reading a request body and discard the rest. Never throws. */
+function drop(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  void reader.cancel().catch(() => undefined);
+}
+
+/**
+ * A URL on github.com for the step's repository, on the fixed origin. The
+ * only place a git upstream URL is built.
+ */
+function githubGitUrl(
+  owner: string,
+  repo: string,
+  endpoint: string,
+  service?: string,
+): URL {
+  const url = new URL("https://github.com");
+  url.pathname = `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/${endpoint}`;
+  if (service) url.searchParams.set("service", service);
+  assertOrigin(url, "https://github.com");
+  return url;
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -155,7 +186,7 @@ async function readCommandSection(
   if (!body) return { ok: false, response: brokerError(400, "bad_request") };
   const reader = body.getReader();
   const fail = (status: number, code: string): CommandSection => {
-    void reader.cancel().catch(() => undefined);
+    drop(reader);
     return { ok: false, response: brokerError(status, code) };
   };
   let prefix: Uint8Array = new Uint8Array(0);
@@ -194,8 +225,21 @@ type StoredPush = {
   httpStatus: number;
   contentType: string;
   bodyB64: string;
-  refs: unknown;
+  refs: ReportStatus["refs"] | null;
 };
+
+function isStoredRefs(value: unknown): value is ReportStatus["refs"] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry: unknown) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as { ref?: unknown }).ref === "string" &&
+        typeof (entry as { ok?: unknown }).ok === "boolean",
+    )
+  );
+}
 
 /** Rebuild a stored push answer, validating every stored field first. */
 function replayResponse(result: Record<string, unknown>): Response {
@@ -316,7 +360,7 @@ async function forwardPush(
           overflowed = true;
           stream.error(new Error("push body over the cap"));
           controller.abort();
-          void section.reader.cancel().catch(() => undefined);
+          drop(section.reader);
           return;
         }
         stream.enqueue(chunk.value);
@@ -348,10 +392,7 @@ async function forwardPush(
     await releaseClaim(push);
     return brokerError(413, "payload_too_large");
   }
-  if (
-    upstream.status >= 500 ||
-    (upstream.status >= 300 && upstream.status < 400)
-  ) {
+  if (upstream.status >= 500 || isAny3xx(upstream.status)) {
     void upstream.body?.cancel().catch(() => undefined);
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
@@ -385,15 +426,9 @@ function isStoredSuccess(
   if (typeof httpStatus !== "number" || httpStatus < 200 || httpStatus > 299) {
     return false;
   }
-  if (!Array.isArray(refs)) return false;
+  if (!isStoredRefs(refs)) return false;
   return commands.every((command) =>
-    refs.some(
-      (entry: unknown) =>
-        typeof entry === "object" &&
-        entry !== null &&
-        (entry as { ref?: unknown }).ref === command.ref &&
-        (entry as { ok?: unknown }).ok === true,
-    ),
+    refs.some((entry) => entry.ref === command.ref && entry.ok),
   );
 }
 
@@ -407,16 +442,19 @@ async function fetchAdvertisedRefs(
   repo: string,
   token: string,
 ): Promise<Map<string, string> | null> {
-  const url = new URL("https://github.com");
-  url.pathname = `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/refs`;
-  url.searchParams.set("service", RECEIVE_PACK);
   try {
-    assertOrigin(url, "https://github.com");
+    const url = githubGitUrl(owner, repo, "info/refs", RECEIVE_PACK);
     const upstream = await callUpstream({
       deps,
-      request: new Request(url.toString(), { method: "GET" }),
+      request: new Request(url.toString(), {
+        method: "GET",
+        headers: { "user-agent": "git/automata-cell-broker" },
+      }),
       url,
       token,
+      signal: AbortSignal.timeout(
+        deps.advertisementTimeoutMs ?? ADVERTISEMENT_TIMEOUT_MS,
+      ),
     });
     if (upstream.status < 200 || upstream.status > 299) {
       void upstream.body?.cancel().catch(() => undefined);
@@ -429,15 +467,13 @@ async function fetchAdvertisedRefs(
   }
 }
 
-const ZERO_SHA = /^0+$/;
-
 /** True when every command's ref is already at its new sha (absent for a delete). */
 function advertisedTipsMatch(
   tips: ReadonlyMap<string, string>,
   commands: readonly ReceivePackCommand[],
 ): boolean {
   return commands.every((command) =>
-    ZERO_SHA.test(command.newSha)
+    isZeroObjectName(command.newSha)
       ? !tips.has(command.ref)
       : tips.get(command.ref) === command.newSha,
   );
@@ -491,7 +527,7 @@ async function handlePush({
       }
     }
     if (!probe) {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return brokerError(400, "bad_request");
     }
   }
@@ -500,7 +536,7 @@ async function handlePush({
   try {
     token = (await deps.mintWriteToken(owner, repo)).token;
   } catch {
-    void section.reader.cancel().catch(() => undefined);
+    drop(section.reader);
     return brokerError(502, "upstream_error");
   }
 
@@ -522,6 +558,7 @@ async function handlePush({
 
   const baseKey = pushIdempotencyKey(section.commands);
   let tips: Map<string, string> | null = null;
+  let refetched = false;
   for (let generation = 1; generation <= MAX_PUSH_GENERATIONS; generation++) {
     const idempotencyKey =
       generation === 1 ? baseKey : `${baseKey}:g${generation}`;
@@ -529,11 +566,11 @@ async function handlePush({
     try {
       begun = await beginEffect({ db: deps.db, token: bearer, idempotencyKey });
     } catch {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return internalError("begin_effect");
     }
     if (begun.kind === "refused") {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return refusalResponse(begun.reason);
     }
     if (begun.kind === "go") {
@@ -546,20 +583,32 @@ async function handlePush({
     // replayed while the refs still show it, otherwise the push is claimed
     // anew under the next generation.
     if (!isStoredSuccess(begun.result, section.commands)) {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return replayResponse(begun.result);
     }
     tips ??= await fetchAdvertisedRefs(deps, owner, repo, token);
     if (!tips) {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return brokerError(502, "upstream_error");
     }
+    if (!advertisedTipsMatch(tips, section.commands) && generation >= 2) {
+      // A concurrent request may have completed this generation after the
+      // first read: look once more before claiming the next one.
+      if (!refetched) {
+        refetched = true;
+        tips = await fetchAdvertisedRefs(deps, owner, repo, token);
+        if (!tips) {
+          drop(section.reader);
+          return brokerError(502, "upstream_error");
+        }
+      }
+    }
     if (advertisedTipsMatch(tips, section.commands)) {
-      void section.reader.cancel().catch(() => undefined);
+      drop(section.reader);
       return replayResponse(begun.result);
     }
   }
-  void section.reader.cancel().catch(() => undefined);
+  drop(section.reader);
   return brokerError(409, "push_generations_exhausted");
 }
 
@@ -600,16 +649,18 @@ export function createGitBrokerHandler(
 
     // The upstream URL comes from the step's repo and the allowlisted endpoint.
     const { owner: stepOwner, repo: stepRepo } = auth;
-    const upstreamUrl = new URL("https://github.com");
-    upstreamUrl.pathname = `/${encodeURIComponent(stepOwner)}/${encodeURIComponent(stepRepo)}.git/${endpoint}`;
-    if (endpoint === "info/refs") {
-      upstreamUrl.searchParams.set(
-        "service",
-        leg === "upload-pack" ? UPLOAD_PACK : RECEIVE_PACK,
-      );
-    }
+    let upstreamUrl: URL;
     try {
-      assertOrigin(upstreamUrl, "https://github.com");
+      upstreamUrl = githubGitUrl(
+        stepOwner,
+        stepRepo,
+        endpoint,
+        endpoint === "info/refs"
+          ? leg === "upload-pack"
+            ? UPLOAD_PACK
+            : RECEIVE_PACK
+          : undefined,
+      );
     } catch {
       return internalError("upstream_origin");
     }

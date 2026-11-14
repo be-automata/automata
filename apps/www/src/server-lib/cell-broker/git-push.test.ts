@@ -125,13 +125,31 @@ function harness(
   // GitHub's ref tips: pushes it accepts move them, advertisement GETs read them.
   const tips: Record<string, string> = { [REF]: OLD };
   const adverts: string[] = [];
-  const state = { advertFails: false };
+  const advertUserAgents: (string | null)[] = [];
+  const state = {
+    advertFails: false,
+    advertHangs: false,
+    // Tips served to the next advertisement GETs, before falling back to `tips`.
+    advertQueue: [] as Record<string, string>[],
+  };
   const fetchImpl = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
-      if ((init?.method ?? "GET") === "GET") {
+      if (
+        (init?.method ?? "GET") === "GET" &&
+        String(input).includes("info/refs?service=git-receive-pack")
+      ) {
         adverts.push(String(input));
+        advertUserAgents.push(new Headers(init?.headers).get("user-agent"));
+        if (state.advertHangs) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new Error("aborted")),
+            );
+          });
+        }
         if (state.advertFails) return new Response("nope", { status: 500 });
-        return new Response(advertisement(tips) as BodyInit, { status: 200 });
+        const served = state.advertQueue.shift() ?? tips;
+        return new Response(advertisement(served) as BodyInit, { status: 200 });
       }
       const body = await readAll(init?.body as BodyInit | null | undefined);
       calls.push({
@@ -171,6 +189,7 @@ function harness(
     handler,
     calls,
     adverts,
+    advertUserAgents,
     tips,
     state,
     fetchImpl,
@@ -575,6 +594,7 @@ describe("git broker push", () => {
     expect(h.adverts[0]).toBe(
       "https://github.com/acme/widgets.git/info/refs?service=git-receive-pack",
     );
+    expect(h.advertUserAgents[0]).toBe("git/automata-cell-broker");
     expect(h.calls).toHaveLength(2);
     expect(await effectsUsed(f.stepKey)).toBe(2);
     expect(await effectRows(f.stepKey)).toBe(2);
@@ -623,6 +643,81 @@ describe("git broker push", () => {
     const h = harness();
     await h.handler(push(f.token, pushBody()));
     h.state.advertFails = true;
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      502,
+      "upstream_error",
+    ]);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("when every generation up to g20 is a stale success the push is refused with 409 and nothing is claimed or forwarded", async () => {
+    const f = await fixture();
+    const h = harness();
+    for (let i = 0; i < 20; i++) {
+      h.tips[REF] = OLD;
+      expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+    }
+    expect(h.calls).toHaveLength(20);
+    expect(await effectRows(f.stepKey)).toBe(20);
+
+    h.tips[REF] = OLD;
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      409,
+      "push_generations_exhausted",
+    ]);
+    expect(h.calls).toHaveLength(20);
+    expect(await effectRows(f.stepKey)).toBe(20);
+    expect(await effectsUsed(f.stepKey)).toBe(20);
+  });
+
+  it("a stale success whose next generation is still pending is a 409 effect_in_progress with no POST", async () => {
+    const f = await fixture();
+    const h = harness();
+    await h.handler(push(f.token, pushBody()));
+    h.tips[REF] = OLD;
+    const g2 = `${pushIdempotencyKey([{ oldSha: OLD, newSha: NEW_A, ref: REF }])}:g2`;
+    const claimed = await beginEffect({
+      db,
+      token: f.token,
+      idempotencyKey: g2,
+    });
+    expect(claimed.kind).toBe("go");
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      409,
+      "effect_in_progress",
+    ]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("looks at the refs once more before claiming the next generation: a push another request just completed is replayed", async () => {
+    const f = await fixture();
+    const h = harness();
+    await h.handler(push(f.token, pushBody()));
+    h.tips[REF] = OLD;
+    await h.handler(push(f.token, pushBody()));
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+
+    // First read is stale, the second shows the push landed.
+    const advertsBefore = h.adverts.length;
+    h.state.advertQueue.push({ [REF]: OLD }, { [REF]: NEW_A });
+    const res = await h.handler(push(f.token, pushBody()));
+    expect(res.status).toBe(200);
+    expect(h.adverts.length - advertsBefore).toBe(2);
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
+  it("an advertisement that does not answer in time is a 502 with no claim", async () => {
+    const f = await fixture();
+    const h = harness({}, { advertisementTimeoutMs: 50 });
+    await h.handler(push(f.token, pushBody()));
+    h.state.advertHangs = true;
     const res = await h.handler(push(f.token, pushBody()));
     expect([res.status, (await json(res)).error]).toEqual([
       502,
