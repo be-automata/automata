@@ -424,8 +424,10 @@ export async function getWriteInstallationToken(
     optional: opts?.allowWorkflows === true ? WRITE_OPTIONAL_PERMISSIONS : {},
     label: "write token",
     cacheToken: true,
-    // A push is never minted on a guess: a fallback token lacks workflows:write,
-    // and GitHub's rejection of a workflow-file push would be stored as final.
+    // The push token fails closed in every case (owner decision OD5, #609).
+    // For an org that opted in, a fallback token would lack workflows:write and
+    // GitHub's refusal of a workflow-file push would be stored as final for the
+    // step; other orgs get the same policy, kept as one simple rule.
     onPermissionsReadFailure: "fail",
     knownInstallationId: opts?.knownInstallationId,
   });
