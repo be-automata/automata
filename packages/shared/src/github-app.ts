@@ -154,10 +154,14 @@ export class MissingInstallationPermissionError extends Error {
   }
 }
 
-// In-process caches (one Worker isolate). Errors are never cached and no token
-// is ever logged.
+// In-process cache of the granted permissions (one Worker isolate). Errors are
+// never cached and no token is ever logged. The tokens themselves are cached
+// by @octokit/auth-app (per App instance: LRU, in-flight de-dup, 59 min TTL).
 const GRANTED_PERMISSIONS_TTL_MS = 5 * 60_000;
+/** A reused token with less than this left is replaced by a fresh one. */
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+/** A token returned for a "fresh" request must have been minted this recently. */
+const FRESH_TOKEN_MAX_AGE_MS = 60_000;
 
 const grantedPermissionsCache = new Map<
   string,
@@ -167,15 +171,14 @@ const grantedPermissionsCache = new Map<
     cachedAt: number;
   }
 >();
-const mintedTokenCache = new Map<
-  string,
-  { token: string; expiresAt: string; expiresAtMs: number }
->();
 
-/** Test hook: forget every cached permission read and minted token. */
+/**
+ * Test hook: forget every cached permission read, and drop the App instance so
+ * @octokit/auth-app's token cache starts empty.
+ */
 export function clearInstallationTokenCacheForTests(): void {
   grantedPermissionsCache.clear();
-  mintedTokenCache.clear();
+  resetAppInstance();
 }
 
 async function readGrantedPermissions(owner: string, repo: string) {
@@ -198,11 +201,13 @@ async function readGrantedPermissions(owner: string, repo: string) {
  * be granted at the requested level or more, else
  * MissingInstallationPermissionError; each `optional` permission is added only
  * when granted. If the permissions read fails (network, 5xx) the mint throws:
- * a token's scope is never guessed. The POST asks for exactly the computed set
+ * a token's scope is never guessed. The token comes from @octokit/auth-app
+ * (`octokit.auth({ type: "installation", ... })`) for exactly the computed set
  * on `[repo]`, with no `expires_at` (GitHub caps installation tokens at one
- * hour); the response's own expiry is returned. With `cacheToken`, a minted
- * token is reused until 5 minutes before it expires, per installation, repo
- * and permission set; without it every call mints a fresh token.
+ * hour); the response's own expiry is returned. With `cacheToken`, auth-app's
+ * cache reuses a token (per installation, repo and permission set) unless it
+ * has less than 5 minutes left, in which case one refresh is made; without it
+ * every call asks for a fresh token (`refresh: true`).
  * `knownInstallationId` overrides the installation id the read found. `label`
  * names the token in the error for a response without a token or an expiry.
  */
@@ -242,44 +247,40 @@ async function mintRepoInstallationToken({
   }
 
   const installationId = knownInstallationId ?? granted.installationId;
-  const cacheKey = `${installationId}|${repo.toLowerCase()}|${Object.entries(
-    permissions,
-  )
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, level]) => `${name}:${level}`)
-    .join(",")}`;
-  const reusable = cacheToken ? mintedTokenCache.get(cacheKey) : undefined;
-  if (reusable && reusable.expiresAtMs - Date.now() > TOKEN_REFRESH_MARGIN_MS) {
-    return { token: reusable.token, expiresAt: reusable.expiresAt };
-  }
-
-  let data: { token?: unknown; expires_at?: unknown };
+  const authenticate = (refresh: boolean) =>
+    getGitHubApp().octokit.auth({
+      type: "installation",
+      installationId,
+      repositoryNames: [repo],
+      permissions,
+      refresh,
+    } as never) as Promise<{
+      token?: unknown;
+      expiresAt?: unknown;
+      createdAt?: unknown;
+    }>;
+  let auth: Awaited<ReturnType<typeof authenticate>>;
   try {
-    ({ data } = await getGitHubApp().octokit.request(
-      "POST /app/installations/{installation_id}/access_tokens",
-      {
-        installation_id: installationId,
-        repositories: [repo],
-        permissions,
-      },
-    ));
+    auth = await authenticate(!cacheToken);
+    // The cache can hand back a token about to expire; a "fresh" request can
+    // join an in-flight cached lookup. One refresh settles both.
+    const expiresAtMs = Date.parse(String(auth.expiresAt));
+    const createdAtMs = Date.parse(String(auth.createdAt));
+    const stale = cacheToken
+      ? Number.isFinite(expiresAtMs) &&
+        expiresAtMs - Date.now() < TOKEN_REFRESH_MARGIN_MS
+      : Number.isFinite(createdAtMs) &&
+        Date.now() - createdAtMs > FRESH_TOKEN_MAX_AGE_MS;
+    if (stale) auth = await authenticate(true);
   } catch (error: unknown) {
     throw notInstalledOr(error, owner, repo);
   }
-  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
+  if (typeof auth.token !== "string" || typeof auth.expiresAt !== "string") {
     throw new Error(
       `GitHub App token response has no token or no expires_at (${label})`,
     );
   }
-  const expiresAtMs = Date.parse(data.expires_at);
-  if (cacheToken && Number.isFinite(expiresAtMs)) {
-    mintedTokenCache.set(cacheKey, {
-      token: data.token,
-      expiresAt: data.expires_at,
-      expiresAtMs,
-    });
-  }
-  return { token: data.token, expiresAt: data.expires_at };
+  return { token: auth.token, expiresAt: auth.expiresAt };
 }
 
 /**
