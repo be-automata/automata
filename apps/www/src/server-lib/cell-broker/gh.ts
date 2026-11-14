@@ -7,6 +7,7 @@ import {
   brokerError,
   decodePathSegments,
   forwardRequestHeaders,
+  hasUnsupportedContentEncoding,
   internalError,
   isUnsafeSegment,
   passThrough,
@@ -64,6 +65,9 @@ async function graphqlTarget(
 ): Promise<Built> {
   if (request.method !== "POST") {
     return { ok: false, response: brokerError(403, "forbidden_method") };
+  }
+  if (hasUnsupportedContentEncoding(request.headers)) {
+    return { ok: false, response: brokerError(415, "unsupported_encoding") };
   }
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {

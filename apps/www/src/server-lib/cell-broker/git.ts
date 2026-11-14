@@ -19,8 +19,8 @@ import {
   decodePathSegments,
   forwardRequestHeaders,
   gitAuthChallenge,
+  hasUnsupportedContentEncoding,
   internalError,
-  isRedirect,
   isUnsafeSegment,
   passThrough,
   readCapped,
@@ -28,7 +28,7 @@ import {
   responseHeadersForCell,
   type TokenMinter,
 } from "./common";
-import { parseReportStatus } from "./report-status";
+import { parseAdvertisedRefs, parseReportStatus } from "./report-status";
 
 /**
  * Remote-cell git broker (#606): a smart-HTTP proxy that lets a cell clone,
@@ -48,6 +48,9 @@ const RECEIVE_PACK = "git-receive-pack";
 const MAX_PUSH_BYTES = 32 * 1024 * 1024;
 const MAX_COMMAND_SECTION_BYTES = 64 * 1024;
 const MAX_PUSH_RESPONSE_BYTES = 1024 * 1024;
+const MAX_ADVERTISEMENT_BYTES = 8 * 1024 * 1024;
+/** How many times one command list may be claimed anew after its stored success went stale. */
+const MAX_PUSH_GENERATIONS = 20;
 
 export interface GitBrokerDeps {
   db: DB;
@@ -345,7 +348,10 @@ async function forwardPush(
     await releaseClaim(push);
     return brokerError(413, "payload_too_large");
   }
-  if (upstream.status >= 500 || isRedirect(upstream.status)) {
+  if (
+    upstream.status >= 500 ||
+    (upstream.status >= 300 && upstream.status < 400)
+  ) {
     void upstream.body?.cancel().catch(() => undefined);
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
@@ -368,6 +374,73 @@ async function forwardPush(
     status: upstream.status,
     headers: responseHeadersForCell(upstream.headers),
   });
+}
+
+/** A stored answer that is a 2xx where every pushed ref is reported ok. */
+function isStoredSuccess(
+  result: Record<string, unknown>,
+  commands: readonly ReceivePackCommand[],
+): boolean {
+  const { httpStatus, refs } = result;
+  if (typeof httpStatus !== "number" || httpStatus < 200 || httpStatus > 299) {
+    return false;
+  }
+  if (!Array.isArray(refs)) return false;
+  return commands.every((command) =>
+    refs.some(
+      (entry: unknown) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as { ref?: unknown }).ref === command.ref &&
+        (entry as { ok?: unknown }).ok === true,
+    ),
+  );
+}
+
+/**
+ * The ref tips GitHub advertises for the step's repository, or null when it
+ * did not answer a parseable advertisement. A GET: nothing is claimed.
+ */
+async function fetchAdvertisedRefs(
+  deps: GitBrokerDeps,
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<Map<string, string> | null> {
+  const url = new URL("https://github.com");
+  url.pathname = `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/refs`;
+  url.searchParams.set("service", RECEIVE_PACK);
+  try {
+    assertOrigin(url, "https://github.com");
+    const upstream = await callUpstream({
+      deps,
+      request: new Request(url.toString(), { method: "GET" }),
+      url,
+      token,
+    });
+    if (upstream.status < 200 || upstream.status > 299) {
+      void upstream.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const bytes = await readCapped(upstream.body, MAX_ADVERTISEMENT_BYTES);
+    return bytes ? parseAdvertisedRefs(bytes) : null;
+  } catch {
+    return null;
+  }
+}
+
+const ZERO_SHA = /^0+$/;
+
+/** True when every command's ref is already at its new sha (absent for a delete). */
+function advertisedTipsMatch(
+  tips: ReadonlyMap<string, string>,
+  commands: readonly ReceivePackCommand[],
+): boolean {
+  return commands.every((command) =>
+    ZERO_SHA.test(command.newSha)
+      ? !tips.has(command.ref)
+      : tips.get(command.ref) === command.newSha,
+  );
 }
 
 interface PushRequest {
@@ -395,8 +468,7 @@ async function handlePush({
   repo,
   url,
 }: PushRequest): Promise<Response> {
-  const encoding = request.headers.get("content-encoding");
-  if (encoding && encoding.trim().toLowerCase() !== "identity") {
+  if (hasUnsupportedContentEncoding(request.headers)) {
     return brokerError(415, "unsupported_encoding");
   }
   const max = deps.maxPushBytes ?? MAX_PUSH_BYTES;
@@ -448,26 +520,47 @@ async function handlePush({
     }
   }
 
-  const idempotencyKey = pushIdempotencyKey(section.commands);
-  let begun: Awaited<ReturnType<typeof beginEffect>>;
-  try {
-    begun = await beginEffect({ db: deps.db, token: bearer, idempotencyKey });
-  } catch {
-    void section.reader.cancel().catch(() => undefined);
-    return internalError("begin_effect");
+  const baseKey = pushIdempotencyKey(section.commands);
+  let tips: Map<string, string> | null = null;
+  for (let generation = 1; generation <= MAX_PUSH_GENERATIONS; generation++) {
+    const idempotencyKey =
+      generation === 1 ? baseKey : `${baseKey}:g${generation}`;
+    let begun: Awaited<ReturnType<typeof beginEffect>>;
+    try {
+      begun = await beginEffect({ db: deps.db, token: bearer, idempotencyKey });
+    } catch {
+      void section.reader.cancel().catch(() => undefined);
+      return internalError("begin_effect");
+    }
+    if (begun.kind === "refused") {
+      void section.reader.cancel().catch(() => undefined);
+      return refusalResponse(begun.reason);
+    }
+    if (begun.kind === "go") {
+      return forwardPush(
+        { deps, request, url, token, context: begun.context, idempotencyKey },
+        section,
+      );
+    }
+    // Replay. A stored rejection stays idempotent; a stored success is only
+    // replayed while the refs still show it, otherwise the push is claimed
+    // anew under the next generation.
+    if (!isStoredSuccess(begun.result, section.commands)) {
+      void section.reader.cancel().catch(() => undefined);
+      return replayResponse(begun.result);
+    }
+    tips ??= await fetchAdvertisedRefs(deps, owner, repo, token);
+    if (!tips) {
+      void section.reader.cancel().catch(() => undefined);
+      return brokerError(502, "upstream_error");
+    }
+    if (advertisedTipsMatch(tips, section.commands)) {
+      void section.reader.cancel().catch(() => undefined);
+      return replayResponse(begun.result);
+    }
   }
-  if (begun.kind === "refused") {
-    void section.reader.cancel().catch(() => undefined);
-    return refusalResponse(begun.reason);
-  }
-  if (begun.kind === "replay") {
-    void section.reader.cancel().catch(() => undefined);
-    return replayResponse(begun.result);
-  }
-  return forwardPush(
-    { deps, request, url, token, context: begun.context, idempotencyKey },
-    section,
-  );
+  void section.reader.cancel().catch(() => undefined);
+  return brokerError(409, "push_generations_exhausted");
 }
 
 export function createGitBrokerHandler(

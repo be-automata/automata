@@ -77,3 +77,39 @@ export function parseReportStatus(body: Uint8Array): ReportStatus | null {
   }
   return parseReportLines(outer);
 }
+
+const REF_TIP = /^[0-9a-f]{40,64}$/;
+
+/**
+ * The ref tips in a receive-pack advertisement (`GET info/refs`): an optional
+ * `# service=...` pkt and its flush, then `<sha> <ref>` pkts (the first with
+ * `\0capabilities`) up to a flush. An empty repository advertises a
+ * `capabilities^{}` line, which is not a ref. Null when the body is not a
+ * complete advertisement.
+ */
+export function parseAdvertisedRefs(
+  body: Uint8Array,
+): Map<string, string> | null {
+  const pkts = readPkts(body);
+  if (!pkts) return null;
+  let i = 0;
+  const first = pkts[0];
+  if (first && UTF8.decode(first).startsWith("# service=")) {
+    if (pkts[1] !== null) return null;
+    i = 2;
+  }
+  const tips = new Map<string, string>();
+  for (; i < pkts.length; i++) {
+    const pkt = pkts[i];
+    if (pkt === null) return tips;
+    const line = UTF8.decode(pkt).replace(/\n$/, "");
+    if (line.startsWith("version ")) continue;
+    const text = line.split("\u0000")[0] ?? "";
+    const space = text.indexOf(" ");
+    const sha = text.slice(0, space).toLowerCase();
+    const ref = text.slice(space + 1);
+    if (space === -1 || !REF_TIP.test(sha) || ref === "") return null;
+    if (ref !== "capabilities^{}") tips.set(ref, sha);
+  }
+  return null;
+}

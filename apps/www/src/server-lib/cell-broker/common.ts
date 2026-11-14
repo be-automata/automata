@@ -225,8 +225,17 @@ export function assertOrigin(url: URL, origin: string): void {
   }
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** A redirect GitHub could send; other 3xx (a 304, say) are ordinary answers. */
 export function isRedirect(status: number): boolean {
-  return status >= 300 && status < 400;
+  return REDIRECT_STATUSES.has(status);
+}
+
+/** True for a request body encoding the broker cannot read (not identity). */
+export function hasUnsupportedContentEncoding(headers: Headers): boolean {
+  const encoding = headers.get("content-encoding");
+  return !!encoding && encoding.trim().toLowerCase() !== "identity";
 }
 
 /**

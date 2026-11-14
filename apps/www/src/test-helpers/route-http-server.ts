@@ -21,6 +21,46 @@ export interface RouteServer {
 
 type RouteHandler = (request: Request) => Promise<Response>;
 
+/**
+ * The request body as a web stream. Built by hand, not with `Readable.toWeb`:
+ * when a handler cancels the body (a push over the cap) that adapter keeps
+ * enqueuing 'data' into its closed controller and throws. Here a cancel only
+ * drains and discards the rest, so the response can still be sent.
+ */
+function bodyStream(req: IncomingMessage): ReadableStream<Uint8Array> {
+  let finished = false;
+  const finish = (action: () => void) => {
+    if (finished) return;
+    finished = true;
+    try {
+      action();
+    } catch {
+      // The consumer already closed the stream.
+    }
+  };
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      req.on("data", (chunk: Buffer) => {
+        if (finished) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          finished = true;
+        }
+      });
+      req.on("end", () => finish(() => controller.close()));
+      req.on("error", (error) => finish(() => controller.error(error)));
+      req.on("close", () =>
+        finish(() => controller.error(new Error("request aborted"))),
+      );
+    },
+    cancel() {
+      finished = true;
+      req.resume();
+    },
+  });
+}
+
 function toRequest(req: IncomingMessage): Request {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
@@ -33,9 +73,7 @@ function toRequest(req: IncomingMessage): Request {
   return new Request(url, {
     method,
     headers,
-    ...(hasBody
-      ? { body: Readable.toWeb(req) as ReadableStream, duplex: "half" }
-      : {}),
+    ...(hasBody ? { body: bodyStream(req), duplex: "half" } : {}),
   } as RequestInit);
 }
 

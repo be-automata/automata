@@ -6,6 +6,7 @@ import { captureLogs, basic } from "@/test-helpers/capture-logs";
 import type { DB } from "@terragon/shared/db";
 import { cellEffect, cellStep } from "@terragon/shared/db/schema";
 import { beginEffect } from "@terragon/shared/model/cell-authority";
+import { parseReceivePackCommands } from "@terragon/utils/receive-pack-refs";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import {
@@ -13,7 +14,7 @@ import {
   pushIdempotencyKey,
   type GitBrokerDeps,
 } from "./git";
-import { parseReportStatus } from "./report-status";
+import { parseAdvertisedRefs, parseReportStatus } from "./report-status";
 
 const SENTINEL = "ghs_SENTINEL_write_token";
 const URL_PUSH =
@@ -102,13 +103,36 @@ interface Answer {
   throws?: boolean;
 }
 
+/** A receive-pack advertisement showing `tips`, as GitHub sends it. */
+function advertisement(tips: Record<string, string>): Uint8Array {
+  const refs = Object.entries(tips);
+  const lines =
+    refs.length === 0
+      ? [pkt(`${"0".repeat(40)} capabilities^{}\0report-status\n`)]
+      : refs.map(([ref, sha], i) =>
+          pkt(
+            `${sha} ${ref}${i === 0 ? "\0report-status side-band-64k" : ""}\n`,
+          ),
+        );
+  return concat(pkt("# service=git-receive-pack\n"), FLUSH, ...lines, FLUSH);
+}
+
 function harness(
   answer: Answer | (() => Promise<Answer> | Answer) = {},
   over: Partial<GitBrokerDeps> = {},
 ) {
   const calls: { url: string; body: Uint8Array; headers: Headers }[] = [];
+  // GitHub's ref tips: pushes it accepts move them, advertisement GETs read them.
+  const tips: Record<string, string> = { [REF]: OLD };
+  const adverts: string[] = [];
+  const state = { advertFails: false };
   const fetchImpl = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") {
+        adverts.push(String(input));
+        if (state.advertFails) return new Response("nope", { status: 500 });
+        return new Response(advertisement(tips) as BodyInit, { status: 200 });
+      }
       const body = await readAll(init?.body as BodyInit | null | undefined);
       calls.push({
         url: String(input),
@@ -117,6 +141,12 @@ function harness(
       });
       const a = typeof answer === "function" ? await answer() : answer;
       if (a.throws) throw new Error("network down");
+      const status = a.status ?? 200;
+      const parsed = parseReceivePackCommands(body);
+      if (status < 300 && parsed.ok) {
+        for (const command of parsed.commands)
+          tips[command.ref] = command.newSha;
+      }
       return new Response(a.body ?? REPORT_OK, {
         status: a.status ?? 200,
         headers: {
@@ -137,7 +167,16 @@ function harness(
     enabled: () => true,
     ...over,
   });
-  return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
+  return {
+    handler,
+    calls,
+    adverts,
+    tips,
+    state,
+    fetchImpl,
+    mintReadToken,
+    mintWriteToken,
+  };
 }
 
 /** The real db with some methods replaced (a failing database, in effect). */
@@ -521,6 +560,79 @@ describe("git broker push", () => {
     expect(await effectsUsed(f.stepKey)).toBe(0);
   });
 
+  it("a stored success whose ref has since moved back is claimed anew under the next generation", async () => {
+    const f = await fixture();
+    const h = harness();
+    expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+    expect(h.calls).toHaveLength(1);
+    expect(h.adverts).toHaveLength(0);
+
+    // The ref went back to where it was: the stored answer is stale.
+    h.tips[REF] = OLD;
+    const again = await h.handler(push(f.token, pushBody()));
+    expect(again.status).toBe(200);
+    expect(h.adverts).toHaveLength(1);
+    expect(h.adverts[0]).toBe(
+      "https://github.com/acme/widgets.git/info/refs?service=git-receive-pack",
+    );
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+    expect(await effectRows(f.stepKey)).toBe(2);
+    const g2 = `${pushIdempotencyKey([{ oldSha: OLD, newSha: NEW_A, ref: REF }])}:g2`;
+    expect(await effectRows(f.stepKey, g2)).toBe(1);
+
+    // The ref shows the pushed sha again: replayed, nothing forwarded.
+    const third = await h.handler(push(f.token, pushBody()));
+    expect(third.status).toBe(200);
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
+  it("a stored success whose ref still shows the pushed sha is replayed after one advertisement check", async () => {
+    const f = await fixture();
+    const h = harness();
+    await h.handler(push(f.token, pushBody()));
+    const again = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await again.arrayBuffer())).toEqual(REPORT_OK);
+    expect(h.adverts).toHaveLength(1);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("a stored rejection is replayed without looking at the refs", async () => {
+    const ng = concat(
+      pkt(
+        concat(
+          Uint8Array.of(1),
+          concat(pkt("unpack ok\n"), pkt(`ng ${REF} hook declined\n`), FLUSH),
+        ),
+      ),
+      FLUSH,
+    );
+    const f = await fixture();
+    const h = harness({ body: ng });
+    await h.handler(push(f.token, pushBody()));
+    const again = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await again.arrayBuffer())).toEqual(ng);
+    expect(h.adverts).toHaveLength(0);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("when the advertisement cannot be fetched the retry is a 502 with no claim and no budget spent", async () => {
+    const f = await fixture();
+    const h = harness();
+    await h.handler(push(f.token, pushBody()));
+    h.state.advertFails = true;
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      502,
+      "upstream_error",
+    ]);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
   it("AC12 a GitHub 503 releases the claim; an identical retry is forwarded and uses a second unit", async () => {
     const f = await fixture();
     let status = 503;
@@ -714,5 +826,35 @@ describe("parseReportStatus", () => {
     expect(
       parseReportStatus(pkt(concat(Uint8Array.of(1), enc.encode("00")))),
     ).toBeNull();
+  });
+});
+
+describe("parseAdvertisedRefs", () => {
+  it("reads ref tips after the service line, ignoring capabilities", () => {
+    expect(
+      parseAdvertisedRefs(
+        advertisement({ [REF]: NEW_A, "refs/heads/main": OLD }),
+      ),
+    ).toEqual(
+      new Map([
+        [REF, NEW_A],
+        ["refs/heads/main", OLD],
+      ]),
+    );
+  });
+
+  it("reads an empty repository's capabilities^{} line as no refs", () => {
+    expect(parseAdvertisedRefs(advertisement({}))).toEqual(new Map());
+  });
+
+  it("is null for a truncated, unterminated or non-advertisement body", () => {
+    const full = advertisement({ [REF]: NEW_A });
+    expect(parseAdvertisedRefs(full.subarray(0, full.length - 10))).toBeNull();
+    expect(parseAdvertisedRefs(full.subarray(0, full.length - 4))).toBeNull();
+    expect(parseAdvertisedRefs(enc.encode("Not found"))).toBeNull();
+    expect(
+      parseAdvertisedRefs(concat(pkt("garbage-line\n"), FLUSH)),
+    ).toBeNull();
+    expect(parseAdvertisedRefs(new Uint8Array(0))).toBeNull();
   });
 });
