@@ -283,12 +283,16 @@ const REDIRECT_HOSTS = new Set([
   "codeload.github.com",
   "objects.githubusercontent.com",
   "github-cloud.githubusercontent.com",
+  "release-assets.githubusercontent.com",
   "api.github.com",
 ]);
 
 function isAllowedRedirectHost(hostname: string): boolean {
+  // Leading-dot suffixes: "evilactions.githubusercontent.com" does not match.
   return (
-    REDIRECT_HOSTS.has(hostname) || hostname.endsWith(".blob.core.windows.net")
+    REDIRECT_HOSTS.has(hostname) ||
+    hostname.endsWith(".blob.core.windows.net") ||
+    hostname.endsWith(".actions.githubusercontent.com")
   );
 }
 

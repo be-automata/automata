@@ -507,6 +507,39 @@ describe("gh broker auth and secrets", () => {
       );
     });
 
+    it("follows release-assets and *.actions.githubusercontent.com hops, and refuses look-alikes", async () => {
+      const f = await fixture();
+      const assets = redirecting([
+        redirect("https://release-assets.githubusercontent.com/a?sig=1"),
+        ok("asset"),
+      ]);
+      expect(
+        (await assets.handler(rest("/user", f.token), "rest")).status,
+      ).toBe(200);
+      expect(assets.calls[1]!.headers.has("authorization")).toBe(false);
+
+      const actions = redirecting([
+        redirect("https://pipelines.actions.githubusercontent.com/log"),
+        ok("log"),
+      ]);
+      expect(
+        (await actions.handler(rest("/user", f.token), "rest")).status,
+      ).toBe(200);
+      expect(actions.calls[1]!.headers.has("authorization")).toBe(false);
+
+      for (const host of [
+        "evilactions.githubusercontent.com",
+        "x.actions.githubusercontent.com.evil.com",
+      ]) {
+        const spoof = redirecting([redirect(`https://${host}/x`)]);
+        expect(
+          (await spoof.handler(rest("/user", f.token), "rest")).status,
+          host,
+        ).toBe(502);
+        expect(spoof.calls).toHaveLength(1);
+      }
+    });
+
     it("refuses a redirect to any other host, a non-https Location and a second hop with a 502", async () => {
       const f = await fixture();
       const evil = redirecting([redirect("https://evil.example/x")]);

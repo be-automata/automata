@@ -313,16 +313,17 @@ describe("git broker push", () => {
     expect(h.calls).toHaveLength(1);
 
     const g = await fixture();
+    // A 4xx other than 403 (which is about our token) is the push's final answer.
     const denied = harness({
-      status: 403,
+      status: 422,
       body: enc.encode("Permission denied"),
       contentType: "text/plain",
     });
     const a = await denied.handler(push(g.token, pushBody()));
-    expect([a.status, await a.text()]).toEqual([403, "Permission denied"]);
+    expect([a.status, await a.text()]).toEqual([422, "Permission denied"]);
     const b = await denied.handler(push(g.token, pushBody()));
     expect([b.status, b.headers.get("content-type"), await b.text()]).toEqual([
-      403,
+      422,
       "text/plain",
       "Permission denied",
     ]);
@@ -826,6 +827,57 @@ describe("git broker push", () => {
     expect(new Uint8Array(await retry.arrayBuffer())).toEqual(REPORT_OK);
     expect(h.calls).toHaveLength(2);
     expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
+  it.each([
+    [401, "application/json"],
+    [403, "application/json"],
+  ])(
+    "a GitHub %i that is not a report-status is about our token: 502, claim released, an identical retry is forwarded",
+    async (status, contentType) => {
+      const f = await fixture();
+      let first = true;
+      const h = harness(() => {
+        if (!first) return {};
+        first = false;
+        return {
+          status,
+          contentType,
+          body: enc.encode(
+            '{"message":"Resource not accessible by integration"}',
+          ),
+        };
+      });
+      const failed = await h.handler(push(f.token, pushBody()));
+      expect([failed.status, (await json(failed)).error]).toEqual([
+        502,
+        "upstream_error",
+      ]);
+      expect(await effectRows(f.stepKey)).toBe(0);
+      expect(await effectsUsed(f.stepKey)).toBe(1);
+      expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+      expect(h.calls).toHaveLength(2);
+      expect(await effectsUsed(f.stepKey)).toBe(2);
+    },
+  );
+
+  it("a 403 that is git's own report-status is stored and replayed as before", async () => {
+    const f = await fixture();
+    const rejection = concat(
+      pkt("unpack ok\n"),
+      pkt(`ng ${REF} protected branch hook declined\n`),
+      FLUSH,
+    );
+    const h = harness({ status: 403, body: rejection });
+    const first = await h.handler(push(f.token, pushBody()));
+    expect(first.status).toBe(403);
+    const again = await h.handler(push(f.token, pushBody()));
+    expect([again.status, new Uint8Array(await again.arrayBuffer())]).toEqual([
+      403,
+      rejection,
+    ]);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
   });
 
   it("a stale-ref ng is final even though it says 'cannot lock ref': stored and replayed", async () => {

@@ -286,7 +286,8 @@ interface Push {
 
 /**
  * GitHub refusals that say "try again" rather than "no": 408 and 429 behave
- * like a 5xx, and a 2xx whose unpack failed, or whose every ng reason is
+ * like a 5xx, and so does a 401, which is about our token, not the push (a 403
+ * that is not a git report-status is the same: see `isReportStatusAnswer`), and a 2xx whose unpack failed, or whose every ng reason is
  * transient, is released instead of stored, so an identical retry claims
  * afresh (the budget unit stays spent).
  *
@@ -295,7 +296,7 @@ interface Push {
  * ref": `is at <sha> but expected <sha>` means the ref moved, so the same push
  * can never succeed and its answer is stored and replayed.
  */
-const TRANSIENT_STATUSES = new Set([408, 429]);
+const TRANSIENT_STATUSES = new Set([401, 408, 429]);
 const TRANSIENT_NG =
   /failed to lock|cannot lock ref|unable to create '.*\.lock': file exists|timed? ?out|timeout|try again/i;
 const STALE_REF = /is at [0-9a-f]+ but expected/i;
@@ -314,6 +315,19 @@ function isTransientRejection(bytes: Uint8Array): boolean {
   return (
     report.refs.length > 0 &&
     report.refs.every((ref) => !ref.ok && isTransientReason(ref.reason))
+  );
+}
+
+/**
+ * True when a receive-pack answer is git's own report-status. A 403 that is
+ * not (a JSON "Resource not accessible", say) is GitHub refusing our token, not
+ * the push, so it is released rather than stored as the push's final answer.
+ */
+function isReportStatusAnswer(upstream: Response, bytes: Uint8Array): boolean {
+  return (
+    (upstream.headers.get("content-type") ?? "").includes(
+      "application/x-git-receive-pack-result",
+    ) && parseReportStatus(bytes) !== null
   );
 }
 
@@ -471,6 +485,10 @@ async function forwardPush(
     return brokerError(413, "payload_too_large");
   }
   if (!bytes) {
+    await releaseClaim(push);
+    return brokerError(502, "upstream_error");
+  }
+  if (upstream.status === 403 && !isReportStatusAnswer(upstream, bytes)) {
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
   }
