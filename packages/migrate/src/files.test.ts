@@ -126,6 +126,7 @@ describe("deploy/migrations", () => {
       "2026-11-10-execution-profile-seed-automata-box",
       "2026-11-13-addon-call-receiver",
       "2026-11-13-cell-broker-authority",
+      "2026-11-14-org-cell-workflow-write",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);
