@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
@@ -8,15 +6,12 @@ import { env } from "@terragon/env/apps-www";
 import { thread } from "@terragon/shared/db/schema";
 import {
   markStepDone,
-  mintBearer,
-  openStep,
   revokeAttempt,
   type Refusal,
 } from "@terragon/shared/model/cell-authority";
 import {
+  createTestCellStep,
   createTestOrg,
-  createTestThread,
-  createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
 import {
@@ -27,8 +22,10 @@ import {
   extractCellBearer,
   forwardRequestHeaders,
   gitAuthChallenge,
+  isRedirect,
   isUnsafeSegment,
   notFound,
+  passThrough,
   refusalResponse,
   resolveCellStep,
   responseHeadersForCell,
@@ -256,6 +253,33 @@ describe("responseHeadersForCell", () => {
   });
 });
 
+describe("isRedirect / passThrough", () => {
+  it("only 301, 302, 303, 307 and 308 are redirects", () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      expect(isRedirect(status), String(status)).toBe(true);
+    }
+    for (const status of [200, 204, 300, 304, 305, 400, 500]) {
+      expect(isRedirect(status), String(status)).toBe(false);
+    }
+  });
+
+  it("passes a 304 through and turns a redirect into a 502", () => {
+    const notModified = passThrough(
+      new Response(null, { status: 304, headers: { etag: '"x"' } }),
+    );
+    expect(notModified.status).toBe(304);
+    expect(notModified.headers.get("etag")).toBe('"x"');
+    const moved = passThrough(
+      new Response(null, {
+        status: 307,
+        headers: { location: "https://evil.test/" },
+      }),
+    );
+    expect(moved.status).toBe(502);
+    expect(moved.headers.has("location")).toBe(false);
+  });
+});
+
 describe("assertOrigin", () => {
   it("passes the fixed origin and throws on any other", () => {
     expect(() =>
@@ -277,40 +301,8 @@ describe("assertOrigin", () => {
 });
 
 describe("resolveCellStep (database)", () => {
-  const STEP_TIMEOUT = 30 * 60_000;
-
-  async function fixture(repo = "Acme/Widgets") {
-    const organizationId = await createTestOrg({ db });
-    const { user } = await createTestUser({ db });
-    const { threadId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { githubRepoFullName: repo },
-    });
-    await db
-      .update(thread)
-      .set({ organizationId })
-      .where(eq(thread.id, threadId));
-    const stepKey = `run-${randomUUID()}/agent`;
-    const open = (attempt: number, orgId = organizationId) =>
-      openStep({
-        db,
-        step: {
-          stepKey,
-          organizationId: orgId,
-          threadId,
-          attempt,
-          stepTimeoutMs: STEP_TIMEOUT,
-          effectBudget: null,
-        },
-      });
-    const bearer = async (attempt: number, ttlMs = STEP_TIMEOUT) => {
-      const m = await mintBearer({ db, stepKey, attempt, ttlMs });
-      if (!m.ok) throw new Error(m.reason);
-      return m.token;
-    };
-    return { organizationId, threadId, stepKey, open, bearer };
-  }
+  const fixture = () =>
+    createTestCellStep({ db, repoFullName: "Acme/Widgets" });
 
   it("a valid bearer resolves to its context and the normalized repo", async () => {
     const f = await fixture();

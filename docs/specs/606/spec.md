@@ -71,6 +71,14 @@ Known risks: Buffer→Uint8Array decode differences (decode pkt-line lengths as 
 - Releasing after a GitHub 5xx / network error once the pack was sent can deliver a push twice (at-least-once); git re-reads refs before re-pushing, and a ref already moved makes GitHub reject the stale update. The PR body names this window next to the budget cost.
 - `report-status.ts` cases live in `git-push.test.ts` (Phase E). The explicit lock in `releaseEffect` is kept for consistency with the module.
 
+## Amendments from roborev (fix round 1, 2026-11-14)
+
+- **Verify before replay.** A stored push success (2xx, every pushed ref `ok`) is replayed only while the receive-pack advertisement still shows each ref at its `newSha` (absent for a delete). Otherwise the push is claimed anew under the key generations `<key>:g2` … `:g20`; past g20 the answer is 409 `push_generations_exhausted`. The advertisement is fetched once per request with the write token, capped at 8 MiB; a failed or unparseable fetch is 502 with no claim. Stored rejections (`ng`, unpack error, 4xx) replay without verification.
+- **Redirects.** Only 301, 302, 303, 307 and 308 are redirects (502). A 304 passes through to the cell.
+- **GraphQL encoding.** A request body with a `content-encoding` other than identity is refused with 415 `unsupported_encoding` before it is read.
+- **Write token.** `WRITE_TOKEN_PERMISSIONS` adds `workflows: write` (owner decision): GitHub refuses a push that touches `.github/workflows/` from an App token without it.
+- **Test route server.** `route-http-server.ts` builds request bodies by hand: `Readable.toWeb` kept enqueuing into a closed controller after an over-cap cancel.
+
 ## Phases (validator cycle 3 + owner decision; supersedes the strategy table above)
 
 | Phase    | Files (≤5 touches)                                                                                                                                                                                                                                                | ACs                                  |

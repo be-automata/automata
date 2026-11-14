@@ -54,7 +54,10 @@ function harness(upstream: Upstream = {}, over: Partial<GhBrokerDeps> = {}) {
       for (const cookie of upstream.cookies ?? []) {
         headers.append("set-cookie", cookie);
       }
-      return new Response(upstream.body ?? '{"ok":true}', {
+      // A 304 has no body.
+      const body =
+        upstream.status === 304 ? null : (upstream.body ?? '{"ok":true}');
+      return new Response(body, {
         status: upstream.status ?? 200,
         headers,
       });
@@ -375,6 +378,45 @@ describe("gh broker auth and secrets", () => {
     expect(touched).not.toHaveBeenCalled();
     expect(h.fetchImpl).not.toHaveBeenCalled();
     expect(h.mintReadToken).not.toHaveBeenCalled();
+  });
+
+  it("refuses an encoded GraphQL body with a 415 before minting or calling GitHub; identity is fine", async () => {
+    const f = await fixture();
+    const h = harness();
+    const body = gql("query { viewer { login } }");
+    const gz = await h.handler(
+      graphql(body, f.token, { "content-encoding": "gzip" }),
+      "graphql",
+    );
+    expect([gz.status, (await gz.json()).error]).toEqual([
+      415,
+      "unsupported_encoding",
+    ]);
+    expect(h.mintReadToken).not.toHaveBeenCalled();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    const identity = await h.handler(
+      graphql(body, f.token, { "content-encoding": "identity" }),
+      "graphql",
+    );
+    expect(identity.status).toBe(200);
+  });
+
+  it("passes a 304 through with its ETag, while a 302 is still a 502", async () => {
+    const f = await fixture();
+    const notModified = harness({
+      status: 304,
+      headers: { etag: '"abc"' },
+    });
+    const res = await notModified.handler(rest("/user", f.token), "rest");
+    expect(res.status).toBe(304);
+    expect(res.headers.get("etag")).toBe('"abc"');
+
+    const redirected = harness({
+      status: 302,
+      headers: { location: "https://evil.test/" },
+    });
+    const moved = await redirected.handler(rest("/user", f.token), "rest");
+    expect(moved.status).toBe(502);
   });
 
   it("mints the read token for the step's owner and repo, and 502s on a 3xx or a thrown fetch", async () => {

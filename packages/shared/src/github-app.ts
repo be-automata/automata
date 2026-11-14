@@ -200,11 +200,15 @@ export async function getReadOnlyInstallationToken(
 
 /**
  * The ONLY permissions a remote-cell write token is ever minted with (#606).
- * Contents write (git push) plus metadata read; nothing else is spread in.
+ * Contents write (git push), metadata read and workflows write; nothing else
+ * is spread in.
  */
 export const WRITE_TOKEN_PERMISSIONS = {
   contents: "write",
   metadata: "read",
+  // Remote cells may change .github/workflows/: GitHub refuses such a push from
+  // an App token without workflows:write (owner decision on #606).
+  workflows: "write",
 } as const;
 
 /**

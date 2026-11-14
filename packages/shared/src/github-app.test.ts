@@ -85,10 +85,11 @@ describe("GitHub App", () => {
       return calls;
     }
 
-    it("pins exactly contents:write and metadata:read", () => {
+    it("pins exactly contents:write, metadata:read and workflows:write", () => {
       expect(WRITE_TOKEN_PERMISSIONS).toEqual({
         contents: "write",
         metadata: "read",
+        workflows: "write",
       });
     });
 
@@ -105,7 +106,11 @@ describe("GitHub App", () => {
       expect(body).toEqual({
         installation_id: 42,
         repositories: ["r"],
-        permissions: WRITE_TOKEN_PERMISSIONS,
+        permissions: {
+          contents: "write",
+          metadata: "read",
+          workflows: "write",
+        },
       });
       expect("expires_at" in body).toBe(false);
     });
