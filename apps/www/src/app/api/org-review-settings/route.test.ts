@@ -41,11 +41,17 @@ function putReq(body: unknown) {
   });
 }
 
-function baseRow(overrides: Partial<{ blockTolerance: string | null }> = {}) {
+function baseRow(
+  overrides: Partial<{
+    blockTolerance: string | null;
+    cellWorkflowWrite: boolean | null;
+  }> = {},
+) {
   return {
     organizationId: ORG,
     blockTolerance: "error",
     trustedAuthorThreshold: null,
+    cellWorkflowWrite: null,
     updatedByUserId: USER,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -162,7 +168,7 @@ describe("GET/PUT /api/org-review-settings", () => {
     expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
   });
 
-  it("PUT 400 when blockTolerance is missing entirely", async () => {
+  it("PUT 400 when neither field is present", async () => {
     const res = await PUT(putReq({}));
     expect(res.status).toBe(400);
     expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
@@ -228,5 +234,92 @@ describe("GET/PUT /api/org-review-settings", () => {
       setting: { blockTolerance: string | null };
     };
     expect(json.setting.blockTolerance).toBeNull();
+  });
+
+  it("GET includes cellWorkflowWrite (null when never set)", async () => {
+    vi.mocked(getOrganizationReviewSetting).mockResolvedValue(
+      baseRow({ cellWorkflowWrite: true }) as never,
+    );
+    const on = (await (await GET()).json()) as {
+      setting: { cellWorkflowWrite: boolean | null };
+    };
+    expect(on.setting.cellWorkflowWrite).toBe(true);
+
+    vi.mocked(getOrganizationReviewSetting).mockResolvedValue(
+      baseRow() as never,
+    );
+    const unset = (await (await GET()).json()) as {
+      setting: { cellWorkflowWrite: boolean | null };
+    };
+    expect(unset.setting.cellWorkflowWrite).toBeNull();
+  });
+
+  it.each([true, null])(
+    "PUT cellWorkflowWrite=%s alone: the patch carries only that key and its capture fires",
+    async (value) => {
+      vi.mocked(upsertOrganizationReviewSetting).mockResolvedValue(
+        baseRow({ cellWorkflowWrite: value }) as never,
+      );
+      const res = await PUT(putReq({ cellWorkflowWrite: value }));
+      expect(res.status).toBe(200);
+      const call = vi.mocked(upsertOrganizationReviewSetting).mock.calls[0]![0];
+      expect(call.patch).toEqual({ cellWorkflowWrite: value });
+      expect(call.patch).not.toHaveProperty("blockTolerance");
+      expect(removeOrganizationReviewSetting).not.toHaveBeenCalled();
+      expect(captureMock).toHaveBeenCalledTimes(1);
+      expect(captureMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "org_cell_workflow_write_updated",
+          properties: { organizationId: ORG, cellWorkflowWrite: value },
+        }),
+      );
+    },
+  );
+
+  it("PUT with both fields writes both and emits both captures", async () => {
+    vi.mocked(upsertOrganizationReviewSetting).mockResolvedValue(
+      baseRow({ blockTolerance: "warning", cellWorkflowWrite: false }) as never,
+    );
+    const res = await PUT(
+      putReq({ blockTolerance: "warning", cellWorkflowWrite: false }),
+    );
+    expect(res.status).toBe(200);
+    const call = vi.mocked(upsertOrganizationReviewSetting).mock.calls[0]![0];
+    expect(call.patch).toEqual({
+      blockTolerance: "warning",
+      cellWorkflowWrite: false,
+    });
+    expect(captureMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "org_review_floor_set" }),
+    );
+    expect(captureMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "org_cell_workflow_write_updated" }),
+    );
+  });
+
+  it("PUT blockTolerance alone leaves cellWorkflowWrite out of the patch and emits no workflow capture", async () => {
+    await PUT(putReq({ blockTolerance: "error" }));
+    const call = vi.mocked(upsertOrganizationReviewSetting).mock.calls[0]![0];
+    expect(call.patch).not.toHaveProperty("cellWorkflowWrite");
+    expect(captureMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "org_cell_workflow_write_updated" }),
+    );
+  });
+
+  it.each(["yes", 1, {}, []])(
+    "PUT 400 when cellWorkflowWrite is not a boolean or null (%j)",
+    async (value) => {
+      const res = await PUT(putReq({ cellWorkflowWrite: value }));
+      expect(res.status).toBe(400);
+      expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
+    },
+  );
+
+  it("PUT 403 for a non-admin sending cellWorkflowWrite, before validation", async () => {
+    vi.mocked(isOrgAdmin).mockResolvedValue(false);
+    const res = await PUT(putReq({ cellWorkflowWrite: "not-a-boolean" }));
+    expect(res.status).toBe(403);
+    expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
+    expect(captureMock).not.toHaveBeenCalled();
   });
 });
