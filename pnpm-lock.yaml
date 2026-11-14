@@ -1273,6 +1273,10 @@ importers:
         version: 5.8.3
 
   packages/utils:
+    dependencies:
+      graphql:
+        specifier: ^16.11.0
+        version: 16.11.0
     devDependencies:
       '@terragon/tsconfig':
         specifier: workspace:*
