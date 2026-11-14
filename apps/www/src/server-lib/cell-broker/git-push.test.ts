@@ -181,6 +181,36 @@ function harness(
   return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
 }
 
+function captureLogs() {
+  const spies = (["error", "warn", "log"] as const).map((method) =>
+    vi.spyOn(console, method).mockImplementation(() => {}),
+  );
+  return {
+    text: () =>
+      spies
+        .flatMap((spy) => spy.mock.calls.flat())
+        .map((arg) =>
+          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
+        )
+        .join("\n"),
+    restore: () => spies.forEach((spy) => spy.mockRestore()),
+  };
+}
+
+/** The real db with some methods replaced (a failing database, in effect). */
+function dbWith(
+  overrides: Record<string, (...args: unknown[]) => unknown>,
+): DB {
+  return new Proxy(db, {
+    get(target, prop) {
+      const override = overrides[String(prop)];
+      if (override) return override;
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as DB;
+}
+
 const basic = (pass: string) => `Basic ${btoa(`x-access-token:${pass}`)}`;
 
 function push(
@@ -387,6 +417,167 @@ describe("git broker push", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+
+  it("AC12 a cell disconnect after the command section is a 502 that releases the claim", async () => {
+    const f = await fixture();
+    const h = harness();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(commandSection());
+          return;
+        }
+        controller.error(new Error("client went away"));
+      },
+    });
+    const res = await h.handler(push(f.token, body));
+    expect([res.status, (await json(res)).error]).toEqual([
+      502,
+      "upstream_error",
+    ]);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("a stored result that fails validation is a 500 corrupt_effect_result with no upstream call", async () => {
+    const f = await fixture();
+    const h = harness();
+    expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+    const key = await pushIdempotencyKey([
+      { oldSha: OLD, newSha: NEW_A, ref: REF },
+    ]);
+    await db
+      .update(cellEffect)
+      .set({ result: { httpStatus: "x" } })
+      .where(
+        and(
+          eq(cellEffect.stepKey, f.stepKey),
+          eq(cellEffect.idempotencyKey, key),
+        ),
+      );
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      500,
+      "corrupt_effect_result",
+    ]);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("a beginEffect failure is a 500 internal_error, with no upstream call and nothing sensitive logged", async () => {
+    const f = await fixture();
+    const logs = captureLogs();
+    try {
+      const h = harness(
+        {},
+        {
+          db: dbWith({
+            transaction: () => {
+              throw new Error(`tx down ${SENTINEL}`);
+            },
+          }),
+        },
+      );
+      const res = await h.handler(push(f.token, pushBody()));
+      expect([res.status, (await json(res)).error]).toEqual([
+        500,
+        "internal_error",
+      ]);
+      expect(h.fetchImpl).not.toHaveBeenCalled();
+      expect(logs.text()).not.toContain(SENTINEL);
+      expect(logs.text()).not.toContain(f.token);
+      expect(await effectRows(f.stepKey)).toBe(0);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("a completeEffect failure after GitHub answered still returns GitHub's bytes and leaves the claim pending", async () => {
+    const f = await fixture();
+    const logs = captureLogs();
+    try {
+      const h = harness(
+        {},
+        {
+          db: dbWith({
+            update: () => {
+              throw new Error(`update down ${SENTINEL}`);
+            },
+          }),
+        },
+      );
+      const first = await h.handler(push(f.token, pushBody()));
+      expect(first.status).toBe(200);
+      expect(new Uint8Array(await first.arrayBuffer())).toEqual(REPORT_OK);
+      const rows = await db
+        .select({ result: cellEffect.result })
+        .from(cellEffect)
+        .where(eq(cellEffect.stepKey, f.stepKey));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.result).toBeNull();
+
+      const again = await h.handler(push(f.token, pushBody()));
+      expect([again.status, (await json(again)).error]).toEqual([
+        409,
+        "effect_in_progress",
+      ]);
+      expect(h.calls).toHaveLength(1);
+      expect(logs.text()).not.toContain(SENTINEL);
+      expect(logs.text()).not.toContain(f.token);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("a releaseEffect failure still answers 502 and logs nothing sensitive", async () => {
+    const f = await fixture();
+    const logs = captureLogs();
+    try {
+      let transactions = 0;
+      const realTransaction = db.transaction.bind(db) as (
+        ...args: unknown[]
+      ) => unknown;
+      const h = harness(
+        { status: 503 },
+        {
+          db: dbWith({
+            transaction: (...args: unknown[]) => {
+              transactions += 1;
+              // The first transaction is beginEffect, the second the release.
+              if (transactions > 1) {
+                throw new Error(`release down ${SENTINEL}`);
+              }
+              return realTransaction(...args);
+            },
+          }),
+        },
+      );
+      const res = await h.handler(push(f.token, pushBody()));
+      expect([res.status, (await json(res)).error]).toEqual([
+        502,
+        "upstream_error",
+      ]);
+      expect(logs.text()).not.toContain(SENTINEL);
+      expect(logs.text()).not.toContain(f.token);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("with side effects off a push POST is a 503 before any mint, claim or upstream call", async () => {
+    const f = await fixture();
+    const h = harness({}, { sideEffectsEnabled: () => false });
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      503,
+      "side_effects_disabled",
+    ]);
+    expect(h.mintWriteToken).not.toHaveBeenCalled();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(0);
   });
 
   it("AC12 a GitHub 503 releases the claim; an identical retry is forwarded and uses a second unit", async () => {

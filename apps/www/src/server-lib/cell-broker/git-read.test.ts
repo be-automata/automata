@@ -93,6 +93,22 @@ function harness(upstream: Upstream = {}, over: Partial<GitBrokerDeps> = {}) {
   return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
 }
 
+function captureLogs() {
+  const spies = (["error", "warn", "log"] as const).map((method) =>
+    vi.spyOn(console, method).mockImplementation(() => {}),
+  );
+  return {
+    text: () =>
+      spies
+        .flatMap((spy) => spy.mock.calls.flat())
+        .map((arg) =>
+          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
+        )
+        .join("\n"),
+    restore: () => spies.forEach((spy) => spy.mockRestore()),
+  };
+}
+
 const basic = (pass: string) => `Basic ${btoa(`x-access-token:${pass}`)}`;
 
 function get(path: string, token: string | null, init: RequestInit = {}) {
@@ -352,5 +368,39 @@ describe("git broker reads", () => {
     expect(c.status).toBe(502);
     expect(text).not.toContain(SENTINEL);
     expect(failedMint.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("AC7 nothing logged carries the installation token or the bearer", async () => {
+    const f = await fixture();
+    const logs = captureLogs();
+    try {
+      const failedMint = harness(
+        {},
+        {
+          mintReadToken: async () => {
+            throw new Error(`boom ${SENTINEL} ${f.token}`);
+          },
+        },
+      );
+      expect(
+        (await failedMint.handler(get(UPLOAD_ADVERT, f.token))).status,
+      ).toBe(502);
+      const down = harness({ throws: true });
+      expect((await down.handler(get(UPLOAD_ADVERT, f.token))).status).toBe(
+        502,
+      );
+      const redirected = harness({ status: 302 });
+      expect(
+        (await redirected.handler(get(UPLOAD_ADVERT, f.token))).status,
+      ).toBe(502);
+      const refused = harness();
+      expect(
+        (await refused.handler(get("/x/y.git/info/refs", f.token))).status,
+      ).toBe(403);
+      expect(logs.text()).not.toContain(SENTINEL);
+      expect(logs.text()).not.toContain(f.token);
+    } finally {
+      logs.restore();
+    }
   });
 });

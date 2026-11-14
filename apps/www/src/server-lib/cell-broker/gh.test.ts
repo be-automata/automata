@@ -144,6 +144,22 @@ function graphql(
   });
 }
 
+function captureLogs() {
+  const spies = (["error", "warn", "log"] as const).map((method) =>
+    vi.spyOn(console, method).mockImplementation(() => {}),
+  );
+  return {
+    text: () =>
+      spies
+        .flatMap((spy) => spy.mock.calls.flat())
+        .map((arg) =>
+          arg instanceof Error ? `${arg.message}\n${arg.stack}` : String(arg),
+        )
+        .join("\n"),
+    restore: () => spies.forEach((spy) => spy.mockRestore()),
+  };
+}
+
 const gql = (query: string) => JSON.stringify({ query });
 
 describe("gh broker REST", () => {
@@ -434,5 +450,53 @@ describe("gh broker auth and secrets", () => {
     expect((await down.handler(rest("/user", f.token), "rest")).status).toBe(
       502,
     );
+  });
+
+  it("AC7 nothing logged carries the installation token or the bearer", async () => {
+    const f = await fixture();
+    const logs = captureLogs();
+    try {
+      const failedMint = harness(
+        {},
+        {
+          mintReadToken: async () => {
+            throw new Error(`boom ${SENTINEL} ${f.token}`);
+          },
+        },
+      );
+      expect(
+        (await failedMint.handler(rest("/user", f.token), "rest")).status,
+      ).toBe(502);
+      const down = harness({ throws: true });
+      expect((await down.handler(rest("/user", f.token), "rest")).status).toBe(
+        502,
+      );
+      const writes = harness();
+      expect(
+        (
+          await writes.handler(
+            rest("/user", f.token, { method: "POST", body: "{}" }),
+            "rest",
+          )
+        ).status,
+      ).toBe(403);
+      const failingDb = harness(
+        {},
+        {
+          db: new Proxy({} as DB, {
+            get() {
+              throw new Error(`db down ${SENTINEL} ${f.token}`);
+            },
+          }),
+        },
+      );
+      expect(
+        (await failingDb.handler(rest("/user", f.token), "rest")).status,
+      ).toBe(500);
+      expect(logs.text()).not.toContain(SENTINEL);
+      expect(logs.text()).not.toContain(f.token);
+    } finally {
+      logs.restore();
+    }
   });
 });
