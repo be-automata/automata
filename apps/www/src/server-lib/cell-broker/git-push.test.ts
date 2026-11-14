@@ -828,6 +828,24 @@ describe("git broker push", () => {
     expect(await effectsUsed(f.stepKey)).toBe(2);
   });
 
+  it("a stale-ref ng is final even though it says 'cannot lock ref': stored and replayed", async () => {
+    const f = await fixture();
+    const stale = concat(
+      pkt("unpack ok\n"),
+      pkt(
+        `ng ${REF} cannot lock ref '${REF}': is at ${"a".repeat(40)} but expected ${"b".repeat(40)}\n`,
+      ),
+      FLUSH,
+    );
+    const h = harness({ body: stale });
+    await h.handler(push(f.token, pushBody()));
+    const again = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await again.arrayBuffer())).toEqual(stale);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
   it("a 200 with a non-transient ng is stored and replayed as before", async () => {
     const f = await fixture();
     const rejection = concat(

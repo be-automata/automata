@@ -6,6 +6,7 @@ import {
   authorizeCellRequest,
   brokerError,
   decodePathSegments,
+  followAllowedRedirect,
   forwardRequestHeaders,
   hasUnsupportedContentEncoding,
   internalError,
@@ -140,12 +141,17 @@ export function createGhBrokerHandler(
     headers.set("authorization", `token ${token}`);
     let upstream: Response;
     try {
-      upstream = await deps.fetchImpl(target.url.toString(), {
-        method: request.method,
-        headers,
-        redirect: "manual",
-        body: target.body,
-      } as RequestInit);
+      upstream = await followAllowedRedirect({
+        upstream: await deps.fetchImpl(target.url.toString(), {
+          method: request.method,
+          headers,
+          redirect: "manual",
+          body: target.body,
+        } as RequestInit),
+        request,
+        token,
+        fetchImpl: deps.fetchImpl,
+      });
     } catch {
       return brokerError(502, "upstream_error");
     }

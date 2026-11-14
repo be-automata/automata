@@ -279,6 +279,76 @@ export function hasUnsupportedContentEncoding(headers: Headers): boolean {
   return !!encoding && encoding.trim().toLowerCase() !== "identity";
 }
 
+const REDIRECT_HOSTS = new Set([
+  "codeload.github.com",
+  "objects.githubusercontent.com",
+  "github-cloud.githubusercontent.com",
+  "api.github.com",
+]);
+
+function isAllowedRedirectHost(hostname: string): boolean {
+  return (
+    REDIRECT_HOSTS.has(hostname) || hostname.endsWith(".blob.core.windows.net")
+  );
+}
+
+/**
+ * Follow ONE redirect of a read, only to an allowlisted https host (release
+ * assets and archives live on codeload and the objects hosts; a renamed repo
+ * redirects back to api.github.com). GET and HEAD only. A hop to api.github.com
+ * carries the token; a hop anywhere else carries NO credential and only the
+ * cell's Accept and Range. Anything else (another host, a non-https or odd-port
+ * Location, a non-read method) is returned unchanged, so `passThrough` turns it
+ * into a 502; so is a second redirect, since the followed response is not
+ * followed again.
+ */
+export async function followAllowedRedirect({
+  upstream,
+  request,
+  token,
+  fetchImpl,
+}: {
+  upstream: Response;
+  request: Request;
+  token: string;
+  fetchImpl: typeof fetch;
+}): Promise<Response> {
+  if (!isRedirect(upstream.status)) return upstream;
+  if (request.method !== "GET" && request.method !== "HEAD") return upstream;
+  const location = upstream.headers.get("location");
+  let target: URL;
+  try {
+    target = new URL(location ?? "", "https://api.github.com/");
+  } catch {
+    return upstream;
+  }
+  if (
+    !location ||
+    target.protocol !== "https:" ||
+    target.port !== "" ||
+    !isAllowedRedirectHost(target.hostname)
+  ) {
+    return upstream;
+  }
+  discard(upstream.body);
+  let headers: Headers;
+  if (target.hostname === "api.github.com") {
+    headers = forwardRequestHeaders(request.headers);
+    headers.set("authorization", `token ${token}`);
+  } else {
+    headers = new Headers();
+    for (const name of ["accept", "range"]) {
+      const value = request.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+  }
+  return fetchImpl(target.toString(), {
+    method: request.method,
+    headers,
+    redirect: "manual",
+  } as RequestInit);
+}
+
 /**
  * Hand GitHub's answer back to the cell, streamed. A redirect is never
  * followed or forwarded: it is a 502.

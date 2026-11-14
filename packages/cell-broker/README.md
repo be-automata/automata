@@ -15,9 +15,10 @@ The remote-cell broker (ADR-014, L3): the handlers that let a remote cell use
 Every dependency is injected: the database (`db`), `fetch`, the token minters
 (read and write), the `enabled` and `sideEffectsEnabled` switches, and the
 size and time limits (`maxPushBytes`, `pushTimeoutMs`) and an optional
-`waitUntil`, which keeps the continuation of a claimed push (forward, then
-release or store) running after a client disconnect, bounded by
-`pushTimeoutMs`. A hard runtime kill is left to the reconciler. The package reads no environment variables and imports
+`waitUntil`, which the continuation of a claimed push (forward, then release
+or store) is registered with. The host promises only a short grace after a
+client disconnect (on workerd about 30 s), not the full `pushTimeoutMs`; what
+runs past it, or a hard runtime kill, is left to the reconciler. The package reads no environment variables and imports
 nothing from a host.
 
 ## Mounting it

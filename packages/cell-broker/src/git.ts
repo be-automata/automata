@@ -76,8 +76,10 @@ export interface GitBrokerDeps {
   pushTimeoutMs?: number;
   /**
    * The host's `waitUntil`. The whole continuation of a claimed push (the
-   * forward, then the release or store) is registered with it, so it outlives
-   * a client disconnect; `pushTimeoutMs` bounds it.
+   * forward, then the release or store) is registered with it. The host only
+   * promises a short grace after the client goes away (on workerd about 30 s),
+   * not the full `pushTimeoutMs`: a continuation still running past that is
+   * left to the reconciler (L3 PR 3).
    */
   waitUntil?: (promise: Promise<unknown>) => void;
   /** Time allowed for the ref advertisement fetch. Defaults to 30 s. */
@@ -284,13 +286,25 @@ interface Push {
 
 /**
  * GitHub refusals that say "try again" rather than "no": 408 and 429 behave
- * like a 5xx, and a 2xx whose unpack failed, or whose every ng reason matches
- * TRANSIENT_NG, is released instead of stored, so an identical retry claims afresh (the budget unit
- * stays spent).
+ * like a 5xx, and a 2xx whose unpack failed, or whose every ng reason is
+ * transient, is released instead of stored, so an identical retry claims
+ * afresh (the budget unit stays spent).
+ *
+ * An ng reason is transient when it names contention or a timeout
+ * (TRANSIENT_NG). A stale ref is FINAL even when it also says "cannot lock
+ * ref": `is at <sha> but expected <sha>` means the ref moved, so the same push
+ * can never succeed and its answer is stored and replayed.
  */
 const TRANSIENT_STATUSES = new Set([408, 429]);
 const TRANSIENT_NG =
-  /failed to lock|cannot lock ref|timed? ?out|timeout|try again/i;
+  /failed to lock|cannot lock ref|unable to create '.*\.lock': file exists|timed? ?out|timeout|try again/i;
+const STALE_REF = /is at [0-9a-f]+ but expected/i;
+
+function isTransientReason(reason: string | undefined): boolean {
+  return (
+    reason !== undefined && !STALE_REF.test(reason) && TRANSIENT_NG.test(reason)
+  );
+}
 
 function isTransientRejection(bytes: Uint8Array): boolean {
   const report = parseReportStatus(bytes);
@@ -299,7 +313,7 @@ function isTransientRejection(bytes: Uint8Array): boolean {
   if (report.unpack !== "ok") return true;
   return (
     report.refs.length > 0 &&
-    report.refs.every((ref) => !ref.ok && TRANSIENT_NG.test(ref.reason ?? ""))
+    report.refs.every((ref) => !ref.ok && isTransientReason(ref.reason))
   );
 }
 
@@ -360,11 +374,12 @@ async function storeOutcome(
  * released, 413; a transient failure (cell disconnect, network error, 5xx, 3xx,
  * oversized answer, a timeout) -> released, 502.
  *
- * The caller registers this whole continuation with `deps.waitUntil`, so it
- * outlives a client disconnect, bounded by the push timeout. A hard runtime
- * kill between the claim and its release can still leave a same-attempt claim
- * pending: the next attempt takes it over, and the reconciler (L3 PR 3) is the
- * backstop, as in the cell-authority header.
+ * The caller registers this whole continuation with `deps.waitUntil`. On
+ * workerd that buys a short grace (about 30 s) after the client goes away, not
+ * the full push timeout. A continuation that outlives the grace, or a hard
+ * runtime kill, can leave a same-attempt claim pending: the next attempt takes
+ * it over, and the reconciler (L3 PR 3) is the backstop, as in the
+ * cell-authority header.
  */
 async function forwardPush(
   push: Push,

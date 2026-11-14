@@ -435,6 +435,105 @@ describe("gh broker auth and secrets", () => {
     expect(moved.status).toBe(502);
   });
 
+  describe("redirects", () => {
+    const redirect =
+      (location: string, status = 302) =>
+      () =>
+        new Response(null, { status, headers: { location } });
+    const ok = (body: string) => () => new Response(body, { status: 200 });
+
+    function redirecting(responses: Array<() => Response>) {
+      const calls: { url: string; headers: Headers }[] = [];
+      const fetchImpl = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push({
+            url: String(input),
+            headers: new Headers(init?.headers),
+          });
+          const next = responses[calls.length - 1];
+          if (!next) throw new Error("unexpected request");
+          return next();
+        },
+      );
+      const handler = createGhBrokerHandler({
+        db,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        mintReadToken: async () => ({ token: SENTINEL }),
+        enabled: () => true,
+      });
+      return { handler, calls };
+    }
+
+    it("follows one hop to an allowlisted asset host with no credential", async () => {
+      const f = await fixture();
+      const h = redirecting([
+        redirect("https://objects.githubusercontent.com/asset?sig=1"),
+        ok("blob-bytes"),
+      ]);
+      const res = await h.handler(
+        rest("/repos/o/r/releases/assets/1", f.token, {
+          headers: { accept: "application/octet-stream", range: "bytes=0-9" },
+        }),
+        "rest",
+      );
+      expect([res.status, await res.text()]).toEqual([200, "blob-bytes"]);
+      expect(h.calls).toHaveLength(2);
+      expect(h.calls[1]!.url).toBe(
+        "https://objects.githubusercontent.com/asset?sig=1",
+      );
+      expect(h.calls[1]!.headers.has("authorization")).toBe(false);
+      expect(h.calls[1]!.headers.get("accept")).toBe(
+        "application/octet-stream",
+      );
+      expect(h.calls[1]!.headers.get("range")).toBe("bytes=0-9");
+      expect(h.calls[0]!.headers.get("authorization")).toBe(
+        `token ${SENTINEL}`,
+      );
+    });
+
+    it("follows a renamed-repo 301 back to api.github.com, with the token", async () => {
+      const f = await fixture();
+      const h = redirecting([
+        redirect("https://api.github.com/repositories/1/pulls", 301),
+        ok("[]"),
+      ]);
+      const res = await h.handler(rest("/repos/o/r/pulls", f.token), "rest");
+      expect(res.status).toBe(200);
+      expect(h.calls[1]!.url).toBe(
+        "https://api.github.com/repositories/1/pulls",
+      );
+      expect(h.calls[1]!.headers.get("authorization")).toBe(
+        `token ${SENTINEL}`,
+      );
+    });
+
+    it("refuses a redirect to any other host, a non-https Location and a second hop with a 502", async () => {
+      const f = await fixture();
+      const evil = redirecting([redirect("https://evil.example/x")]);
+      expect((await evil.handler(rest("/user", f.token), "rest")).status).toBe(
+        502,
+      );
+      expect(evil.calls).toHaveLength(1);
+
+      const plain = redirecting([
+        redirect("http://objects.githubusercontent.com/x"),
+      ]);
+      expect((await plain.handler(rest("/user", f.token), "rest")).status).toBe(
+        502,
+      );
+      expect(plain.calls).toHaveLength(1);
+
+      const chain = redirecting([
+        redirect("https://objects.githubusercontent.com/a"),
+        redirect("https://objects.githubusercontent.com/b"),
+      ]);
+      expect((await chain.handler(rest("/user", f.token), "rest")).status).toBe(
+        502,
+      );
+      expect(chain.calls).toHaveLength(2);
+    });
+  });
+
   it("mints the read token for the step's owner and repo, and 502s on a 3xx or a thrown fetch", async () => {
     const f = await fixture("Acme/Widgets");
     const h = harness();
