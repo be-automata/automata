@@ -43,16 +43,25 @@ function harness(upstream: Upstream = {}, over: Partial<GitBrokerDeps> = {}) {
   );
   const mintReadToken = vi.fn(async () => ({ token: SENTINEL }));
   const mintWriteToken = vi.fn(async () => ({ token: SENTINEL }));
+  const allowWorkflowWrite = vi.fn(async () => false);
   const handler = createGitBrokerHandler({
     db,
     fetchImpl: fetchImpl as unknown as typeof fetch,
     mintReadToken,
     mintWriteToken,
+    allowWorkflowWrite,
     sideEffectsEnabled: () => true,
     enabled: () => true,
     ...over,
   });
-  return { handler, calls, fetchImpl, mintReadToken, mintWriteToken };
+  return {
+    handler,
+    calls,
+    fetchImpl,
+    mintReadToken,
+    mintWriteToken,
+    allowWorkflowWrite,
+  };
 }
 
 function get(path: string, token: string | null, init: RequestInit = {}) {
@@ -260,11 +269,46 @@ describe("git broker reads", () => {
     const advert = await h.handler(get(RECEIVE_ADVERT, f.token));
     expect(advert.status).toBe(200);
     expect(h.mintWriteToken).toHaveBeenCalledTimes(1);
-    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets");
+    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: false,
+    });
     expect(h.mintReadToken).toHaveBeenCalledTimes(2);
     expect(h.calls[2]?.url).toBe(
       "https://github.com/acme/widgets.git/info/refs?service=git-receive-pack",
     );
+  });
+
+  it("#609 the receive-pack advertisement reads the org setting once and mints with its value; upload-pack never reads it", async () => {
+    const f = await fixture();
+    const allow = vi.fn(async (_organizationId: string) => true);
+    const h = harness({}, { allowWorkflowWrite: allow });
+    await h.handler(get(UPLOAD_ADVERT, f.token));
+    await h.handler(post("/acme/widgets.git/git-upload-pack", f.token));
+    expect(allow).not.toHaveBeenCalled();
+
+    const advert = await h.handler(get(RECEIVE_ADVERT, f.token));
+    expect(advert.status).toBe(200);
+    expect(allow).toHaveBeenCalledTimes(1);
+    expect(allow).toHaveBeenCalledWith(f.organizationId);
+    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: true,
+    });
+  });
+
+  it("#609 a failed settings read on the receive-pack advertisement is a 500 with nothing minted or fetched", async () => {
+    const f = await fixture();
+    const h = harness(
+      {},
+      {
+        allowWorkflowWrite: async () => {
+          throw new Error("settings down");
+        },
+      },
+    );
+    const res = await h.handler(get(RECEIVE_ADVERT, f.token));
+    expect(res.status).toBe(500);
+    expect(h.mintWriteToken).not.toHaveBeenCalled();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
   });
 
   it("with side effects off the receive-pack advertisement is 503 and upload-pack still works", async () => {
