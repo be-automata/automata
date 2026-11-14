@@ -17,7 +17,7 @@ import {
 import { cellEffect, cellStep } from "@terragon/shared/db/schema";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
-import { createGitBrokerHandler } from "./git";
+import { createGitBrokerHandler } from "@terragon/cell-broker/git";
 
 const execFileAsync = promisify(execFile);
 const hasGit = spawnSync("git", ["--version"]).status === 0;

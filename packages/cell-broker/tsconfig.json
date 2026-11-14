@@ -1,0 +1,3 @@
+{
+  "extends": "@terragon/tsconfig/base.json"
+}

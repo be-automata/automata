@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
-import { cellBrokerEnabled } from "@/server-lib/cell-broker/common";
-import { createGhBrokerHandler } from "@/server-lib/cell-broker/gh";
+import { cellBrokerEnabled } from "@/lib/cell-broker-enabled";
+import { createGhBrokerHandler } from "@terragon/cell-broker/gh";
 import { getCellReadInstallationToken } from "@terragon/shared/github-app";
 
 /**

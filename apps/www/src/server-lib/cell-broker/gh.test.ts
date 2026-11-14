@@ -9,7 +9,10 @@ import {
 } from "@terragon/shared/model/cell-authority";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
-import { createGhBrokerHandler, type GhBrokerDeps } from "./gh";
+import {
+  createGhBrokerHandler,
+  type GhBrokerDeps,
+} from "@terragon/cell-broker/gh";
 
 const SENTINEL = "ghs_SENTINEL_read_token";
 const HOST = "www.example.com";

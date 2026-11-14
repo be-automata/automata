@@ -1,7 +1,7 @@
 import { db } from "@/lib/db";
 import { githubSideEffectsEnabled } from "@/lib/github-side-effects";
-import { cellBrokerEnabled } from "@/server-lib/cell-broker/common";
-import { createGitBrokerHandler } from "@/server-lib/cell-broker/git";
+import { cellBrokerEnabled } from "@/lib/cell-broker-enabled";
+import { createGitBrokerHandler } from "@terragon/cell-broker/git";
 import {
   getCellReadInstallationToken,
   getWriteInstallationToken,

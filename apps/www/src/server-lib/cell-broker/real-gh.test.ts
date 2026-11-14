@@ -13,7 +13,7 @@ import {
 } from "@/test-helpers/route-http-server";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
-import { createGhBrokerHandler } from "./gh";
+import { createGhBrokerHandler } from "@terragon/cell-broker/gh";
 
 const execFileAsync = promisify(execFile);
 const hasGh = spawnSync("gh", ["--version"]).status === 0;

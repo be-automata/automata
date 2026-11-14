@@ -1,6 +1,5 @@
 import { and, eq } from "drizzle-orm";
 
-import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
 import { thread } from "@terragon/shared/db/schema";
 import {
@@ -22,11 +21,6 @@ export type TokenMinter = (
   owner: string,
   repo: string,
 ) => Promise<{ token: string }>;
-
-export function cellBrokerEnabled(): boolean {
-  return env.CELL_BROKER_ENABLED;
-}
-
 export function notFound(): Response {
   return brokerError(404, "not_found");
 }

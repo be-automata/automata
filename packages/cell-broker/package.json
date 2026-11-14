@@ -1,0 +1,29 @@
+{
+  "name": "@terragon/cell-broker",
+  "version": "1.0.0",
+  "description": "Remote-cell broker: git smart-HTTP and read-only GitHub API handlers (ADR-014)",
+  "type": "module",
+  "exports": {
+    "./common": "./src/common.ts",
+    "./git": "./src/git.ts",
+    "./gh": "./src/gh.ts",
+    "./report-status": "./src/report-status.ts"
+  },
+  "scripts": {
+    "tsc-check": "tsc --noEmit",
+    "tsc-watch": "tsc --noEmit --watch --preserveWatchOutput",
+    "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
+    "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"
+  },
+  "packageManager": "pnpm@10.14.0",
+  "dependencies": {
+    "@terragon/shared": "workspace:*",
+    "@terragon/utils": "workspace:*",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "@terragon/tsconfig": "workspace:*",
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  }
+}

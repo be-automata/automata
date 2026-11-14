@@ -13,8 +13,11 @@ import {
   createGitBrokerHandler,
   pushIdempotencyKey,
   type GitBrokerDeps,
-} from "./git";
-import { parseAdvertisedRefs, parseReportStatus } from "./report-status";
+} from "@terragon/cell-broker/git";
+import {
+  parseAdvertisedRefs,
+  parseReportStatus,
+} from "@terragon/cell-broker/report-status";
 
 const SENTINEL = "ghs_SENTINEL_write_token";
 const URL_PUSH =

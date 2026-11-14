@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 
+import { cellBrokerEnabled } from "@/lib/cell-broker-enabled";
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import { thread } from "@terragon/shared/db/schema";
@@ -17,7 +18,6 @@ import {
 import {
   assertOrigin,
   brokerError,
-  cellBrokerEnabled,
   decodePathSegments,
   extractCellBearer,
   forwardRequestHeaders,
@@ -29,7 +29,7 @@ import {
   refusalResponse,
   resolveCellStep,
   responseHeadersForCell,
-} from "./common";
+} from "@terragon/cell-broker/common";
 
 const basic = (user: string, pass: string) =>
   `Basic ${btoa(`${user}:${pass}`)}`;

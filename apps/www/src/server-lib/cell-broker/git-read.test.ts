@@ -9,7 +9,10 @@ import {
 } from "@terragon/shared/model/cell-authority";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
-import { createGitBrokerHandler, type GitBrokerDeps } from "./git";
+import {
+  createGitBrokerHandler,
+  type GitBrokerDeps,
+} from "@terragon/cell-broker/git";
 
 const SENTINEL = "ghs_SENTINEL_installation_token";
 const BASE = "https://www.example.com/api/cell/git";
