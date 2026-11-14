@@ -6,6 +6,7 @@ import {
   brokerError,
   decodePathSegments,
   extractCellBearer,
+  internalError,
   forwardRequestHeaders,
   isUnsafeSegment,
   refusalResponse,
@@ -131,7 +132,12 @@ export function createGhBrokerHandler(
 
     const bearer = extractCellBearer(request.headers);
     if (!bearer) return brokerError(401, "unauthenticated");
-    const step = await resolveCellStep(deps.db, bearer);
+    let step: Awaited<ReturnType<typeof resolveCellStep>>;
+    try {
+      step = await resolveCellStep(deps.db, bearer);
+    } catch {
+      return internalError("resolve_step");
+    }
     if (!step.ok) return refusalResponse(step.reason);
 
     const url = new URL(request.url);
@@ -143,7 +149,11 @@ export function createGhBrokerHandler(
             deps.maxGraphqlBytes ?? MAX_GRAPHQL_BYTES,
           );
     if (!target.ok) return target.response;
-    assertOrigin(target.url, "https://api.github.com");
+    try {
+      assertOrigin(target.url, "https://api.github.com");
+    } catch {
+      return internalError("upstream_origin");
+    }
 
     const [owner, repo] = step.repoFullName.split("/");
     if (!owner || !repo) return brokerError(502, "upstream_error");

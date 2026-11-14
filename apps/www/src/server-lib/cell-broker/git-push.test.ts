@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import type { DB } from "@terragon/shared/db";
 import { cellEffect, cellStep, thread } from "@terragon/shared/db/schema";
 import {
   beginEffect,
@@ -322,6 +323,70 @@ describe("git broker push", () => {
     ]);
     expect(await effectRows(f.stepKey)).toBe(0);
     expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("AC10 a cap crossed while GitHub's early answer is still being read is a 413 that releases the claim", async () => {
+    const f = await fixture();
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const consumed = readAll(init?.body as BodyInit | null | undefined);
+        consumed.catch(() => undefined);
+        // Headers arrive at once; the body only ends after the request is read.
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              await consumed;
+              controller.enqueue(REPORT_OK);
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    );
+    const handler = createGitBrokerHandler({
+      db,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      mintReadToken: async () => ({ token: SENTINEL }),
+      mintWriteToken: async () => ({ token: SENTINEL }),
+      sideEffectsEnabled: () => true,
+      enabled: () => true,
+      maxPushBytes: 1000,
+    });
+    const chunks = [
+      commandSection(),
+      ...Array.from({ length: 5 }, () => new Uint8Array(400).fill(7)),
+    ];
+    const res = await handler(push(f.token, streamOf(chunks)));
+    expect([res.status, (await json(res)).error]).toEqual([
+      413,
+      "payload_too_large",
+    ]);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("a database failure while resolving the bearer is a 500 internal_error and logs no error message", async () => {
+    const f = await fixture();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing = new Proxy({} as DB, {
+        get() {
+          throw new Error(`db down ${SENTINEL}`);
+        },
+      });
+      const h = harness({}, { db: failing });
+      const res = await h.handler(push(f.token, pushBody()));
+      expect([res.status, (await json(res)).error]).toEqual([
+        500,
+        "internal_error",
+      ]);
+      expect(h.fetchImpl).not.toHaveBeenCalled();
+      expect(JSON.stringify(logged.mock.calls)).not.toContain(SENTINEL);
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("AC12 a GitHub 503 releases the claim; an identical retry is forwarded and uses a second unit", async () => {

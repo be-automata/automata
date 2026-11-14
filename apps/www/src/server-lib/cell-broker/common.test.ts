@@ -220,6 +220,7 @@ describe("responseHeadersForCell", () => {
       "transfer-encoding": "chunked",
       connection: "close",
       "access-control-allow-origin": "*",
+      "www-authenticate": 'Basic realm="GitHub"',
       "x-ratelimit-remaining": "42",
       link: '<https://api.github.com/repos/a/b/issues?page=2>; rel="next", <https://api.github.com/repos/a/b/issues?page=5>; rel="last"',
     });
@@ -231,6 +232,7 @@ describe("responseHeadersForCell", () => {
   it("drops cookies and framing headers and keeps the rest", () => {
     const out = responseHeadersForCell(upstream());
     expect(out.has("set-cookie")).toBe(false);
+    expect(out.has("www-authenticate")).toBe(false);
     for (const name of [
       "content-length",
       "content-encoding",

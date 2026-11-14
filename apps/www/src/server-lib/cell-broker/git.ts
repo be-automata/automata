@@ -17,6 +17,7 @@ import {
   extractCellBearer,
   forwardRequestHeaders,
   gitAuthChallenge,
+  internalError,
   isUnsafeSegment,
   refusalResponse,
   resolveCellStep,
@@ -296,7 +297,7 @@ async function releaseClaim(push: Push): Promise<void> {
   } catch (error) {
     console.error(
       "cell-broker: releaseEffect failed",
-      error instanceof Error ? error.message : String(error),
+      error instanceof Error ? error.name : "unknown",
     );
   }
 }
@@ -328,7 +329,7 @@ async function storeOutcome(
     // newer attempt takes it over. Logged, not hidden.
     console.error(
       "cell-broker: completeEffect failed",
-      error instanceof Error ? error.message : String(error),
+      error instanceof Error ? error.name : "unknown",
     );
   }
 }
@@ -411,6 +412,12 @@ async function forwardPush(
     return brokerError(502, "upstream_error");
   }
   const bytes = await readCapped(upstream.body, MAX_PUSH_RESPONSE_BYTES);
+  // The cap can be crossed while the answer is still being read (GitHub
+  // replies early): that is an overflow, not an upstream failure.
+  if (overflowed) {
+    await releaseClaim(push);
+    return brokerError(413, "payload_too_large");
+  }
   if (!bytes) {
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
@@ -506,7 +513,7 @@ async function handlePush({
     begun = await beginEffect({ db: deps.db, token: bearer, idempotencyKey });
   } catch {
     void section.reader.cancel().catch(() => undefined);
-    return brokerError(500, "internal_error");
+    return internalError("begin_effect");
   }
   if (begun.kind === "refused") {
     void section.reader.cancel().catch(() => undefined);
@@ -530,7 +537,12 @@ export function createGitBrokerHandler(
 
     const bearer = extractCellBearer(request.headers);
     if (!bearer) return gitAuthChallenge();
-    const step = await resolveCellStep(deps.db, bearer);
+    let step: Awaited<ReturnType<typeof resolveCellStep>>;
+    try {
+      step = await resolveCellStep(deps.db, bearer);
+    } catch {
+      return internalError("resolve_step");
+    }
     if (!step.ok) return refusalResponse(step.reason);
 
     const url = new URL(request.url);
@@ -571,7 +583,11 @@ export function createGitBrokerHandler(
         leg === "upload-pack" ? UPLOAD_PACK : RECEIVE_PACK,
       );
     }
-    assertOrigin(upstreamUrl, "https://github.com");
+    try {
+      assertOrigin(upstreamUrl, "https://github.com");
+    } catch {
+      return internalError("upstream_origin");
+    }
 
     if (leg === "receive-pack-post") {
       return handlePush({

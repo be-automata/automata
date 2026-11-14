@@ -34,6 +34,15 @@ export function brokerError(
   return Response.json({ error: code }, { status, headers });
 }
 
+/**
+ * 500 for a failure inside the broker (database or URL construction). Logs a
+ * fixed string only: an error message could carry a URL or a token.
+ */
+export function internalError(where: string): Response {
+  console.error(`cell-broker: internal_error (${where})`);
+  return brokerError(500, "internal_error");
+}
+
 /** 401 for a git request with no credential, so git retries with its helper. */
 export function gitAuthChallenge(): Response {
   return brokerError(401, "unauthenticated", {
@@ -201,7 +210,9 @@ export function responseHeadersForCell(
   const out = new Headers();
   upstream.forEach((value, name) => {
     const lower = name.toLowerCase();
-    if (lower === "set-cookie" || HOP_BY_HOP.has(lower)) return;
+    // GitHub's own auth challenge must not reach the cell's credential helper.
+    if (lower === "set-cookie" || lower === "www-authenticate") return;
+    if (HOP_BY_HOP.has(lower)) return;
     if (lower === "link" && opts?.rewriteLinkHost) {
       out.set(
         name,
