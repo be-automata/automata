@@ -125,6 +125,43 @@ export async function getInstallationToken(
 }
 
 /**
+ * One installation token for exactly one repository with exactly `permissions`.
+ * No `expires_at` is requested (GitHub caps installation tokens at one hour);
+ * the response's own expiry is returned. `label` names the token in the error
+ * for a response without a token or an expiry.
+ */
+async function mintScopedInstallationToken(
+  owner: string,
+  repo: string,
+  permissions: Record<string, string>,
+  label: string,
+  knownInstallationId?: number,
+): Promise<{ token: string; expiresAt: string }> {
+  const app = getGitHubApp();
+  let data: { token?: unknown; expires_at?: unknown };
+  try {
+    const installationId =
+      knownInstallationId ?? (await lookupInstallationId(owner, repo));
+    ({ data } = await app.octokit.request(
+      "POST /app/installations/{installation_id}/access_tokens",
+      {
+        installation_id: installationId,
+        repositories: [repo],
+        permissions,
+      },
+    ));
+  } catch (error: unknown) {
+    throw notInstalledOr(error, owner, repo);
+  }
+  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
+    throw new Error(
+      `GitHub App token response has no token or no expires_at (${label})`,
+    );
+  }
+  return { token: data.token, expiresAt: data.expires_at };
+}
+
+/**
  * The ONLY permissions a read-only task token is ever minted with (phase 7).
  * No write and no admin key, by construction: the request body below spreads
  * nothing else in.
@@ -152,28 +189,13 @@ export async function getReadOnlyInstallationToken(
   repo: string,
   knownInstallationId?: number,
 ): Promise<{ token: string; expiresAt: string }> {
-  const app = getGitHubApp();
-  let data: { token?: unknown; expires_at?: unknown };
-  try {
-    const installationId =
-      knownInstallationId ?? (await lookupInstallationId(owner, repo));
-    ({ data } = await app.octokit.request(
-      "POST /app/installations/{installation_id}/access_tokens",
-      {
-        installation_id: installationId,
-        repositories: [repo],
-        permissions: READ_ONLY_TOKEN_PERMISSIONS,
-      },
-    ));
-  } catch (error: unknown) {
-    throw notInstalledOr(error, owner, repo);
-  }
-  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
-    throw new Error(
-      "GitHub App token response has no token or no expires_at (read-only token)",
-    );
-  }
-  return { token: data.token, expiresAt: data.expires_at };
+  return mintScopedInstallationToken(
+    owner,
+    repo,
+    READ_ONLY_TOKEN_PERMISSIONS,
+    "read-only token",
+    knownInstallationId,
+  );
 }
 
 /**
@@ -200,28 +222,13 @@ export async function getWriteInstallationToken(
   repo: string,
   knownInstallationId?: number,
 ): Promise<{ token: string; expiresAt: string }> {
-  const app = getGitHubApp();
-  let data: { token?: unknown; expires_at?: unknown };
-  try {
-    const installationId =
-      knownInstallationId ?? (await lookupInstallationId(owner, repo));
-    ({ data } = await app.octokit.request(
-      "POST /app/installations/{installation_id}/access_tokens",
-      {
-        installation_id: installationId,
-        repositories: [repo],
-        permissions: WRITE_TOKEN_PERMISSIONS,
-      },
-    ));
-  } catch (error: unknown) {
-    throw notInstalledOr(error, owner, repo);
-  }
-  if (typeof data.token !== "string" || typeof data.expires_at !== "string") {
-    throw new Error(
-      "GitHub App token response has no token or no expires_at (write token)",
-    );
-  }
-  return { token: data.token, expiresAt: data.expires_at };
+  return mintScopedInstallationToken(
+    owner,
+    repo,
+    WRITE_TOKEN_PERMISSIONS,
+    "write token",
+    knownInstallationId,
+  );
 }
 
 /**

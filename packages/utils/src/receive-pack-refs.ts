@@ -72,6 +72,36 @@ function asciiAt(buf: Uint8Array, start: number, length: number): string {
   return out;
 }
 
+/** One pkt-line read at an offset of a buffer. */
+export type PktLine =
+  | { kind: "flush"; next: number }
+  | { kind: "data"; payload: Uint8Array; next: number }
+  /** The header or the payload is not all in the buffer yet. */
+  | { kind: "incomplete" }
+  /** Not a pkt-line git writes: bad hex length, or a length below 5. */
+  | { kind: "malformed" };
+
+/**
+ * Read the pkt-line that starts at `offset`: a 4-hex-digit length that counts
+ * itself, then the payload. `0000` is a flush. 0001 (delim) and 0002
+ * (response-end) are protocol v2 only, and 3 is impossible; a data pkt carries
+ * at least one payload byte, so any length below 5 is malformed.
+ */
+export function readPktLine(buf: Uint8Array, offset: number): PktLine {
+  if (buf.length - offset < 4) return { kind: "incomplete" };
+  const lenHex = asciiAt(buf, offset, 4).toLowerCase();
+  if (!HEX_LEN.test(lenHex)) return { kind: "malformed" };
+  const len = Number.parseInt(lenHex, 16);
+  if (len === 0) return { kind: "flush", next: offset + 4 };
+  if (len < 5) return { kind: "malformed" };
+  if (buf.length - offset < len) return { kind: "incomplete" };
+  return {
+    kind: "data",
+    payload: buf.subarray(offset + 4, offset + len),
+    next: offset + len,
+  };
+}
+
 /**
  * Parse the receive-pack command section at the start of `buf`.
  * `incomplete` until the terminating flush-pkt is in the buffer.
@@ -83,19 +113,15 @@ export function parseReceivePackCommands(
   let offset = 0;
   let sawCommand = false;
   for (;;) {
-    if (buf.length - offset < 4) return { ok: false, reason: "incomplete" };
-    const lenHex = asciiAt(buf, offset, 4).toLowerCase();
-    if (!HEX_LEN.test(lenHex)) return { ok: false, reason: "malformed" };
-    const len = Number.parseInt(lenHex, 16);
-    if (len === 0) {
-      return { ok: true, commands, consumed: offset + 4 };
+    const pkt = readPktLine(buf, offset);
+    if (pkt.kind === "incomplete" || pkt.kind === "malformed") {
+      return { ok: false, reason: pkt.kind };
     }
-    // 0001 (delim) / 0002 (response-end) are protocol v2 only, and 3 is
-    // impossible; a data pkt carries at least one payload byte.
-    if (len < 5) return { ok: false, reason: "malformed" };
-    if (buf.length - offset < len) return { ok: false, reason: "incomplete" };
-    let payload = UTF8.decode(buf.subarray(offset + 4, offset + len));
-    offset += len;
+    if (pkt.kind === "flush") {
+      return { ok: true, commands, consumed: pkt.next };
+    }
+    let payload = UTF8.decode(pkt.payload);
+    offset = pkt.next;
     if (payload.endsWith("\n")) payload = payload.slice(0, -1);
 
     if (payload.startsWith(SHALLOW_PREFIX)) {
