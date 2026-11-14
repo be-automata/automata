@@ -1,32 +1,23 @@
 import { execFile, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
 import {
   startRouteServer,
   type RouteServer,
 } from "@/test-helpers/route-http-server";
-import { thread } from "@terragon/shared/db/schema";
-import { mintBearer, openStep } from "@terragon/shared/model/cell-authority";
-import {
-  createTestOrg,
-  createTestThread,
-  createTestUser,
-} from "@terragon/shared/model/test-helpers";
+import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import { createGhBrokerHandler } from "./gh";
 
 const execFileAsync = promisify(execFile);
 const hasGh = spawnSync("gh", ["--version"]).status === 0;
 const SENTINEL = "ghs_SENTINEL_real_gh";
-const STEP_TIMEOUT = 30 * 60_000;
 const HOST = "cell.test";
 
 /**
@@ -49,37 +40,7 @@ describe.skipIf(!hasGh)("real gh through the cell gh broker", () => {
   const upstreamSeen: Array<{ url: string; auth: string | null }> = [];
 
   beforeAll(async () => {
-    const organizationId = await createTestOrg({ db });
-    const { user } = await createTestUser({ db });
-    const { threadId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { githubRepoFullName: "o/r" },
-    });
-    await db
-      .update(thread)
-      .set({ organizationId })
-      .where(eq(thread.id, threadId));
-    const stepKey = `run-${randomUUID()}/agent`;
-    await openStep({
-      db,
-      step: {
-        stepKey,
-        organizationId,
-        threadId,
-        attempt: 1,
-        stepTimeoutMs: STEP_TIMEOUT,
-        effectBudget: null,
-      },
-    });
-    const minted = await mintBearer({
-      db,
-      stepKey,
-      attempt: 1,
-      ttlMs: STEP_TIMEOUT,
-    });
-    if (!minted.ok) throw new Error(minted.reason);
-    bearer = minted.token;
+    bearer = (await createTestCellStep({ db, repoFullName: "o/r" })).token;
 
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);

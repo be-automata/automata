@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,20 +14,14 @@ import {
   startRouteServer,
   type RouteServer,
 } from "@/test-helpers/route-http-server";
-import { cellEffect, cellStep, thread } from "@terragon/shared/db/schema";
-import { mintBearer, openStep } from "@terragon/shared/model/cell-authority";
-import {
-  createTestOrg,
-  createTestThread,
-  createTestUser,
-} from "@terragon/shared/model/test-helpers";
+import { cellEffect, cellStep } from "@terragon/shared/db/schema";
+import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import { createGitBrokerHandler } from "./git";
 
 const execFileAsync = promisify(execFile);
 const hasGit = spawnSync("git", ["--version"]).status === 0;
 const SENTINEL = "ghs_SENTINEL_real_git";
-const STEP_TIMEOUT = 30 * 60_000;
 const TEST_TIMEOUT = 90_000;
 
 const dirs: string[] = [];
@@ -158,38 +152,12 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
   }
 
   async function step() {
-    const organizationId = await createTestOrg({ db });
-    const { user } = await createTestUser({ db });
-    const { threadId } = await createTestThread({
+    const s = await createTestCellStep({
       db,
-      userId: user.id,
-      overrides: { githubRepoFullName: "org/repo" },
+      repoFullName: "org/repo",
+      effectBudget: 10,
     });
-    await db
-      .update(thread)
-      .set({ organizationId })
-      .where(eq(thread.id, threadId));
-    const stepKey = `run-${randomUUID()}/agent`;
-    const opened = await openStep({
-      db,
-      step: {
-        stepKey,
-        organizationId,
-        threadId,
-        attempt: 1,
-        stepTimeoutMs: STEP_TIMEOUT,
-        effectBudget: 10,
-      },
-    });
-    expect(opened.ok).toBe(true);
-    const minted = await mintBearer({
-      db,
-      stepKey,
-      attempt: 1,
-      ttlMs: STEP_TIMEOUT,
-    });
-    if (!minted.ok) throw new Error(minted.reason);
-    return { stepKey, bearer: minted.token };
+    return { stepKey: s.stepKey, bearer: s.token };
   }
 
   async function setup(maxPushBytes?: number) {
