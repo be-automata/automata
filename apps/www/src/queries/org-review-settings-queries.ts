@@ -92,7 +92,9 @@ export function useSetCellWorkflowWriteMutation() {
       const json = (await res.json()) as { setting: OrgReviewSettingDto };
       return json.setting;
     },
-    onSuccess: () => {
+    onSuccess: (setting) => {
+      // The query's data is the bare setting DTO: show the saved value at once.
+      queryClient.setQueryData(orgReviewSettingsQueryKeys.detail(), setting);
       queryClient.invalidateQueries({
         queryKey: orgReviewSettingsQueryKeys.detail(),
       });

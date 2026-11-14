@@ -42,13 +42,13 @@ import { getPostHogServer } from "@/lib/posthog-server";
 
 function toDto(row: {
   blockTolerance: string | null;
-  cellWorkflowWrite?: boolean | null;
+  cellWorkflowWrite: boolean | null;
   updatedAt: Date;
 }) {
   return {
     blockTolerance: row.blockTolerance as BlockTolerance | null,
     // Raw nullable, like blockTolerance: NULL means "never set" (resolves off).
-    cellWorkflowWrite: row.cellWorkflowWrite ?? null,
+    cellWorkflowWrite: row.cellWorkflowWrite,
     updatedAt: row.updatedAt,
   };
 }
@@ -180,7 +180,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       event: "org_cell_workflow_write_updated",
       properties: {
         organizationId: ctx.organizationId,
-        cellWorkflowWrite: row.cellWorkflowWrite ?? null,
+        cellWorkflowWrite: row.cellWorkflowWrite,
       },
     });
   }

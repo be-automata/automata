@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { SettingsSection } from "@/components/settings/settings-row";
 import {
   useOrgReviewSettingsQuery,
+  type OrgReviewSettingDto,
   useSetCellWorkflowWriteMutation,
 } from "@/queries/org-review-settings-queries";
 
@@ -88,6 +89,13 @@ export function CellWorkflowWriteCardView({
   );
 }
 
+/** Off unless the org explicitly opted in: no row, NULL and false all resolve off. */
+export function cellWorkflowWriteEnabled(
+  data: OrgReviewSettingDto | null | undefined,
+): boolean {
+  return data?.cellWorkflowWrite === true;
+}
+
 /** Thin container: binds the org review-settings query and the write mutation. */
 export function CellWorkflowWriteCard() {
   const settings = useOrgReviewSettingsQuery();
@@ -105,7 +113,7 @@ export function CellWorkflowWriteCard() {
         }
       : {
           kind: "ready",
-          enabled: settings.data?.cellWorkflowWrite === true,
+          enabled: cellWorkflowWriteEnabled(settings.data),
           saving: setWrite.isPending,
         };
 

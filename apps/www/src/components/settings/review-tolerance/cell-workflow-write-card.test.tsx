@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   CellWorkflowWriteCardView,
+  cellWorkflowWriteEnabled,
   type CellWorkflowWriteState,
 } from "./cell-workflow-write-card";
 
@@ -48,7 +49,7 @@ describe("CellWorkflowWriteCardView", () => {
     expect(html).not.toContain('role="switch"');
   });
 
-  it("is off when the stored value is null or false (the container maps both to enabled: false)", () => {
+  it("is off when not enabled", () => {
     const html = render({ kind: "ready", enabled: false, saving: false });
     expect(html).toContain("Let remote cells change CI workflow files");
     expect(html).toContain('aria-checked="false"');
@@ -77,5 +78,24 @@ describe("CellWorkflowWriteCardView", () => {
     expect(render({ kind: "ready", enabled: true, saving: false })).not.toMatch(
       /role="switch"[^>]*disabled=""/,
     );
+  });
+});
+
+describe("cellWorkflowWriteEnabled", () => {
+  const dto = (cellWorkflowWrite: boolean | null) => ({
+    blockTolerance: null,
+    cellWorkflowWrite,
+    updatedAt: "2026-11-14T00:00:00.000Z",
+  });
+
+  it("is on only for an explicit true", () => {
+    expect(cellWorkflowWriteEnabled(dto(true))).toBe(true);
+  });
+
+  it("is off for undefined data, no row, null and false", () => {
+    expect(cellWorkflowWriteEnabled(undefined)).toBe(false);
+    expect(cellWorkflowWriteEnabled(null)).toBe(false);
+    expect(cellWorkflowWriteEnabled(dto(null))).toBe(false);
+    expect(cellWorkflowWriteEnabled(dto(false))).toBe(false);
   });
 });

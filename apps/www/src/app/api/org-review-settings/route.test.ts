@@ -322,4 +322,16 @@ describe("GET/PUT /api/org-review-settings", () => {
     expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
     expect(captureMock).not.toHaveBeenCalled();
   });
+
+  it.each([null, [], "x"])(
+    "PUT 400 Invalid body when the JSON body is not an object (%j)",
+    async (value) => {
+      const res = await PUT(putReq(value));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "Invalid body",
+      );
+      expect(upsertOrganizationReviewSetting).not.toHaveBeenCalled();
+    },
+  );
 });
