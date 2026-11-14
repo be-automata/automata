@@ -60,6 +60,16 @@ const HEX_LEN = /^[0-9a-f]{4}$/;
 const OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const ZERO_NAME = /^0+$/;
 const SHALLOW_PREFIX = "shallow ";
+
+/** True for a sha1 or sha256 object name in lowercase hex. */
+export function isObjectName(value: string): boolean {
+  return OBJECT_NAME.test(value);
+}
+
+/** True for the all-zeros object name git uses for "no object". */
+export function isZeroObjectName(value: string): boolean {
+  return ZERO_NAME.test(value);
+}
 // ignoreBOM keeps a leading U+FEFF in the payload, as Buffer#toString does.
 const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
 

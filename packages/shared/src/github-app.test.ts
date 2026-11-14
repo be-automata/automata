@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   READ_ONLY_TOKEN_PERMISSIONS,
+  WORKFLOWS_WRITE_PERMISSION,
   WRITE_TOKEN_PERMISSIONS,
   getWriteInstallationToken,
   getGitHubApp,
@@ -68,29 +69,37 @@ describe("GitHub App", () => {
   describe("installation tokens (#606: remote-cell write variant)", () => {
     type Call = { route: string; params: Record<string, unknown> };
 
-    function mockRequests(tokenResponse: Record<string, unknown>): Call[] {
+    function mockRequests(
+      tokenResponse: Record<string, unknown>,
+      installation: Record<string, unknown> = { id: 42 },
+      failFirstInstallationRead = false,
+    ): Call[] {
       process.env.GITHUB_APP_ID = "123456";
       process.env.GITHUB_APP_PRIVATE_KEY = "fake-private-key";
       const calls: Call[] = [];
+      let installationReads = 0;
       vi.spyOn(getGitHubApp().octokit, "request").mockImplementation((async (
         route: string,
         params: Record<string, unknown>,
       ) => {
         calls.push({ route, params });
         if (route === "GET /repos/{owner}/{repo}/installation") {
-          return { data: { id: 42 } };
+          if (failFirstInstallationRead && installationReads++ === 0) {
+            throw new Error("permissions read failed");
+          }
+          return { data: installation };
         }
         return { data: tokenResponse };
       }) as never);
       return calls;
     }
 
-    it("pins exactly contents:write, metadata:read and workflows:write", () => {
+    it("pins exactly contents:write and metadata:read as the base write permissions", () => {
       expect(WRITE_TOKEN_PERMISSIONS).toEqual({
         contents: "write",
         metadata: "read",
-        workflows: "write",
       });
+      expect(WORKFLOWS_WRITE_PERMISSION).toEqual({ workflows: "write" });
     });
 
     it("requests a single-repo token with exactly the write permissions and returns token + expiresAt", async () => {
@@ -106,13 +115,50 @@ describe("GitHub App", () => {
       expect(body).toEqual({
         installation_id: 42,
         repositories: ["r"],
-        permissions: {
-          contents: "write",
-          metadata: "read",
-          workflows: "write",
-        },
+        permissions: { contents: "write", metadata: "read" },
       });
       expect("expires_at" in body).toBe(false);
+    });
+
+    const MINTED = { token: "ghs_x", expires_at: "2026-10-04T03:00:00Z" };
+
+    it("adds workflows:write when the installation grants it", async () => {
+      const calls = mockRequests(MINTED, {
+        id: 42,
+        permissions: { contents: "write", workflows: "write" },
+      });
+      await getWriteInstallationToken("o", "r");
+      expect(calls[1]!.params.permissions).toEqual({
+        contents: "write",
+        metadata: "read",
+        workflows: "write",
+      });
+    });
+
+    it("stays at contents:write + metadata:read when workflows is read-only or not granted", async () => {
+      for (const permissions of [{ workflows: "read" }, {}, undefined]) {
+        vi.restoreAllMocks();
+        resetAppInstance();
+        const calls = mockRequests(MINTED, { id: 42, permissions });
+        await getWriteInstallationToken("o", "r");
+        expect(calls[1]!.params.permissions).toEqual({
+          contents: "write",
+          metadata: "read",
+        });
+      }
+    });
+
+    it("mints without workflows when reading the granted permissions fails", async () => {
+      const calls = mockRequests(MINTED, { id: 42 }, true);
+      await expect(getWriteInstallationToken("o", "r")).resolves.toEqual({
+        token: "ghs_x",
+        expiresAt: "2026-10-04T03:00:00Z",
+      });
+      const post = calls.find((c) => c.route.startsWith("POST"));
+      expect(post!.params.permissions).toEqual({
+        contents: "write",
+        metadata: "read",
+      });
     });
 
     it("a known installation id skips the lookup", async () => {
@@ -121,10 +167,12 @@ describe("GitHub App", () => {
         expires_at: "2026-10-04T03:00:00Z",
       });
       await getWriteInstallationToken("o", "r", 7);
+      // One read of the granted permissions, then the mint for installation 7.
       expect(calls.map((c) => c.route)).toEqual([
+        "GET /repos/{owner}/{repo}/installation",
         "POST /app/installations/{installation_id}/access_tokens",
       ]);
-      expect(calls[0]!.params).toMatchObject({ installation_id: 7 });
+      expect(calls[1]!.params).toMatchObject({ installation_id: 7 });
     });
 
     it("404 -> the same 'not installed' error as the other token minters", async () => {

@@ -76,7 +76,7 @@ Known risks: Buffer→Uint8Array decode differences (decode pkt-line lengths as 
 - **Verify before replay.** A stored push success (2xx, every pushed ref `ok`) is replayed only while the receive-pack advertisement still shows each ref at its `newSha` (absent for a delete). Otherwise the push is claimed anew under the key generations `<key>:g2` … `:g20`; past g20 the answer is 409 `push_generations_exhausted`. The advertisement is fetched once per request with the write token, capped at 8 MiB; a failed or unparseable fetch is 502 with no claim. Stored rejections (`ng`, unpack error, 4xx) replay without verification.
 - **Redirects.** Only 301, 302, 303, 307 and 308 are redirects (502). A 304 passes through to the cell.
 - **GraphQL encoding.** A request body with a `content-encoding` other than identity is refused with 415 `unsupported_encoding` before it is read.
-- **Write token.** `WRITE_TOKEN_PERMISSIONS` adds `workflows: write` (owner decision): GitHub refuses a push that touches `.github/workflows/` from an App token without it.
+- **Write token.** The write token adds `workflows: write` only when the installation grants Workflows write (read first; a failed read mints without it). The App does not hold that permission today: add it to the App and have installations approve it to enable pushes of workflow files.
 - **Test route server.** `route-http-server.ts` builds request bodies by hand: `Readable.toWeb` kept enqueuing into a closed controller after an over-cap cancel.
 
 ## Phases (validator cycle 3 + owner decision; supersedes the strategy table above)

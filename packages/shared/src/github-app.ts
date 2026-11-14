@@ -199,39 +199,56 @@ export async function getReadOnlyInstallationToken(
 }
 
 /**
- * The ONLY permissions a remote-cell write token is ever minted with (#606).
- * Contents write (git push), metadata read and workflows write; nothing else
- * is spread in.
+ * The permissions every remote-cell write token carries (#606): contents write
+ * (git push) and metadata read.
  */
 export const WRITE_TOKEN_PERMISSIONS = {
   contents: "write",
   metadata: "read",
-  // Remote cells may change .github/workflows/: GitHub refuses such a push from
-  // an App token without workflows:write (owner decision on #606).
-  workflows: "write",
 } as const;
+
+/** Added to a write token only when the installation grants Workflows write. */
+export const WORKFLOWS_WRITE_PERMISSION = { workflows: "write" } as const;
 
 /**
  * A contents-write installation token for exactly one repository (#606).
  *
- * Scope: WRITE_TOKEN_PERMISSIONS on `[repo]` only. Lifetime: GitHub caps
- * installation tokens at one hour, so no `expires_at` is requested; the
- * response's own expiry is returned. Used only by the remote-cell broker, for
- * both legs of a push (the info/refs advertisement and the receive-pack POST);
- * fetch-side calls use the read-only token. `knownInstallationId` skips the
- * lookup, exactly as for getInstallationToken.
+ * Scope: WRITE_TOKEN_PERMISSIONS on `[repo]`, plus `workflows: write` only when
+ * the installation grants it (owner decision on #606): a remote cell can change
+ * `.github/workflows/` only then; otherwise GitHub rejects such a push and the
+ * rejection reaches git. Asking for a permission the installation lacks would
+ * fail the mint, so the granted permissions are read first; if that read
+ * fails the token is minted WITHOUT workflows (fail narrow, not closed).
+ * Lifetime: GitHub caps installation tokens at one hour, so no `expires_at` is
+ * requested; the response's own expiry is returned. Used only by the
+ * remote-cell broker, for both legs of a push (the info/refs advertisement and
+ * the receive-pack POST); fetch-side calls use the read-only token.
+ * `knownInstallationId` overrides the installation id the lookup found.
  */
 export async function getWriteInstallationToken(
   owner: string,
   repo: string,
   knownInstallationId?: number,
 ): Promise<{ token: string; expiresAt: string }> {
+  let installationId = knownInstallationId;
+  let workflowsGranted = false;
+  try {
+    const found = await getRepoInstallationPermissions(owner, repo);
+    installationId ??= found.installationId;
+    workflowsGranted = found.permissions.workflows === "write";
+  } catch {
+    // Fail narrow: mint without workflows. A missing installation surfaces
+    // from the mint below.
+  }
   return mintScopedInstallationToken(
     owner,
     repo,
-    WRITE_TOKEN_PERMISSIONS,
+    {
+      ...WRITE_TOKEN_PERMISSIONS,
+      ...(workflowsGranted ? WORKFLOWS_WRITE_PERMISSION : {}),
+    },
     "write token",
-    knownInstallationId,
+    installationId,
   );
 }
 
