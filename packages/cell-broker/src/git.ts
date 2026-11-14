@@ -573,15 +573,36 @@ function advertisedTipsMatch(
   );
 }
 
-/** The org's workflow-write opt-in, or null when the settings read failed. */
-async function readAllowWorkflows(
+type PushToken =
+  | { ok: true; token: string }
+  | { ok: false; response: Response };
+
+/**
+ * The write token for a push leg: read the org's workflow-write opt-in (a
+ * failure is a logged 500, nothing minted), then mint with it (a failure is
+ * the mapped mint response). Never logs the token.
+ */
+async function mintPushToken(
   deps: GitBrokerDeps,
   organizationId: string,
-): Promise<boolean | null> {
+  owner: string,
+  repo: string,
+): Promise<PushToken> {
+  let allowWorkflows: boolean;
   try {
-    return await deps.allowWorkflowWrite(organizationId);
-  } catch {
-    return null;
+    allowWorkflows = await deps.allowWorkflowWrite(organizationId);
+  } catch (error) {
+    console.error(
+      "cell-broker: workflow write setting read failed",
+      error instanceof Error ? `${error.name}: ${error.message}` : "unknown",
+    );
+    return { ok: false, response: internalError("workflow_write_setting") };
+  }
+  try {
+    const minted = await deps.mintWriteToken(owner, repo, { allowWorkflows });
+    return { ok: true, token: minted.token };
+  } catch (error) {
+    return { ok: false, response: mintFailureResponse(error) };
   }
 }
 
@@ -639,19 +660,12 @@ async function handlePush({
     }
   }
 
-  const allowWorkflows = await readAllowWorkflows(deps, context.organizationId);
-  if (allowWorkflows === null) {
+  const minted = await mintPushToken(deps, context.organizationId, owner, repo);
+  if (!minted.ok) {
     drop(section.reader);
-    return internalError("workflow_write_setting");
+    return minted.response;
   }
-
-  let token: string;
-  try {
-    token = (await deps.mintWriteToken(owner, repo, { allowWorkflows })).token;
-  } catch (error) {
-    drop(section.reader);
-    return mintFailureResponse(error);
-  }
+  const token = minted.token;
 
   if (section.commands.length === 0) {
     try {
@@ -804,25 +818,22 @@ export function createGitBrokerHandler(
 
     // Only the receive-pack advertisement reads the org setting: it is the
     // first leg of a push and checks permission with the write token.
-    let allowWorkflows = false;
-    if (leg === "receive-pack-advert") {
-      const setting = await readAllowWorkflows(
+    let token: string;
+    if (leg === "upload-pack") {
+      try {
+        token = (await deps.mintReadToken(stepOwner, stepRepo)).token;
+      } catch (error) {
+        return mintFailureResponse(error);
+      }
+    } else {
+      const minted = await mintPushToken(
         deps,
         auth.context.organizationId,
+        stepOwner,
+        stepRepo,
       );
-      if (setting === null) return internalError("workflow_write_setting");
-      allowWorkflows = setting;
-    }
-
-    let token: string;
-    try {
-      const minted =
-        leg !== "upload-pack"
-          ? await deps.mintWriteToken(stepOwner, stepRepo, { allowWorkflows })
-          : await deps.mintReadToken(stepOwner, stepRepo);
+      if (!minted.ok) return minted.response;
       token = minted.token;
-    } catch (error) {
-      return mintFailureResponse(error);
     }
     try {
       return passThrough(

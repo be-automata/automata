@@ -22,8 +22,7 @@ const handler = createGitBrokerHandler({
   db,
   fetchImpl: (input, init) => fetch(input, init),
   mintReadToken: getCellReadInstallationToken,
-  mintWriteToken: (owner, repo, opts) =>
-    getWriteInstallationToken(owner, repo, opts),
+  mintWriteToken: getWriteInstallationToken,
   // Errors propagate: the broker answers 500 rather than minting on a guess.
   allowWorkflowWrite: async (organizationId) =>
     isCellWorkflowWriteEnabled(
