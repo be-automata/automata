@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { githubSideEffectsEnabled } from "@/lib/github-side-effects";
+import { waitUntil } from "@/lib/wait-until";
 import { cellBrokerEnabled } from "@/lib/cell-broker-enabled";
 import { createGitBrokerHandler } from "@terragon/cell-broker/git";
 import {
@@ -20,6 +21,7 @@ const handler = createGitBrokerHandler({
   mintWriteToken: getWriteInstallationToken,
   sideEffectsEnabled: githubSideEffectsEnabled,
   enabled: cellBrokerEnabled,
+  waitUntil,
 });
 
 export const GET = (request: Request) => handler(request);

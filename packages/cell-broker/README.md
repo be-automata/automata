@@ -14,7 +14,9 @@ The remote-cell broker (ADR-014, L3): the handlers that let a remote cell use
 
 Every dependency is injected: the database (`db`), `fetch`, the token minters
 (read and write), the `enabled` and `sideEffectsEnabled` switches, and the
-size and time limits. The package reads no environment variables and imports
+size and time limits (`maxPushBytes`, `pushTimeoutMs`) and an optional
+`waitUntil`, which keeps claim-ending writes running after the response or a
+client disconnect. The package reads no environment variables and imports
 nothing from a host.
 
 ## Mounting it

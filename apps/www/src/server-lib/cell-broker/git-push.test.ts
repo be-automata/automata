@@ -819,6 +819,81 @@ describe("git broker push", () => {
     expect(await effectRows(f.stepKey)).toBe(1);
   });
 
+  it("a push GitHub never answers is abandoned at the timeout: 502, claim released, and a retry is forwarded", async () => {
+    const f = await fixture();
+    let calls = 0;
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        calls += 1;
+        await readAll(init?.body as BodyInit | null | undefined);
+        if (calls > 1)
+          return new Response(REPORT_OK as BodyInit, { status: 200 });
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new Error("aborted")),
+          );
+        });
+      },
+    );
+    const handler = createGitBrokerHandler({
+      db,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      mintReadToken: async () => ({ token: SENTINEL }),
+      mintWriteToken: async () => ({ token: SENTINEL }),
+      sideEffectsEnabled: () => true,
+      enabled: () => true,
+      pushTimeoutMs: 50,
+    });
+    const timedOut = await handler(push(f.token, pushBody()));
+    expect([timedOut.status, (await json(timedOut)).error]).toEqual([
+      502,
+      "upstream_error",
+    ]);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+
+    const retry = await handler(push(f.token, pushBody()));
+    expect(retry.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
+  it("hands the release to waitUntil when the cell disconnects, and the claim is gone once it settles", async () => {
+    const f = await fixture();
+    const kept: Promise<unknown>[] = [];
+    const h = harness({}, { waitUntil: (p) => void kept.push(p) });
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(commandSection());
+          return;
+        }
+        controller.error(new Error("client went away"));
+      },
+    });
+    const res = await h.handler(push(f.token, body));
+    expect(res.status).toBe(502);
+    expect(kept).toHaveLength(1);
+    await Promise.all(kept);
+    expect(await effectRows(f.stepKey)).toBe(0);
+  });
+
+  it("hands the store of GitHub's answer to waitUntil", async () => {
+    const f = await fixture();
+    const kept: Promise<unknown>[] = [];
+    const h = harness({}, { waitUntil: (p) => void kept.push(p) });
+    expect((await h.handler(push(f.token, pushBody()))).status).toBe(200);
+    expect(kept).toHaveLength(1);
+    await Promise.all(kept);
+    const rows = await db
+      .select({ result: cellEffect.result })
+      .from(cellEffect)
+      .where(eq(cellEffect.stepKey, f.stepKey));
+    expect(rows[0]?.result).not.toBeNull();
+  });
+
   it("AC12 a GitHub 503 releases the claim; an identical retry is forwarded and uses a second unit", async () => {
     const f = await fixture();
     let status = 503;

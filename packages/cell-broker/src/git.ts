@@ -56,6 +56,8 @@ const MAX_PUSH_BYTES = 32 * 1024 * 1024;
 const MAX_COMMAND_SECTION_BYTES = 64 * 1024;
 const MAX_PUSH_RESPONSE_BYTES = 1024 * 1024;
 const MAX_ADVERTISEMENT_BYTES = 8 * 1024 * 1024;
+/** How long one upstream receive-pack POST may take before it is abandoned. */
+const PUSH_TIMEOUT_MS = 10 * 60_000;
 const ADVERTISEMENT_TIMEOUT_MS = 30_000;
 /** How many times one command list may be claimed anew after its stored success went stale. */
 const MAX_PUSH_GENERATIONS = 20;
@@ -69,6 +71,14 @@ export interface GitBrokerDeps {
   enabled: () => boolean;
   /** Cap on a push body; tests lower it. Defaults to 32 MiB. */
   maxPushBytes?: number;
+  /** Time allowed for the upstream receive-pack POST. Defaults to 10 minutes. */
+  pushTimeoutMs?: number;
+  /**
+   * Keeps work running after the response is sent or the client is gone (the
+   * host's `waitUntil`). Every claim-ending write after a push was claimed
+   * (release, store) is handed to it when present.
+   */
+  waitUntil?: (promise: Promise<unknown>) => void;
   /** Time allowed for the ref advertisement fetch. Defaults to 30 s. */
   advertisementTimeoutMs?: number;
 }
@@ -289,8 +299,21 @@ function isTransientRejection(bytes: Uint8Array): boolean {
   );
 }
 
+/**
+ * Hand a claim-ending write to the host's `waitUntil` (when there is one) and
+ * return it so the handler can still await it. The work never rejects.
+ */
+function keepAlive(deps: GitBrokerDeps, work: Promise<void>): Promise<void> {
+  deps.waitUntil?.(work);
+  return work;
+}
+
 /** Drop the claim of an effect that never got an answer. Never throws. */
-async function releaseClaim(push: Push): Promise<void> {
+function releaseClaim(push: Push): Promise<void> {
+  return keepAlive(push.deps, releaseClaimNow(push));
+}
+
+async function releaseClaimNow(push: Push): Promise<void> {
   try {
     const released = await releaseEffect({
       db: push.deps.db,
@@ -308,7 +331,15 @@ async function releaseClaim(push: Push): Promise<void> {
 }
 
 /** Store GitHub's answer so a retry replays it. Never throws. */
-async function storeOutcome(
+function storeOutcome(
+  push: Push,
+  upstream: Response,
+  bytes: Uint8Array,
+): Promise<void> {
+  return keepAlive(push.deps, storeOutcomeNow(push, upstream, bytes));
+}
+
+async function storeOutcomeNow(
   push: Push,
   upstream: Response,
   bytes: Uint8Array,
@@ -344,7 +375,13 @@ async function storeOutcome(
  * of the request, through a byte counter that aborts the upstream call over the
  * cap. Outcomes: GitHub answered 2xx/4xx -> stored and returned; overflow ->
  * released, 413; a transient failure (cell disconnect, network error, 5xx, 3xx,
- * oversized answer) -> released, 502.
+ * oversized answer, a timeout) -> released, 502.
+ *
+ * The claim-ending writes go through `deps.waitUntil` so they survive a client
+ * disconnect. The remaining gap is honest: a hard runtime kill between the claim
+ * and its release can still leave a same-attempt claim pending. The next attempt
+ * takes it over, and the reconciler (L3 PR 3) is the backstop, as in the
+ * cell-authority header.
  */
 async function forwardPush(
   push: Push,
@@ -398,7 +435,10 @@ async function forwardPush(
       url: push.url,
       token: push.token,
       body,
-      signal: controller.signal,
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(push.deps.pushTimeoutMs ?? PUSH_TIMEOUT_MS),
+      ]),
     });
   } catch {
     await releaseClaim(push);
