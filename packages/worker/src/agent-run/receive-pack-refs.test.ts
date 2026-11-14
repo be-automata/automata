@@ -5,7 +5,7 @@ import {
   parseReceivePackCommands,
   RECEIVE_PACK_ZERO_SHA,
   type ReceivePackCommand,
-} from "./receive-pack-refs";
+} from "@terragon/utils/receive-pack-refs";
 
 const OLD = "1".repeat(40);
 const NEW = "a".repeat(40);

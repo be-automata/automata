@@ -322,6 +322,7 @@ pnpm -C apps/cli uninstall:dev
 - **`@terragon/transactional`**: React Email-based transactional email templates
 - **`@terragon/sandbox`**: Sandbox abstraction across multiple providers (E2B, Docker, Daytona)
 - **`@terragon/sandbox-image`**: Sandbox image specific code to create template images for sandbox providers
+- **`@terragon/cell-broker`**: remote-cell broker (ADR-014): git smart-HTTP and read-only GitHub API routes over the cell authority model; dependencies injected, mounted by a host (www today)
 - **`@terragon/one-time-token-signin`**: Better Auth plugin for magic-link/one-time token sign-in
 
 ## Important Notes

@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+
+import { parseReceivePackCommands } from "./receive-pack-refs";
+
+const encoder = new TextEncoder();
+
+/** One pkt-line: 4 hex digits counting themselves, then the payload. */
+function pkt(payload: string): Uint8Array {
+  const body = encoder.encode(payload);
+  const len = (body.length + 4).toString(16).padStart(4, "0");
+  return encoder.encode(len + payload);
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
+describe("parseReceivePackCommands (plain Uint8Array input)", () => {
+  it("parses one update with capabilities and reports where the PACK starts", () => {
+    const oldSha = "1".repeat(40);
+    const newSha = "a".repeat(40);
+    const ref = "refs/heads/feat/x";
+    const commandSection = concat(
+      pkt(`${oldSha} ${newSha} ${ref}\0report-status side-band-64k\n`),
+      encoder.encode("0000"),
+    );
+    const buf = concat(commandSection, encoder.encode("PACK"));
+    expect(parseReceivePackCommands(buf)).toEqual({
+      ok: true,
+      commands: [{ oldSha, newSha, ref }],
+      consumed: commandSection.length,
+    });
+  });
+});

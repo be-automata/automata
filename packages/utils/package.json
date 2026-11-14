@@ -10,7 +10,10 @@
     "./redact": "./src/redact.ts",
     "./payload-seal": "./src/payload-seal.ts",
     "./run-lane": "./src/run-lane.ts",
-    "./box-capacity": "./src/box-capacity.ts"
+    "./box-capacity": "./src/box-capacity.ts",
+    "./receive-pack-refs": "./src/receive-pack-refs.ts",
+    "./graphql-mutation": "./src/graphql-mutation.ts",
+    "./broker-headers": "./src/broker-headers.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",
@@ -25,5 +28,8 @@
     "@types/node": "^22.15.29",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"
+  },
+  "dependencies": {
+    "graphql": "^16.11.0"
   }
 }

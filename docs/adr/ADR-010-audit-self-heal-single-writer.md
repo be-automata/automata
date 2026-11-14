@@ -176,7 +176,8 @@ Each must keep holding; the named test is the guard.
   `fix-pr-expiry.ts`, `regression-sweep.ts`, `metrics.ts`), `apps/www/src/agent/hatchet/dispatch.ts`,
   `apps/www/src/app/api/self-heal/fix-check/route.ts`,
   `packages/shared/src/model/audit-fix-attempts.ts`, `self-heal-slot.ts`, `self-heal-breaker.ts`,
-  `packages/shared/src/self-heal/fix-paths.ts`, `packages/worker/src/agent-run/receive-pack-refs.ts`,
+  `packages/shared/src/self-heal/fix-paths.ts`, `packages/worker/src/agent-run/receive-pack-refs.ts`
+  (moved to `packages/utils/src/receive-pack-refs.ts`, `@terragon/utils/receive-pack-refs`, in #606; the worker test stays at its path),
   `git-broker.ts`, `self-heal-fix-check.ts`, `workflow.ts`, `deploy/skills/audit-fix/SKILL.md`.
 - **Schema:** none. Every table and column the fix loop uses shipped with part 1, so the one manual
   production push of phase 8 covers both parts.

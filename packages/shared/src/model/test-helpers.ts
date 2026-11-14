@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 
 import { DB } from "../db";
 import { eq } from "drizzle-orm";
@@ -20,6 +20,7 @@ import { createAutomation } from "./automations";
 import { recordHatchetRun } from "./hatchet-run";
 import type { SupersedeSnapshot } from "./repo-review-settings";
 import { createOrganization, addOrganizationMember } from "./organizations";
+import { mintBearer, openStep } from "./cell-authority";
 
 // Unique keys must not come from a small random range: a suite creates
 // thousands of fixtures in one database, and 10^7 values collide by the
@@ -396,4 +397,70 @@ export async function createTestRemoteRun({
       .where(eq(schema.threadChat.threadId, threadId));
   }
   return { threadId, threadChatId, runId: run.id };
+}
+
+/**
+ * A remote-cell step ready for broker tests: an organization, a user, a thread
+ * on `repoFullName` (owned by that organization), the step opened at `attempt`
+ * and a bearer minted for it. `open` and `bearer` take any attempt, so a test
+ * can fence, revoke or re-open the step.
+ */
+export async function createTestCellStep({
+  db,
+  repoFullName = "acme/widgets",
+  effectBudget = null,
+  stepTimeoutMs = 30 * 60_000,
+  attempt = 1,
+}: {
+  db: DB;
+  repoFullName?: string;
+  effectBudget?: number | null;
+  stepTimeoutMs?: number;
+  attempt?: number;
+}) {
+  const organizationId = await createTestOrg({ db });
+  const { user } = await createTestUser({ db });
+  const { threadId } = await createTestThread({
+    db,
+    userId: user.id,
+    overrides: { githubRepoFullName: repoFullName },
+  });
+  await db
+    .update(schema.thread)
+    .set({ organizationId })
+    .where(eq(schema.thread.id, threadId));
+  const stepKey = `run-${randomUUID()}/agent`;
+  const open = (openAttempt: number) =>
+    openStep({
+      db,
+      step: {
+        stepKey,
+        organizationId,
+        threadId,
+        attempt: openAttempt,
+        stepTimeoutMs,
+        effectBudget,
+      },
+    });
+  const bearer = async (bearerAttempt: number, ttlMs = stepTimeoutMs) => {
+    const minted = await mintBearer({
+      db,
+      stepKey,
+      attempt: bearerAttempt,
+      ttlMs,
+    });
+    if (!minted.ok) throw new Error(minted.reason);
+    return minted.token;
+  };
+  const opened = await open(attempt);
+  if (!opened.ok) throw new Error(opened.reason);
+  return {
+    stepKey,
+    organizationId,
+    threadId,
+    attempt,
+    open,
+    bearer,
+    token: await bearer(attempt),
+  };
 }

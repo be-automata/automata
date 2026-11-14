@@ -54,6 +54,7 @@
     "@tanstack/react-table": "^8.21.3",
     "@terragon/agent": "workspace:*",
     "@terragon/bundled": "workspace:*",
+    "@terragon/cell-broker": "workspace:*",
     "@terragon/cli-api-contract": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/env": "workspace:*",

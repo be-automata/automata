@@ -3,7 +3,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { graphqlHasMutation, startGhBroker, type GhBroker } from "./gh-broker";
+import { startGhBroker, type GhBroker } from "./gh-broker";
 
 const TOKEN = "ghs_installation_token_secret";
 const BEARER = "run-bearer-abc123";
@@ -327,19 +327,6 @@ describe("startGhBroker — GraphQL (load-bearing for the gh auth status preflig
     });
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(1);
-  });
-});
-
-describe("graphqlHasMutation", () => {
-  it("detects mutations, ignores strings/comments, fails closed on bare keyword", () => {
-    expect(graphqlHasMutation("query{viewer{login}}")).toBe(false);
-    expect(graphqlHasMutation("mutation{x}")).toBe(true);
-    expect(graphqlHasMutation("query A{a} mutation B{b}")).toBe(true);
-    expect(graphqlHasMutation('query{f(q:"mutation")}')).toBe(false);
-    expect(graphqlHasMutation('"""mutation docs""" query{a}')).toBe(false);
-    expect(graphqlHasMutation("# mutation comment\nquery{a}")).toBe(false);
-    // Superset of operation position — deliberate fail-closed.
-    expect(graphqlHasMutation("query{mutation}")).toBe(true);
   });
 });
 

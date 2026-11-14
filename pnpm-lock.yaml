@@ -467,6 +467,9 @@ importers:
       '@terragon/bundled':
         specifier: workspace:*
         version: link:../../packages/bundled
+      '@terragon/cell-broker':
+        specifier: workspace:*
+        version: link:../../packages/cell-broker
       '@terragon/cli-api-contract':
         specifier: workspace:*
         version: link:../../packages/cli-api-contract
@@ -797,6 +800,28 @@ importers:
       esbuild:
         specifier: '>=0.25.0 <1'
         version: 0.25.5
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
+  packages/cell-broker:
+    dependencies:
+      '@terragon/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@terragon/utils':
+        specifier: workspace:*
+        version: link:../utils
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2
+    devDependencies:
+      '@terragon/tsconfig':
+        specifier: workspace:*
+        version: link:../tsconfig
+      '@types/node':
+        specifier: 24.0.1
+        version: 24.0.1
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -1273,6 +1298,10 @@ importers:
         version: 5.8.3
 
   packages/utils:
+    dependencies:
+      graphql:
+        specifier: ^16.11.0
+        version: 16.11.0
     devDependencies:
       '@terragon/tsconfig':
         specifier: workspace:*

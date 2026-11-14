@@ -1680,6 +1680,9 @@ still created before the deploy (step 2). Still run the schema gate before each 
 - GitHub App permissions on the repo: pull_requests write, contents write, issues write,
   checks read, actions read, metadata read. A missing permission latches and the lane refunds
   `missing-permission` instead of writing.
+- Remote-cell pushes that change `.github/workflows/` need the App's Workflows read/write permission
+  approved on the installation; without it the broker mints without it and GitHub rejects those pushes
+  (#606).
 - Branch protection is OPTIONAL. Record its state and the resulting CI gate source, never require
   it: `protection` (required checks), `all-checks` (no protection, or unreadable on a free plan:
   every check run and commit status must be green, with a 2-minute settle window), or

@@ -11,7 +11,7 @@ import {
   checkRefFence,
   parseReceivePackCommands,
   type RefFenceResult,
-} from "./receive-pack-refs";
+} from "@terragon/utils/receive-pack-refs";
 
 /**
  * Worker-box-LOCAL git credential broker (#65, be-automata/automata).

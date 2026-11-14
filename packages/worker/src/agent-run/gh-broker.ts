@@ -8,6 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { graphqlHasMutation } from "@terragon/utils/graphql-mutation";
+
 import { HOP_BY_HOP, REQUEST_OWNED } from "./broker-common";
 
 /**
@@ -86,22 +88,6 @@ export type StartGhBrokerOptions = {
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 };
-
-/**
- * True iff the GraphQL document contains a `mutation` operation. Strings
- * (block + regular, with escapes) and `#` comments are stripped first so a
- * query mentioning "mutation" in a literal still passes; after stripping, ANY
- * bare `mutation` keyword rejects. That is a superset of "operation position"
- * — deliberately fail-closed (GitHub's Query type has no field spelled
- * `mutation`, so real reads never trip it).
- */
-export function graphqlHasMutation(query: string): boolean {
-  const stripped = query
-    .replace(/"""[\s\S]*?"""/g, " ")
-    .replace(/"(?:\\.|[^"\\])*"/g, " ")
-    .replace(/#[^\n\r]*/g, " ");
-  return /\bmutation\b/.test(stripped);
-}
 
 function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
