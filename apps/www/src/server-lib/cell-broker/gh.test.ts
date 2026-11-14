@@ -245,6 +245,19 @@ describe("gh broker GraphQL", () => {
     expect(h.fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("AC6 refuses a mutation hidden behind a quote inside a comment", async () => {
+    const f = await fixture();
+    const h = harness();
+    const query =
+      'query Q { viewer { login } } # "\nmutation M { addStar(input:{starrableId:"x"}) { clientMutationId } } # "';
+    const res = await h.handler(graphql(gql(query), f.token), "graphql");
+    expect([res.status, (await res.json()).error]).toEqual([
+      403,
+      "graphql_mutation_refused",
+    ]);
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("AC6 answers 413 over the cap (declared or streamed), 400 for non-JSON or a non-string query, 403 for GET", async () => {
     const f = await fixture();
     const h = harness({}, { maxGraphqlBytes: 100 });

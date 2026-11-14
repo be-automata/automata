@@ -342,6 +342,12 @@ describe("graphqlHasMutation", () => {
     expect(graphqlHasMutation("# mutation comment\nquery{a}")).toBe(false);
     // Superset of operation position — deliberate fail-closed.
     expect(graphqlHasMutation("query{mutation}")).toBe(true);
+    // A quote inside a comment must not open a string that hides a mutation.
+    expect(
+      graphqlHasMutation(
+        'query Q { viewer { login } } # "\nmutation M { addStar(input:{starrableId:"x"}) { clientMutationId } } # "',
+      ),
+    ).toBe(true);
   });
 });
 
