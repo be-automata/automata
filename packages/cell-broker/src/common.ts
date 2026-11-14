@@ -245,6 +245,20 @@ export function assertOrigin(url: URL, origin: string): void {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/** Stop reading a stream and drop the rest. A failed cancel changes nothing. */
+export function discard(
+  source: { cancel(): Promise<void> } | null | undefined,
+): void {
+  if (!source) return;
+  void (async () => {
+    try {
+      await source.cancel();
+    } catch {
+      // Nothing is left to read either way.
+    }
+  })();
+}
+
 /** A redirect GitHub could send; other 3xx (a 304, say) are ordinary answers. */
 export function isRedirect(status: number): boolean {
   return REDIRECT_STATUSES.has(status);
@@ -274,7 +288,7 @@ export function passThrough(
   opts?: { rewriteLinkHost?: string },
 ): Response {
   if (isRedirect(upstream.status)) {
-    void upstream.body?.cancel().catch(() => undefined);
+    discard(upstream.body);
     return brokerError(502, "upstream_error");
   }
   return new Response(upstream.body, {
@@ -310,7 +324,7 @@ export async function readCapped(
     if (chunk.done) return concatBytes(...chunks);
     total += chunk.value.length;
     if (total > maxBytes) {
-      void reader.cancel().catch(() => undefined);
+      discard(reader);
       return null;
     }
     chunks.push(chunk.value);

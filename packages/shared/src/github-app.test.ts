@@ -343,26 +343,20 @@ describe("GitHub App", () => {
       );
     });
 
-    it("a failed permissions read falls back to exactly the required permissions", async () => {
-      // The installation does grant workflows, but a failed read adds no optional permission.
-      const push = mockRequests(
-        {
-          id: 42,
-          permissions: { ...PUSH_GRANTED, workflows: "write" },
-        },
+    it("a failed permissions read fails a push closed, with no token request", async () => {
+      const calls = mockRequests(
+        { id: 42, permissions: { ...PUSH_GRANTED, workflows: "write" } },
         MINTED,
         1,
       );
-      await getWriteInstallationToken("o", "r");
-      expect(posts(push)).toHaveLength(1);
-      expect(posts(push)[0]!.params.permissions).toEqual({
-        contents: "write",
-        metadata: "read",
-      });
+      const error = await getWriteInstallationToken("o", "r").catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(MissingInstallationPermissionError);
+      expect(error.message).toContain("permissions read failed");
+      expect(posts(calls)).toHaveLength(0);
+    });
 
-      vi.restoreAllMocks();
-      resetAppInstance();
-      clearInstallationTokenCacheForTests();
+    it("a failed permissions read falls back to exactly the required permissions for the read presets", async () => {
       const read = mockRequests(
         { id: 42, permissions: { ...READ_ONLY_TOKEN_PERMISSIONS } },
         MINTED,
@@ -372,6 +366,28 @@ describe("GitHub App", () => {
       expect(posts(read)[0]!.params.permissions).toEqual(
         READ_ONLY_TOKEN_PERMISSIONS,
       );
+
+      vi.restoreAllMocks();
+      resetAppInstance();
+      clearInstallationTokenCacheForTests();
+      const cell = mockRequests(
+        {
+          id: 42,
+          permissions: {
+            contents: "read",
+            metadata: "read",
+            pull_requests: "read",
+            issues: "read",
+          },
+        },
+        MINTED,
+        1,
+      );
+      await getCellReadInstallationToken("o", "r");
+      expect(posts(cell)[0]!.params.permissions).toEqual({
+        contents: "read",
+        metadata: "read",
+      });
     });
 
     it("404 -> the same 'not installed' error as the other token minters", async () => {
@@ -537,11 +553,11 @@ describe("GitHub App", () => {
 
       it("a failed permissions read is not cached: the next call reads again", async () => {
         const calls = mockRequests(undefined, MINTED, 1);
-        await getWriteInstallationToken("o", "r");
-        // GET 1 failed, GET 2 was the fallback lookup.
+        await expect(getWriteInstallationToken("o", "r")).rejects.toThrow();
+        await expect(
+          getWriteInstallationToken("o", "r"),
+        ).resolves.toMatchObject({ token: "ghs_x" });
         expect(gets(calls)).toHaveLength(2);
-        await getWriteInstallationToken("o", "r");
-        expect(gets(calls)).toHaveLength(3);
       });
     });
   });

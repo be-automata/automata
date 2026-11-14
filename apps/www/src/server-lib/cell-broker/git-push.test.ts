@@ -804,6 +804,30 @@ describe("git broker push", () => {
     expect(await effectsUsed(f.stepKey)).toBe(2);
   });
 
+  it("a 200 whose unpack failed returns GitHub's bytes but releases the claim, so a retry is forwarded", async () => {
+    const f = await fixture();
+    const unpackFailure = concat(
+      pkt("unpack index-pack failed\n"),
+      pkt(`ng ${REF} unpacker error\n`),
+      FLUSH,
+    );
+    let first = true;
+    const h = harness(() => {
+      const body = first ? unpackFailure : REPORT_OK;
+      first = false;
+      return { body };
+    });
+    const rejected = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await rejected.arrayBuffer())).toEqual(unpackFailure);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+
+    const retry = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await retry.arrayBuffer())).toEqual(REPORT_OK);
+    expect(h.calls).toHaveLength(2);
+    expect(await effectsUsed(f.stepKey)).toBe(2);
+  });
+
   it("a 200 with a non-transient ng is stored and replayed as before", async () => {
     const f = await fixture();
     const rejection = concat(

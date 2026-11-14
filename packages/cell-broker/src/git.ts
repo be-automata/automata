@@ -17,6 +17,7 @@ import {
   authorizeCellRequest,
   brokerError,
   concatBytes,
+  discard,
   decodePathSegments,
   forwardRequestHeaders,
   gitAuthChallenge,
@@ -117,7 +118,7 @@ export function pushIdempotencyKey(
 
 /** Stop reading a request body and discard the rest. Never throws. */
 function drop(reader: ReadableStreamDefaultReader<Uint8Array>): void {
-  void reader.cancel().catch(() => undefined);
+  discard(reader);
 }
 
 /**
@@ -283,8 +284,8 @@ interface Push {
 
 /**
  * GitHub refusals that say "try again" rather than "no": 408 and 429 behave
- * like a 5xx, and a 2xx whose every ng reason matches TRANSIENT_NG is released
- * instead of stored, so an identical retry claims afresh (the budget unit
+ * like a 5xx, and a 2xx whose unpack failed, or whose every ng reason matches
+ * TRANSIENT_NG, is released instead of stored, so an identical retry claims afresh (the budget unit
  * stays spent).
  */
 const TRANSIENT_STATUSES = new Set([408, 429]);
@@ -292,10 +293,13 @@ const TRANSIENT_NG =
   /failed to lock|cannot lock ref|timed? ?out|timeout|try again/i;
 
 function isTransientRejection(bytes: Uint8Array): boolean {
-  const refs = parseReportStatus(bytes)?.refs ?? [];
+  const report = parseReportStatus(bytes);
+  if (!report) return false;
+  // GitHub could not unpack the pack: nothing was applied, so a retry is safe.
+  if (report.unpack !== "ok") return true;
   return (
-    refs.length > 0 &&
-    refs.every((ref) => !ref.ok && TRANSIENT_NG.test(ref.reason ?? ""))
+    report.refs.length > 0 &&
+    report.refs.every((ref) => !ref.ok && TRANSIENT_NG.test(ref.reason ?? ""))
   );
 }
 
@@ -426,7 +430,7 @@ async function forwardPush(
       : brokerError(502, "upstream_error");
   }
   if (overflowed) {
-    void upstream.body?.cancel().catch(() => undefined);
+    discard(upstream.body);
     await releaseClaim(push);
     return brokerError(413, "payload_too_large");
   }
@@ -435,13 +439,16 @@ async function forwardPush(
     isAny3xx(upstream.status) ||
     TRANSIENT_STATUSES.has(upstream.status)
   ) {
-    void upstream.body?.cancel().catch(() => undefined);
+    discard(upstream.body);
     await releaseClaim(push);
     return brokerError(502, "upstream_error");
   }
-  const bytes = await readCapped(upstream.body, MAX_PUSH_RESPONSE_BYTES).catch(
-    () => null,
-  );
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await readCapped(upstream.body, MAX_PUSH_RESPONSE_BYTES);
+  } catch {
+    bytes = null;
+  }
   // The cap can be crossed while the answer is still being read (GitHub
   // replies early): that is an overflow, not an upstream failure.
   if (overflowed) {
@@ -504,7 +511,7 @@ async function fetchAdvertisedRefs(
       ),
     });
     if (upstream.status < 200 || upstream.status > 299) {
-      void upstream.body?.cancel().catch(() => undefined);
+      discard(upstream.body);
       return null;
     }
     const bytes = await readCapped(upstream.body, MAX_ADVERTISEMENT_BYTES);
@@ -628,10 +635,13 @@ async function handlePush({
       // From here the claim must end (store or release) even if the request is
       // cancelled: the host keeps the continuation alive.
       deps.waitUntil?.(
-        outcome.then(
-          () => undefined,
-          () => undefined,
-        ),
+        (async () => {
+          try {
+            await outcome;
+          } catch {
+            // Outcome errors are handled inside forwardPush.
+          }
+        })(),
       );
       return await outcome;
     }

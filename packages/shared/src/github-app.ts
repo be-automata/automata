@@ -133,14 +133,20 @@ export async function getInstallationToken(
 type PermissionLevel = "read" | "write";
 type PermissionSet = Readonly<Record<string, PermissionLevel>>;
 
-const PERMISSION_RANK: Record<string, number> = { read: 1, write: 2, admin: 3 };
+const PERMISSION_RANK = { read: 1, write: 2, admin: 3 } as const;
+
+function rankOf(level: string | undefined): number {
+  return level === "read" || level === "write" || level === "admin"
+    ? PERMISSION_RANK[level]
+    : 0;
+}
 
 /** True when `granted` is at least `needed` (write covers read). */
 function grantsLevel(
   granted: string | undefined,
   needed: PermissionLevel,
 ): boolean {
-  return (PERMISSION_RANK[granted ?? ""] ?? 0) >= PERMISSION_RANK[needed]!;
+  return rankOf(granted) >= PERMISSION_RANK[needed];
 }
 
 /**
@@ -206,10 +212,11 @@ async function readGrantedPermissions(owner: string, repo: string) {
  * the read also yields the installation id). Every `required` permission must
  * be granted at the requested level or more, else
  * MissingInstallationPermissionError; each `optional` permission is added only
- * when granted. If the permissions read FAILS (network, 5xx, rate limit) the
- * mint falls back to the required set alone, without optional permissions, and
- * lets GitHub's own 422 reject a permission the installation truly lacks; a
- * failed read is never cached, and a "not installed" answer still throws. The
+ * when granted. If the permissions read FAILS (network, 5xx, rate limit),
+ * `onPermissionsReadFailure` decides: "fallback" mints with the required set
+ * alone, without optional permissions, and lets GitHub's own 422 reject a
+ * permission the installation truly lacks; "fail" throws the read error. A
+ * failed read is never cached, and a "not installed" answer always throws. The
  * token comes from @octokit/auth-app
  * (`octokit.auth({ type: "installation", ... })`) for exactly the computed set
  * on `[repo]`, with no `expires_at` (GitHub caps installation tokens at one
@@ -227,6 +234,7 @@ async function mintRepoInstallationToken({
   optional = {},
   label,
   cacheToken,
+  onPermissionsReadFailure,
   knownInstallationId,
 }: {
   owner: string;
@@ -235,13 +243,16 @@ async function mintRepoInstallationToken({
   optional?: PermissionSet;
   label: string;
   cacheToken: boolean;
+  onPermissionsReadFailure: "fallback" | "fail";
   knownInstallationId?: number;
 }): Promise<{ token: string; expiresAt: string }> {
   let granted: Awaited<ReturnType<typeof readGrantedPermissions>> | null = null;
   try {
     granted = await readGrantedPermissions(owner, repo);
   } catch (error: unknown) {
-    if (isNotInstalledError(error)) throw error;
+    if (isNotInstalledError(error) || onPermissionsReadFailure === "fail") {
+      throw error;
+    }
     // Fall back to the required set: no optional permission is guessed.
   }
   const permissions: Record<string, PermissionLevel> = { ...required };
@@ -338,6 +349,7 @@ export async function getReadOnlyInstallationToken(
     required: READ_ONLY_TOKEN_PERMISSIONS,
     label: "read-only token",
     cacheToken: false,
+    onPermissionsReadFailure: "fallback",
     knownInstallationId,
   });
 }
@@ -374,6 +386,7 @@ export async function getCellReadInstallationToken(
     optional: CELL_READ_OPTIONAL_PERMISSIONS,
     label: "cell read token",
     cacheToken: true,
+    onPermissionsReadFailure: "fallback",
     knownInstallationId,
   });
 }
@@ -410,6 +423,9 @@ export async function getWriteInstallationToken(
     optional: WRITE_OPTIONAL_PERMISSIONS,
     label: "write token",
     cacheToken: true,
+    // A push is never minted on a guess: a fallback token lacks workflows:write,
+    // and GitHub's rejection of a workflow-file push would be stored as final.
+    onPermissionsReadFailure: "fail",
     knownInstallationId,
   });
 }
