@@ -73,3 +73,48 @@ export function silentLogger(): MigrationLogger & { lines: string[] } {
     error: (m) => lines.push(`error ${m}`),
   };
 }
+
+/** The busy runner's error message (`MigrationLockBusyError`), spelled out. */
+export const BUSY_MESSAGE =
+  "another migration run holds the lock (automata:schema_migrations); nothing was applied";
+
+/** The first column of the first row. */
+export async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
+  const result = await c.query(sql);
+  return Object.values(result.rows[0] ?? {})[0] as T;
+}
+
+/** Polls `check` until it is true; fails the test (never falls through) on timeout. */
+export async function waitUntil(
+  description: string,
+  check: () => Promise<boolean>,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+/** True once some session of this database holds a granted advisory lock. */
+export async function advisoryLockHeld(c: pg.Client): Promise<boolean> {
+  return (
+    (await scalar<number>(
+      c,
+      `SELECT count(*)::int FROM pg_locks
+        WHERE locktype = 'advisory' AND granted
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+    )) > 0
+  );
+}
+
+export function invalidIndexCount(c: pg.Client): Promise<number> {
+  return scalar<number>(
+    c,
+    "SELECT count(*)::int FROM pg_index WHERE NOT indisvalid",
+  );
+}

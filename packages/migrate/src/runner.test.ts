@@ -15,9 +15,14 @@ import {
   planMigrations,
 } from "./runner";
 import {
+  advisoryLockHeld,
+  BUSY_MESSAGE,
   createFreshDb,
+  invalidIndexCount,
   migrationsDir,
+  scalar,
   silentLogger,
+  waitUntil,
   type FreshDb,
 } from "./test-db";
 
@@ -52,54 +57,11 @@ async function applyDir(
   });
 }
 
-async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
-  const result = await c.query(sql);
-  return Object.values(result.rows[0] ?? {})[0] as T;
-}
-
-const BUSY_MESSAGE =
-  "another migration run holds the lock (automata:schema_migrations); nothing was applied";
-
-/** Polls `check` until it is true; fails the test (never falls through) on timeout. */
-async function waitUntil(
-  description: string,
-  check: () => Promise<boolean>,
-  timeoutMs = 20_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`timed out waiting for ${description}`);
-}
-
-/** True once some session of this database holds a granted advisory lock. */
-async function advisoryLockHeld(monitor: pg.Client): Promise<boolean> {
-  return (
-    (await scalar<number>(
-      monitor,
-      `SELECT count(*)::int FROM pg_locks
-        WHERE locktype = 'advisory' AND granted
-          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
-    )) > 0
-  );
-}
-
 /** Collects the server notices (e.g. "you don't own a lock") a client receives. */
 function collectNotices(c: pg.Client): string[] {
   const notices: string[] = [];
   c.on("notice", (notice) => notices.push(notice.message ?? ""));
   return notices;
-}
-
-function invalidIndexCount(c: pg.Client): Promise<number> {
-  return scalar<number>(
-    c,
-    "SELECT count(*)::int FROM pg_index WHERE NOT indisvalid",
-  );
 }
 
 describe("deploy/migrations on a fresh database", () => {
@@ -189,6 +151,8 @@ describe("applyMigrations", () => {
     });
 
     await expect(applyDir(c, dir)).rejects.toThrow(/division by zero/);
+    // The failure still released the advisory lock on this healthy session.
+    expect(await advisoryLockHeld(c)).toBe(false);
     expect((await readLedger(c)).map((r) => r.id)).toEqual(["001-ok"]);
     expect(await scalar<string | null>(c, "SELECT to_regclass('half')")).toBe(
       null,
@@ -264,7 +228,7 @@ describe("applyMigrations", () => {
       const winning = applyDir(winner, dir);
       let result: Awaited<typeof winning>;
       try {
-        await waitUntil("the winner's advisory lock", async () =>
+        await waitUntil("the winner's advisory lock", () =>
           advisoryLockHeld(monitor),
         );
         const error = await applyDir(loser, dir).catch((e: unknown) => e);
@@ -362,14 +326,18 @@ describe("applyMigrations", () => {
     }
   }
 
-  it("production shape: exactly one runner applies the CIC and no index is left invalid", async () => {
+  it("production shape: exactly one runner applies the CIC, the other is busy, and no index is left invalid", async () => {
     const { monitor, settled } = await productionRace();
     expect(await invalidIndexCount(monitor)).toBe(0);
     const winners = settled.filter(
       (r) => r.status === "fulfilled" && r.value.applied.includes("002"),
     );
     expect(winners).toHaveLength(1);
-    expect(settled.filter((r) => r.status === "rejected")).toHaveLength(1);
+    const losers = settled.filter((r) => r.status === "rejected");
+    expect(losers).toHaveLength(1);
+    const reason = (losers[0] as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(MigrationLockBusyError);
+    expect((reason as Error).message).toBe(BUSY_MESSAGE);
     expect((await readLedger(monitor)).map((r) => r.id)).toEqual([
       "001",
       "002",
@@ -381,14 +349,6 @@ describe("applyMigrations", () => {
           WHERE c.relname = 'items_x' AND i.indisvalid`,
       ),
     ).toBe(1);
-  });
-
-  it("production shape: the losing runner is told the lock is busy", async () => {
-    const { settled } = await productionRace();
-    const loser = settled.find((r) => r.status === "rejected");
-    const reason = (loser as PromiseRejectedResult).reason;
-    expect(reason).toBeInstanceOf(MigrationLockBusyError);
-    expect((reason as Error).message).toBe(BUSY_MESSAGE);
   });
 
   it("runs CREATE INDEX CONCURRENTLY from a no-transaction file", async () => {

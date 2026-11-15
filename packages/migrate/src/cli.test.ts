@@ -3,11 +3,19 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type pg from "pg";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { readLedger } from "./ledger";
-import { createFreshDb, migrationsDir, type FreshDb } from "./test-db";
+import {
+  advisoryLockHeld,
+  BUSY_MESSAGE,
+  createFreshDb,
+  invalidIndexCount,
+  migrationsDir,
+  scalar,
+  waitUntil,
+  type FreshDb,
+} from "./test-db";
 
 const PACKAGE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -21,19 +29,23 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[], databaseUrl: string | undefined): CliResult {
+function cliEnv(databaseUrl: string | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_ACTOR: "ci-bot" };
   delete env.DATABASE_URL;
   if (databaseUrl !== undefined) {
     env.DATABASE_URL = databaseUrl;
   }
+  return env;
+}
+
+function runCli(args: string[], databaseUrl: string | undefined): CliResult {
   // `--import tsx` resolves from the cwd, where this package installs tsx.
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", CLI, ...args],
     {
       cwd: PACKAGE_DIR,
-      env,
+      env: cliEnv(databaseUrl),
       encoding: "utf8",
       timeout: 60_000,
     },
@@ -43,12 +55,6 @@ function runCli(args: string[], databaseUrl: string | undefined): CliResult {
     stdout: result.stdout,
     stderr: result.stderr,
   };
-}
-
-function cliEnv(databaseUrl: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_ACTOR: "ci-bot" };
-  env.DATABASE_URL = databaseUrl;
-  return env;
 }
 
 /** Async twin of `runCli`, so two runs can overlap. */
@@ -68,29 +74,7 @@ function runCliAsync(args: string[], databaseUrl: string): Promise<CliResult> {
   });
 }
 
-const BUSY_LINE =
-  "migrate: another migration run holds the lock (automata:schema_migrations); nothing was applied";
-
-/** Polls `check` until it is true; fails the test (never falls through) on timeout. */
-async function waitUntil(
-  description: string,
-  check: () => Promise<boolean>,
-  timeoutMs = 30_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`timed out waiting for ${description}`);
-}
-
-async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
-  const result = await c.query(sql);
-  return Object.values(result.rows[0] ?? {})[0] as T;
-}
+const BUSY_LINE = `migrate: ${BUSY_MESSAGE}`;
 
 const dbs: FreshDb[] = [];
 
@@ -236,16 +220,7 @@ describe("deploy/migrate.ts", () => {
     const first = runCliAsync(["--apply", "--dir", dir], db.url);
     let second: CliResult;
     try {
-      await waitUntil(
-        "run A's advisory lock",
-        async () =>
-          (await scalar<number>(
-            monitor,
-            `SELECT count(*)::int FROM pg_locks
-              WHERE locktype = 'advisory' AND granted
-                AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
-          )) > 0,
-      );
+      await waitUntil("run A's advisory lock", () => advisoryLockHeld(monitor));
       second = await runCliAsync(["--apply", "--dir", dir], db.url);
     } finally {
       await monitor.query("ROLLBACK");
@@ -257,12 +232,7 @@ describe("deploy/migrate.ts", () => {
     expect(second.stderr).toContain(BUSY_LINE);
     expect(second.stdout).not.toContain("migrations:");
     expect(await readLedger(monitor)).toHaveLength(2);
-    expect(
-      await scalar<number>(
-        monitor,
-        "SELECT count(*)::int FROM pg_index WHERE NOT indisvalid",
-      ),
-    ).toBe(0);
+    expect(await invalidIndexCount(monitor)).toBe(0);
   });
 
   it("exits 3 for --apply and --mark-applied while the key is held, touching nothing; the dry run still plans", async () => {
