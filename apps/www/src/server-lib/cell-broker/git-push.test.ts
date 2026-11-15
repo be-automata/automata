@@ -6,7 +6,10 @@ import { captureLogs, basic } from "@/test-helpers/capture-logs";
 import type { DB } from "@terragon/shared/db";
 import { cellEffect, cellStep } from "@terragon/shared/db/schema";
 import { beginEffect } from "@terragon/shared/model/cell-authority";
-import { parseReceivePackCommands } from "@terragon/utils/receive-pack-refs";
+import {
+  parseReceivePackCommands,
+  RECEIVE_PACK_ZERO_SHA,
+} from "@terragon/utils/receive-pack-refs";
 import { createTestCellStep } from "@terragon/shared/model/test-helpers";
 
 import {
@@ -58,8 +61,10 @@ const pushBody = (newSha = NEW_A) => concat(commandSection(newSha), PACK);
 
 const REPORT_OK = concat(pkt("unpack ok\n"), pkt(`ok ${REF}\n`), FLUSH);
 
-const fixture = (effectBudget: number | null = null) =>
-  createTestCellStep({ db, effectBudget });
+const fixture = (
+  effectBudget: number | null = null,
+  { allowedRef }: { allowedRef?: string | null } = {},
+) => createTestCellStep({ db, effectBudget, allowedRef });
 
 async function effectsUsed(stepKey: string): Promise<number> {
   const rows = await db
@@ -111,7 +116,7 @@ function advertisement(tips: Record<string, string>): Uint8Array {
   const refs = Object.entries(tips);
   const lines =
     refs.length === 0
-      ? [pkt(`${"0".repeat(40)} capabilities^{}\0report-status\n`)]
+      ? [pkt(`${RECEIVE_PACK_ZERO_SHA} capabilities^{}\0report-status\n`)]
       : refs.map(([ref, sha], i) =>
           pkt(
             `${sha} ${ref}${i === 0 ? "\0report-status side-band-64k" : ""}\n`,
@@ -1343,70 +1348,57 @@ describe("git broker push ref fence (#610)", () => {
     expect(await effectsUsed(f.stepKey)).toBe(1);
   });
 
-  it("AC4 a push to another ref is 403 ref_not_allowed with no mint, no upstream call and no budget spent", async () => {
-    const f = await fixture(5);
-    const h = harness();
-    const res = await h.handler(
-      push(f.token, concat(commandSection(NEW_A, "refs/heads/main"), PACK)),
-    );
-    expect([res.status, (await json(res)).error]).toEqual([
-      403,
-      "ref_not_allowed",
-    ]);
-    await expectNoSideEffects(h, f.stepKey);
-  });
+  async function expectRefusal(
+    h: ReturnType<typeof harness>,
+    stepKey: string,
+    res: Response,
+    code: string,
+  ) {
+    expect([res.status, (await json(res)).error]).toEqual([403, code]);
+    await expectNoSideEffects(h, stepKey);
+  }
 
-  it("AC4 one command outside the fence rejects the whole push", async () => {
-    const f = await fixture(5);
-    const h = harness();
-    const two = concat(
-      pkt(`${OLD} ${NEW_A} ${REF}\0report-status\n`),
-      pkt(`${OLD} ${NEW_A} refs/tags/v1\n`),
-      FLUSH,
-      PACK,
-    );
-    const res = await h.handler(push(f.token, two));
-    expect([res.status, (await json(res)).error]).toEqual([
-      403,
-      "ref_not_allowed",
-    ]);
-    await expectNoSideEffects(h, f.stepKey);
-  });
+  const twoCommands = concat(
+    pkt(`${OLD} ${NEW_A} ${REF}\0report-status\n`),
+    pkt(`${OLD} ${NEW_A} refs/tags/v1\n`),
+    FLUSH,
+    PACK,
+  );
 
-  it("AC4 deleting allowed_ref is 403 delete_not_allowed with no side effects", async () => {
-    const f = await fixture(5);
-    const h = harness();
-    const res = await h.handler(
-      push(f.token, concat(commandSection("0".repeat(40)), PACK)),
-    );
-    expect([res.status, (await json(res)).error]).toEqual([
-      403,
-      "delete_not_allowed",
-    ]);
-    await expectNoSideEffects(h, f.stepKey);
-  });
-
-  it("AC5 a null allowed_ref refuses every push with 403 no_ref_fence and no side effects", async () => {
-    const f = await createTestCellStep({
-      db,
-      effectBudget: 5,
+  it.each([
+    {
+      name: "AC4 a push to another ref is 403 ref_not_allowed",
+      body: concat(commandSection(NEW_A, "refs/heads/main"), PACK),
+      code: "ref_not_allowed",
+    },
+    {
+      name: "AC4 one command outside the fence rejects the whole push",
+      body: twoCommands,
+      code: "ref_not_allowed",
+    },
+    {
+      name: "AC4 deleting allowed_ref is 403 delete_not_allowed",
+      body: concat(commandSection(RECEIVE_PACK_ZERO_SHA), PACK),
+      code: "delete_not_allowed",
+    },
+    {
+      name: "AC5 a null allowed_ref refuses every push with 403 no_ref_fence",
+      body: pushBody(),
+      code: "no_ref_fence",
       allowedRef: null,
-    });
+    },
+  ])("$name, with no mint, no upstream call and no budget spent", async (c) => {
+    const f = await fixture(
+      5,
+      c.allowedRef === undefined ? {} : { allowedRef: c.allowedRef },
+    );
     const h = harness();
-    const res = await h.handler(push(f.token, pushBody()));
-    expect([res.status, (await json(res)).error]).toEqual([
-      403,
-      "no_ref_fence",
-    ]);
-    await expectNoSideEffects(h, f.stepKey);
+    const res = await h.handler(push(f.token, c.body));
+    await expectRefusal(h, f.stepKey, res, c.code);
   });
 
   it("AC6 the probe of a null-fence step still passes through, and the advert is unchanged", async () => {
-    const f = await createTestCellStep({
-      db,
-      effectBudget: 5,
-      allowedRef: null,
-    });
+    const f = await fixture(5, { allowedRef: null });
     const h = harness({ body: enc.encode("probe-ok") });
     const res = await h.handler(push(f.token, FLUSH));
     expect(res.status).toBe(200);

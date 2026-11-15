@@ -161,10 +161,10 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     return { stepKey: s.stepKey, bearer: s.token };
   }
 
-  async function setup(
-    maxPushBytes?: number,
+  async function setup({
+    maxPushBytes,
     allowedRef = "refs/heads/feat/x",
-  ) {
+  }: { maxPushBytes?: number; allowedRef?: string } = {}) {
     const up = upstream();
     const s = await step(allowedRef);
     active = createGitBrokerHandler({
@@ -260,7 +260,7 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     "push of a >1 MiB commit sends git's 0000 probe first: it lands, and the probe is not an effect",
     async (ctx) => {
       if (!server) return ctx.skip();
-      const t = await setup(undefined, "refs/heads/feat/big");
+      const t = await setup({ allowedRef: "refs/heads/feat/big" });
       const work = tmp("real-git-work-");
       await t.run(work, "clone", t.remote, "clone");
       const clone = path.join(work, "clone");
@@ -311,7 +311,10 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     "AC10 end to end: a push over the cap fails, nothing lands, the claim is released",
     async (ctx) => {
       if (!server) return ctx.skip();
-      const t = await setup(200 * 1024, "refs/heads/feat/over");
+      const t = await setup({
+        maxPushBytes: 200 * 1024,
+        allowedRef: "refs/heads/feat/over",
+      });
       const work = tmp("real-git-work-");
       await t.run(work, "clone", t.remote, "clone");
       const clone = path.join(work, "clone");
@@ -354,15 +357,9 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
       git(clone, ...COMMIT, "commit", "-m", "feature");
       const mainBefore = git(t.bare, "rev-parse", "refs/heads/main");
       const postsBefore = t.calls.filter((c) => c.method === "POST").length;
-      let failure: { code?: number | string; stderr?: string } | null = null;
-      try {
-        await t.run(clone, "push", "origin", "HEAD:refs/heads/main");
-      } catch (error) {
-        failure = error as { code?: number | string; stderr?: string };
-      }
-      expect(failure).not.toBeNull();
-      expect(failure?.code).not.toBe(0);
-      expect(failure?.stderr ?? "").toContain("403");
+      await expect(
+        t.run(clone, "push", "origin", "HEAD:refs/heads/main"),
+      ).rejects.toMatchObject({ stderr: expect.stringContaining("403") });
       expect(git(t.bare, "rev-parse", "refs/heads/main")).toBe(mainBefore);
       expect(t.calls.filter((c) => c.method === "POST")).toHaveLength(
         postsBefore,

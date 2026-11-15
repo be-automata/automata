@@ -48,8 +48,12 @@ export type RefFenceResult =
   | { ok: true; pushedSha: string }
   | {
       ok: false;
-      reason: "ref_not_allowed" | "delete_not_allowed" | "no_commands";
-      /** The first offending ref (absent for `no_commands`). */
+      reason:
+        | "ref_not_allowed"
+        | "delete_not_allowed"
+        | "no_commands"
+        | "no_ref_fence";
+      /** The first offending ref (absent for `no_commands`, `no_ref_fence`). */
       ref?: string;
     };
 
@@ -169,12 +173,14 @@ function parseCommandLine(line: string): ReceivePackCommand | null {
 /**
  * Every update must target exactly `exactRef` and must not delete it. One bad
  * update rejects the whole push. The pushed sha is the last update's new sha.
+ * A `null` fence means the step has no ref to push to: `no_ref_fence`.
  */
 export function checkRefFence(
   commands: readonly ReceivePackCommand[],
-  fence: { exactRef: string },
+  fence: { exactRef: string } | null,
 ): RefFenceResult {
   if (commands.length === 0) return { ok: false, reason: "no_commands" };
+  if (fence === null) return { ok: false, reason: "no_ref_fence" };
   for (const command of commands) {
     if (command.ref !== fence.exactRef) {
       return { ok: false, reason: "ref_not_allowed", ref: command.ref };

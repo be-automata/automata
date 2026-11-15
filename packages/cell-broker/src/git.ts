@@ -659,21 +659,16 @@ async function handlePush({
       drop(section.reader);
       return brokerError(400, "bad_request");
     }
-  }
-
-  if (section.commands.length > 0) {
+  } else {
     // A step with no fence does not push; otherwise every command must target
     // the one ref the step was opened with. Nothing is minted or claimed yet.
-    const refusal =
-      context.allowedRef === null
-        ? "no_ref_fence"
-        : checkRefFence(section.commands, { exactRef: context.allowedRef });
-    if (typeof refusal === "string" || !refusal.ok) {
+    const fence = checkRefFence(
+      section.commands,
+      context.allowedRef === null ? null : { exactRef: context.allowedRef },
+    );
+    if (!fence.ok) {
       drop(section.reader);
-      return brokerError(
-        403,
-        typeof refusal === "string" ? refusal : refusal.reason,
-      );
+      return brokerError(403, fence.reason);
     }
   }
 

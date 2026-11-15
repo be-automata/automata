@@ -33,7 +33,7 @@ async function newStep(
   const { user } = await createTestUser({ db });
   const { threadId } = await createTestThread({ db, userId: user.id });
   const stepKey = `run-${randomUUID()}/agent`;
-  const open = (attempt: number) =>
+  const open = (attempt: number, ref: string | null = allowedRef) =>
     openStep({
       db,
       step: {
@@ -43,7 +43,7 @@ async function newStep(
         attempt,
         stepTimeoutMs: STEP_TIMEOUT,
         effectBudget,
-        allowedRef,
+        allowedRef: ref,
       },
     });
   const bearer = async (attempt: number) => {
@@ -158,19 +158,7 @@ describe("cell authority (ADR-014 remote cells)", () => {
   it("AC2 re-opening with a different allowedRef is a conflict, and the stored ref never changes", async () => {
     const s = await newStep(null, "refs/heads/feat/x");
     expect(await s.open(1)).toEqual({ ok: true });
-    const reopen = (attempt: number, allowedRef: string | null) =>
-      openStep({
-        db,
-        step: {
-          stepKey: s.stepKey,
-          organizationId: s.organizationId,
-          threadId: s.threadId,
-          attempt,
-          stepTimeoutMs: STEP_TIMEOUT,
-          effectBudget: null,
-          allowedRef,
-        },
-      });
+    const reopen = s.open;
     expect(await reopen(1, "refs/heads/feat/y")).toEqual({
       ok: false,
       reason: "conflict",

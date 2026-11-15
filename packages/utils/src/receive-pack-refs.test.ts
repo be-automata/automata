@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isBranchRef, parseReceivePackCommands } from "./receive-pack-refs";
+import {
+  checkRefFence,
+  isBranchRef,
+  parseReceivePackCommands,
+} from "./receive-pack-refs";
 
 const encoder = new TextEncoder();
 
@@ -82,5 +86,27 @@ describe("isBranchRef", () => {
     "refs/heads/a\ud800",
   ])("refuses %j", (ref) => {
     expect(isBranchRef(ref)).toBe(false);
+  });
+});
+
+describe("checkRefFence with no fence", () => {
+  const command = {
+    oldSha: "1".repeat(40),
+    newSha: "a".repeat(40),
+    ref: "refs/heads/x",
+  };
+
+  it("refuses a non-empty command list with no_ref_fence", () => {
+    expect(checkRefFence([command], null)).toEqual({
+      ok: false,
+      reason: "no_ref_fence",
+    });
+  });
+
+  it("keeps no_commands for an empty list", () => {
+    expect(checkRefFence([], null)).toEqual({
+      ok: false,
+      reason: "no_commands",
+    });
   });
 });
