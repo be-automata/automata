@@ -11,10 +11,14 @@
  *     [--no-contract]   refuse (exit 2, nothing applied) when a pending file is
  *                       marked `migrate:contract`; the CI auto-apply uses it
  *
+ *   --apply and --mark-applied try-lock the advisory lock before any other
+ *   SQL and hold it to the end; the dry run takes no lock.
+ *
  *   Exit: 0 = plan clean (and applied, with --apply); 1 = drift (an applied
  *         file was edited), an orphan ledger row, a failed migration, an unset
  *         or pooler DATABASE_URL, or an unreachable database; 2 = --no-contract
- *         and a pending contract file. Fails closed.
+ *         and a pending contract file; 3 = another run holds the lock, nothing
+ *         was done. Fails closed.
  *
  * Files apply in filename order. Each transactional file runs inside one
  * BEGIN … COMMIT together with its ledger row, under `lock_timeout` 5s and
@@ -39,12 +43,14 @@ import {
   assertDirectConnection,
   loadMigrations,
   markApplied,
+  MigrationLockBusyError,
   openClient,
   planMigrations,
   planProblems,
   readLedger,
   type MigrationLogger,
   type MigrationPlan,
+  withAdvisoryLock,
 } from "../packages/migrate/src/index";
 
 interface CliArgs {
@@ -144,43 +150,57 @@ function printPlan(plan: MigrationPlan): void {
   }
 }
 
+async function runPlan(
+  client: Awaited<ReturnType<typeof openClient>>,
+  args: CliArgs,
+  files: ReturnType<typeof loadMigrations>,
+): Promise<number> {
+  if (args.markApplied.length > 0) {
+    // Re-entrant under the outer lock: session advisory locks stack.
+    await markApplied(client, files, args.markApplied, appliedBy(), logger);
+  }
+  const plan = planMigrations(files, await readLedger(client));
+  printPlan(plan);
+  if (planProblems(plan).length > 0) {
+    return 1;
+  }
+  // A contract file removes what the previous revision may still read, and
+  // a www/worker deploy is a separate manual step that can lag main. So the
+  // unattended path refuses it; a person applies it after the deploy.
+  const contracts = plan.pending.filter((file) => file.headers.contract);
+  if (args.noContract && contracts.length > 0) {
+    console.error(
+      `refusing: pending contract migration(s) ${contracts.map((f) => f.id).join(", ")}; ` +
+        "deploy the code that no longer reads the removed schema, then apply without --no-contract",
+    );
+    return 2;
+  }
+  if (!args.apply) {
+    if (args.markApplied.length === 0 && plan.pending.length > 0) {
+      console.log("dry run: pass --apply to apply the pending migrations");
+    }
+    return 0;
+  }
+  const result = await applyMigrations(client, plan, {
+    appliedBy: appliedBy(),
+    logger,
+  });
+  console.log(`applied ${result.applied.length} migration(s)`);
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
   const url = assertDirectConnection(process.env.DATABASE_URL);
   const files = loadMigrations(args.dir);
   const client = await openClient(url);
   try {
-    if (args.markApplied.length > 0) {
-      await markApplied(client, files, args.markApplied, appliedBy(), logger);
+    // Writers take the lock first, before planning or any ledger SQL, and
+    // hold it on this one session to the end. The dry run stays lock-free.
+    if (args.apply || args.markApplied.length > 0) {
+      return await withAdvisoryLock(client, () => runPlan(client, args, files));
     }
-    const plan = planMigrations(files, await readLedger(client));
-    printPlan(plan);
-    if (planProblems(plan).length > 0) {
-      return 1;
-    }
-    // A contract file removes what the previous revision may still read, and
-    // a www/worker deploy is a separate manual step that can lag main. So the
-    // unattended path refuses it; a person applies it after the deploy.
-    const contracts = plan.pending.filter((file) => file.headers.contract);
-    if (args.noContract && contracts.length > 0) {
-      console.error(
-        `refusing: pending contract migration(s) ${contracts.map((f) => f.id).join(", ")}; ` +
-          "deploy the code that no longer reads the removed schema, then apply without --no-contract",
-      );
-      return 2;
-    }
-    if (!args.apply) {
-      if (args.markApplied.length === 0 && plan.pending.length > 0) {
-        console.log("dry run: pass --apply to apply the pending migrations");
-      }
-      return 0;
-    }
-    const result = await applyMigrations(client, plan, {
-      appliedBy: appliedBy(),
-      logger,
-    });
-    console.log(`applied ${result.applied.length} migration(s)`);
-    return 0;
+    return await runPlan(client, args, files);
   } finally {
     await client.end();
   }
@@ -193,7 +213,7 @@ async function run(): Promise<void> {
     console.error(
       `migrate: ${error instanceof Error ? error.message : String(error)}`,
     );
-    process.exitCode = 1;
+    process.exitCode = error instanceof MigrationLockBusyError ? 3 : 1;
   }
 }
 

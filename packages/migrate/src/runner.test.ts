@@ -7,15 +7,22 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadMigrations } from "./files";
 import { readLedger } from "./ledger";
 import {
+  ADVISORY_LOCK_KEY,
   applyMigrations,
   markApplied,
   MigrationError,
+  MigrationLockBusyError,
   planMigrations,
 } from "./runner";
 import {
+  advisoryLockHeld,
+  BUSY_MESSAGE,
   createFreshDb,
+  invalidIndexCount,
   migrationsDir,
+  scalar,
   silentLogger,
+  waitUntil,
   type FreshDb,
 } from "./test-db";
 
@@ -50,9 +57,11 @@ async function applyDir(
   });
 }
 
-async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
-  const result = await c.query(sql);
-  return Object.values(result.rows[0] ?? {})[0] as T;
+/** Collects the server notices (e.g. "you don't own a lock") a client receives. */
+function collectNotices(c: pg.Client): string[] {
+  const notices: string[] = [];
+  c.on("notice", (notice) => notices.push(notice.message ?? ""));
+  return notices;
 }
 
 describe("deploy/migrations on a fresh database", () => {
@@ -142,6 +151,8 @@ describe("applyMigrations", () => {
     });
 
     await expect(applyDir(c, dir)).rejects.toThrow(/division by zero/);
+    // The failure still released the advisory lock on this healthy session.
+    expect(await advisoryLockHeld(c)).toBe(false);
     expect((await readLedger(c)).map((r) => r.id)).toEqual(["001-ok"]);
     expect(await scalar<string | null>(c, "SELECT to_regclass('half')")).toBe(
       null,
@@ -191,20 +202,158 @@ describe("applyMigrations", () => {
     expect(await readLedger(c)).toEqual([]);
   });
 
-  it("serializes two concurrent runners: every file applies exactly once", async () => {
+  it("two racing runners: the loser is busy, the winner applies every file once", async () => {
     const db = await freshDb();
+    const monitor = await db.connect();
     const a = await db.connect();
     const b = await db.connect();
+    const [winner, loser] = [a, b];
+    const loserNotices = collectNotices(loser);
+    // 001 blocks on `gate`, which this session holds, so the winner holds the
+    // advisory lock for as long as the test wants (no sleeps to race).
+    await monitor.query("CREATE TABLE gate (id int)");
+    await monitor.query("BEGIN");
+    await monitor.query("LOCK TABLE gate IN ACCESS EXCLUSIVE MODE");
     const dir = migrationsDir({
-      "001.sql": "CREATE TABLE once (id int);\nSELECT pg_sleep(0.5);",
+      "001.sql":
+        "-- migrate:lock-timeout=30s\nLOCK TABLE gate IN SHARE MODE;\nCREATE TABLE once (id int);",
       "002.sql": "INSERT INTO once VALUES (1);",
     });
 
-    const [ra, rb] = await Promise.all([applyDir(a, dir), applyDir(b, dir)]);
-    const counts = [ra.applied.length, rb.applied.length].sort();
-    expect(counts).toEqual([0, 2]);
-    expect(await readLedger(a)).toHaveLength(2);
-    expect(await scalar<number>(a, "SELECT count(*)::int FROM once")).toBe(1);
+    const winning = applyDir(winner, dir);
+    let result: Awaited<typeof winning>;
+    try {
+      await waitUntil("the winner's advisory lock", () =>
+        advisoryLockHeld(monitor),
+      );
+      const error = await applyDir(loser, dir).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(MigrationLockBusyError);
+      expect((error as Error).message).toBe(BUSY_MESSAGE);
+    } finally {
+      await monitor.query("ROLLBACK");
+      result = await winning;
+    }
+
+    expect(result.applied).toEqual(["001", "002"]);
+    expect(await readLedger(winner)).toHaveLength(2);
+    expect(await scalar<number>(winner, "SELECT count(*)::int FROM once")).toBe(
+      1,
+    );
+    // A busy runner never unlocks a lock it does not own.
+    expect(loserNotices.filter((m) => /you don't own a lock/i.test(m))).toEqual(
+      [],
+    );
+  });
+
+  /**
+   * Production shape, ordered deterministically: a writer holds a table lock
+   * open, runner A's CIC waits on it, runner B arrives, and only then does the
+   * writer commit. A runner that blocks B on the advisory lock makes the CIC
+   * wait on B's virtual xid as the last waiter, so Postgres kills the CIC and
+   * leaves an INVALID index.
+   */
+  async function productionRace() {
+    const db = await freshDb();
+    const monitor = await db.connect();
+    const writer = await db.connect();
+    const a = await db.connect();
+    const b = await db.connect();
+    const files = {
+      "001.sql": "CREATE TABLE items (id int, x int);",
+      "002.sql":
+        "-- migrate:no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS items_x ON items (x);\n",
+    };
+    // Only the CIC file is pending, as on production.
+    await applyDir(a, migrationsDir({ "001.sql": files["001.sql"] }));
+    const dir = migrationsDir(files);
+    const bPid = await scalar<number>(b, "SELECT pg_backend_pid()");
+
+    await writer.query("BEGIN");
+    await writer.query("LOCK TABLE items IN ROW EXCLUSIVE MODE");
+    let writerOpen = true;
+    const started: Promise<unknown>[] = [];
+    let finished = false;
+    try {
+      const first = applyDir(a, dir, { lockTimeout: "120s" });
+      started.push(first);
+      first.catch(() => undefined);
+      await waitUntil(
+        "runner A's CIC waiting on the writer's lock",
+        async () =>
+          (
+            await monitor.query(
+              `SELECT 1 FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock'
+                  AND pid <> pg_backend_pid()
+                  AND query ILIKE '%CREATE INDEX CONCURRENTLY%'`,
+            )
+          ).rows.length > 0,
+      );
+
+      let secondSettled = false;
+      const second = applyDir(b, dir, { lockTimeout: "120s" });
+      started.push(second);
+      second.then(
+        () => (secondSettled = true),
+        () => (secondSettled = true),
+      );
+      // Finished (busy) or, on a runner that waits, blocked on the advisory
+      // lock for longer than deadlock_timeout. B's one deadlock check must run
+      // before the cycle exists, so that A's CIC is the later waiter and the
+      // victim.
+      await waitUntil("runner B finished or waiting", async () => {
+        if (secondSettled) {
+          return true;
+        }
+        const waiting = await monitor.query(
+          `SELECT 1 FROM pg_stat_activity
+            WHERE pid = $1 AND wait_event = 'advisory'
+              AND now() - query_start >
+                  2 * current_setting('deadlock_timeout')::interval`,
+          [bPid],
+        );
+        return waiting.rows.length > 0;
+      });
+      await writer.query("COMMIT");
+      writerOpen = false;
+
+      const settled = await Promise.allSettled([first, second]);
+      finished = true;
+      return { monitor, settled };
+    } finally {
+      if (writerOpen) {
+        await writer.query("ROLLBACK");
+      }
+      // On a failed wait, let both runners end inside the test.
+      if (!finished) {
+        await Promise.allSettled(started);
+      }
+    }
+  }
+
+  it("production shape: exactly one runner applies the CIC, the other is busy, and no index is left invalid", async () => {
+    const { monitor, settled } = await productionRace();
+    expect(await invalidIndexCount(monitor)).toBe(0);
+    const winners = settled.filter(
+      (r) => r.status === "fulfilled" && r.value.applied.includes("002"),
+    );
+    expect(winners).toHaveLength(1);
+    const losers = settled.filter((r) => r.status === "rejected");
+    expect(losers).toHaveLength(1);
+    const reason = (losers[0] as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(MigrationLockBusyError);
+    expect((reason as Error).message).toBe(BUSY_MESSAGE);
+    expect((await readLedger(monitor)).map((r) => r.id)).toEqual([
+      "001",
+      "002",
+    ]);
+    expect(
+      await scalar<number>(
+        monitor,
+        `SELECT count(*)::int FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+          WHERE c.relname = 'items_x' AND i.indisvalid`,
+      ),
+    ).toBe(1);
   });
 
   it("runs CREATE INDEX CONCURRENTLY from a no-transaction file", async () => {
@@ -278,5 +427,27 @@ describe("markApplied", () => {
     ).toEqual([]);
     const plan = planMigrations(files, await readLedger(c));
     expect(plan.pending.map((f) => f.id)).toEqual(["002"]);
+  });
+
+  it("a busy markApplied writes no ledger row and does not create the ledger", async () => {
+    const db = await freshDb();
+    const holder = await db.connect();
+    const c = await db.connect();
+    const notices = collectNotices(c);
+    const files = loadMigrations(
+      migrationsDir({ "001.sql": "CREATE TABLE marked_only (id int);" }),
+    );
+    await holder.query("SELECT pg_advisory_lock(hashtext($1))", [
+      ADVISORY_LOCK_KEY,
+    ]);
+
+    await expect(
+      markApplied(c, files, ["001"], "test@0", silentLogger()),
+    ).rejects.toBeInstanceOf(MigrationLockBusyError);
+
+    expect(
+      await scalar<string | null>(c, "SELECT to_regclass('schema_migrations')"),
+    ).toBe(null);
+    expect(notices.filter((m) => /you don't own a lock/i.test(m))).toEqual([]);
   });
 });

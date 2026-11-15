@@ -11,8 +11,8 @@ export class ConnectionConfigError extends Error {
  *
  * A Neon pooler endpoint (`-pooler.` in the host) is refused: PgBouncer in
  * transaction mode does not keep a session advisory lock on one backend, so
- * two runners would not serialize, and session-level SETs leak between
- * clients.
+ * the lock that lets one runner at a time apply would not hold, and
+ * session-level SETs leak between clients.
  */
 export function assertDirectConnection(raw: string | undefined): string {
   const value = raw?.trim() ?? "";

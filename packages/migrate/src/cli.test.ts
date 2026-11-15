@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +6,16 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { readLedger } from "./ledger";
-import { createFreshDb, migrationsDir, type FreshDb } from "./test-db";
+import {
+  advisoryLockHeld,
+  BUSY_MESSAGE,
+  createFreshDb,
+  invalidIndexCount,
+  migrationsDir,
+  scalar,
+  waitUntil,
+  type FreshDb,
+} from "./test-db";
 
 const PACKAGE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -20,19 +29,23 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[], databaseUrl: string | undefined): CliResult {
+function cliEnv(databaseUrl: string | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_ACTOR: "ci-bot" };
   delete env.DATABASE_URL;
   if (databaseUrl !== undefined) {
     env.DATABASE_URL = databaseUrl;
   }
+  return env;
+}
+
+function runCli(args: string[], databaseUrl: string | undefined): CliResult {
   // `--import tsx` resolves from the cwd, where this package installs tsx.
   const result = spawnSync(
     process.execPath,
     ["--import", "tsx", CLI, ...args],
     {
       cwd: PACKAGE_DIR,
-      env,
+      env: cliEnv(databaseUrl),
       encoding: "utf8",
       timeout: 60_000,
     },
@@ -43,6 +56,25 @@ function runCli(args: string[], databaseUrl: string | undefined): CliResult {
     stderr: result.stderr,
   };
 }
+
+/** Async twin of `runCli`, so two runs can overlap. */
+function runCliAsync(args: string[], databaseUrl: string): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", CLI, ...args], {
+      cwd: PACKAGE_DIR,
+      env: cliEnv(databaseUrl),
+      timeout: 60_000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+const BUSY_LINE = `migrate: ${BUSY_MESSAGE}`;
 
 const dbs: FreshDb[] = [];
 
@@ -168,5 +200,72 @@ describe("deploy/migrate.ts", () => {
     const unset = runCli([], undefined);
     expect(unset.status).toBe(1);
     expect(unset.stderr).toContain("DATABASE_URL is not set");
+  });
+
+  it("races two --apply runs over a no-transaction CIC file: one applies, the other exits 3 and plans nothing", async () => {
+    const db = await freshDb();
+    const monitor = await db.connect();
+    // 001 blocks on `gate`, which this session holds, so run A keeps the
+    // advisory lock for as long as the test wants.
+    await monitor.query("CREATE TABLE gate (id int)");
+    await monitor.query("BEGIN");
+    await monitor.query("LOCK TABLE gate IN ACCESS EXCLUSIVE MODE");
+    const dir = migrationsDir({
+      "001.sql":
+        "-- migrate:lock-timeout=30s\nLOCK TABLE gate IN SHARE MODE;\nCREATE TABLE items (id int, x int);",
+      "002.sql":
+        "-- migrate:no-transaction\nCREATE INDEX CONCURRENTLY IF NOT EXISTS items_x ON items (x);\n",
+    });
+
+    const first = runCliAsync(["--apply", "--dir", dir], db.url);
+    let second: CliResult;
+    try {
+      await waitUntil("run A's advisory lock", () => advisoryLockHeld(monitor));
+      second = await runCliAsync(["--apply", "--dir", dir], db.url);
+    } catch (error) {
+      // Let run A finish before failing, so it never outlives the test.
+      await monitor.query("ROLLBACK");
+      await first;
+      throw error;
+    }
+    await monitor.query("ROLLBACK");
+    const firstResult = await first;
+
+    expect([firstResult.status, second.status].sort()).toEqual([0, 3]);
+    expect(firstResult.stdout).toContain("applied 2 migration(s)");
+    expect(second.stderr).toContain(BUSY_LINE);
+    expect(second.stdout).not.toContain("migrations:");
+    expect(await readLedger(monitor)).toHaveLength(2);
+    expect(await invalidIndexCount(monitor)).toBe(0);
+  });
+
+  it("exits 3 for --apply and --mark-applied while the key is held, touching nothing; the dry run still plans", async () => {
+    const db = await freshDb();
+    const holder = await db.connect();
+    await holder.query("SELECT pg_advisory_lock(hashtext($1))", [
+      "automata:schema_migrations",
+    ]);
+    const dir = migrationsDir({ "001.sql": "CREATE TABLE a (id int);" });
+
+    const apply = runCli(["--apply", "--dir", dir], db.url);
+    expect(apply.status).toBe(3);
+    expect(apply.stderr).toContain(BUSY_LINE);
+    expect(apply.stdout).not.toContain("migrations:");
+
+    const mark = runCli(["--mark-applied", "001", "--dir", dir], db.url);
+    expect(mark.status).toBe(3);
+    expect(mark.stderr).toContain(BUSY_LINE);
+    expect(mark.stdout).not.toContain("migrations:");
+
+    expect(
+      await scalar<string | null>(
+        holder,
+        "SELECT to_regclass('public.schema_migrations')",
+      ),
+    ).toBe(null);
+
+    const dry = runCli(["--dir", dir], db.url);
+    expect(dry.status).toBe(0);
+    expect(dry.stdout).toContain("1 pending");
   });
 });

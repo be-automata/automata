@@ -43,8 +43,9 @@ on:
 permissions:
   contents: read
 
-# One run at a time, never cancelled mid-apply: a second run queues behind the
-# first (the runner's advisory lock is the database-side backstop).
+# One run at a time, never cancelled mid-apply: GitHub queues its own runs. The
+# runner's advisory lock is the database-side backstop for a manual run: a run
+# that overlaps one exits 3 (busy), touches nothing and opens `migrate-failure`.
 concurrency:
   group: migrate-production
   cancel-in-progress: false
