@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, realpathSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   assertSafeBranchName,
@@ -56,12 +56,16 @@ describe("runGit", () => {
   let marker: string;
 
   beforeEach(async () => {
+    // Keep the host's git config (signing, hooks, templates) out of the temp repo.
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
     dir = mkdtempSync(join(tmpdir(), "cli-git-test-"));
     marker = join(dir, "marker");
     await runGit(["init", "-q"], { cwd: dir });
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(dir, { recursive: true, force: true });
   });
 
