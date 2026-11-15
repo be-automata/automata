@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { createServer } from "http";
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { useSaveApiKey } from "../hooks/useApi.js";
 
 const AUTH_PORT = 8742; // Uncommon port
@@ -11,13 +11,15 @@ const TERRAGON_WEB_URL =
   process.env.TERRAGON_WEB_URL || "http://localhost:3000";
 
 function openBrowser(url: string) {
-  const start =
+  // On Windows, rundll32 takes the URL as a single argument; `cmd /c start`
+  // would parse it through cmd.exe.
+  const [command, args]: [string, string[]] =
     process.platform === "darwin"
-      ? "open"
+      ? ["open", [url]]
       : process.platform === "win32"
-        ? "start"
-        : "xdg-open";
-  exec(`${start} ${url}`, (error) => {
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
+        : ["xdg-open", [url]];
+  execFile(command, args, (error) => {
     if (error) {
       console.error("Failed to open browser:", error);
     }

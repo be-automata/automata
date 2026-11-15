@@ -2,15 +2,18 @@ import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { useThreadDetail } from "../hooks/useApi.js";
-import { promisify } from "util";
-import { exec as execCallback } from "child_process";
-const exec = promisify(execCallback);
 import { promises as fs } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { ThreadSelector } from "../components/ThreadSelector.js";
 import { launchClaude } from "../utils/claude.js";
 import { useCurrentGitHubRepo } from "../hooks/useGitInfo.js";
+import {
+  assertSafeBranchName,
+  InvalidBranchNameError,
+  localBranchExists,
+  runGit,
+} from "../utils/git.js";
 
 interface ProcessingResult {
   success: boolean;
@@ -23,9 +26,7 @@ interface ProcessingResult {
 // Find git repository root
 async function findGitRoot(): Promise<{ gitRoot?: string; error?: string }> {
   try {
-    const { stdout } = await exec("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-    });
+    const { stdout } = await runGit(["rev-parse", "--show-toplevel"]);
     const gitRoot = stdout.trim();
     return { gitRoot };
   } catch (err) {
@@ -38,10 +39,17 @@ async function switchToBranch(
   branchName: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    await assertSafeBranchName(branchName);
+  } catch (err) {
+    if (err instanceof InvalidBranchNameError) {
+      return { success: false, error: err.message };
+    }
+    throw err;
+  }
+
+  try {
     // First check if working directory is clean
-    const { stdout: statusOutput } = await exec("git status --porcelain", {
-      encoding: "utf8",
-    });
+    const { stdout: statusOutput } = await runGit(["status", "--porcelain"]);
     if (statusOutput.trim()) {
       return {
         success: false,
@@ -50,28 +58,20 @@ async function switchToBranch(
     }
 
     // Fetch to ensure we have the latest remote info
-    await exec("git fetch", { encoding: "utf8" });
+    await runGit(["fetch"]);
 
     // Check if branch exists locally
-    let branchExists = false;
-    try {
-      await exec(`git rev-parse --verify ${branchName}`, { encoding: "utf8" });
-      branchExists = true;
-    } catch {
-      // Branch doesn't exist locally
-    }
+    const branchExists = await localBranchExists(branchName);
 
     if (branchExists) {
       // Switch to branch
-      await exec(`git checkout ${branchName}`, { encoding: "utf8" });
+      await runGit(["checkout", branchName]);
       // Pull latest changes
-      await exec("git pull", { encoding: "utf8" });
+      await runGit(["pull"]);
     } else {
       // Create and checkout branch from remote if it exists
       try {
-        await exec(`git checkout -b ${branchName} origin/${branchName}`, {
-          encoding: "utf8",
-        });
+        await runGit(["checkout", "-b", branchName, `origin/${branchName}`]);
       } catch {
         return {
           success: false,
