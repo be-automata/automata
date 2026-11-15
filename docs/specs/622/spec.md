@@ -54,7 +54,7 @@ export function fixBranchName(input: FixBranchNameInput): string; // same checks
 - **AC5** The worker test runs the real `fixBranchName` over the AC1 table, and every result gets `{exactRef: "refs/heads/<name>"}` from `selfHealRefFence`.
 - **AC6** `utils/src/fix-branch.test.ts` owns AC1 and AC2. `package-exports.test.ts` pins `./fix-branch`.
 - **AC7** No new dependency edges. The worker imports nothing new from www or shared.
-- **AC8** `verify-fixes.ts` still loads under tsx. _Not verified._
+- **AC8** `verify-fixes.ts` still loads under tsx. _Not verified._ **(Superseded: verified in R4. It prints USAGE and exits 1 with no module error.)**
 
 ### Tests
 
@@ -251,7 +251,7 @@ Inside `describe("selfHealRefFence (FENCE-01 wiring)")` (`:836-925`):
 
 All present at 8ebffabe: `packages/shared/src/self-heal/fix-paths.test.ts`, `apps/www/src/server-lib/audit/fix-run-prompt.test.ts`, `apps/www/src/server-lib/audit/plan-self-heal-run.test.ts`, `apps/www/src/server-lib/review/skill-contract-drift.test.ts`, `apps/www/src/agent/hatchet/dispatch.test.ts`. `packages/utils/src/fix-branch.test.ts` does not exist yet (created here). `self-heal-dispatcher.test.ts` exists, but it never names a fix branch (0 hits), so it is not needed for AC3.
 
-- `fix-run-prompt.test.ts:56-82` holds the www `fixBranchName` golden (`automata/fix-42-01234567-a2`), the prefix check, and the throw cases. It keeps passing through the re-export. Leave it in place: it proves the re-export.
+- `fix-run-prompt.test.ts:56-82` holds the www `fixBranchName` golden (`automata/fix-42-01234567-a2`), the prefix check, and the throw cases. It keeps passing through the re-export. **(Superseded: the Simplify round moved the golden, prefix and throw cases to utils. www keeps one test proving the re-export.)**
 - Environment: `packages/shared` vitest has `globalSetup: "./src/test-global-setup.ts"` (docker compose Postgres, or `TEST_DATABASE_ADMIN_URL`). The www suite needs the same. The utils and worker files need neither. Not run here: the shared and www baselines.
 
 ### Already done / does not exist
@@ -274,7 +274,7 @@ All present at 8ebffabe: `packages/shared/src/self-heal/fix-paths.test.ts`, `app
   - rename the describe: drop "this does not exercise fixBranchName"; it now does;
   - AC4: `git grep 'readSource\|WORKER_FIX_BRANCH_PREFIX' packages/worker` must print nothing.
 - **`packages/utils/src/fix-branch.test.ts` owns AC1 and AC2.** AC1 is the 175-name table: assert the explicit expected names, or the sha256 `f4cc7c43…8524` plus the first and last names, plus a few spot goldens (`automata/fix-42-01234567-a2` from `0123456789abcdef`). Also assert that every name starts with `FIX_BRANCH_PREFIX` and that `FIX_FINGERPRINT_RE.source === "^[0-9a-f]{8,}$"`. AC2 covers `0`, `-1`, `1.5`, `NaN` on both issue and attempt, and `../x`, `DEADBEEF`, `abc` on the fingerprint. Each is an exact-message `toThrow("<full message>")`, not a regex.
-- **Do not change:** `deploy/self-heal-bench/verify-fixes.ts`, `review-skill.ts`, `skill-contract-drift.test.ts`, `self-heal-acceptance.sh` and its test, `FIX_SUFFIX_SHAPE`, `knowledge-minimize.ts`, any www/shared caller of the prefix or builder, or `fix-run-prompt.test.ts`.
+- **Do not change:** `deploy/self-heal-bench/verify-fixes.ts`, `review-skill.ts`, `skill-contract-drift.test.ts`, `self-heal-acceptance.sh` and its test, `FIX_SUFFIX_SHAPE`, `knowledge-minimize.ts`, or any www/shared caller of the prefix or builder. **(Superseded for `fix-run-prompt.test.ts`: in the Simplify round, its builder tests moved to `packages/utils/src/fix-branch.test.ts`, and one re-export smoke test stays.)**
 - **TypeScript (AGENTS.md):** strict; `interface` for the input; no `any`; no `!` without a comment (note `noUncheckedIndexedAccess` in table loops); `??` over `||`; ES imports only; English identifiers; kebab-case file names; no commented-out code; no enums.
 - **Formatting:** `pnpm exec prettier --no-editorconfig --config .prettierrc --write <changed files>` (the `.editorconfig` disagrees with the repo's prettier config).
 - **Content:** no client or customer names in code, tests, comments or the PR.
