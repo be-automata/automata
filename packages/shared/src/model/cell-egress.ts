@@ -83,8 +83,20 @@ export function cellEgressKey(entry: CellEgressEntry): string {
   return entry.wildcard ? `*.${entry.name}` : entry.name;
 }
 
+/** Characters a host, `*.host`, `host:443` or an IP literal can hold (ASCII only: IDNs come as punycode). */
+const HOST_CHARS_RE = /^[A-Za-z0-9.*:[\]-]*$/;
+
 function normalizeEntry(raw: string): CellEgressEntry {
-  const text = raw.trim().toLowerCase();
+  const trimmed = raw.trim();
+  // Checked before lowercasing (U+212A lowercases to "k") and before echoing:
+  // a URL or `user:token@host` must never reach an error message.
+  if (!HOST_CHARS_RE.test(trimmed)) {
+    throw new CellEgressError(
+      "invalid_host",
+      "invalid_host: entry is not a bare ASCII host (URL, credentials or non-punycode name); not echoed",
+    );
+  }
+  const text = trimmed.toLowerCase();
   if (text.includes("[") || text.includes("]") || text.split(":").length > 2) {
     throw new CellEgressError("ipv6", `ipv6: '${raw}' is not supported`, raw);
   }
@@ -92,7 +104,14 @@ function normalizeEntry(raw: string): CellEgressEntry {
   const colon = text.indexOf(":");
   if (colon !== -1) {
     hostPart = text.slice(0, colon);
-    if (text.slice(colon + 1) !== "443") {
+    const port = text.slice(colon + 1);
+    if (port === "") {
+      throw new CellEgressError(
+        "invalid_host",
+        "invalid_host: entry ends with ':' and names no port; not echoed",
+      );
+    }
+    if (port !== "443") {
       throw new CellEgressError(
         "port_not_443",
         `port_not_443: '${raw}' pins a port other than 443`,

@@ -164,15 +164,42 @@ describe("compileCellEgress", () => {
     ["a bracketed IPv6 literal", "[::1]", "ipv6"],
     ["a :80 pin", "host.example.com:80", "port_not_443"],
     ["a non-numeric port", "host.example.com:web", "port_not_443"],
+    ["a trailing colon with no port", "host.example.com:", "invalid_host"],
     ["a bare star", "*", "invalid_host"],
     ["a TLD wildcard", "*.com", "invalid_host"],
     ["an empty string", "", "invalid_host"],
     ["a single label", "localhost", "invalid_host"],
+    ["a star inside the name", "a.*.example.com", "invalid_host"],
+    ["a double star", "**.example.com", "invalid_host"],
+    ["an empty label", "a..example.com", "invalid_host"],
+    ["a non-punycode IDN", "bücher.example", "invalid_host"],
+    ["a Kelvin sign that lowercases to k", "Key.example.com", "invalid_host"],
+    ["a URL", "https://registry.npmjs.org/", "invalid_host"],
   ])("rejects %s", (_name, entry, code) => {
     const catalog: CellEgressCatalog = {
       "t/bad@1": { id: "t/bad@1", allow: [entry] },
     };
     expect(codeOf(() => compile(["t/bad@1"], { catalog }))).toBe(code);
+  });
+
+  it("never echoes an entry that carries credentials", () => {
+    const catalog: CellEgressCatalog = {
+      "t/cred@1": {
+        id: "t/cred@1",
+        allow: ["user:s3cret-token@host.example.com"],
+      },
+    };
+    let caught: unknown;
+    try {
+      compile(["t/cred@1"], { catalog });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CellEgressError);
+    const err = caught as CellEgressError;
+    expect(err.code).toBe("invalid_host");
+    expect(err.message).not.toContain("s3cret-token");
+    expect(err.entry).toBeUndefined();
   });
 
   it("accepts host:443 and stores it as the bare host", () => {

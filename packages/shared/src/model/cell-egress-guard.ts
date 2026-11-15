@@ -16,7 +16,7 @@ export type CellEgressRefusal =
   | "egress_mode_observe"
   | "egress_mode_unknown" // any other value than "enforce"
   | "egress_not_allowlist" // capabilities.egress !== "allowlist"
-  | "allowlist_empty" // capabilities.egress_allowlist not a non-empty string[]
+  | "allowlist_empty" // capabilities.egress_allowlist not a non-empty list of non-blank strings
   | "evidence_missing" // no evidence.expires_at
   | "evidence_not_from_conformance" // evidence.source !== "conformance"
   | "evidence_invalid" // expires_at not RFC 3339
@@ -36,7 +36,7 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
     value.length > 0 &&
-    value.every((v) => typeof v === "string")
+    value.every((v) => typeof v === "string" && v.trim() !== "")
   );
 }
 

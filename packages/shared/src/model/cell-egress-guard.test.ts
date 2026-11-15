@@ -89,6 +89,13 @@ describe("assertCellEgressEnforced", () => {
       "allowlist_empty",
     ],
     [
+      "an allowlist of blank strings",
+      profile({
+        capabilities: { egress: "allowlist", egress_allowlist: ["", "  "] },
+      }),
+      "allowlist_empty",
+    ],
+    [
       "a non-string allowlist",
       profile({ capabilities: { egress: "allowlist", egress_allowlist: [1] } }),
       "allowlist_empty",
