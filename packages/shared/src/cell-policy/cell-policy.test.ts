@@ -75,6 +75,8 @@ type Case = {
   allowed: boolean;
   /** Reasons that must be present (all of them). */
   reasons?: string[];
+  /** Reasons that must be absent. */
+  absent?: string[];
 };
 
 const CASES: Case[] = [
@@ -202,6 +204,7 @@ const CASES: Case[] = [
     }),
     allowed: false,
     reasons: ["egress_open"],
+    absent: ["egress_not_enforced"],
   },
   {
     name: "host outside the allowlist denies",
@@ -312,7 +315,7 @@ describe("allow_cell compiled to WASM", () => {
     policy = await loadCellPolicy(await readCellPolicyWasm());
   });
 
-  it.each(CASES)("$name", ({ input, allowed, reasons }) => {
+  it.each(CASES)("$name", ({ input, allowed, reasons, absent }) => {
     const decision = policy.evaluate(input as CellPolicyInput);
     expect(decision.allowed).toBe(allowed);
     if (reasons && reasons.length === 0) {
@@ -321,24 +324,13 @@ describe("allow_cell compiled to WASM", () => {
     for (const reason of reasons ?? []) {
       expect(decision.reasons).toContain(reason);
     }
+    for (const reason of absent ?? []) {
+      expect(decision.reasons).not.toContain(reason);
+    }
     // Deny by default: a denial always names a reason.
     if (!decision.allowed) {
       expect(decision.reasons.length).toBeGreaterThan(0);
     }
-  });
-
-  it("egress_not_enforced is managed-tier only", () => {
-    const boxObserve = policy.evaluate(
-      req(undefined, {
-        ...allowlistProfile,
-        tier: "customer_box",
-        configuration: { egress_mode: "observe" },
-      }) as CellPolicyInput,
-    );
-    expect(boxObserve.reasons).toContain("egress_open");
-    expect(boxObserve.reasons).not.toContain("egress_not_enforced");
-    const enforced = policy.evaluate(req() as CellPolicyInput);
-    expect(enforced.reasons).not.toContain("egress_not_enforced");
   });
 
   it("reasons come back sorted and unique", () => {

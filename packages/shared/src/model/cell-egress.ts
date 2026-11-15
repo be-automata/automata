@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@terragon/utils/payload-seal";
 
-import { DOMAIN_RE, IPV4_RE, type EgressPolicyShape } from "./egress-policy";
+import {
+  DOMAIN_RE,
+  splitHostPort,
+  type EgressPolicyShape,
+} from "./egress-policy";
 
 /**
  * Egress a remote cell receives (#611): compiled once from named bundles into
@@ -100,34 +104,27 @@ function normalizeEntry(raw: string): CellEgressEntry {
   if (text.includes("[") || text.includes("]") || text.split(":").length > 2) {
     throw new CellEgressError("ipv6", `ipv6: '${raw}' is not supported`, raw);
   }
-  let hostPart = text;
-  const colon = text.indexOf(":");
-  if (colon !== -1) {
-    hostPart = text.slice(0, colon);
-    const port = text.slice(colon + 1);
-    if (port === "") {
-      throw new CellEgressError(
-        "invalid_host",
-        "invalid_host: entry ends with ':' and names no port; not echoed",
-      );
-    }
-    if (port !== "443") {
-      throw new CellEgressError(
-        "port_not_443",
-        `port_not_443: '${raw}' pins a port other than 443`,
-        raw,
-      );
-    }
+  const { host, port } = splitHostPort(text);
+  if (port === "") {
+    throw new CellEgressError(
+      "invalid_host",
+      "invalid_host: entry ends with ':' and names no port; not echoed",
+    );
   }
+  if (port !== null && port !== "443") {
+    throw new CellEgressError(
+      "port_not_443",
+      `port_not_443: '${raw}' pins a port other than 443`,
+      raw,
+    );
+  }
+  let hostPart = host;
   hostPart = hostPart.replace(/\.$/, "");
   const wildcard = hostPart.startsWith("*.");
   const name = wildcard ? hostPart.slice(2) : hostPart;
   const lastLabel = name.slice(name.lastIndexOf(".") + 1);
   // A host whose last label is all digits is an IP literal even when DOMAIN_RE accepts it.
-  if (
-    IPV4_RE.test(name) ||
-    (DOMAIN_RE.test(name) && /^[0-9]+$/.test(lastLabel))
-  ) {
+  if (DOMAIN_RE.test(name) && /^[0-9]+$/.test(lastLabel)) {
     throw new CellEgressError(
       "ip_literal",
       `ip_literal: '${raw}' is an IP address`,
@@ -168,7 +165,6 @@ function collect(
   refs: readonly string[],
 ): Collected {
   const out: Collected = { allows: [], denies: [], bundles: new Set() };
-  const done = new Set<string>();
 
   const take = (bundle: CellEgressBundle, platform: boolean): void => {
     out.bundles.add(bundle.id);
@@ -189,7 +185,7 @@ function collect(
         ref,
       );
     }
-    if (done.has(ref)) return;
+    if (out.bundles.has(ref)) return;
     const bundle = Object.hasOwn(catalog, ref) ? catalog[ref] : undefined;
     if (!bundle) {
       throw new CellEgressError(
@@ -198,15 +194,7 @@ function collect(
         ref,
       );
     }
-    if (bundle.id === CELL_EGRESS_PLATFORM_BUNDLE) {
-      throw new CellEgressError(
-        "platform_override",
-        `platform_override: '${ref}' cannot replace the platform bundle`,
-        ref,
-      );
-    }
     for (const parent of bundle.extends ?? []) visit(parent, [...chain, ref]);
-    done.add(ref);
     take(bundle, false);
   };
 
@@ -236,14 +224,19 @@ function renderedNames(entries: readonly CellEgressEntry[]): string[] {
   return [...names];
 }
 
-function assertWithinCap(entries: readonly CellEgressEntry[]): void {
-  const count = renderedNames(entries).length;
-  if (count > CELL_EGRESS_MAX_ENTRIES) {
+/** The rendered list both planes emit; refuses an empty set and one over the cap. */
+function assertRenderable(set: CellEgressSet): string[] {
+  if (set.entries.length === 0) {
+    throw new CellEgressError("empty_set", "empty_set: nothing to allow");
+  }
+  const names = renderedNames(set.entries);
+  if (names.length > CELL_EGRESS_MAX_ENTRIES) {
     throw new CellEgressError(
       "too_many_entries",
-      `too_many_entries: ${count} rendered entries exceed the cap of ${CELL_EGRESS_MAX_ENTRIES}; refusing to truncate`,
+      `too_many_entries: ${names.length} rendered entries exceed the cap of ${CELL_EGRESS_MAX_ENTRIES}; refusing to truncate`,
     );
   }
+  return names;
 }
 
 function byKey(a: CellEgressEntry, b: CellEgressEntry): number {
@@ -300,12 +293,11 @@ export function compileCellEgress(
   // Templates only narrow.
   let result: CellEgressEntry[] = kept.map((k) => k.entry);
   if (deps.narrowTo) {
-    const keptEntries = result;
     const narrowed = deps.narrowTo.map(normalizeEntry);
     for (const [i, entry] of narrowed.entries()) {
-      const allowed = keptEntries.some((k) => coversEntry(k, entry));
+      const allowed = result.some((k) => coversEntry(k, entry));
       if (!allowed) {
-        const raw = deps.narrowTo[i] ?? cellEgressKey(entry);
+        const raw = deps.narrowTo[i] as string;
         throw new CellEgressError(
           "template_widens",
           `template widens: '${raw}' is not allowed by its bundles`,
@@ -320,7 +312,6 @@ export function compileCellEgress(
   }
 
   const entries = dedupeSorted(result);
-  assertWithinCap(entries);
   const bundleIds = [...bundles].sort();
   const digest = createHash("sha256")
     .update(
@@ -330,25 +321,20 @@ export function compileCellEgress(
       }),
     )
     .digest("hex");
-  return { entries, bundles: bundleIds, digest };
+  const set: CellEgressSet = { entries, bundles: bundleIds, digest };
+  assertRenderable(set); // the cap holds at compile time too
+  return set;
 }
 
 /** Agent37 `network`: an allowlist only, never "allow-all". A wildcard also lists its apex. */
 export function toAgent37Network(set: CellEgressSet): { allow: string[] } {
-  if (set.entries.length === 0) {
-    throw new CellEgressError("empty_set", "empty_set: nothing to allow");
-  }
-  assertWithinCap(set.entries);
-  return { allow: renderedNames(set.entries) };
+  return { allow: assertRenderable(set) };
 }
 
 /** The shared proxy shape: every entry pinned to :443, a wildcard also emits its apex. */
 export function toProxyShape(set: CellEgressSet): EgressPolicyShape {
-  if (set.entries.length === 0) {
-    throw new CellEgressError("empty_set", "empty_set: nothing to allow");
-  }
   return {
     level: "domain",
-    allowlist: renderedNames(set.entries).map((name) => `${name}:443`),
+    allowlist: assertRenderable(set).map((name) => `${name}:443`),
   };
 }

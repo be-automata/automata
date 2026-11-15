@@ -6,17 +6,10 @@ import {
   compileCellEgress,
   toAgent37Network,
   toProxyShape,
-  type CellEgressCatalog,
 } from "./cell-egress";
+import { BROKER, CATALOG } from "./cell-egress.fixtures";
 
 // AC5: the worker proxy and the cell plane (Agent37) must agree on every probe.
-
-const BROKER = "broker.automata.test";
-
-const CATALOG: CellEgressCatalog = {
-  "test/npm@1": { id: "test/npm@1", allow: ["registry.npmjs.org"] },
-  "test/wild@1": { id: "test/wild@1", allow: ["*.example.org"] },
-};
 
 const SET = compileCellEgress(["test/npm@1", "test/wild@1"], {
   brokerHost: BROKER,

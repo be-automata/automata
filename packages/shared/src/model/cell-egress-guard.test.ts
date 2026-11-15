@@ -47,6 +47,25 @@ function reasonOf(
 }
 
 describe("assertCellEgressEnforced", () => {
+  it.each<[unknown, string | null]>([
+    [undefined, null],
+    ["observe", "observe"],
+    ["audit", "audit"],
+  ])("carries the observed mode %s", (mode, observed) => {
+    try {
+      assertCellEgressEnforced({
+        profile: profile({
+          configuration: mode === undefined ? undefined : { egress_mode: mode },
+        } as Partial<CellPolicyProfile>),
+        now: NOW,
+      });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(CellEgressNotEnforcedError);
+      expect((e as CellEgressNotEnforcedError).mode).toBe(observed);
+    }
+  });
+
   it("passes for enforce + allowlist + current conformance evidence", () => {
     expect(reasonOf(profile())).toBeUndefined();
   });
@@ -59,17 +78,17 @@ describe("assertCellEgressEnforced", () => {
     [
       "no configuration",
       profile({ configuration: undefined }),
-      "egress_mode_missing",
+      "egress_mode_not_enforce",
     ],
     [
       "observe mode",
       profile({ configuration: { egress_mode: "observe" } }),
-      "egress_mode_observe",
+      "egress_mode_not_enforce",
     ],
     [
       "an unknown mode",
       profile({ configuration: { egress_mode: "audit" } }),
-      "egress_mode_unknown",
+      "egress_mode_not_enforce",
     ],
     [
       "egress none",

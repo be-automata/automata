@@ -10,25 +10,29 @@ import {
  * nothing is logged.
  */
 
-export type CellEgressRefusal =
-  | "unknown_profile" // null, undefined, {} or no id
-  | "egress_mode_missing" // configuration.egress_mode absent
-  | "egress_mode_observe"
-  | "egress_mode_unknown" // any other value than "enforce"
-  | "egress_not_allowlist" // capabilities.egress !== "allowlist"
-  | "allowlist_empty" // capabilities.egress_allowlist not a non-empty list of non-blank strings
-  | "evidence_missing" // no evidence.expires_at
-  | "evidence_not_from_conformance" // evidence.source !== "conformance"
-  | "evidence_invalid" // expires_at not RFC 3339
-  | "evidence_expired"; // expires_at <= now
+export const CELL_EGRESS_GUARD_REASONS = [
+  "unknown_profile", // null, undefined, {} or no id
+  "egress_mode_not_enforce", // configuration.egress_mode absent, "observe" or any value other than "enforce"
+  "egress_not_allowlist", // capabilities.egress !== "allowlist"
+  "allowlist_empty", // capabilities.egress_allowlist not a non-empty list of non-blank strings
+  "evidence_missing", // no evidence.expires_at
+  "evidence_not_from_conformance", // evidence.source !== "conformance"
+  "evidence_invalid", // expires_at not RFC 3339
+  "evidence_expired", // expires_at <= now
+] as const;
+
+export type CellEgressRefusal = (typeof CELL_EGRESS_GUARD_REASONS)[number];
 
 export class CellEgressNotEnforcedError extends Error {
   readonly reason: CellEgressRefusal;
+  /** The observed configuration.egress_mode (null when absent); set only for egress_mode_not_enforce. */
+  readonly mode: string | null;
 
-  constructor(reason: CellEgressRefusal) {
+  constructor(reason: CellEgressRefusal, mode: string | null = null) {
     super(`cell egress not enforced: ${reason}`);
     this.name = "CellEgressNotEnforcedError";
     this.reason = reason;
+    this.mode = mode;
   }
 }
 
@@ -55,14 +59,11 @@ export function assertCellEgressEnforced(input: {
   }
 
   const mode = profile.configuration?.egress_mode;
-  if (mode === undefined || mode === null) {
-    throw new CellEgressNotEnforcedError("egress_mode_missing");
-  }
-  if (mode === "observe") {
-    throw new CellEgressNotEnforcedError("egress_mode_observe");
-  }
   if (mode !== "enforce") {
-    throw new CellEgressNotEnforcedError("egress_mode_unknown");
+    throw new CellEgressNotEnforcedError(
+      "egress_mode_not_enforce",
+      typeof mode === "string" ? mode : null,
+    );
   }
 
   const caps = profile.capabilities ?? {};

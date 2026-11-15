@@ -11,14 +11,7 @@ import {
   type CellEgressErrorCode,
   type CellEgressSet,
 } from "./cell-egress";
-
-const BROKER = "broker.automata.test";
-
-const CATALOG: CellEgressCatalog = {
-  "test/npm@1": { id: "test/npm@1", allow: ["registry.npmjs.org"] },
-  "test/wild@1": { id: "test/wild@1", allow: ["*.example.org"] },
-  "test/gh@1": { id: "test/gh@1", allow: ["*.github.com"] },
-};
+import { BROKER, CATALOG } from "./cell-egress.fixtures";
 
 function codeOf(fn: () => unknown): CellEgressErrorCode | undefined {
   try {
