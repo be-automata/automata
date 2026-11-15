@@ -108,7 +108,7 @@ function normalizeEntry(raw: string): CellEgressEntry {
   if (text.includes("[") || text.includes("]") || text.split(":").length > 2) {
     // Echo only what looks like an IPv6 literal; anything else (for example
     // `host:user:token`) may carry a credential.
-    if (/^[0-9a-f:.[\]]+$/.test(text)) {
+    if (isIpv6Literal(text)) {
       throw new CellEgressError("ipv6", `ipv6: '${raw}' is not supported`, raw);
     }
     throw new CellEgressError(
@@ -177,6 +177,20 @@ function normalizeEntry(raw: string): CellEgressEntry {
     );
   }
   return { name, wildcard };
+}
+
+/**
+ * True only for a real IPv6 literal (bracketed or not). The WHATWG URL parser
+ * validates it, which works the same in Node and in Workers (no node:net).
+ */
+function isIpv6Literal(text: string): boolean {
+  const bare = text.replace(/^\[/, "").replace(/\]$/, "");
+  if (!bare.includes(":")) return false;
+  try {
+    return new URL(`http://[${bare}]/`).hostname !== "";
+  } catch {
+    return false;
+  }
 }
 
 /** Names `d` matches: its own name, plus every subdomain when it is a wildcard. */

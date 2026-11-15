@@ -1,6 +1,6 @@
-import type { CellEgressCatalog } from "./cell-egress";
+import type { CellEgressCatalog } from "../cell-egress";
 
-/** Test-only fixtures shared by the cell egress suites. */
+/** Test-only fixtures shared by the cell egress suites (the `__fixtures__` convention, as in self-heal/bench). */
 export const BROKER = "broker.automata.test";
 
 export const CATALOG: CellEgressCatalog = {

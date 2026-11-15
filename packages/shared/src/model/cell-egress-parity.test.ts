@@ -7,7 +7,7 @@ import {
   toAgent37Network,
   toProxyShape,
 } from "./cell-egress";
-import { BROKER, CATALOG } from "./cell-egress.fixtures";
+import { BROKER, CATALOG } from "./__fixtures__/cell-egress";
 
 // AC5: the worker proxy and the cell plane (Agent37) must agree on every probe.
 

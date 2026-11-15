@@ -11,7 +11,7 @@ import {
   type CellEgressErrorCode,
   type CellEgressSet,
 } from "./cell-egress";
-import { BROKER, CATALOG } from "./cell-egress.fixtures";
+import { BROKER, CATALOG } from "./__fixtures__/cell-egress";
 
 function codeOf(fn: () => unknown): CellEgressErrorCode | undefined {
   try {
@@ -292,6 +292,27 @@ describe("compileCellEgress", () => {
       expect(err.code).toBe(code);
       expect(err.entry).toBeUndefined();
       expect(err.message).not.toContain(raw);
+    }
+  });
+
+  it("does not echo an all-hex multi-colon entry that is not an IPv6 address", () => {
+    try {
+      compile([], { narrowTo: ["deadbeef:cafe:0123abcd"] });
+      expect.unreachable();
+    } catch (e) {
+      const err = e as CellEgressError;
+      expect(err.code).toBe("ipv6");
+      expect(err.entry).toBeUndefined();
+      expect(err.message).not.toContain("deadbeef");
+    }
+  });
+
+  it("still echoes a real IPv6 literal", () => {
+    try {
+      compile([], { narrowTo: ["[2001:db8::1]"] });
+      expect.unreachable();
+    } catch (e) {
+      expect((e as CellEgressError).entry).toBe("[2001:db8::1]");
     }
   });
 
