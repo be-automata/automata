@@ -11,6 +11,7 @@ import { useCurrentGitHubRepo } from "../hooks/useGitInfo.js";
 import {
   assertSafeBranchName,
   InvalidBranchNameError,
+  localBranchExists,
   runGit,
 } from "../utils/git.js";
 
@@ -60,18 +61,7 @@ async function switchToBranch(
     await runGit(["fetch"]);
 
     // Check if branch exists locally
-    let branchExists = false;
-    try {
-      await runGit([
-        "show-ref",
-        "--verify",
-        "--quiet",
-        `refs/heads/${branchName}`,
-      ]);
-      branchExists = true;
-    } catch {
-      // Branch doesn't exist locally
-    }
+    const branchExists = await localBranchExists(branchName);
 
     if (branchExists) {
       // Switch to branch

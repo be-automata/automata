@@ -40,6 +40,29 @@ export async function runGit(
 }
 
 /**
+ * Whether `name` is a local branch (a tag or commit with that name does not
+ * count).
+ */
+export async function localBranchExists(
+  name: string,
+  opts: RunGitOptions = {},
+): Promise<boolean> {
+  try {
+    await runGit(
+      ["show-ref", "--verify", "--quiet", `refs/heads/${name}`],
+      opts,
+    );
+    return true;
+  } catch (err) {
+    // show-ref exits 1 when the ref is missing; anything else is a real error.
+    if (err instanceof Error && (err as { code?: unknown }).code === 1) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
  * Throws InvalidBranchNameError unless `name` is a valid git branch name made
  * only of [A-Za-z0-9._/+-] that cannot be read as a command-line option.
  */

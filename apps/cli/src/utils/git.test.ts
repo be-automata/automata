@@ -4,7 +4,12 @@ import { join } from "path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { assertSafeBranchName, InvalidBranchNameError, runGit } from "./git";
+import {
+  assertSafeBranchName,
+  InvalidBranchNameError,
+  localBranchExists,
+  runGit,
+} from "./git";
 
 describe("assertSafeBranchName", () => {
   it.each(["main", "feature/x", "terragon/abc-123", "release-1.2.3"])(
@@ -76,6 +81,27 @@ describe("runGit", () => {
       runGit(["rev-parse", "--verify", "--end-of-options", name], { cwd: dir }),
     ).rejects.toThrow();
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("reports only local branches as existing", async () => {
+    await runGit(
+      [
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+      ],
+      { cwd: dir },
+    );
+    await runGit(["tag", "foo"], { cwd: dir });
+    await expect(localBranchExists("foo", { cwd: dir })).resolves.toBe(false);
+    await runGit(["branch", "bar"], { cwd: dir });
+    await expect(localBranchExists("bar", { cwd: dir })).resolves.toBe(true);
   });
 
   it("runs in the given working directory", async () => {
