@@ -886,7 +886,15 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
         "0123abcd",
         "0123456789abcdef".repeat(4),
       ];
-      const attempts = [1, 2, 9, 10, 99999];
+      const attempts = [
+        1,
+        2,
+        9,
+        10,
+        99999,
+        2147483647,
+        Number.MAX_SAFE_INTEGER,
+      ];
       for (const issueNumber of issues) {
         for (const fingerprint of fps) {
           for (const attemptNo of attempts) {
@@ -896,6 +904,29 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
             });
           }
         }
+      }
+    });
+
+    it("a seeded sample of safe-integer issue and attempt numbers maps to exactly its ref", () => {
+      // Deterministic BigInt LCG (Knuth MMIX), reduced into [1, MAX_SAFE_INTEGER].
+      let state = 623n;
+      const MASK = (1n << 64n) - 1n;
+      const max = BigInt(Number.MAX_SAFE_INTEGER);
+      const next = (): number => {
+        state = (state * 6364136223846793005n + 1442695040888963407n) & MASK;
+        return Number((state >> 11n) % max) + 1;
+      };
+      for (let i = 0; i < 500; i++) {
+        const issueNumber = next();
+        const attemptNo = next();
+        const name = fixBranchName({
+          issueNumber,
+          fingerprint: "deadbeef",
+          attemptNo,
+        });
+        expect(selfHealRefFence(fix(name)), name).toEqual({
+          exactRef: `refs/heads/${name}`,
+        });
       }
     });
   });
