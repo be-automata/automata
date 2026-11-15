@@ -10,7 +10,12 @@ import {
   type LedgerRow,
 } from "./ledger";
 
-/** Every runner instance takes this session advisory lock before touching the ledger. */
+/**
+ * Every applying runner (`--apply`, `--mark-applied`) try-locks this session
+ * advisory lock before any other SQL. A runner that cannot get it fails fast
+ * and touches nothing: waiting inside the lock query would hold a snapshot
+ * that a `CREATE INDEX CONCURRENTLY` in the holder waits for (deadlock).
+ */
 export const ADVISORY_LOCK_KEY = "automata:schema_migrations";
 
 export interface MigrationLogger {
@@ -103,11 +108,35 @@ export function planProblems(plan: MigrationPlan): string[] {
   ];
 }
 
-async function withAdvisoryLock<T>(
+/** Another runner holds the advisory lock; this run did nothing. */
+export class MigrationLockBusyError extends MigrationError {
+  constructor() {
+    super(
+      `another migration run holds the lock (${ADVISORY_LOCK_KEY}); nothing was applied`,
+    );
+    this.name = "MigrationLockBusyError";
+  }
+}
+
+/**
+ * Runs `fn` while holding the session advisory lock, taken with
+ * `pg_try_advisory_lock` (never a blocking wait) and released in `finally`.
+ * Session advisory locks stack, so a nested call on the same session (the
+ * runner functions under the CLI's outer lock) succeeds and pops one level.
+ * The busy error is thrown before the `try`, so a failed try-lock never
+ * unlocks a lock this session does not own.
+ */
+export async function withAdvisoryLock<T>(
   c: ClientBase,
   fn: () => Promise<T>,
 ): Promise<T> {
-  await c.query(`SELECT pg_advisory_lock(hashtext($1))`, [ADVISORY_LOCK_KEY]);
+  const result = await c.query<{ locked: boolean }>(
+    `SELECT pg_try_advisory_lock(hashtext($1)) AS locked`,
+    [ADVISORY_LOCK_KEY],
+  );
+  if (result.rows[0]?.locked !== true) {
+    throw new MigrationLockBusyError();
+  }
   try {
     return await fn();
   } finally {
@@ -236,9 +265,9 @@ async function applyNoTransaction(
 }
 
 /**
- * Applies `plan.pending` in order under the advisory lock. The ledger is
- * re-read once the lock is held, so a runner that waited behind another one
- * applies only what is still pending (usually nothing). Stops at the first
+ * Applies `plan.pending` in order under the advisory lock; throws
+ * `MigrationLockBusyError` when another runner holds it. The ledger is
+ * re-read once the lock is held, so `plan` may be stale. Stops at the first
  * failure; every file before it stays applied.
  */
 export async function applyMigrations(
