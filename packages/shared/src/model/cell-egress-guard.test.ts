@@ -78,17 +78,17 @@ describe("assertCellEgressEnforced", () => {
     [
       "no configuration",
       profile({ configuration: undefined }),
-      "egress_mode_not_enforce",
+      "egress_mode_missing",
     ],
     [
       "observe mode",
       profile({ configuration: { egress_mode: "observe" } }),
-      "egress_mode_not_enforce",
+      "egress_mode_observe",
     ],
     [
       "an unknown mode",
       profile({ configuration: { egress_mode: "audit" } }),
-      "egress_mode_not_enforce",
+      "egress_mode_unknown",
     ],
     [
       "egress none",

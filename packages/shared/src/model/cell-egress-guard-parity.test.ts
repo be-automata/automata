@@ -70,14 +70,18 @@ const evidence = (patch: Record<string, unknown>) => ({
 
 /** guard reason -> the rego reasons that may carry it (any one is enough). */
 const REGO_REASONS: Record<
-  Exclude<CellEgressRefusal, "allowlist_empty" | "unknown_profile">,
+  Exclude<
+    CellEgressRefusal,
+    "allowlist_empty" | "unknown_profile" | "evidence_invalid"
+  >,
   string[]
 > = {
-  egress_mode_not_enforce: ["egress_not_enforced"],
+  egress_mode_missing: ["egress_not_enforced"],
+  egress_mode_observe: ["egress_not_enforced"],
+  egress_mode_unknown: ["egress_not_enforced"],
   egress_not_allowlist: ["egress_not_enforced"],
   evidence_missing: ["evidence_missing"],
   evidence_not_from_conformance: ["evidence_not_from_conformance"],
-  evidence_invalid: [], // rego's parse builtin throws instead; see the row below
   evidence_expired: ["evidence_expired"],
 };
 
@@ -99,17 +103,17 @@ const ROWS: {
   {
     name: "observe mode",
     profile: { ...base, configuration: { egress_mode: "observe" } },
-    guard: "egress_mode_not_enforce",
+    guard: "egress_mode_observe",
   },
   {
     name: "missing mode",
     profile: without(base, "configuration"),
-    guard: "egress_mode_not_enforce",
+    guard: "egress_mode_missing",
   },
   {
     name: "unknown mode",
     profile: { ...base, configuration: { egress_mode: "audit" } },
-    guard: "egress_mode_not_enforce",
+    guard: "egress_mode_unknown",
   },
   {
     name: "caps.egress none",
@@ -175,6 +179,27 @@ describe("cell egress guard vs compiled cell.wasm", () => {
       const mapped = REGO_REASONS[refusal as keyof typeof REGO_REASONS];
       expect(mapped.some((r) => decision.reasons.includes(r))).toBe(true);
     }
+  });
+
+  // evidence_invalid has no rego reason: the policy's RFC 3339 parse builtin
+  // throws on a malformed expiry instead of denying, so the guard refuses it
+  // and policy.evaluate throws.
+  it("evidence_invalid: the guard refuses, policy.evaluate throws", () => {
+    const bad = evidence({ expires_at: "not-a-date" });
+    expect(() =>
+      assertCellEgressEnforced({
+        profile: bad as unknown as CellPolicyProfile,
+        now: new Date(NOW),
+      }),
+    ).toThrow(/evidence_invalid/);
+    expect(() =>
+      policy.evaluate({
+        now: NOW,
+        cell,
+        provenance: server,
+        profile: bad,
+      } as unknown as CellPolicyInput),
+    ).toThrow();
   });
 
   // allowlist_empty has no rego equivalent: the policy checks each host the

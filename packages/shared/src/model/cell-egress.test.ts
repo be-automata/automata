@@ -234,6 +234,27 @@ describe("compileCellEgress", () => {
     expect(codeOf(() => compile([], { catalog }))).toBe("platform_override");
   });
 
+  it("raises bundle_id_mismatch when a catalog key and its bundle id differ", () => {
+    const catalog: CellEgressCatalog = {
+      "t/a@1": { id: "t/b@1", allow: ["a.example.com"] },
+    };
+    expect(codeOf(() => compile([], { catalog }))).toBe("bundle_id_mismatch");
+  });
+
+  it("does not echo a non-numeric port", () => {
+    try {
+      compile([], { narrowTo: ["host.example.com:hunter2"] });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(CellEgressError);
+      const err = e as CellEgressError;
+      expect(err.code).toBe("port_not_443");
+      expect(err.entry).toBeUndefined();
+      expect(err.message).not.toContain("hunter2");
+      expect(JSON.stringify(err)).not.toContain("hunter2");
+    }
+  });
+
   it("raises platform_denied when a deny covers a platform entry", () => {
     const catalog: CellEgressCatalog = {
       "t/deny@1": { id: "t/deny@1", deny: ["*.anthropic.com"] },

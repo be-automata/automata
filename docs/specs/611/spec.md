@@ -481,3 +481,19 @@ These override anything above.
 - shared vitest over `src/model` and `src/cell-policy`.
 
 The shared and worker suites run unsandboxed.
+
+## Simplify + review round
+
+The contract after the simplify pass and the roborev review.
+
+- **`CellEgressRefusal`** (guard reasons, in check order): `unknown_profile`, `egress_mode_missing`, `egress_mode_observe`, `egress_mode_unknown`, `egress_not_allowlist`, `allowlist_empty`, `evidence_missing`, `evidence_not_from_conformance`, `evidence_invalid`, `evidence_expired`. The three mode reasons restore AC7: an observe, missing or unknown profile and an empty allowlist each get their own reason. All three mode reasons map to rego `egress_not_enforced`. `evidence_invalid` has no rego reason: the guard refuses it and `policy.evaluate` throws on the malformed expiry (the parity test asserts both).
+- **`bundle_id_mismatch`** is a new `CellEgressErrorCode`. The catalog walk throws it when a catalog entry's `bundle.id` differs from its key.
+- **Non-numeric ports are never echoed.** `port_not_443` echoes the raw entry only when the port is all digits. Otherwise it throws a generic "not echoed" message with `entry` undefined.
+- **AC4, per W1.** `toAgent37Network` output is the compiled keys plus the apex of each wildcard. It is never `allow-all`, and an empty set throws `empty_set`.
+- **`toProxyShape` also enforces the 100-entry cap**, over the rendered list, like `toAgent37Network`.
+- **`IPV4_RE` export reverted.** It is private to its module again.
+- **Deferred follow-ups:**
+  - one host parser shared by `egress-policy`, `cell-egress` and the sandbox code;
+  - folding `egress_not_enforced` into `egress_open`;
+  - moving `toAgent37Network` next to the sandbox renderers in PR 3;
+  - moving `matchEgress` to `utils`.

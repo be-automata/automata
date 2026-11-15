@@ -12,7 +12,9 @@ import {
 
 export const CELL_EGRESS_GUARD_REASONS = [
   "unknown_profile", // null, undefined, {} or no id
-  "egress_mode_not_enforce", // configuration.egress_mode absent, "observe" or any value other than "enforce"
+  "egress_mode_missing", // configuration.egress_mode absent
+  "egress_mode_observe", // configuration.egress_mode is "observe"
+  "egress_mode_unknown", // configuration.egress_mode is any other value than "enforce"
   "egress_not_allowlist", // capabilities.egress !== "allowlist"
   "allowlist_empty", // capabilities.egress_allowlist not a non-empty list of non-blank strings
   "evidence_missing", // no evidence.expires_at
@@ -25,7 +27,7 @@ export type CellEgressRefusal = (typeof CELL_EGRESS_GUARD_REASONS)[number];
 
 export class CellEgressNotEnforcedError extends Error {
   readonly reason: CellEgressRefusal;
-  /** The observed configuration.egress_mode (null when absent); set only for egress_mode_not_enforce. */
+  /** The observed configuration.egress_mode (null when absent); set only for the egress_mode_* refusals. */
   readonly mode: string | null;
 
   constructor(reason: CellEgressRefusal, mode: string | null = null) {
@@ -59,9 +61,15 @@ export function assertCellEgressEnforced(input: {
   }
 
   const mode = profile.configuration?.egress_mode;
+  if (mode === undefined || mode === null) {
+    throw new CellEgressNotEnforcedError("egress_mode_missing");
+  }
+  if (mode === "observe") {
+    throw new CellEgressNotEnforcedError("egress_mode_observe", "observe");
+  }
   if (mode !== "enforce") {
     throw new CellEgressNotEnforcedError(
-      "egress_mode_not_enforce",
+      "egress_mode_unknown",
       typeof mode === "string" ? mode : null,
     );
   }

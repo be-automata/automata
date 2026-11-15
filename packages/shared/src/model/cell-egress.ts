@@ -54,6 +54,7 @@ export type CellEgressErrorCode =
   | "unknown_bundle"
   | "extends_cycle"
   | "platform_override"
+  | "bundle_id_mismatch"
   | "invalid_host"
   | "ip_literal"
   | "ipv6"
@@ -112,6 +113,13 @@ function normalizeEntry(raw: string): CellEgressEntry {
     );
   }
   if (port !== null && port !== "443") {
+    // A non-numeric "port" may be a secret (host:token): never echo it.
+    if (!/^[0-9]+$/.test(port)) {
+      throw new CellEgressError(
+        "port_not_443",
+        "port_not_443: entry pins a non-numeric port other than 443; not echoed",
+      );
+    }
     throw new CellEgressError(
       "port_not_443",
       `port_not_443: '${raw}' pins a port other than 443`,
@@ -206,6 +214,13 @@ function collect(
       throw new CellEgressError(
         "platform_override",
         `platform_override: '${key}' cannot replace the platform bundle`,
+        key,
+      );
+    }
+    if (bundle.id !== key) {
+      throw new CellEgressError(
+        "bundle_id_mismatch",
+        `bundle_id_mismatch: catalog key '${key}' holds a bundle whose id is '${bundle.id}'`,
         key,
       );
     }
