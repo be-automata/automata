@@ -33,6 +33,7 @@ const allowlistProfile: CellPolicyProfile = {
   id: "agent37/gvisor/allowlist",
   provider: "agent37",
   tier: "managed",
+  configuration: { egress_mode: "enforce" },
   capabilities: {
     egress: "allowlist",
     egress_allowlist: ["gateway.example"],
@@ -163,12 +164,44 @@ const CASES: Case[] = [
   },
   {
     name: "enforce mode keeps the measured egress",
+    // egress_not_enforced is managed-tier only: a customer_box profile with no configuration is allowed.
     input: req(undefined, {
-      ...allowlistProfile,
-      configuration: { egress_mode: "enforce" },
+      ...without(allowlistProfile, "configuration"),
+      tier: "customer_box",
     }),
     allowed: true,
     reasons: [],
+  },
+  {
+    name: "managed observe mode is not enforced",
+    input: req(undefined, {
+      ...allowlistProfile,
+      configuration: { egress_mode: "observe" },
+    }),
+    allowed: false,
+    reasons: ["egress_not_enforced", "egress_open"],
+  },
+  {
+    name: "managed profile with a missing egress mode is not enforced",
+    input: req(undefined, without(allowlistProfile, "configuration")),
+    allowed: false,
+    reasons: ["egress_not_enforced"],
+  },
+  {
+    name: "managed profile with caps.egress none is not enforced",
+    input: req(undefined, withCaps({ egress: "none" })),
+    allowed: false,
+    reasons: ["egress_not_enforced"],
+  },
+  {
+    name: "customer_box observe is open but not unenforced",
+    input: req(undefined, {
+      ...allowlistProfile,
+      tier: "customer_box",
+      configuration: { egress_mode: "observe" },
+    }),
+    allowed: false,
+    reasons: ["egress_open"],
   },
   {
     name: "host outside the allowlist denies",
@@ -292,6 +325,20 @@ describe("allow_cell compiled to WASM", () => {
     if (!decision.allowed) {
       expect(decision.reasons.length).toBeGreaterThan(0);
     }
+  });
+
+  it("egress_not_enforced is managed-tier only", () => {
+    const boxObserve = policy.evaluate(
+      req(undefined, {
+        ...allowlistProfile,
+        tier: "customer_box",
+        configuration: { egress_mode: "observe" },
+      }) as CellPolicyInput,
+    );
+    expect(boxObserve.reasons).toContain("egress_open");
+    expect(boxObserve.reasons).not.toContain("egress_not_enforced");
+    const enforced = policy.evaluate(req() as CellPolicyInput);
+    expect(enforced.reasons).not.toContain("egress_not_enforced");
   });
 
   it("reasons come back sorted and unique", () => {
