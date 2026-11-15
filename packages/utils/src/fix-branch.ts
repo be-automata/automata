@@ -19,7 +19,7 @@ export interface FixBranchNameInput {
 }
 
 function assertPositiveInteger(value: number, what: string): void {
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`fix run ${what} must be a positive integer, got ${value}`);
   }
 }
