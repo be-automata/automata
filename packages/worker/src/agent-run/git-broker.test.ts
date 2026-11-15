@@ -1,3 +1,4 @@
+import { Server } from "node:http";
 import { Readable } from "node:stream";
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -295,6 +296,35 @@ async function postReceivePack(b: GitBroker, body: Buffer) {
 }
 
 describe("startGitBroker refFence (FENCE-01 — self-heal fix runs)", () => {
+  it("rejects an exactRef that is not a valid refs/heads/ branch ref, before listening", async () => {
+    const listen = vi.spyOn(Server.prototype, "listen");
+    try {
+      for (const exactRef of [
+        "refs/heads/",
+        "refs/heads/a..b",
+        "refs/tags/v1",
+      ]) {
+        const { impl, dials } = bodyReadingFetch();
+        await expect(
+          startGitBroker({
+            installationToken: TOKEN,
+            repoFullName: REPO,
+            runBearer: BEARER,
+            fetchImpl: impl,
+            refFence: { exactRef },
+          }),
+          exactRef,
+        ).rejects.toThrow(
+          `git-broker: refFence.exactRef must be a valid refs/heads/ branch ref, got: ${exactRef}`,
+        );
+        expect(dials.count).toBe(0);
+      }
+      expect(listen).not.toHaveBeenCalled();
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
   it("a push to the exact attempt branch is forwarded byte-identically and its sha recorded", async () => {
     const { b, calls } = await bootFenced();
     expect(b.lastPushedSha()).toBeNull();

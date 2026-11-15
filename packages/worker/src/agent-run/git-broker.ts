@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import { HOP_BY_HOP, REQUEST_OWNED, timingSafeEqualStr } from "./broker-common";
 import {
   checkRefFence,
+  isBranchRef,
   parseReceivePackCommands,
   type FencedRefResult,
 } from "@terragon/utils/receive-pack-refs";
@@ -80,7 +81,7 @@ export type StartGitBrokerOptions = {
   fetchImpl?: typeof fetch;
   /**
    * FENCE-01: when set, pushes may update ONLY this fully-qualified ref
-   * (`refs/heads/automata/fix-…`). Absent ⇒ no fence and no buffering.
+   * (`refs/heads/automata/fix-…`), and it must pass `isBranchRef`. Absent ⇒ no fence and no buffering.
    */
   refFence?: { exactRef: string };
 };
@@ -90,9 +91,9 @@ export async function startGitBroker(
 ): Promise<GitBroker> {
   const { installationToken, repoFullName, runBearer, refFence } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
-  if (refFence && !refFence.exactRef.startsWith("refs/heads/")) {
+  if (refFence && !isBranchRef(refFence.exactRef)) {
     throw new Error(
-      `git-broker: refFence.exactRef must be a refs/heads/ ref, got: ${refFence.exactRef}`,
+      `git-broker: refFence.exactRef must be a valid refs/heads/ branch ref, got: ${refFence.exactRef}`,
     );
   }
   let lastPushedSha: string | null = null;
