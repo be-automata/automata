@@ -62,7 +62,12 @@ async function switchToBranch(
     // Check if branch exists locally
     let branchExists = false;
     try {
-      await runGit(["rev-parse", "--verify", "--end-of-options", branchName]);
+      await runGit([
+        "show-ref",
+        "--verify",
+        "--quiet",
+        `refs/heads/${branchName}`,
+      ]);
       branchExists = true;
     } catch {
       // Branch doesn't exist locally
