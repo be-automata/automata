@@ -1319,6 +1319,103 @@ describe("parseReportStatus", () => {
   });
 });
 
+describe("git broker push ref fence (#610)", () => {
+  async function expectNoSideEffects(
+    h: ReturnType<typeof harness>,
+    stepKey: string,
+  ) {
+    expect(h.mintWriteToken).not.toHaveBeenCalled();
+    expect(h.allowWorkflowWrite).not.toHaveBeenCalled();
+    expect(h.calls).toHaveLength(0);
+    expect(await effectRows(stepKey)).toBe(0);
+    expect(await effectsUsed(stepKey)).toBe(0);
+  }
+
+  it("AC3 a push to allowed_ref is forwarded, recorded and replayed", async () => {
+    const f = await fixture(5);
+    const h = harness();
+    const first = await h.handler(push(f.token, pushBody()));
+    expect(first.status).toBe(200);
+    expect(h.calls).toHaveLength(1);
+    const replay = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await replay.arrayBuffer())).toEqual(REPORT_OK);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectsUsed(f.stepKey)).toBe(1);
+  });
+
+  it("AC4 a push to another ref is 403 ref_not_allowed with no mint, no upstream call and no budget spent", async () => {
+    const f = await fixture(5);
+    const h = harness();
+    const res = await h.handler(
+      push(f.token, concat(commandSection(NEW_A, "refs/heads/main"), PACK)),
+    );
+    expect([res.status, (await json(res)).error]).toEqual([
+      403,
+      "ref_not_allowed",
+    ]);
+    await expectNoSideEffects(h, f.stepKey);
+  });
+
+  it("AC4 one command outside the fence rejects the whole push", async () => {
+    const f = await fixture(5);
+    const h = harness();
+    const two = concat(
+      pkt(`${OLD} ${NEW_A} ${REF}\0report-status\n`),
+      pkt(`${OLD} ${NEW_A} refs/tags/v1\n`),
+      FLUSH,
+      PACK,
+    );
+    const res = await h.handler(push(f.token, two));
+    expect([res.status, (await json(res)).error]).toEqual([
+      403,
+      "ref_not_allowed",
+    ]);
+    await expectNoSideEffects(h, f.stepKey);
+  });
+
+  it("AC4 deleting allowed_ref is 403 delete_not_allowed with no side effects", async () => {
+    const f = await fixture(5);
+    const h = harness();
+    const res = await h.handler(
+      push(f.token, concat(commandSection("0".repeat(40)), PACK)),
+    );
+    expect([res.status, (await json(res)).error]).toEqual([
+      403,
+      "delete_not_allowed",
+    ]);
+    await expectNoSideEffects(h, f.stepKey);
+  });
+
+  it("AC5 a null allowed_ref refuses every push with 403 no_ref_fence and no side effects", async () => {
+    const f = await createTestCellStep({
+      db,
+      effectBudget: 5,
+      allowedRef: null,
+    });
+    const h = harness();
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      403,
+      "no_ref_fence",
+    ]);
+    await expectNoSideEffects(h, f.stepKey);
+  });
+
+  it("AC6 the probe of a null-fence step still passes through, and the advert is unchanged", async () => {
+    const f = await createTestCellStep({
+      db,
+      effectBudget: 5,
+      allowedRef: null,
+    });
+    const h = harness({ body: enc.encode("probe-ok") });
+    const res = await h.handler(push(f.token, FLUSH));
+    expect(res.status).toBe(200);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(0);
+  });
+});
+
 describe("parseAdvertisedRefs", () => {
   it("reads ref tips after the service line, ignoring capabilities", () => {
     expect(

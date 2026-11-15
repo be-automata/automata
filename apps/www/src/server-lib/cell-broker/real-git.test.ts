@@ -151,18 +151,22 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     return { bare, calls, fetchImpl };
   }
 
-  async function step() {
+  async function step(allowedRef: string) {
     const s = await createTestCellStep({
       db,
       repoFullName: "org/repo",
       effectBudget: 10,
+      allowedRef,
     });
     return { stepKey: s.stepKey, bearer: s.token };
   }
 
-  async function setup(maxPushBytes?: number) {
+  async function setup(
+    maxPushBytes?: number,
+    allowedRef = "refs/heads/feat/x",
+  ) {
     const up = upstream();
-    const s = await step();
+    const s = await step(allowedRef);
     active = createGitBrokerHandler({
       db,
       fetchImpl: up.fetchImpl,
@@ -256,7 +260,7 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     "push of a >1 MiB commit sends git's 0000 probe first: it lands, and the probe is not an effect",
     async (ctx) => {
       if (!server) return ctx.skip();
-      const t = await setup();
+      const t = await setup(undefined, "refs/heads/feat/big");
       const work = tmp("real-git-work-");
       await t.run(work, "clone", t.remote, "clone");
       const clone = path.join(work, "clone");
@@ -307,7 +311,7 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
     "AC10 end to end: a push over the cap fails, nothing lands, the claim is released",
     async (ctx) => {
       if (!server) return ctx.skip();
-      const t = await setup(200 * 1024);
+      const t = await setup(200 * 1024, "refs/heads/feat/over");
       const work = tmp("real-git-work-");
       await t.run(work, "clone", t.remote, "clone");
       const clone = path.join(work, "clone");
@@ -333,6 +337,44 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
       const e = await effects(t.stepKey);
       expect(e.rows).toHaveLength(0);
       expect(e.used).toBe(1);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    "#610 a push outside the fence fails with a readable 403, nothing lands and no effect is spent",
+    async (ctx) => {
+      if (!server) return ctx.skip();
+      const t = await setup();
+      const work = tmp("real-git-work-");
+      await t.run(work, "clone", t.remote, "clone");
+      const clone = path.join(work, "clone");
+      fs.writeFileSync(path.join(clone, "feature.txt"), "feature\n");
+      git(clone, "add", ".");
+      git(clone, ...COMMIT, "commit", "-m", "feature");
+      const mainBefore = git(t.bare, "rev-parse", "refs/heads/main");
+      const postsBefore = t.calls.filter((c) => c.method === "POST").length;
+      let failure: { code?: number | string; stderr?: string } | null = null;
+      try {
+        await t.run(clone, "push", "origin", "HEAD:refs/heads/main");
+      } catch (error) {
+        failure = error as { code?: number | string; stderr?: string };
+      }
+      expect(failure).not.toBeNull();
+      expect(failure?.code).not.toBe(0);
+      expect(failure?.stderr ?? "").toContain("403");
+      expect(git(t.bare, "rev-parse", "refs/heads/main")).toBe(mainBefore);
+      expect(t.calls.filter((c) => c.method === "POST")).toHaveLength(
+        postsBefore,
+      );
+      const e = await effects(t.stepKey);
+      expect(e.rows).toHaveLength(0);
+      expect(e.used).toBe(0);
+      // The allowed ref still goes through.
+      await t.run(clone, "push", "origin", "HEAD:refs/heads/feat/x");
+      expect(git(t.bare, "rev-parse", "refs/heads/feat/x")).toBe(
+        git(clone, "rev-parse", "HEAD"),
+      );
     },
     TEST_TIMEOUT,
   );
