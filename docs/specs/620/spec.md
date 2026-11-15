@@ -224,7 +224,7 @@ export async function startGitBroker(
   - AC4: `git-broker.test.ts` — a new `it` that, for each of `refs/heads/`, `refs/heads/a..b`, `refs/tags/v1`, awaits `expect(startGitBroker({ installationToken: TOKEN, repoFullName: REPO, runBearer: BEARER, fetchImpl, refFence: { exactRef } })).rejects.toThrow(/must be a valid refs\/heads\/ branch ref/)` and checks the dial counter stayed 0. Do not assign the module-level `broker` (there is nothing to close).
   - AC5: `workflow.test.ts`, inside the `selfHealRefFence` describe:
     1. **Shape drift test.** Read `../../../../apps/www/src/server-lib/audit/fix-run-prompt.ts` via `new URL(…, import.meta.url)` (path from `packages/worker/src/agent-run/`; verify it resolves) and assert it contains ``return `${FIX_BRANCH_PREFIX}${issueNumber}-${fingerprint.slice(0, 8)}-a${attemptNo}`;`` and `const FINGERPRINT_RE = /^[0-9a-f]{8,}$/;`. If either changes, this test fails and forces the table below to be revisited.
-    2. **Table over the documented shape.** A local `generated(issue, fp8, attempt)` that builds `` `${WORKER_FIX_BRANCH_PREFIX}${issue}-${fp8}-a${attempt}` ``, crossed over issue `{1, 9, 10, 12, 99999, 2147483647, Number.MAX_SAFE_INTEGER}`, fp8 `{"00000000", "ffffffff", "deadbeef", "0123abcd"}` and attempt `{1, 2, 9, 10, 99999}`; each maps to exactly `refs/heads/<name>`. Add a deterministic sweep (e.g. a seeded LCG over issue/attempt in `[1, 99999]` and 8-hex fingerprints, a few thousand names) so the claim matches the ticket's 4,000+ sweep. No `fast-check`: it is not installed (`node_modules/fast-check` absent); do not add it.
+    2. **Table over the documented shape.** A local `generated(issue, fp8, attempt)` that builds `` `${WORKER_FIX_BRANCH_PREFIX}${issue}-${fp8}-a${attempt}` ``, crossed over issue `{1, 9, 10, 12, 99999, 2147483647, Number.MAX_SAFE_INTEGER}`, fp8 `{"00000000", "ffffffff", "deadbeef", "0123abcd"}` and attempt `{1, 2, 9, 10, 99999}`; each maps to exactly `refs/heads/<name>`. (A seeded sweep was built, then dropped in the /simplify pass as redundant with this table: it used the same shape and added no edge value.) No `fast-check`: it is not installed (`node_modules/fast-check` absent); do not add it.
   - Keep the existing prefix drift test (:876-887) as is.
 - **TypeScript (AGENTS.md):** strict; no `any`; no `!` without a comment; `??` over `||`; `async`/`await` only; English identifiers; no commented-out code; no enums.
 - **Formatting:** `pnpm exec prettier --no-editorconfig --config .prettierrc --write <files>` (the `.editorconfig` disagrees with the repo's prettier config).
@@ -254,7 +254,7 @@ pnpm turbo format-check
 ## Phases
 
 1. **Fence validators** (2 files): `packages/worker/src/agent-run/workflow.ts`, `packages/worker/src/agent-run/git-broker.ts`. Import `isBranchRef`; replace the inline checks and the guard; update the two doc comments; OD2 text.
-2. **Tests** (2 files): `packages/worker/src/agent-run/workflow.test.ts` (AC2, AC3 additions, AC5 drift test and table/sweep), `packages/worker/src/agent-run/git-broker.test.ts` (AC4).
+2. **Tests** (2 files): `packages/worker/src/agent-run/workflow.test.ts` (AC2, AC3 additions, AC5 drift test and table), `packages/worker/src/agent-run/git-broker.test.ts` (AC4).
 3. **Gates**: run the Gates block, then the AC1/AC6/AC7 checks; prettier on the four files.
 
 ## Validate round 1 (PASS_WITH_WARNINGS) — fixes folded in
@@ -269,7 +269,7 @@ These override anything above.
 
 - **RF-2, a narrower AC5 claim.**
   - The source-text drift test is kept, following the precedent of the prefix test at `workflow.test.ts:876-887`.
-  - The table of names and the seeded sweep prove that the fence accepts the documented name shape. They do not prove what `fixBranchName` emits; the tests are labelled to say so.
+  - The table of names proves that the fence accepts the documented name shape. It does not prove what `fixBranchName` emits; the tests are labelled to say so.
   - Follow-up, named in the PR and not built here: a shared `@terragon/utils/fix-branch` module (the prefix plus a pure name builder) imported by shared, www and the worker. It would remove both drift tests.
 - **RF-3, "the tests did not skip" is a hard gate.**
   - Run the worker files unsandboxed with `--reporter=verbose` and save the output.
