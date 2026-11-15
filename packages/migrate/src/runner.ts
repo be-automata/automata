@@ -137,12 +137,22 @@ export async function withAdvisoryLock<T>(
   if (result.rows[0]?.locked !== true) {
     throw new MigrationLockBusyError();
   }
+  let failed = false;
   try {
     return await fn();
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    await c.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
-      ADVISORY_LOCK_KEY,
-    ]);
+    try {
+      await c.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
+        ADVISORY_LOCK_KEY,
+      ]);
+    } catch (unlockError) {
+      // A broken session already released the lock on disconnect; when fn
+      // failed, its error is the one worth reporting, so keep it.
+      if (!failed) throw unlockError;
+    }
   }
 }
 

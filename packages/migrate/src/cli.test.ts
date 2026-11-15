@@ -222,9 +222,13 @@ describe("deploy/migrate.ts", () => {
     try {
       await waitUntil("run A's advisory lock", () => advisoryLockHeld(monitor));
       second = await runCliAsync(["--apply", "--dir", dir], db.url);
-    } finally {
+    } catch (error) {
+      // Let run A finish before failing, so it never outlives the test.
       await monitor.query("ROLLBACK");
+      await first;
+      throw error;
     }
+    await monitor.query("ROLLBACK");
     const firstResult = await first;
 
     expect([firstResult.status, second.status].sort()).toEqual([0, 3]);
