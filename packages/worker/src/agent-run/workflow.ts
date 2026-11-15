@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
+import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 import { hatchet } from "../hatchet-client";
 import {
   AGENT_RUN_VARIANTS,
@@ -821,10 +822,19 @@ export interface SelfHealAuditStepDeps {
 export const WORKER_FIX_BRANCH_PREFIX = "automata/fix-";
 
 /**
+ * The worker's own shape rule for what follows `automata/fix-`: it keeps the
+ * fence as tight as the generated names (`<issue>-<8 hex>-a<attempt>`). It is
+ * a local shape rule, not a ref-format check; `isBranchRef` owns ref format.
+ */
+const FIX_SUFFIX_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
  * FENCE-01: the git-broker ref fence for a self-heal fix run — exactly
  * `refs/heads/<attempt branch>` — or undefined for every other run (no fence,
- * no buffering). Fails closed on a branch that is not a plain
- * `automata/fix-*` name: a fence built from `main` would be no fence at all.
+ * no buffering). Fails closed unless the branch has the `automata/fix-`
+ * prefix, a suffix matching the local shape rule, and is a valid
+ * `refs/heads/` ref per `isBranchRef`: a fence built from `main` would be no
+ * fence at all.
  */
 export function selfHealRefFence(
   selfHeal: AgentRunInput["selfHeal"],
@@ -834,12 +844,7 @@ export function selfHealRefFence(
   const suffix = branch.startsWith(WORKER_FIX_BRANCH_PREFIX)
     ? branch.slice(WORKER_FIX_BRANCH_PREFIX.length)
     : "";
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(suffix) ||
-    suffix.includes("..") ||
-    suffix.endsWith(".") ||
-    suffix.endsWith(".lock")
-  ) {
+  if (!FIX_SUFFIX_SHAPE.test(suffix) || !isBranchRef(`refs/heads/${branch}`)) {
     throw new Error(
       `self-heal fix run: branch is not a ${WORKER_FIX_BRANCH_PREFIX}* branch name`,
     );
