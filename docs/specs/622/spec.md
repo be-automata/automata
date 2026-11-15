@@ -341,3 +341,12 @@ These override anything above.
    - `pnpm --filter @terragon/docs exec fumadocs-mdx`, `pnpm turbo tsc-check`, `pnpm turbo lint`.
    - prettier on the changed files.
    - The AC7 diff-stat and UAT steps 2 and 3.
+
+## Simplify round (overrides the constraint above)
+
+- **The www `fixBranchName` tests moved.** The golden, prefix and throw tests in `apps/www/src/server-lib/audit/fix-run-prompt.test.ts` now live in `packages/utils/src/fix-branch.test.ts`, the builder's owner. Those tests pin the 175 names by sha256 and the exact AC2 error messages. The www file keeps one test proving the re-export.
+- **Kept on purpose:**
+  - the shared and www re-exports (OD2);
+  - `FIX_SUFFIX_SHAPE` in the worker;
+  - the `FIX_FINGERPRINT_RE` export, because the contract names it.
+- **Possible follow-up:** point the four www importers and the six shared importers at `@terragon/utils/fix-branch` directly, then drop the re-exports. `fix-paths.ts` would go back to having no imports.
