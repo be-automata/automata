@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseReceivePackCommands } from "./receive-pack-refs";
+import { isBranchRef, parseReceivePackCommands } from "./receive-pack-refs";
 
 const encoder = new TextEncoder();
 
@@ -36,5 +36,47 @@ describe("parseReceivePackCommands (plain Uint8Array input)", () => {
       commands: [{ oldSha, newSha, ref }],
       consumed: commandSection.length,
     });
+  });
+});
+
+describe("isBranchRef", () => {
+  it.each([
+    "refs/heads/automata/task-1a2b3c4d",
+    "refs/heads/automata/fix-abc.1",
+    "refs/heads/feat/x",
+    "refs/heads/main",
+    "refs/heads/HEAD2",
+  ])("accepts %s", (ref) => {
+    expect(isBranchRef(ref)).toBe(true);
+  });
+
+  it.each([
+    "feat/x",
+    "refs/tags/v1",
+    "refs/heads/",
+    "refs/heads/a..b",
+    "refs/heads/a.lock",
+    "refs/heads/a.lock/b",
+    "refs/heads/.hidden",
+    "refs/heads/a/.b",
+    "refs/heads/a\u0007b",
+    "refs/heads/a b",
+    "refs/heads/a~1",
+    "refs/heads/a^",
+    "refs/heads/a:b",
+    "refs/heads/a?",
+    "refs/heads/a*",
+    "refs/heads/a[0]",
+    "refs/heads/a\\b",
+    "refs/heads/a@{1}",
+    "refs/heads/@",
+    "refs/heads//a",
+    "refs/heads/a//b",
+    "refs/heads/a/",
+    "refs/heads/a.",
+    "refs/heads/-x",
+    "refs/heads/HEAD",
+  ])("refuses %j", (ref) => {
+    expect(isBranchRef(ref)).toBe(false);
   });
 });

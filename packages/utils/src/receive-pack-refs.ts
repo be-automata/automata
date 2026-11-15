@@ -187,3 +187,28 @@ export function checkRefFence(
   const last = commands[commands.length - 1] as ReceivePackCommand;
   return { ok: true, pushedSha: last.newSha };
 }
+
+const BRANCH_REF_PREFIX = "refs/heads/";
+
+/**
+ * True when `ref` is a well-formed `refs/heads/<name>` branch ref: git's
+ * check-ref-format rules, plus two fail-closed extras (a name starting with
+ * `-` and the name `HEAD` are refused).
+ */
+export function isBranchRef(ref: string): boolean {
+  if (!ref.startsWith(BRANCH_REF_PREFIX)) return false;
+  const name = ref.slice(BRANCH_REF_PREFIX.length);
+  if (name.length === 0 || name === "@" || name === "HEAD") return false;
+  if (name.startsWith("-")) return false;
+  if (name.endsWith(".") || name.includes("..") || name.includes("@{")) {
+    return false;
+  }
+  // Control characters, space, DEL and git's reserved punctuation.
+  if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return false;
+  return name
+    .split("/")
+    .every(
+      (part) =>
+        part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"),
+    );
+}
