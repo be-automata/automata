@@ -16,7 +16,8 @@
     "lint": "tsc --noEmit",
     "install:dev": "./scripts/install-cli-dev.sh",
     "uninstall:dev": "./scripts/uninstall-cli.sh",
-    "release": "./scripts/release.sh"
+    "release": "./scripts/release.sh",
+    "test": "vitest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.6",
@@ -41,7 +42,8 @@
     "dotenv": "^16.5.0",
     "tsup": "^8.3.5",
     "tsx": "^4.19.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.1.4"
   },
   "publishConfig": {
     "access": "public",

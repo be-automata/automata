@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { createServer } from "http";
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { useSaveApiKey } from "../hooks/useApi.js";
 
 const AUTH_PORT = 8742; // Uncommon port
@@ -11,13 +11,14 @@ const TERRAGON_WEB_URL =
   process.env.TERRAGON_WEB_URL || "http://localhost:3000";
 
 function openBrowser(url: string) {
-  const start =
+  // `start` is a cmd builtin on Windows; the empty string is its window title.
+  const [command, args]: [string, string[]] =
     process.platform === "darwin"
-      ? "open"
+      ? ["open", [url]]
       : process.platform === "win32"
-        ? "start"
-        : "xdg-open";
-  exec(`${start} ${url}`, (error) => {
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  execFile(command, args, (error) => {
     if (error) {
       console.error("Failed to open browser:", error);
     }
