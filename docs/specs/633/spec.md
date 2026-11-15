@@ -267,7 +267,7 @@ These override anything above.
    - Gates: `pnpm --filter @terragon/migrate exec tsc --noEmit`, then the migrate suite. Only `serializes two concurrent runners` may fail at this point.
 2. **Tests.**
    - Files: `packages/migrate/src/runner.test.ts`, `packages/migrate/src/cli.test.ts`, with W1–W3 applied.
-   - Gate: `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism`, unsandboxed.
+   - Gate: `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism`, with local Docker.
 3. **Docs.**
    - Files: `AGENTS.md`, `.github/workflows/migrate.yml` (comments only), `packages/migrate/src/connection.ts` (docblock only).
    - Gate: prettier `--check` on those files.
