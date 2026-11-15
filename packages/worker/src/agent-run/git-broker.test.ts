@@ -307,7 +307,9 @@ describe("startGitBroker refFence (FENCE-01 — self-heal fix runs)", () => {
           refFence: { exactRef },
         }),
         exactRef,
-      ).rejects.toThrow(/must be a valid refs\/heads\/ branch ref/);
+      ).rejects.toThrow(
+        `git-broker: refFence.exactRef must be a valid refs/heads/ branch ref, got: ${exactRef}`,
+      );
       expect(dials.count).toBe(0);
     }
   });
