@@ -497,3 +497,23 @@ The contract after the simplify pass and the roborev review.
   - folding `egress_not_enforced` into `egress_open`;
   - moving `toAgent37Network` next to the sandbox renderers in PR 3;
   - moving `matchEgress` to `utils`.
+
+## Final contract as shipped (supersedes conflicting text above)
+
+- **Modules.** `packages/shared/src/model/cell-egress.ts` (compiler and renderers), `cell-egress-guard.ts` (switch guard) and `psl.d.ts` (an ambient declaration for `psl`'s `get`, referenced from `cell-egress.ts` so it travels with the source). `egress-policy.ts` exports `DOMAIN_RE` and `splitHostPort`. No `classifyEgressHost` export exists. The `IPV4_RE` export was reverted.
+- **New runtime dependency.** `psl@^1.15.0`, already in the lockfile at 1.15.0 before this change. It is self-contained (it bundles punycode, with no imports), so it works in Workers.
+- **Renderers.**
+  - `toAgent37Network` emits the compiled keys plus the apex of each wildcard, and never `allow-all` (W1).
+  - `toProxyShape` pins every entry to `:443` and also emits the apexes.
+  - Both go through `assertRenderable`, which refuses `empty_set` and `too_many_entries`, with the cap counted on the rendered list.
+- **`CellEgressError` codes** (exactly the `CellEgressErrorCode` union): `unknown_bundle`, `extends_cycle`, `platform_override`, `bundle_id_mismatch`, `invalid_host`, `public_suffix_wildcard`, `ip_literal`, `ipv6`, `port_not_443`, `platform_denied`, `inexpressible`, `template_widens`, `too_many_entries`, `empty_set`.
+- **When an error repeats the entry.** `invalid_host` never echoes it. `ipv6` echoes it only for a real IPv6 literal (checked with the WHATWG URL parser). `port_not_443` echoes it only for a numeric port on a real domain.
+- **Guard reasons** (exactly `CELL_EGRESS_GUARD_REASONS`, 10): `unknown_profile`, `egress_mode_missing`, `egress_mode_observe`, `egress_mode_unknown`, `egress_not_allowlist`, `allowlist_empty`, `evidence_missing`, `evidence_not_from_conformance`, `evidence_invalid`, `evidence_expired`. AC7 holds: observe, missing and unknown each have their own reason.
+- **Left for later** (named in the PR; not built here):
+  1. One host parser shared by `egress-policy`, `cell-egress` and `sandbox`.
+  2. Folding `egress_not_enforced` into `egress_open`.
+  3. Moving `toAgent37Network` next to the sandbox renderers, in PR 3.
+  4. Moving `matchEgress` to utils.
+  5. `ip_literal` echoes token-like `x.42` entries; it should echo only real dotted quads.
+  6. Whether the public-suffix rule should also apply to deny entries; today a broad deny such as `*.co.uk` fails the compile.
+  7. An upstream PR to psl to add a `types` condition to its `exports`, after which `psl.d.ts` can be deleted.
