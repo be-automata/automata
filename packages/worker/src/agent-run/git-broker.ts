@@ -10,7 +10,7 @@ import { HOP_BY_HOP, REQUEST_OWNED, timingSafeEqualStr } from "./broker-common";
 import {
   checkRefFence,
   parseReceivePackCommands,
-  type RefFenceResult,
+  type FencedRefResult,
 } from "@terragon/utils/receive-pack-refs";
 
 /**
@@ -253,7 +253,7 @@ type ReceivePackGate =
       ok: false;
       status: 403 | 413 | 415;
       reason:
-        | Extract<RefFenceResult, { ok: false }>["reason"]
+        | Extract<FencedRefResult, { ok: false }>["reason"]
         | "malformed"
         | "command_section_too_large"
         | "encoded_body";

@@ -175,6 +175,20 @@ function parseCommandLine(line: string): ReceivePackCommand | null {
  * update rejects the whole push. The pushed sha is the last update's new sha.
  * A `null` fence means the step has no ref to push to: `no_ref_fence`.
  */
+/** A result from a non-null fence, which can never be `no_ref_fence`. */
+export type FencedRefResult = Exclude<
+  RefFenceResult,
+  { reason: "no_ref_fence" }
+>;
+
+export function checkRefFence(
+  commands: readonly ReceivePackCommand[],
+  fence: { exactRef: string },
+): FencedRefResult;
+export function checkRefFence(
+  commands: readonly ReceivePackCommand[],
+  fence: { exactRef: string } | null,
+): RefFenceResult;
 export function checkRefFence(
   commands: readonly ReceivePackCommand[],
   fence: { exactRef: string } | null,

@@ -25,10 +25,10 @@ The cell git broker (#606, merged in #608) forwards a push to **any** ref of the
 
 ## Contract
 
-- **Storage:** a nullable `allowed_ref text` column on `cell_step`, added by `deploy/migrations/2026-11-XX-cell-step-allowed-ref.sql` (`-- migrate:expand`, `ADD COLUMN IF NOT EXISTS`), plus the same column in `schema.ts`.
+- **Storage:** a nullable `allowed_ref text` column on `cell_step`, added by `deploy/migrations/2026-11-15-cell-step-allowed-ref.sql` (`-- migrate:expand`, `ADD COLUMN IF NOT EXISTS`), plus the same column in `schema.ts`.
 - **Written by `openStep`:**
   - It takes a new parameter `allowedRef: string | null`.
-  - A non-null value must be `refs/heads/<name>` and pass git's ref-format rules, the same ones `selfHealRefFence` applies. Anything else throws a `RangeError`.
+  - A non-null value must be `refs/heads/<name>` and pass `isBranchRef` (`@terragon/utils/receive-pack-refs`: git's ref-format rules plus the F3 refusals; not `selfHealRefFence`, which refuses `/`). Anything else throws a `RangeError`.
   - The ref cannot change for the life of the step. Re-opening the step with a different ref returns `conflict`.
 - **Read:** `resolveBearer` selects `allowedRef`, and `authorizeCellRequest` passes it to `handlePush`.
 - **Applied:**
@@ -65,6 +65,8 @@ The cell git broker (#606, merged in #608) forwards a push to **any** ref of the
   - CI `schema-drift`
 
 ## Open decisions
+
+_All resolved; the outcomes are in **Decisions** below._
 
 All resolved by the owner on 2026-11-14:
 
