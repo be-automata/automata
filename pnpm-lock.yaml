@@ -1238,6 +1238,9 @@ importers:
       '@terragon/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig
+      '@terragon/worker':
+        specifier: workspace:*
+        version: link:../worker
       '@types/node':
         specifier: 24.0.1
         version: 24.0.1

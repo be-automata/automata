@@ -59,6 +59,7 @@
     "@terragon/dev-env": "workspace:*",
     "@terragon/sandbox": "workspace:*",
     "@terragon/tsconfig": "workspace:*",
+    "@terragon/worker": "workspace:*",
     "@types/node": "^22.15.21",
     "dotenv-cli": "^8.0.0",
     "drizzle-kit": "^0.31.4",
