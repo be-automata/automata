@@ -866,11 +866,68 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
       "automata/fix-1 x",
       "automata/fix-1.lock",
       "Automata/fix-1",
+      "automata/fix-a@{1}",
+      "automata/fix-HEAD.",
+      "automata/fix-a/b",
+      "automata/fix-a\ufffd",
     ]) {
       expect(() => selfHealRefFence(fix(branch)), branch).toThrow(
         /self-heal fix run/,
       );
     }
+  });
+
+  describe("documented fix-name shape (the fence accepts it; this does not exercise fixBranchName)", () => {
+    const generated = (issue: number, fp8: string, attempt: number) =>
+      `automata/fix-${issue}-${fp8}-a${attempt}`;
+
+    it("source drift: fix-run-prompt.ts still builds the shape the table assumes", async () => {
+      const fs = await import("node:fs/promises");
+      const src = await fs.readFile(
+        new URL(
+          "../../../../apps/www/src/server-lib/audit/fix-run-prompt.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      expect(src).toContain(
+        "return `${FIX_BRANCH_PREFIX}${issueNumber}-${fingerprint.slice(0, 8)}-a${attemptNo}`;",
+      );
+      expect(src).toContain("const FINGERPRINT_RE = /^[0-9a-f]{8,}$/;");
+    });
+
+    it("every name in the documented shape maps to exactly its ref", () => {
+      const issues = [1, 9, 10, 12, 99999, 2147483647, Number.MAX_SAFE_INTEGER];
+      const fps = ["00000000", "ffffffff", "deadbeef", "0123abcd"];
+      const attempts = [1, 2, 9, 10, 99999];
+      for (const issue of issues) {
+        for (const fp of fps) {
+          for (const attempt of attempts) {
+            const name = generated(issue, fp, attempt);
+            expect(selfHealRefFence(fix(name)), name).toEqual({
+              exactRef: `refs/heads/${name}`,
+            });
+          }
+        }
+      }
+    });
+
+    it("a seeded sweep of 4000 names in the documented shape is all accepted", () => {
+      let state = 12345;
+      const next = () => {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        return state;
+      };
+      for (let i = 0; i < 4000; i += 1) {
+        const issue = (next() % 99999) + 1;
+        const attempt = (next() % 99999) + 1;
+        const fp = next().toString(16).padStart(8, "0");
+        const name = generated(issue, fp, attempt);
+        expect(selfHealRefFence(fix(name)), name).toEqual({
+          exactRef: `refs/heads/${name}`,
+        });
+      }
+    });
   });
 
   it("the worker's fix-branch prefix matches shared FIX_BRANCH_PREFIX (drift)", async () => {
