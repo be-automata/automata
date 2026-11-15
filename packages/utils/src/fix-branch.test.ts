@@ -63,30 +63,42 @@ describe("fixBranchName (AC1: byte-identical to the pre-move builder)", () => {
 describe("fixBranchName (AC2: same checks, same messages)", () => {
   const fp = "0123456789abcdef";
 
+  /** Asserts the exact message (toThrow with a string only matches a substring). */
+  const throwsExactly = (fn: () => unknown, message: string): void => {
+    expect(fn).toThrow(
+      new RegExp(`^${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+    );
+  };
+
   it.each([0, -1, 1.5, Number.NaN])("rejects issue number %s", (bad) => {
-    expect(() =>
-      fixBranchName({ issueNumber: bad, fingerprint: fp, attemptNo: 1 }),
-    ).toThrow(`fix run issue number must be a positive integer, got ${bad}`);
+    throwsExactly(
+      () => fixBranchName({ issueNumber: bad, fingerprint: fp, attemptNo: 1 }),
+      `fix run issue number must be a positive integer, got ${bad}`,
+    );
   });
 
   it.each([0, -1, 1.5, Number.NaN])("rejects attempt number %s", (bad) => {
-    expect(() =>
-      fixBranchName({ issueNumber: 1, fingerprint: fp, attemptNo: bad }),
-    ).toThrow(`fix run attempt number must be a positive integer, got ${bad}`);
+    throwsExactly(
+      () => fixBranchName({ issueNumber: 1, fingerprint: fp, attemptNo: bad }),
+      `fix run attempt number must be a positive integer, got ${bad}`,
+    );
   });
 
   it.each(["../x", "DEADBEEF", "abc"])("rejects fingerprint %s", (bad) => {
-    expect(() =>
-      fixBranchName({ issueNumber: 1, fingerprint: bad, attemptNo: 1 }),
-    ).toThrow("fix run fingerprint must be lowercase hex (>= 8 chars)");
+    throwsExactly(
+      () => fixBranchName({ issueNumber: 1, fingerprint: bad, attemptNo: 1 }),
+      "fix run fingerprint must be lowercase hex (>= 8 chars)",
+    );
   });
 
   it("reports the first bad field: issue, then attempt, then fingerprint", () => {
-    expect(() =>
-      fixBranchName({ issueNumber: 0, fingerprint: "x", attemptNo: 0 }),
-    ).toThrow("fix run issue number must be a positive integer, got 0");
-    expect(() =>
-      fixBranchName({ issueNumber: 1, fingerprint: "x", attemptNo: 0 }),
-    ).toThrow("fix run attempt number must be a positive integer, got 0");
+    throwsExactly(
+      () => fixBranchName({ issueNumber: 0, fingerprint: "x", attemptNo: 0 }),
+      "fix run issue number must be a positive integer, got 0",
+    );
+    throwsExactly(
+      () => fixBranchName({ issueNumber: 1, fingerprint: "x", attemptNo: 0 }),
+      "fix run attempt number must be a positive integer, got 0",
+    );
   });
 });
