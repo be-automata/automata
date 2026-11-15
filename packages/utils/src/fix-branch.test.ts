@@ -70,27 +70,32 @@ describe("fixBranchName (AC2: same checks, same messages)", () => {
     );
   };
 
-  it.each([0, -1, 1.5, Number.NaN, 1e21, 2 ** 53, 2 ** 53 + 2])(
-    "rejects issue number %s",
-    (bad) => {
-      throwsExactly(
-        () =>
-          fixBranchName({ issueNumber: bad, fingerprint: fp, attemptNo: 1 }),
-        `fix run issue number must be a positive integer, got ${bad}`,
-      );
-    },
-  );
+  // -0 prints as "got 0"; 2 ** 53 + 1 is not representable, so 2 ** 53 + 2 is the next unsafe value.
+  const NOT_SAFE_POSITIVE = [
+    0,
+    -0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    1e21,
+    2 ** 53,
+    2 ** 53 + 2,
+  ];
 
-  it.each([0, -1, 1.5, Number.NaN, 1e21, 2 ** 53, 2 ** 53 + 2])(
-    "rejects attempt number %s",
-    (bad) => {
-      throwsExactly(
-        () =>
-          fixBranchName({ issueNumber: 1, fingerprint: fp, attemptNo: bad }),
-        `fix run attempt number must be a positive integer, got ${bad}`,
-      );
-    },
-  );
+  it.each(NOT_SAFE_POSITIVE)("rejects issue number %s", (bad) => {
+    throwsExactly(
+      () => fixBranchName({ issueNumber: bad, fingerprint: fp, attemptNo: 1 }),
+      `fix run issue number must be a positive integer, got ${bad}`,
+    );
+  });
+
+  it.each(NOT_SAFE_POSITIVE)("rejects attempt number %s", (bad) => {
+    throwsExactly(
+      () => fixBranchName({ issueNumber: 1, fingerprint: fp, attemptNo: bad }),
+      `fix run attempt number must be a positive integer, got ${bad}`,
+    );
+  });
 
   it.each(["../x", "DEADBEEF", "abc"])("rejects fingerprint %s", (bad) => {
     throwsExactly(
