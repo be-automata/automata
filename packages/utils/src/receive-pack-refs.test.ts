@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   checkRefFence,
@@ -108,5 +108,16 @@ describe("checkRefFence with no fence", () => {
       ok: false,
       reason: "no_commands",
     });
+  });
+});
+
+describe("checkRefFence result types", () => {
+  it("a non-null fence never reports no_ref_fence", () => {
+    const result = checkRefFence([], { exactRef: "refs/heads/feat/x" });
+    expectTypeOf<
+      Extract<typeof result, { ok: false }>["reason"]
+    >().toEqualTypeOf<
+      "ref_not_allowed" | "delete_not_allowed" | "no_commands"
+    >();
   });
 });

@@ -44,18 +44,20 @@ export type ParseReceivePackResult =
       reason: "incomplete" | "malformed";
     };
 
-export type RefFenceResult =
+/** The result of checking a push against a non-null fence. */
+export type FencedRefResult =
   | { ok: true; pushedSha: string }
   | {
       ok: false;
-      reason:
-        | "ref_not_allowed"
-        | "delete_not_allowed"
-        | "no_commands"
-        | "no_ref_fence";
-      /** The first offending ref (absent for `no_commands`, `no_ref_fence`). */
+      reason: "ref_not_allowed" | "delete_not_allowed" | "no_commands";
+      /** The first offending ref (absent for `no_commands`). */
       ref?: string;
     };
+
+/** A null fence adds one refusal: the step has no ref to push to. */
+export type RefFenceResult =
+  | FencedRefResult
+  | { ok: false; reason: "no_ref_fence" };
 
 /** The all-zeros sha1 object name git uses for "no object" (create/delete). */
 export const RECEIVE_PACK_ZERO_SHA = "0".repeat(40);
@@ -175,12 +177,6 @@ function parseCommandLine(line: string): ReceivePackCommand | null {
  * update rejects the whole push. The pushed sha is the last update's new sha.
  * A `null` fence means the step has no ref to push to: `no_ref_fence`.
  */
-/** A result from a non-null fence, which can never be `no_ref_fence`. */
-export type FencedRefResult = Exclude<
-  RefFenceResult,
-  { reason: "no_ref_fence" }
->;
-
 export function checkRefFence(
   commands: readonly ReceivePackCommand[],
   fence: { exactRef: string },
