@@ -1,14 +1,19 @@
 import type { DBUserMessage } from "@terragon/shared";
 import type { AuditFindingRow } from "@terragon/shared/model/audit-findings";
 import {
-  FIX_BRANCH_PREFIX,
   FIX_DENY_PATHS,
   allowedFilesFor,
   denyExceptionsFor,
   isDeniedPath,
 } from "@terragon/shared/self-heal/fix-paths";
+import {
+  fixBranchName,
+  type FixBranchNameInput,
+} from "@terragon/utils/fix-branch";
 
 import { oneLine, sanitizeAgentText } from "./render-issue";
+
+export { fixBranchName, type FixBranchNameInput };
 
 /**
  * The platform section of a self-heal fix run (phase 9). Built ONLY from the
@@ -29,35 +34,8 @@ export type FixRunFinding = Pick<
   | "planFiles"
 >;
 
-export interface FixBranchNameInput {
-  issueNumber: number;
-  fingerprint: string;
-  attemptNo: number;
-}
-
-const FINGERPRINT_RE = /^[0-9a-f]{8,}$/;
 /** A plain branch name: no spaces, backticks, newlines or `..`. */
 const REF_NAME_RE = /^[A-Za-z0-9._/-]+$/;
-
-function assertPositiveInteger(value: number, what: string): void {
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`fix run ${what} must be a positive integer, got ${value}`);
-  }
-}
-
-/** `automata/fix-<issue>-<fp8>-a<attempt>` — one branch per attempt. */
-export function fixBranchName({
-  issueNumber,
-  fingerprint,
-  attemptNo,
-}: FixBranchNameInput): string {
-  assertPositiveInteger(issueNumber, "issue number");
-  assertPositiveInteger(attemptNo, "attempt number");
-  if (!FINGERPRINT_RE.test(fingerprint)) {
-    throw new Error("fix run fingerprint must be lowercase hex (>= 8 chars)");
-  }
-  return `${FIX_BRANCH_PREFIX}${issueNumber}-${fingerprint.slice(0, 8)}-a${attemptNo}`;
-}
 
 export interface BuildFixRunTransformInput {
   finding: FixRunFinding;
