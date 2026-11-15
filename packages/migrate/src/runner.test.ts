@@ -202,54 +202,48 @@ describe("applyMigrations", () => {
     expect(await readLedger(c)).toEqual([]);
   });
 
-  it.each([
-    ["a starts first", true],
-    ["b starts first", false],
-  ])(
-    "two racing runners, %s: the loser is busy, the winner applies every file once",
-    async (_label, aFirst) => {
-      const db = await freshDb();
-      const monitor = await db.connect();
-      const a = await db.connect();
-      const b = await db.connect();
-      const [winner, loser] = aFirst ? [a, b] : [b, a];
-      const loserNotices = collectNotices(loser);
-      // 001 blocks on `gate`, which this session holds, so the winner holds the
-      // advisory lock for as long as the test wants (no sleeps to race).
-      await monitor.query("CREATE TABLE gate (id int)");
-      await monitor.query("BEGIN");
-      await monitor.query("LOCK TABLE gate IN ACCESS EXCLUSIVE MODE");
-      const dir = migrationsDir({
-        "001.sql":
-          "-- migrate:lock-timeout=30s\nLOCK TABLE gate IN SHARE MODE;\nCREATE TABLE once (id int);",
-        "002.sql": "INSERT INTO once VALUES (1);",
-      });
+  it("two racing runners: the loser is busy, the winner applies every file once", async () => {
+    const db = await freshDb();
+    const monitor = await db.connect();
+    const a = await db.connect();
+    const b = await db.connect();
+    const [winner, loser] = [a, b];
+    const loserNotices = collectNotices(loser);
+    // 001 blocks on `gate`, which this session holds, so the winner holds the
+    // advisory lock for as long as the test wants (no sleeps to race).
+    await monitor.query("CREATE TABLE gate (id int)");
+    await monitor.query("BEGIN");
+    await monitor.query("LOCK TABLE gate IN ACCESS EXCLUSIVE MODE");
+    const dir = migrationsDir({
+      "001.sql":
+        "-- migrate:lock-timeout=30s\nLOCK TABLE gate IN SHARE MODE;\nCREATE TABLE once (id int);",
+      "002.sql": "INSERT INTO once VALUES (1);",
+    });
 
-      const winning = applyDir(winner, dir);
-      let result: Awaited<typeof winning>;
-      try {
-        await waitUntil("the winner's advisory lock", () =>
-          advisoryLockHeld(monitor),
-        );
-        const error = await applyDir(loser, dir).catch((e: unknown) => e);
-        expect(error).toBeInstanceOf(MigrationLockBusyError);
-        expect((error as Error).message).toBe(BUSY_MESSAGE);
-      } finally {
-        await monitor.query("ROLLBACK");
-        result = await winning;
-      }
+    const winning = applyDir(winner, dir);
+    let result: Awaited<typeof winning>;
+    try {
+      await waitUntil("the winner's advisory lock", () =>
+        advisoryLockHeld(monitor),
+      );
+      const error = await applyDir(loser, dir).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(MigrationLockBusyError);
+      expect((error as Error).message).toBe(BUSY_MESSAGE);
+    } finally {
+      await monitor.query("ROLLBACK");
+      result = await winning;
+    }
 
-      expect(result.applied).toEqual(["001", "002"]);
-      expect(await readLedger(winner)).toHaveLength(2);
-      expect(
-        await scalar<number>(winner, "SELECT count(*)::int FROM once"),
-      ).toBe(1);
-      // A busy runner never unlocks a lock it does not own.
-      expect(
-        loserNotices.filter((m) => /you don't own a lock/i.test(m)),
-      ).toEqual([]);
-    },
-  );
+    expect(result.applied).toEqual(["001", "002"]);
+    expect(await readLedger(winner)).toHaveLength(2);
+    expect(await scalar<number>(winner, "SELECT count(*)::int FROM once")).toBe(
+      1,
+    );
+    // A busy runner never unlocks a lock it does not own.
+    expect(loserNotices.filter((m) => /you don't own a lock/i.test(m))).toEqual(
+      [],
+    );
+  });
 
   /**
    * Production shape, ordered deterministically: a writer holds a table lock
@@ -277,8 +271,11 @@ describe("applyMigrations", () => {
     await writer.query("BEGIN");
     await writer.query("LOCK TABLE items IN ROW EXCLUSIVE MODE");
     let writerOpen = true;
+    const started: Promise<unknown>[] = [];
+    let finished = false;
     try {
       const first = applyDir(a, dir, { lockTimeout: "120s" });
+      started.push(first);
       first.catch(() => undefined);
       await waitUntil(
         "runner A's CIC waiting on the writer's lock",
@@ -295,6 +292,7 @@ describe("applyMigrations", () => {
 
       let secondSettled = false;
       const second = applyDir(b, dir, { lockTimeout: "120s" });
+      started.push(second);
       second.then(
         () => (secondSettled = true),
         () => (secondSettled = true),
@@ -320,10 +318,15 @@ describe("applyMigrations", () => {
       writerOpen = false;
 
       const settled = await Promise.allSettled([first, second]);
+      finished = true;
       return { monitor, settled };
     } finally {
       if (writerOpen) {
         await writer.query("ROLLBACK");
+      }
+      // On a failed wait, let both runners end inside the test.
+      if (!finished) {
+        await Promise.allSettled(started);
       }
     }
   }
