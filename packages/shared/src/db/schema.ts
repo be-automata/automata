@@ -3321,6 +3321,11 @@ export const cellStep = pgTable(
     /** Null = unlimited. */
     effectBudget: integer("effect_budget"),
     effectsUsed: integer("effects_used").notNull().default(0),
+    /**
+     * The one ref (`refs/heads/<name>`) this step may push, fixed when the step
+     * is opened. Null = the step does not push. Immutable for the step's life.
+     */
+    allowedRef: text("allowed_ref"),
     /** Every attempt up to and including this one is revoked (the sweep's verdict). */
     revokedThrough: integer("revoked_through"),
     doneAt: timestamp("done_at", { mode: "date" }),

@@ -44,7 +44,8 @@ export type ParseReceivePackResult =
       reason: "incomplete" | "malformed";
     };
 
-export type RefFenceResult =
+/** The result of checking a push against a non-null fence. */
+export type FencedRefResult =
   | { ok: true; pushedSha: string }
   | {
       ok: false;
@@ -52,6 +53,11 @@ export type RefFenceResult =
       /** The first offending ref (absent for `no_commands`). */
       ref?: string;
     };
+
+/** A null fence adds one refusal: the step has no ref to push to. */
+export type RefFenceResult =
+  | FencedRefResult
+  | { ok: false; reason: "no_ref_fence" };
 
 /** The all-zeros sha1 object name git uses for "no object" (create/delete). */
 export const RECEIVE_PACK_ZERO_SHA = "0".repeat(40);
@@ -169,12 +175,22 @@ function parseCommandLine(line: string): ReceivePackCommand | null {
 /**
  * Every update must target exactly `exactRef` and must not delete it. One bad
  * update rejects the whole push. The pushed sha is the last update's new sha.
+ * A `null` fence means the step has no ref to push to: `no_ref_fence`.
  */
 export function checkRefFence(
   commands: readonly ReceivePackCommand[],
   fence: { exactRef: string },
+): FencedRefResult;
+export function checkRefFence(
+  commands: readonly ReceivePackCommand[],
+  fence: { exactRef: string } | null,
+): RefFenceResult;
+export function checkRefFence(
+  commands: readonly ReceivePackCommand[],
+  fence: { exactRef: string } | null,
 ): RefFenceResult {
   if (commands.length === 0) return { ok: false, reason: "no_commands" };
+  if (fence === null) return { ok: false, reason: "no_ref_fence" };
   for (const command of commands) {
     if (command.ref !== fence.exactRef) {
       return { ok: false, reason: "ref_not_allowed", ref: command.ref };
@@ -186,4 +202,33 @@ export function checkRefFence(
   // Non-empty: checked above.
   const last = commands[commands.length - 1] as ReceivePackCommand;
   return { ok: true, pushedSha: last.newSha };
+}
+
+const BRANCH_REF_PREFIX = "refs/heads/";
+
+/**
+ * True when `ref` is a well-formed `refs/heads/<name>` branch ref: git's
+ * check-ref-format rules, plus fail-closed extras: a name starting with `-`,
+ * the name `HEAD`, and a name holding U+FFFD or a lone surrogate are refused.
+ * The last one matters because the receive-pack parser decodes ref bytes
+ * leniently, so any invalid UTF-8 in a pushed ref becomes U+FFFD; a fence
+ * holding U+FFFD would then match refs whose raw bytes differ from it.
+ */
+export function isBranchRef(ref: string): boolean {
+  if (!ref.startsWith(BRANCH_REF_PREFIX)) return false;
+  const name = ref.slice(BRANCH_REF_PREFIX.length);
+  if (name.length === 0 || name === "@" || name === "HEAD") return false;
+  if (name.startsWith("-")) return false;
+  if (name.endsWith(".") || name.includes("..") || name.includes("@{")) {
+    return false;
+  }
+  // Control characters, space, DEL and git's reserved punctuation.
+  if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return false;
+  if (/[\uD800-\uDFFF\uFFFD]/u.test(name)) return false;
+  return name
+    .split("/")
+    .every(
+      (part) =>
+        part.length > 0 && !part.startsWith(".") && !part.endsWith(".lock"),
+    );
 }

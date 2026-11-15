@@ -7,6 +7,7 @@ import {
 } from "@terragon/shared/model/cell-authority";
 import { hashOpaqueToken } from "@terragon/shared/utils/opaque-token";
 import {
+  checkRefFence,
   isZeroObjectName,
   parseReceivePackCommands,
   type ReceivePackCommand,
@@ -619,9 +620,9 @@ interface PushRequest {
 /**
  * POST git-receive-pack (amendment 12): nothing that can fail for a local or
  * GitHub-App reason runs after the effect is claimed. Order: encoding (415),
- * declared length (413), command section (400/413), probe check (400), org
- * settings read (500), write token (502), probe pass-through, claim
- * (`beginEffect`), forward.
+ * declared length (413), command section (400/413), probe check (400), ref
+ * fence (403, #610), org settings read (500), write token (502), probe
+ * pass-through, claim (`beginEffect`), forward.
  */
 async function handlePush({
   deps,
@@ -657,6 +658,17 @@ async function handlePush({
     if (!probe) {
       drop(section.reader);
       return brokerError(400, "bad_request");
+    }
+  } else {
+    // A step with no fence does not push; otherwise every command must target
+    // the one ref the step was opened with. Nothing is minted or claimed yet.
+    const fence = checkRefFence(
+      section.commands,
+      context.allowedRef === null ? null : { exactRef: context.allowedRef },
+    );
+    if (!fence.ok) {
+      drop(section.reader);
+      return brokerError(403, fence.reason);
     }
   }
 

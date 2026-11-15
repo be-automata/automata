@@ -315,6 +315,7 @@ describe("resolveCellStep (database)", () => {
         attempt: 1,
         organizationId: f.organizationId,
         threadId: f.threadId,
+        allowedRef: "refs/heads/feat/x",
       },
       repoFullName: "acme/widgets",
     });

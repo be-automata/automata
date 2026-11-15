@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { parseReceivePackCommands } from "./receive-pack-refs";
+import {
+  checkRefFence,
+  isBranchRef,
+  parseReceivePackCommands,
+} from "./receive-pack-refs";
 
 const encoder = new TextEncoder();
 
@@ -36,5 +40,84 @@ describe("parseReceivePackCommands (plain Uint8Array input)", () => {
       commands: [{ oldSha, newSha, ref }],
       consumed: commandSection.length,
     });
+  });
+});
+
+describe("isBranchRef", () => {
+  it.each([
+    "refs/heads/automata/task-1a2b3c4d",
+    "refs/heads/automata/fix-abc.1",
+    "refs/heads/feat/x",
+    "refs/heads/main",
+    "refs/heads/HEAD2",
+    "refs/heads/feat/caf\u00e9-\u{1f680}",
+  ])("accepts %s", (ref) => {
+    expect(isBranchRef(ref)).toBe(true);
+  });
+
+  it.each([
+    "feat/x",
+    "refs/tags/v1",
+    "refs/heads/",
+    "refs/heads/a..b",
+    "refs/heads/a.lock",
+    "refs/heads/a.lock/b",
+    "refs/heads/.hidden",
+    "refs/heads/a/.b",
+    "refs/heads/a\u0007b",
+    "refs/heads/a b",
+    "refs/heads/a~1",
+    "refs/heads/a^",
+    "refs/heads/a:b",
+    "refs/heads/a?",
+    "refs/heads/a*",
+    "refs/heads/a[0]",
+    "refs/heads/a\\b",
+    "refs/heads/a@{1}",
+    "refs/heads/@",
+    "refs/heads//a",
+    "refs/heads/a//b",
+    "refs/heads/a/",
+    "refs/heads/a.",
+    "refs/heads/-x",
+    "refs/heads/HEAD",
+    "refs/heads/a\u007f",
+    "refs/heads/a\ufffd",
+    "refs/heads/a\ud800",
+  ])("refuses %j", (ref) => {
+    expect(isBranchRef(ref)).toBe(false);
+  });
+});
+
+describe("checkRefFence with no fence", () => {
+  const command = {
+    oldSha: "1".repeat(40),
+    newSha: "a".repeat(40),
+    ref: "refs/heads/x",
+  };
+
+  it("refuses a non-empty command list with no_ref_fence", () => {
+    expect(checkRefFence([command], null)).toEqual({
+      ok: false,
+      reason: "no_ref_fence",
+    });
+  });
+
+  it("keeps no_commands for an empty list", () => {
+    expect(checkRefFence([], null)).toEqual({
+      ok: false,
+      reason: "no_commands",
+    });
+  });
+});
+
+describe("checkRefFence result types", () => {
+  it("a non-null fence never reports no_ref_fence", () => {
+    const result = checkRefFence([], { exactRef: "refs/heads/feat/x" });
+    expectTypeOf<
+      Extract<typeof result, { ok: false }>["reason"]
+    >().toEqualTypeOf<
+      "ref_not_allowed" | "delete_not_allowed" | "no_commands"
+    >();
   });
 });
