@@ -155,6 +155,11 @@ describe("compileCellEgress", () => {
     ["a five-label numeric host", "1.2.3.4.5", "ip_literal"],
     ["an IPv6 literal", "2001:db8::1", "ipv6"],
     ["a bracketed IPv6 literal", "[::1]", "ipv6"],
+    [
+      "a multi-colon entry that is not IPv6",
+      "host.example.com:user:token",
+      "ipv6",
+    ],
     ["a :80 pin", "host.example.com:80", "port_not_443"],
     ["a non-numeric port", "host.example.com:web", "port_not_443"],
     ["a trailing colon with no port", "host.example.com:", "invalid_host"],
@@ -252,6 +257,19 @@ describe("compileCellEgress", () => {
       expect(err.entry).toBeUndefined();
       expect(err.message).not.toContain("hunter2");
       expect(JSON.stringify(err)).not.toContain("hunter2");
+    }
+  });
+
+  it("does not echo a multi-colon entry that is not an IPv6 literal", () => {
+    try {
+      compile([], { narrowTo: ["host.example.com:user:s3cret"] });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(CellEgressError);
+      const err = e as CellEgressError;
+      expect(err.code).toBe("ipv6");
+      expect(err.entry).toBeUndefined();
+      expect(JSON.stringify(err) + err.message).not.toContain("s3cret");
     }
   });
 

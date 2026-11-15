@@ -103,7 +103,15 @@ function normalizeEntry(raw: string): CellEgressEntry {
   }
   const text = trimmed.toLowerCase();
   if (text.includes("[") || text.includes("]") || text.split(":").length > 2) {
-    throw new CellEgressError("ipv6", `ipv6: '${raw}' is not supported`, raw);
+    // Echo only what looks like an IPv6 literal; anything else (for example
+    // `host:user:token`) may carry a credential.
+    if (/^[0-9a-f:.[\]]+$/.test(text)) {
+      throw new CellEgressError("ipv6", `ipv6: '${raw}' is not supported`, raw);
+    }
+    throw new CellEgressError(
+      "ipv6",
+      "ipv6: entry has more than one ':' and is not an IPv6 literal; not echoed",
+    );
   }
   const { host, port } = splitHostPort(text);
   if (port === "") {
