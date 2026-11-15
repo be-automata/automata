@@ -13,7 +13,8 @@
     "./box-capacity": "./src/box-capacity.ts",
     "./receive-pack-refs": "./src/receive-pack-refs.ts",
     "./graphql-mutation": "./src/graphql-mutation.ts",
-    "./broker-headers": "./src/broker-headers.ts"
+    "./broker-headers": "./src/broker-headers.ts",
+    "./fix-branch": "./src/fix-branch.ts"
   },
   "scripts": {
     "tsc-check": "tsc --noEmit",

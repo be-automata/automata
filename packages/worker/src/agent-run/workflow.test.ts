@@ -8,6 +8,7 @@ import {
   vi,
 } from "vitest";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
+import { fixBranchName } from "@terragon/utils/fix-branch";
 import { AGENT_RUN_VARIANTS } from "./definition";
 
 // Defensive: this suite only checks registration shapes and never runs the
@@ -74,7 +75,6 @@ let resolveUseCredits: typeof import("./workflow").resolveUseCredits;
 let resolveCredentialSource: typeof import("./workflow").resolveCredentialSource;
 let runSelfHealAuditStep: typeof import("./workflow").runSelfHealAuditStep;
 let selfHealRefFence: typeof import("./workflow").selfHealRefFence;
-let WORKER_FIX_BRANCH_PREFIX: string;
 let wf: typeof import("./workflow");
 
 beforeAll(async () => {
@@ -86,7 +86,6 @@ beforeAll(async () => {
   resolveCredentialSource = mod.resolveCredentialSource;
   runSelfHealAuditStep = mod.runSelfHealAuditStep;
   selfHealRefFence = mod.selfHealRefFence;
-  WORKER_FIX_BRANCH_PREFIX = mod.WORKER_FIX_BRANCH_PREFIX;
 });
 
 afterEach(() => {
@@ -877,34 +876,21 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
     }
   });
 
-  /** Reads a repo source file relative to this test, for the drift checks. */
-  const readSource = async (rel: string): Promise<string> => {
-    const fs = await import("node:fs/promises");
-    return fs.readFile(new URL(rel, import.meta.url), "utf8");
-  };
-
-  describe("documented fix-name shape (the fence accepts it; this does not exercise fixBranchName)", () => {
-    const generated = (issue: number, fp8: string, attempt: number) =>
-      `automata/fix-${issue}-${fp8}-a${attempt}`;
-
-    it("source drift: fix-run-prompt.ts still builds the shape the table assumes", async () => {
-      const src = await readSource(
-        "../../../../apps/www/src/server-lib/audit/fix-run-prompt.ts",
-      );
-      expect(src).toMatch(
-        /`\$\{FIX_BRANCH_PREFIX\}\$\{issueNumber\}-\$\{fingerprint\.slice\(0, 8\)\}-a\$\{attemptNo\}`/,
-      );
-      expect(src).toContain("const FINGERPRINT_RE = /^[0-9a-f]{8,}$/;");
-    });
-
-    it("every name in the documented shape maps to exactly its ref", () => {
+  describe("real fixBranchName output (the fence accepts every generated name)", () => {
+    it("every name fixBranchName builds maps to exactly its ref", () => {
       const issues = [1, 9, 10, 12, 99999, 2147483647, Number.MAX_SAFE_INTEGER];
-      const fps = ["00000000", "ffffffff", "deadbeef", "0123abcd"];
+      const fps = [
+        "00000000",
+        "ffffffff",
+        "deadbeef",
+        "0123abcd",
+        "0123456789abcdef".repeat(4),
+      ];
       const attempts = [1, 2, 9, 10, 99999];
-      for (const issue of issues) {
-        for (const fp of fps) {
-          for (const attempt of attempts) {
-            const name = generated(issue, fp, attempt);
+      for (const issueNumber of issues) {
+        for (const fingerprint of fps) {
+          for (const attemptNo of attempts) {
+            const name = fixBranchName({ issueNumber, fingerprint, attemptNo });
             expect(selfHealRefFence(fix(name)), name).toEqual({
               exactRef: `refs/heads/${name}`,
             });
@@ -912,15 +898,6 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
         }
       }
     });
-  });
-
-  it("the worker's fix-branch prefix matches shared FIX_BRANCH_PREFIX (drift)", async () => {
-    // The worker does not depend on @terragon/shared; the literal is mirrored
-    // and pinned against the source of truth here.
-    const src = await readSource("../../../shared/src/self-heal/fix-paths.ts");
-    expect(src).toContain(
-      `export const FIX_BRANCH_PREFIX = "${WORKER_FIX_BRANCH_PREFIX}";`,
-    );
   });
 });
 

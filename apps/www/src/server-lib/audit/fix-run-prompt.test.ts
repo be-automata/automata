@@ -2,10 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { DBUserMessage } from "@terragon/shared";
-import {
-  FIX_BRANCH_PREFIX,
-  FIX_DENY_PATHS,
-} from "@terragon/shared/self-heal/fix-paths";
+import { FIX_DENY_PATHS } from "@terragon/shared/self-heal/fix-paths";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -53,32 +50,13 @@ function render(finding: FixRunFinding = FINDING): string {
   return last.text;
 }
 
-describe("fixBranchName", () => {
-  it("golden", () => {
+describe("fixBranchName re-export", () => {
+  // The builder's behaviour is owned and tested in @terragon/utils/fix-branch;
+  // this only proves the www re-export still points at it.
+  it("re-exports the utils builder", () => {
     expect(
       fixBranchName({ issueNumber: 42, fingerprint: FP, attemptNo: 2 }),
     ).toBe("automata/fix-42-01234567-a2");
-  });
-
-  it("always starts with FIX_BRANCH_PREFIX", () => {
-    const name = fixBranchName({
-      issueNumber: 7,
-      fingerprint: "fedcba9876543210",
-      attemptNo: 1,
-    });
-    expect(name.startsWith(FIX_BRANCH_PREFIX)).toBe(true);
-  });
-
-  it("rejects inputs that would make a malformed ref", () => {
-    expect(() =>
-      fixBranchName({ issueNumber: 0, fingerprint: FP, attemptNo: 1 }),
-    ).toThrow();
-    expect(() =>
-      fixBranchName({ issueNumber: 1, fingerprint: "../x", attemptNo: 1 }),
-    ).toThrow();
-    expect(() =>
-      fixBranchName({ issueNumber: 1, fingerprint: FP, attemptNo: 1.5 }),
-    ).toThrow();
   });
 });
 

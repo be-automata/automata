@@ -47,4 +47,8 @@ describe(`${MANIFEST} exports`, () => {
   it("exports the run display-lane module shared by www and the worker (#373)", () => {
     expect(exportsMap["./run-lane"]).toBe("./src/run-lane.ts");
   });
+
+  it("exports the fix-branch module shared by shared, www and the worker (#622)", () => {
+    expect(exportsMap["./fix-branch"]).toBe("./src/fix-branch.ts");
+  });
 });

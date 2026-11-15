@@ -71,7 +71,7 @@ export interface ClaimFixAttemptInput {
   findingId: string;
   maxAttempts: number;
   cooldownMin: number;
-  /** Branch name for the attempt number (fixBranchName in www). */
+  /** Branch name for the attempt number (fixBranchName in @terragon/utils/fix-branch). */
   branchFor: (attemptNo: number) => string;
   leaseMs?: number;
   now?: Date;

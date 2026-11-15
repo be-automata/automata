@@ -2,16 +2,18 @@
  * Self-heal fix lane path policy (phase 9) — THE one definition of which files
  * a fix run may change and which it may never touch.
  *
- * Dependency-free on purpose (no imports at all): the www fix prompt, the www
- * compare-diff guard and — through a drift-tested mirror — the worker's
- * pushed-diff check all read this module, and the deploy tsx scripts can load
- * it without alias resolution. The prompt is advice to a well-behaved agent;
- * the worker and www checks are the enforcement, and they must agree with the
- * prompt byte for byte, which is why the list lives here and nowhere else.
+ * Nearly dependency-free on purpose (its only import is the dependency-free
+ * `@terragon/utils/fix-branch`, which owns the fix-branch prefix and is also read
+ * by the worker directly): the www fix prompt, the www compare-diff guard and —
+ * through a drift-tested mirror — the worker's pushed-diff check all read this
+ * module, and the deploy tsx scripts can load it without alias resolution. The
+ * prompt is advice to a well-behaved agent; the worker and www checks are the
+ * enforcement, and they must agree with the prompt byte for byte, which is why
+ * the list lives here and nowhere else.
  */
 
 /** Every fix branch starts with this; the git-broker ref fence accepts nothing else. */
-export const FIX_BRANCH_PREFIX = "automata/fix-";
+export { FIX_BRANCH_PREFIX } from "@terragon/utils/fix-branch";
 
 /**
  * Paths a fix run may never change, whatever the plan lists. Agent
