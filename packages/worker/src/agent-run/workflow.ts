@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { FIX_BRANCH_PREFIX } from "@terragon/utils/fix-branch";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 import { hatchet } from "../hatchet-client";
@@ -816,12 +817,6 @@ export interface SelfHealAuditStepDeps {
 }
 
 /**
- * Mirror of @terragon/shared `FIX_BRANCH_PREFIX` (the worker does not depend
- * on shared); a drift test in workflow.test.ts pins the two together.
- */
-export const WORKER_FIX_BRANCH_PREFIX = "automata/fix-";
-
-/**
  * The worker's own shape rule for what follows `automata/fix-`: a conservative
  * character set with no `/`, looser than the generated names
  * (`<issue>-<8 hex>-a<attempt>`) but never wider than before. It is a local
@@ -842,12 +837,12 @@ export function selfHealRefFence(
 ): { exactRef: string } | undefined {
   if (selfHeal?.kind !== "fix") return undefined;
   const branch = selfHeal.branch;
-  const suffix = branch.startsWith(WORKER_FIX_BRANCH_PREFIX)
-    ? branch.slice(WORKER_FIX_BRANCH_PREFIX.length)
+  const suffix = branch.startsWith(FIX_BRANCH_PREFIX)
+    ? branch.slice(FIX_BRANCH_PREFIX.length)
     : "";
   if (!FIX_SUFFIX_SHAPE.test(suffix) || !isBranchRef(`refs/heads/${branch}`)) {
     throw new Error(
-      `self-heal fix run: branch is not a ${WORKER_FIX_BRANCH_PREFIX}* branch name`,
+      `self-heal fix run: branch is not a ${FIX_BRANCH_PREFIX}* branch name`,
     );
   }
   return { exactRef: `refs/heads/${branch}` };
