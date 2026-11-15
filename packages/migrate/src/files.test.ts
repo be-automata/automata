@@ -127,6 +127,7 @@ describe("deploy/migrations", () => {
       "2026-11-13-addon-call-receiver",
       "2026-11-13-cell-broker-authority",
       "2026-11-14-org-cell-workflow-write",
+      "2026-11-15-cell-step-allowed-ref",
     ]);
     expect(files[0]?.headers.baseline).toBe(true);
     expect(files.slice(1).every((f) => !f.headers.baseline)).toBe(true);
