@@ -411,12 +411,15 @@ export async function createTestCellStep({
   effectBudget = null,
   stepTimeoutMs = 30 * 60_000,
   attempt = 1,
+  allowedRef = "refs/heads/feat/x",
 }: {
   db: DB;
   repoFullName?: string;
   effectBudget?: number | null;
   stepTimeoutMs?: number;
   attempt?: number;
+  /** The step's push fence. Defaults to `refs/heads/feat/x`; pass null for a step that does not push. */
+  allowedRef?: string | null;
 }) {
   const organizationId = await createTestOrg({ db });
   const { user } = await createTestUser({ db });
@@ -440,6 +443,7 @@ export async function createTestCellStep({
         attempt: openAttempt,
         stepTimeoutMs,
         effectBudget,
+        allowedRef,
       },
     });
   const bearer = async (bearerAttempt: number, ttlMs = stepTimeoutMs) => {

@@ -25,7 +25,10 @@ import {
 const db = createDb(env.DATABASE_URL!);
 const STEP_TIMEOUT = 30 * 60_000;
 
-async function newStep(effectBudget: number | null = null) {
+async function newStep(
+  effectBudget: number | null = null,
+  allowedRef: string | null = "refs/heads/feat/x",
+) {
   const organizationId = await createTestOrg({ db });
   const { user } = await createTestUser({ db });
   const { threadId } = await createTestThread({ db, userId: user.id });
@@ -40,6 +43,7 @@ async function newStep(effectBudget: number | null = null) {
         attempt,
         stepTimeoutMs: STEP_TIMEOUT,
         effectBudget,
+        allowedRef,
       },
     });
   const bearer = async (attempt: number) => {
@@ -99,6 +103,7 @@ describe("cell authority (ADR-014 remote cells)", () => {
           attempt: 5,
           stepTimeoutMs: STEP_TIMEOUT,
           effectBudget: null,
+          allowedRef: "refs/heads/feat/x",
         },
       }),
     ).toEqual({ ok: false, reason: "conflict" });
@@ -117,9 +122,68 @@ describe("cell authority (ADR-014 remote cells)", () => {
           attempt: 1,
           stepTimeoutMs: STEP_TIMEOUT,
           effectBudget: -1,
+          allowedRef: null,
         },
       }),
     ).rejects.toThrow(RangeError);
+  });
+
+  it("AC2 stores allowedRef, surfaces it on the bearer context, and keeps null as null", async () => {
+    const s = await newStep(null, "refs/heads/automata/task-1a2b3c4d");
+    await s.open(1);
+    const v = await verifyBearer({ db, token: await s.bearer(1) });
+    expect(v.ok && v.context.allowedRef).toBe(
+      "refs/heads/automata/task-1a2b3c4d",
+    );
+    const n = await newStep(null, null);
+    await n.open(1);
+    const nv = await verifyBearer({ db, token: await n.bearer(1) });
+    expect(nv.ok && nv.context.allowedRef).toBeNull();
+  });
+
+  it.each([
+    "feat/x",
+    "refs/tags/v1",
+    "refs/heads/",
+    "refs/heads/a..b",
+    "refs/heads/a.lock",
+    "refs/heads/a\u0007b",
+    "refs/heads/-x",
+    "refs/heads/HEAD",
+  ])("AC2 openStep throws a RangeError for allowedRef %j", async (ref) => {
+    const s = await newStep(null, ref);
+    await expect(s.open(1)).rejects.toThrow(RangeError);
+  });
+
+  it("AC2 re-opening with a different allowedRef is a conflict, and the stored ref never changes", async () => {
+    const s = await newStep(null, "refs/heads/feat/x");
+    expect(await s.open(1)).toEqual({ ok: true });
+    const reopen = (attempt: number, allowedRef: string | null) =>
+      openStep({
+        db,
+        step: {
+          stepKey: s.stepKey,
+          organizationId: s.organizationId,
+          threadId: s.threadId,
+          attempt,
+          stepTimeoutMs: STEP_TIMEOUT,
+          effectBudget: null,
+          allowedRef,
+        },
+      });
+    expect(await reopen(1, "refs/heads/feat/y")).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(await reopen(2, "refs/heads/feat/y")).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(await reopen(2, null)).toEqual({ ok: false, reason: "conflict" });
+    // The newer attempt with the same ref still takes the lease.
+    expect(await reopen(2, "refs/heads/feat/x")).toEqual({ ok: true });
+    const v = await verifyBearer({ db, token: await s.bearer(2) });
+    expect(v.ok && v.context.allowedRef).toBe("refs/heads/feat/x");
   });
 
   it("AC2 refuses a bearer whose TTL exceeds the step timeout or for a fenced attempt, and throws on a TTL that is not a positive number", async () => {

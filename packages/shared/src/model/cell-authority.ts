@@ -1,5 +1,7 @@
 import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 
+import { isBranchRef } from "@terragon/utils/receive-pack-refs";
+
 import { DB } from "../db";
 import { cellBearer, cellEffect, cellStep } from "../db/schema";
 import { hashOpaqueToken, mintOpaqueToken } from "../utils/opaque-token";
@@ -50,6 +52,8 @@ export interface BearerContext {
   attempt: number;
   organizationId: string;
   threadId: string;
+  /** The one ref the step may push (`refs/heads/<name>`); null = it does not push. */
+  allowedRef: string | null;
 }
 
 type Executor = Pick<DB, "select">;
@@ -75,6 +79,10 @@ const isRevoked = (attempt: number, revokedThrough: number | null): boolean =>
  * holds the lease is a no-op success (a restarted worker re-opening its own
  * attempt). A stale or revoked attempt, a finished step, or a step that belongs
  * to another organization or thread is refused.
+ *
+ * `allowedRef` is the one ref (`refs/heads/<name>`) the step may push, or null
+ * when it does not push. It is fixed for the life of the step: re-opening with a
+ * different value (including null against a ref) is a `conflict`.
  */
 export async function openStep({
   db,
@@ -88,6 +96,7 @@ export async function openStep({
     attempt: number;
     stepTimeoutMs: number;
     effectBudget: number | null;
+    allowedRef: string | null;
   };
 }): Promise<
   | { ok: true }
@@ -104,6 +113,9 @@ export async function openStep({
   ) {
     throw new RangeError("effectBudget must be null or a non-negative integer");
   }
+  if (step.allowedRef !== null && !isBranchRef(step.allowedRef)) {
+    throw new RangeError("allowedRef must be null or a refs/heads/ branch ref");
+  }
   const rows = await db
     .insert(cellStep)
     .values({
@@ -113,6 +125,7 @@ export async function openStep({
       currentAttempt: step.attempt,
       stepTimeoutMs: step.stepTimeoutMs,
       effectBudget: step.effectBudget,
+      allowedRef: step.allowedRef,
     })
     .onConflictDoUpdate({
       target: cellStep.stepKey,
@@ -126,6 +139,7 @@ export async function openStep({
         ),
         eq(cellStep.organizationId, step.organizationId),
         eq(cellStep.threadId, step.threadId),
+        sql`${cellStep.allowedRef} IS NOT DISTINCT FROM ${step.allowedRef}`,
       ),
     })
     .returning({ stepKey: cellStep.stepKey });
@@ -139,6 +153,7 @@ export async function openStep({
         revokedThrough: cellStep.revokedThrough,
         organizationId: cellStep.organizationId,
         threadId: cellStep.threadId,
+        allowedRef: cellStep.allowedRef,
       })
       .from(cellStep)
       .where(eq(cellStep.stepKey, step.stepKey))
@@ -147,7 +162,8 @@ export async function openStep({
   if (
     !existing ||
     existing.organizationId !== step.organizationId ||
-    existing.threadId !== step.threadId
+    existing.threadId !== step.threadId ||
+    existing.allowedRef !== step.allowedRef
   ) {
     return { ok: false, reason: "conflict" };
   }
@@ -255,6 +271,7 @@ async function resolveBearer(
       effectsUsed: cellStep.effectsUsed,
       organizationId: cellStep.organizationId,
       threadId: cellStep.threadId,
+      allowedRef: cellStep.allowedRef,
     })
     .from(cellBearer)
     .innerJoin(cellStep, eq(cellStep.stepKey, cellBearer.stepKey))
@@ -278,6 +295,7 @@ async function resolveBearer(
       attempt: row.attempt,
       organizationId: row.organizationId,
       threadId: row.threadId,
+      allowedRef: row.allowedRef,
     },
     effectBudget: row.effectBudget,
     effectsUsed: row.effectsUsed,
