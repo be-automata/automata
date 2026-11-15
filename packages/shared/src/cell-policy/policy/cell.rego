@@ -4,9 +4,10 @@
 # ADR-005 §3b); the profile record comes from a conformance run and expires (ADR-014 Decision 3).
 # Called at compile, dispatch and resume.
 #
-# Carried over from the 2026-11-08 spike (17/17 tests) with one addition: a profile whose
+# Carried over from the 2026-11-08 spike (17/17 tests) with two additions: a profile whose
 # configuration says egress_mode "observe" counts as open egress (ADR-014 invariant "Observe is
-# not enforce").
+# not enforce"), and a managed profile must run egress in enforce mode with a measured allowlist
+# (egress_not_enforced, #611).
 #
 # The compiled WASM (../cell.wasm, entrypoint cell/decision) is committed; regenerate it with
 # packages/shared/scripts/build-cell-policy.sh after any change here. CI fails on a mismatch.
@@ -120,6 +121,18 @@ reasons contains "provider_endpoints_reachable" if {
 # ---------------------------------------------------------------- third-party (managed) tier
 
 managed if profile.tier == "managed"
+
+# A managed cell's egress must be enforced by the provider: enforce mode and a measured allowlist.
+# A missing mode or capability counts as not enforced.
+reasons contains "egress_not_enforced" if {
+	managed
+	not managed_egress_enforced
+}
+
+managed_egress_enforced if {
+	object.get(profile, ["configuration", "egress_mode"], "") == "enforce"
+	object.get(caps, "egress", "") == "allowlist"
+}
 
 reasons contains sprintf("data_class_barred:%s", [cell.data_class]) if {
 	managed

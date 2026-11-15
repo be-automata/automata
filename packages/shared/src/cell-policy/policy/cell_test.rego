@@ -20,6 +20,7 @@ allowlist_profile := {
 	"id": "agent37/gvisor/allowlist",
 	"provider": "agent37",
 	"tier": "managed",
+	"configuration": {"egress_mode": "enforce"},
 	"capabilities": {
 		"egress": "allowlist",
 		"egress_allowlist": ["gateway.example"],
@@ -108,9 +109,42 @@ test_observe_mode_counts_as_open_egress if {
 	denied_with(req(synthetic_cell, p), "egress_open")
 }
 
-test_enforce_mode_keeps_measured_egress if {
-	p := object.union(allowlist_profile, {"configuration": {"egress_mode": "enforce"}})
+test_customer_box_without_mode_is_not_held_to_enforce if {
+	# The egress_not_enforced rule is managed-tier only: a customer_box profile with no
+	# configuration is still allowed.
+	p := object.union(object.remove(allowlist_profile, ["configuration"]), {"tier": "customer_box"})
 	d := cell.decision with input as req(synthetic_cell, p)
+	d.allow
+}
+
+# ---------------------------------------------------------------- egress must be enforced (#611)
+
+test_managed_observe_mode_is_not_enforced if {
+	p := object.union(allowlist_profile, {"configuration": {"egress_mode": "observe"}})
+	denied_with(req(synthetic_cell, p), "egress_not_enforced")
+	denied_with(req(synthetic_cell, p), "egress_open")
+}
+
+test_managed_missing_mode_is_not_enforced if {
+	p := object.remove(allowlist_profile, ["configuration"])
+	denied_with(req(synthetic_cell, p), "egress_not_enforced")
+}
+
+test_managed_caps_egress_none_is_not_enforced if {
+	p := object.union(allowlist_profile, {"capabilities": object.union(allowlist_profile.capabilities, {"egress": "none"})})
+	denied_with(req(synthetic_cell, p), "egress_not_enforced")
+}
+
+test_customer_box_observe_is_open_but_not_unenforced if {
+	p := object.union(allowlist_profile, {"tier": "customer_box", "configuration": {"egress_mode": "observe"}})
+	denied_with(req(synthetic_cell, p), "egress_open")
+	d := cell.decision with input as req(synthetic_cell, p)
+	not "egress_not_enforced" in d.reasons
+}
+
+test_managed_enforce_with_allowlist_is_enforced if {
+	d := cell.decision with input as req(synthetic_cell, allowlist_profile)
+	not "egress_not_enforced" in d.reasons
 	d.allow
 }
 

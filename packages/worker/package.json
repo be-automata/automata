@@ -14,7 +14,7 @@
     "worker": "pnpm run daemon:build && tsx src/hello/worker.ts",
     "trigger": "tsx src/hello/trigger.ts",
     "provision:tenant": "tsx scripts/provision-tenant.ts",
-    "test": "vitest --no-file-parallelism --passWithNoTests",
+    "test": "vitest run --no-file-parallelism --passWithNoTests",
     "tsc-check": "tsc --noEmit",
     "format": "prettier --write . --ignore-path ../../.prettierignore --config ../../.prettierrc",
     "format-check": "prettier --check . --ignore-path ../../.prettierignore --config ../../.prettierrc"

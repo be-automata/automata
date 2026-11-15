@@ -33,6 +33,7 @@ const allowlistProfile: CellPolicyProfile = {
   id: "agent37/gvisor/allowlist",
   provider: "agent37",
   tier: "managed",
+  configuration: { egress_mode: "enforce" },
   capabilities: {
     egress: "allowlist",
     egress_allowlist: ["gateway.example"],
@@ -74,6 +75,8 @@ type Case = {
   allowed: boolean;
   /** Reasons that must be present (all of them). */
   reasons?: string[];
+  /** Reasons that must be absent. */
+  absent?: string[];
 };
 
 const CASES: Case[] = [
@@ -162,13 +165,46 @@ const CASES: Case[] = [
     reasons: ["egress_open"],
   },
   {
-    name: "enforce mode keeps the measured egress",
+    name: "a customer_box profile without egress_mode is not held to egress_not_enforced",
+    // egress_not_enforced is managed-tier only: a customer_box profile with no configuration is allowed.
     input: req(undefined, {
-      ...allowlistProfile,
-      configuration: { egress_mode: "enforce" },
+      ...without(allowlistProfile, "configuration"),
+      tier: "customer_box",
     }),
     allowed: true,
     reasons: [],
+  },
+  {
+    name: "managed observe mode is not enforced",
+    input: req(undefined, {
+      ...allowlistProfile,
+      configuration: { egress_mode: "observe" },
+    }),
+    allowed: false,
+    reasons: ["egress_not_enforced", "egress_open"],
+  },
+  {
+    name: "managed profile with a missing egress mode is not enforced",
+    input: req(undefined, without(allowlistProfile, "configuration")),
+    allowed: false,
+    reasons: ["egress_not_enforced"],
+  },
+  {
+    name: "managed profile with caps.egress none is not enforced",
+    input: req(undefined, withCaps({ egress: "none" })),
+    allowed: false,
+    reasons: ["egress_not_enforced"],
+  },
+  {
+    name: "customer_box observe is open but not unenforced",
+    input: req(undefined, {
+      ...allowlistProfile,
+      tier: "customer_box",
+      configuration: { egress_mode: "observe" },
+    }),
+    allowed: false,
+    reasons: ["egress_open"],
+    absent: ["egress_not_enforced"],
   },
   {
     name: "host outside the allowlist denies",
@@ -279,7 +315,7 @@ describe("allow_cell compiled to WASM", () => {
     policy = await loadCellPolicy(await readCellPolicyWasm());
   });
 
-  it.each(CASES)("$name", ({ input, allowed, reasons }) => {
+  it.each(CASES)("$name", ({ input, allowed, reasons, absent }) => {
     const decision = policy.evaluate(input as CellPolicyInput);
     expect(decision.allowed).toBe(allowed);
     if (reasons && reasons.length === 0) {
@@ -287,6 +323,9 @@ describe("allow_cell compiled to WASM", () => {
     }
     for (const reason of reasons ?? []) {
       expect(decision.reasons).toContain(reason);
+    }
+    for (const reason of absent ?? []) {
+      expect(decision.reasons).not.toContain(reason);
     }
     // Deny by default: a denial always names a reason.
     if (!decision.allowed) {
