@@ -1,3 +1,4 @@
+/// <reference path="./psl.d.ts" />
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@terragon/utils/payload-seal";
@@ -130,10 +131,18 @@ function normalizeEntry(raw: string): CellEgressEntry {
         "port_not_443: entry pins a non-numeric port other than 443; not echoed",
       );
     }
+    // Echo only when the host part is a real domain (`user:12345` is not).
+    const bare = host.replace(/\.$/, "").replace(/^\*\./, "");
+    if (DOMAIN_RE.test(bare)) {
+      throw new CellEgressError(
+        "port_not_443",
+        `port_not_443: '${raw}' pins a port other than 443`,
+        raw,
+      );
+    }
     throw new CellEgressError(
       "port_not_443",
-      `port_not_443: '${raw}' pins a port other than 443`,
-      raw,
+      "port_not_443: entry pins a port other than 443 on a non-domain host; not echoed",
     );
   }
   let hostPart = host;
@@ -150,10 +159,10 @@ function normalizeEntry(raw: string): CellEgressEntry {
     );
   }
   if (!DOMAIN_RE.test(name)) {
+    // Never echoed: a bare token (`abc123token`) also fails here.
     throw new CellEgressError(
       "invalid_host",
-      `invalid_host: '${raw}' is not a domain or *.domain`,
-      raw,
+      "invalid_host: entry is not a domain or *.domain; not echoed",
     );
   }
   // A wildcard over a public suffix (`*.co.uk`, `*.github.io`) would open every

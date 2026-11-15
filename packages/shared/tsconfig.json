@@ -1,8 +1,3 @@
 {
-  "extends": "@terragon/tsconfig/base.json",
-  "compilerOptions": {
-    "paths": {
-      "psl": ["./node_modules/psl/types/index.d.ts"]
-    }
-  }
+  "extends": "@terragon/tsconfig/base.json"
 }

@@ -279,6 +279,22 @@ describe("compileCellEgress", () => {
     }
   });
 
+  it.each([
+    ["a bare token", "abc123token", "invalid_host"],
+    ["a numeric port on a non-domain host", "user:12345", "port_not_443"],
+  ])("does not echo %s", (_label, raw, code) => {
+    try {
+      compile([], { narrowTo: [raw] });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(CellEgressError);
+      const err = e as CellEgressError;
+      expect(err.code).toBe(code);
+      expect(err.entry).toBeUndefined();
+      expect(err.message).not.toContain(raw);
+    }
+  });
+
   it("does not echo a multi-colon entry that is not an IPv6 literal", () => {
     try {
       compile([], { narrowTo: ["host.example.com:user:s3cret"] });
