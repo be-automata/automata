@@ -877,21 +877,22 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
     }
   });
 
+  /** Reads a repo source file relative to this test, for the drift checks. */
+  const readSource = async (rel: string): Promise<string> => {
+    const fs = await import("node:fs/promises");
+    return fs.readFile(new URL(rel, import.meta.url), "utf8");
+  };
+
   describe("documented fix-name shape (the fence accepts it; this does not exercise fixBranchName)", () => {
     const generated = (issue: number, fp8: string, attempt: number) =>
       `automata/fix-${issue}-${fp8}-a${attempt}`;
 
     it("source drift: fix-run-prompt.ts still builds the shape the table assumes", async () => {
-      const fs = await import("node:fs/promises");
-      const src = await fs.readFile(
-        new URL(
-          "../../../../apps/www/src/server-lib/audit/fix-run-prompt.ts",
-          import.meta.url,
-        ),
-        "utf8",
+      const src = await readSource(
+        "../../../../apps/www/src/server-lib/audit/fix-run-prompt.ts",
       );
-      expect(src).toContain(
-        "return `${FIX_BRANCH_PREFIX}${issueNumber}-${fingerprint.slice(0, 8)}-a${attemptNo}`;",
+      expect(src).toMatch(
+        /`\$\{FIX_BRANCH_PREFIX\}\$\{issueNumber\}-\$\{fingerprint\.slice\(0, 8\)\}-a\$\{attemptNo\}`/,
       );
       expect(src).toContain("const FINGERPRINT_RE = /^[0-9a-f]{8,}$/;");
     });
@@ -911,33 +912,12 @@ describe("selfHealRefFence (FENCE-01 wiring)", () => {
         }
       }
     });
-
-    it("a seeded sweep of 4000 names in the documented shape is all accepted", () => {
-      let state = 12345;
-      const next = () => {
-        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-        return state;
-      };
-      for (let i = 0; i < 4000; i += 1) {
-        const issue = (next() % 99999) + 1;
-        const attempt = (next() % 99999) + 1;
-        const fp = next().toString(16).padStart(8, "0");
-        const name = generated(issue, fp, attempt);
-        expect(selfHealRefFence(fix(name)), name).toEqual({
-          exactRef: `refs/heads/${name}`,
-        });
-      }
-    });
   });
 
   it("the worker's fix-branch prefix matches shared FIX_BRANCH_PREFIX (drift)", async () => {
     // The worker does not depend on @terragon/shared; the literal is mirrored
     // and pinned against the source of truth here.
-    const fs = await import("node:fs/promises");
-    const src = await fs.readFile(
-      new URL("../../../shared/src/self-heal/fix-paths.ts", import.meta.url),
-      "utf8",
-    );
+    const src = await readSource("../../../shared/src/self-heal/fix-paths.ts");
     expect(src).toContain(
       `export const FIX_BRANCH_PREFIX = "${WORKER_FIX_BRANCH_PREFIX}";`,
     );

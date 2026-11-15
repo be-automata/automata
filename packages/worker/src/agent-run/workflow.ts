@@ -822,9 +822,10 @@ export interface SelfHealAuditStepDeps {
 export const WORKER_FIX_BRANCH_PREFIX = "automata/fix-";
 
 /**
- * The worker's own shape rule for what follows `automata/fix-`: it keeps the
- * fence as tight as the generated names (`<issue>-<8 hex>-a<attempt>`). It is
- * a local shape rule, not a ref-format check; `isBranchRef` owns ref format.
+ * The worker's own shape rule for what follows `automata/fix-`: a conservative
+ * character set with no `/`, looser than the generated names
+ * (`<issue>-<8 hex>-a<attempt>`) but never wider than before. It is a local
+ * shape rule, not a ref-format check; `isBranchRef` owns ref format.
  */
 const FIX_SUFFIX_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
