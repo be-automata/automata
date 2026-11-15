@@ -79,7 +79,7 @@ export const BUSY_MESSAGE =
   "another migration run holds the lock (automata:schema_migrations); nothing was applied";
 
 /** The first column of the first row. */
-export async function scalar<T>(c: pg.Client, sql: string): Promise<T> {
+export async function scalar<T>(c: pg.ClientBase, sql: string): Promise<T> {
   const result = await c.query(sql);
   return Object.values(result.rows[0] ?? {})[0] as T;
 }
@@ -101,7 +101,7 @@ export async function waitUntil(
 }
 
 /** True once some session of this database holds a granted advisory lock. */
-export async function advisoryLockHeld(c: pg.Client): Promise<boolean> {
+export async function advisoryLockHeld(c: pg.ClientBase): Promise<boolean> {
   return (
     (await scalar<number>(
       c,
@@ -112,7 +112,8 @@ export async function advisoryLockHeld(c: pg.Client): Promise<boolean> {
   );
 }
 
-export function invalidIndexCount(c: pg.Client): Promise<number> {
+/** Invalid (failed `CREATE INDEX CONCURRENTLY`) indexes in the current database. */
+export function invalidIndexCount(c: pg.ClientBase): Promise<number> {
   return scalar<number>(
     c,
     "SELECT count(*)::int FROM pg_index WHERE NOT indisvalid",

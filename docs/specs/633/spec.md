@@ -170,7 +170,7 @@ Header `deploy/migrate.ts:14-17` and `run()` at `:189-198`:
 
 So exit 3 collides with nothing. Precedence after the fix: argument and URL errors (1) still come before connecting; once connected, busy (3) comes before anything that reads the database, so a loser never reaches drift (1) or contract (2) checks.
 
-### The prototype (`eval-633/prototype.diff`)
+### The prototype (from the pre-implementation evaluation)
 
 What it changes, 3 files:
 
@@ -201,16 +201,16 @@ What it changes, 3 files:
 - **TS rules** (AGENTS.md): no `any`, `unknown` in catches narrowed with `instanceof`, no `!` without a comment, `async`/`await` only, no silently swallowed errors, kebab-case file names.
 - **Tests are deterministic.** Order runners by observed state, never by bare sleeps where a state is observable: poll `pg_stat_activity` / `pg_locks` filtered on `datname = current_database()`, with a bounded loop that **fails** the test when the state is never reached (the `runner-test.diff` loop falls through silently; fix that).
 - Prettier: `pnpm exec prettier --no-editorconfig --config .prettierrc --write <files>`.
-- Docker-backed test runs (vitest in `packages/migrate`, the race script) run **unsandboxed**.
+- Docker-backed test runs (vitest in `packages/migrate`, the race script) need a local Docker daemon.
 
 ## Gates
 
-1. `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism` (unsandboxed; docker compose test Postgres 16)
+1. `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism` (needs local Docker; docker compose test Postgres 16)
 2. `node deploy/lint-migrations.ts`
 3. `pnpm turbo tsc-check`
 4. `pnpm turbo lint`
 5. `pnpm exec prettier --no-editorconfig --config .prettierrc --check <changed files>`
-6. **T0 two-runner race** (unsandboxed, local Docker only, never a shared or production database), the evaluation's `scripts/race.sh` + `matrix.sh` + `holder.mjs` + `q.mjs` + `sampler.mjs` + `summarize.mjs`, copied into the session scratchpad and adapted:
+6. **T0 two-runner race** (local Docker only, never a shared or production database), the evaluation's `scripts/race.sh` + `matrix.sh` + `holder.mjs` + `q.mjs` + `sampler.mjs` + `summarize.mjs`, run from a local working copy and adapted:
    - set `WT=` to this worktree (`…/.claude/worktrees/gh-633`) and `PG_FROM=$WT/packages/migrate/package.json`;
    - start `postgres:16-alpine` and `postgres:18-alpine` as containers `eval633-pg16` / `eval633-pg18` on host ports `55416` / `55418` (`race.sh` uses `554$V`), `POSTGRES_PASSWORD=pw`, with `-c log_lock_waits=on -c deadlock_timeout=1s`;
    - run with Homebrew bash ≥ 4 (`race.sh` uses `${DB,,}`; `/bin/bash` 3.2 fails);
@@ -231,7 +231,7 @@ What it changes, 3 files:
    - `runner.test.ts`: add **the production-shape test**. A traffic session holds `ROW EXCLUSIVE` on `items`; runner A applies a `-- migrate:no-transaction` `CREATE INDEX CONCURRENTLY IF NOT EXISTS` file and is observed waiting (`wait_event = 'virtualxid'`, this database). Runner B then gets `MigrationLockBusyError` with the exact message. After the traffic commits, A applies `["002"]`, `pg_index` has no `NOT indisvalid` row, and the ledger is `["001","002"]`. Against the current runner this test must fail with `002: left 1 invalid index(es) behind` (the evaluation measured this); record that run in the PR.
    - `runner.test.ts`: add a test that a busy `markApplied` writes no ledger row.
    - `cli.test.ts`: add a CLI race with async `spawn`, two `--apply --dir <fixture>` where the fixture's first file sleeps and a later one is a no-transaction CIC. Exit codes sorted must be `[0, 3]`; the loser's stderr contains the exact `migrate: …` line and its stdout has no `migrations:` plan line. Then add a busy run against an empty database while a test session holds the key (`pg_advisory_lock(hashtext('automata:schema_migrations'))`): exit 3 for `--apply` and for `--mark-applied`, `to_regclass('public.schema_migrations')` still `NULL`. Finally, a dry run while the key is held: exit 0 with the plan printed (OD3).
-   - Gate: the full `@terragon/migrate` suite (unsandboxed).
+   - Gate: the full `@terragon/migrate` suite (local Docker).
 3. **Docs** (≤ 2 files: `AGENTS.md`, `.github/workflows/migrate.yml` comments only).
    - `AGENTS.md:139-140`: the pooler cannot hold the session advisory lock, which lets **one runner at a time** apply; a second `--apply` or `--mark-applied` exits 3 with the lock message and touches nothing; the dry run takes no lock. Mention exit 3 next to the commands at `:119-123`.
    - `migrate.yml:46-47`, comment only: GitHub queues its own runs; a run that overlaps a manual one exits 3 and opens `migrate-failure`.
@@ -274,3 +274,7 @@ These override anything above.
 4. **Repo gates.**
    - `node deploy/lint-migrations.ts`, `pnpm turbo tsc-check`, `pnpm turbo lint`.
    - The T0 race: N=10 in each order on postgres:16 and :18. It requires 0 deadlocks, 0 `NOT indisvalid` rows, and exit codes in {0, 3}.
+
+## Note on line numbers
+
+The line numbers in **Ticket** and **Ground truth** point at `origin/main` before this change (c5e25f07). This change rewrites the lock functions and replaces the `serializes two concurrent runners` test, so those lines no longer exist on the branch.

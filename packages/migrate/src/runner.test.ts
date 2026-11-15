@@ -245,7 +245,9 @@ describe("applyMigrations", () => {
         await scalar<number>(winner, "SELECT count(*)::int FROM once"),
       ).toBe(1);
       // A busy runner never unlocks a lock it does not own.
-      expect(loserNotices.filter((m) => /own/i.test(m))).toEqual([]);
+      expect(
+        loserNotices.filter((m) => /you don't own a lock/i.test(m)),
+      ).toEqual([]);
     },
   );
 
@@ -443,6 +445,6 @@ describe("markApplied", () => {
     expect(
       await scalar<string | null>(c, "SELECT to_regclass('schema_migrations')"),
     ).toBe(null);
-    expect(notices.filter((m) => /own/i.test(m))).toEqual([]);
+    expect(notices.filter((m) => /you don't own a lock/i.test(m))).toEqual([]);
   });
 });
