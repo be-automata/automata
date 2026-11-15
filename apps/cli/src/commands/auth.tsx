@@ -11,12 +11,13 @@ const TERRAGON_WEB_URL =
   process.env.TERRAGON_WEB_URL || "http://localhost:3000";
 
 function openBrowser(url: string) {
-  // `start` is a cmd builtin on Windows; the empty string is its window title.
+  // On Windows, rundll32 takes the URL as a single argument; `cmd /c start`
+  // would parse it through cmd.exe.
   const [command, args]: [string, string[]] =
     process.platform === "darwin"
       ? ["open", [url]]
       : process.platform === "win32"
-        ? ["cmd", ["/c", "start", "", url]]
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
         : ["xdg-open", [url]];
   execFile(command, args, (error) => {
     if (error) {

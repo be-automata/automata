@@ -31,6 +31,21 @@ describe("assertSafeBranchName", () => {
   });
 });
 
+describe("assertSafeBranchName when git cannot be spawned", () => {
+  const originalPath = process.env.PATH;
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+  });
+
+  it("rethrows the spawn error instead of reporting an invalid name", async () => {
+    process.env.PATH = "";
+    const err = await assertSafeBranchName("feature/x").catch((e) => e);
+    expect(err).not.toBeInstanceOf(InvalidBranchNameError);
+    expect((err as { code?: unknown }).code).toBe("ENOENT");
+  });
+});
+
 describe("runGit", () => {
   let dir: string;
   let marker: string;

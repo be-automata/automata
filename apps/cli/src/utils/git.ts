@@ -49,7 +49,15 @@ export async function assertSafeBranchName(name: string): Promise<void> {
   }
   try {
     await runGit(["check-ref-format", "--branch", name]);
-  } catch {
-    throw new InvalidBranchNameError(name);
+  } catch (err) {
+    // A non-zero git exit carries a numeric code; spawn failures (e.g. git
+    // missing from PATH) carry a string code and are rethrown unchanged.
+    if (
+      err instanceof Error &&
+      typeof (err as { code?: unknown }).code === "number"
+    ) {
+      throw new InvalidBranchNameError(name);
+    }
+    throw err;
   }
 }

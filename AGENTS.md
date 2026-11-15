@@ -47,6 +47,7 @@ pnpm -C apps/www test
 pnpm -C packages/shared test
 pnpm -C packages/daemon test
 pnpm -C packages/sandbox test
+pnpm -C apps/cli test
 
 # TypeScript type checking
 pnpm tsc-check
