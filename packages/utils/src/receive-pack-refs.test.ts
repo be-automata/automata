@@ -46,6 +46,7 @@ describe("isBranchRef", () => {
     "refs/heads/feat/x",
     "refs/heads/main",
     "refs/heads/HEAD2",
+    "refs/heads/feat/caf\u00e9-\u{1f680}",
   ])("accepts %s", (ref) => {
     expect(isBranchRef(ref)).toBe(true);
   });
@@ -76,6 +77,9 @@ describe("isBranchRef", () => {
     "refs/heads/a.",
     "refs/heads/-x",
     "refs/heads/HEAD",
+    "refs/heads/a\u007f",
+    "refs/heads/a\ufffd",
+    "refs/heads/a\ud800",
   ])("refuses %j", (ref) => {
     expect(isBranchRef(ref)).toBe(false);
   });

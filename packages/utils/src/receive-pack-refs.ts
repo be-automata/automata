@@ -192,8 +192,11 @@ const BRANCH_REF_PREFIX = "refs/heads/";
 
 /**
  * True when `ref` is a well-formed `refs/heads/<name>` branch ref: git's
- * check-ref-format rules, plus two fail-closed extras (a name starting with
- * `-` and the name `HEAD` are refused).
+ * check-ref-format rules, plus fail-closed extras: a name starting with `-`,
+ * the name `HEAD`, and a name holding U+FFFD or a lone surrogate are refused.
+ * The last one matters because the receive-pack parser decodes ref bytes
+ * leniently, so any invalid UTF-8 in a pushed ref becomes U+FFFD; a fence
+ * holding U+FFFD would then match refs whose raw bytes differ from it.
  */
 export function isBranchRef(ref: string): boolean {
   if (!ref.startsWith(BRANCH_REF_PREFIX)) return false;
@@ -205,6 +208,7 @@ export function isBranchRef(ref: string): boolean {
   }
   // Control characters, space, DEL and git's reserved punctuation.
   if (/[\u0000- \u007f~^:?*[\\]/.test(name)) return false;
+  if (/[\uD800-\uDFFF\uFFFD]/u.test(name)) return false;
   return name
     .split("/")
     .every(
