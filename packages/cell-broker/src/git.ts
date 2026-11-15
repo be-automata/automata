@@ -31,6 +31,7 @@ import {
   refusalResponse,
   responseHeadersForCell,
   type TokenMinter,
+  type WriteTokenMinter,
 } from "./common";
 import {
   parseAdvertisedRefs,
@@ -67,7 +68,13 @@ export interface GitBrokerDeps {
   db: DB;
   fetchImpl: typeof fetch;
   mintReadToken: TokenMinter;
-  mintWriteToken: TokenMinter;
+  mintWriteToken: WriteTokenMinter;
+  /**
+   * Whether the organization opted in to cells pushing `.github/workflows`
+   * (#609). Read live, per request, from the authorized step's organization.
+   * A throw is a 500: nothing is minted or claimed on a guess.
+   */
+  allowWorkflowWrite: (organizationId: string) => Promise<boolean>;
   sideEffectsEnabled: () => boolean;
   enabled: () => boolean;
   /** Cap on a push body; tests lower it. Defaults to 32 MiB. */
@@ -566,6 +573,39 @@ function advertisedTipsMatch(
   );
 }
 
+type PushToken =
+  | { ok: true; token: string }
+  | { ok: false; response: Response };
+
+/**
+ * The write token for a push leg: read the org's workflow-write opt-in (a
+ * failure is a logged 500, nothing minted), then mint with it (a failure is
+ * the mapped mint response). Never logs the token.
+ */
+async function mintPushToken(
+  deps: GitBrokerDeps,
+  organizationId: string,
+  owner: string,
+  repo: string,
+): Promise<PushToken> {
+  let allowWorkflows: boolean;
+  try {
+    allowWorkflows = await deps.allowWorkflowWrite(organizationId);
+  } catch (error) {
+    console.error(
+      "cell-broker: workflow write setting read failed",
+      error instanceof Error ? `${error.name}: ${error.message}` : "unknown",
+    );
+    return { ok: false, response: internalError("workflow_write_setting") };
+  }
+  try {
+    const minted = await deps.mintWriteToken(owner, repo, { allowWorkflows });
+    return { ok: true, token: minted.token };
+  } catch (error) {
+    return { ok: false, response: mintFailureResponse(error) };
+  }
+}
+
 interface PushRequest {
   deps: GitBrokerDeps;
   request: Request;
@@ -579,8 +619,9 @@ interface PushRequest {
 /**
  * POST git-receive-pack (amendment 12): nothing that can fail for a local or
  * GitHub-App reason runs after the effect is claimed. Order: encoding (415),
- * declared length (413), command section (400/413), write token (502), probe,
- * claim (`beginEffect`), forward.
+ * declared length (413), command section (400/413), probe check (400), org
+ * settings read (500), write token (502), probe pass-through, claim
+ * (`beginEffect`), forward.
  */
 async function handlePush({
   deps,
@@ -619,13 +660,12 @@ async function handlePush({
     }
   }
 
-  let token: string;
-  try {
-    token = (await deps.mintWriteToken(owner, repo)).token;
-  } catch (error) {
+  const minted = await mintPushToken(deps, context.organizationId, owner, repo);
+  if (!minted.ok) {
     drop(section.reader);
-    return mintFailureResponse(error);
+    return minted.response;
   }
+  const token = minted.token;
 
   if (section.commands.length === 0) {
     try {
@@ -776,15 +816,24 @@ export function createGitBrokerHandler(
       });
     }
 
+    // Only the receive-pack advertisement reads the org setting: it is the
+    // first leg of a push and checks permission with the write token.
     let token: string;
-    try {
-      const minted =
-        leg !== "upload-pack"
-          ? await deps.mintWriteToken(stepOwner, stepRepo)
-          : await deps.mintReadToken(stepOwner, stepRepo);
+    if (leg === "upload-pack") {
+      try {
+        token = (await deps.mintReadToken(stepOwner, stepRepo)).token;
+      } catch (error) {
+        return mintFailureResponse(error);
+      }
+    } else {
+      const minted = await mintPushToken(
+        deps,
+        auth.context.organizationId,
+        stepOwner,
+        stepRepo,
+      );
+      if (!minted.ok) return minted.response;
       token = minted.token;
-    } catch (error) {
-      return mintFailureResponse(error);
     }
     try {
       return passThrough(

@@ -178,12 +178,18 @@ function harness(
     },
   );
   const mintReadToken = vi.fn(async () => ({ token: SENTINEL }));
-  const mintWriteToken = vi.fn(async () => ({ token: SENTINEL }));
+  const mintWriteToken = vi.fn(
+    async (..._args: [string, string, { allowWorkflows: boolean }]) => ({
+      token: SENTINEL,
+    }),
+  );
+  const allowWorkflowWrite = vi.fn(async () => false);
   const handler = createGitBrokerHandler({
     db,
     fetchImpl: fetchImpl as unknown as typeof fetch,
     mintReadToken,
     mintWriteToken,
+    allowWorkflowWrite,
     sideEffectsEnabled: () => true,
     enabled: () => true,
     ...over,
@@ -198,6 +204,7 @@ function harness(
     fetchImpl,
     mintReadToken,
     mintWriteToken,
+    allowWorkflowWrite,
   };
 }
 
@@ -290,8 +297,91 @@ describe("git broker push", () => {
     const f = await fixture();
     const h = harness();
     await h.handler(push(f.token, pushBody()));
-    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets");
+    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: false,
+    });
     expect(h.mintReadToken).not.toHaveBeenCalled();
+  });
+
+  it("#609 the push mints with the org's setting: false by default, true when opted in", async () => {
+    const f = await fixture();
+    const off = harness();
+    await off.handler(push(f.token, pushBody()));
+    expect(off.allowWorkflowWrite).toHaveBeenCalledWith(f.organizationId);
+    expect(off.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: false,
+    });
+
+    const g = await fixture();
+    const on = harness({}, { allowWorkflowWrite: vi.fn(async () => true) });
+    await on.handler(push(g.token, pushBody()));
+    expect(on.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: true,
+    });
+  });
+
+  it("#609 AC3 each org's setting reaches its own mint, never another org's", async () => {
+    const a = await fixture();
+    const b = await fixture();
+    const allow = vi.fn(async (orgId: string) => orgId === a.organizationId);
+    const h = harness({}, { allowWorkflowWrite: allow });
+    await h.handler(push(a.token, pushBody()));
+    await h.handler(push(b.token, pushBody()));
+    expect(allow).toHaveBeenCalledWith(a.organizationId);
+    expect(allow).toHaveBeenCalledWith(b.organizationId);
+    expect(h.mintWriteToken.mock.calls.map((c) => c[2])).toEqual([
+      { allowWorkflows: true },
+      { allowWorkflows: false },
+    ]);
+  });
+
+  it("#609 AC4 a failed settings read is a 500 internal_error with no mint, no claim and no budget spent", async () => {
+    const f = await fixture();
+    const h = harness(
+      {},
+      {
+        allowWorkflowWrite: async () => {
+          throw new Error("settings down");
+        },
+      },
+    );
+    const res = await h.handler(push(f.token, pushBody()));
+    expect([res.status, (await json(res)).error]).toEqual([
+      500,
+      "internal_error",
+    ]);
+    expect(h.mintWriteToken).not.toHaveBeenCalled();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await effectRows(f.stepKey)).toBe(0);
+    expect(await effectsUsed(f.stepKey)).toBe(0);
+  });
+
+  it("#609 the probe POST reads the setting too", async () => {
+    const f = await fixture();
+    const h = harness({ body: enc.encode("probe-ok") });
+    await h.handler(push(f.token, FLUSH));
+    expect(h.allowWorkflowWrite).toHaveBeenCalledTimes(1);
+    expect(h.mintWriteToken).toHaveBeenCalledWith("acme", "widgets", {
+      allowWorkflows: false,
+    });
+  });
+
+  it("#609 AC6 GitHub's workflow-permission refusal is stored and replayed without a second upstream call", async () => {
+    const refusal = concat(
+      pkt("unpack ok\n"),
+      pkt(
+        `ng ${REF} refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yml without workflows permission\n`,
+      ),
+      FLUSH,
+    );
+    const f = await fixture();
+    const h = harness({ body: refusal });
+    const first = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(refusal);
+    const replay = await h.handler(push(f.token, pushBody()));
+    expect(new Uint8Array(await replay.arrayBuffer())).toEqual(refusal);
+    expect(h.calls).toHaveLength(1);
+    expect(await effectRows(f.stepKey)).toBe(1);
   });
 
   it("AC5 stores a 200 whose report-status says ng, and a 4xx, and replays both", async () => {
@@ -382,6 +472,7 @@ describe("git broker push", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       mintReadToken: async () => ({ token: SENTINEL }),
       mintWriteToken: async () => ({ token: SENTINEL }),
+      allowWorkflowWrite: async () => false,
       sideEffectsEnabled: () => true,
       enabled: () => true,
       maxPushBytes: 1000,
@@ -934,6 +1025,7 @@ describe("git broker push", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       mintReadToken: async () => ({ token: SENTINEL }),
       mintWriteToken: async () => ({ token: SENTINEL }),
+      allowWorkflowWrite: async () => false,
       sideEffectsEnabled: () => true,
       enabled: () => true,
       pushTimeoutMs: 50,
@@ -972,6 +1064,7 @@ describe("git broker push", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       mintReadToken: async () => ({ token: SENTINEL }),
       mintWriteToken: async () => ({ token: SENTINEL }),
+      allowWorkflowWrite: async () => false,
       sideEffectsEnabled: () => true,
       enabled: () => true,
       pushTimeoutMs: 150,

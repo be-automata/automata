@@ -168,6 +168,7 @@ describe.skipIf(!hasGit)("real git through the cell git broker", () => {
       fetchImpl: up.fetchImpl,
       mintReadToken: async () => ({ token: SENTINEL }),
       mintWriteToken: async () => ({ token: SENTINEL }),
+      allowWorkflowWrite: async () => false,
       sideEffectsEnabled: () => true,
       enabled: () => true,
       maxPushBytes,

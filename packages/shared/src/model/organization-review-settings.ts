@@ -61,12 +61,14 @@ export async function upsertOrganizationReviewSetting({
   patch: {
     blockTolerance?: string | null;
     trustedAuthorThreshold?: string | null;
+    cellWorkflowWrite?: boolean | null;
   };
   updatedByUserId?: string | null;
 }): Promise<OrganizationReviewSetting> {
   const set: {
     blockTolerance?: string | null;
     trustedAuthorThreshold?: string | null;
+    cellWorkflowWrite?: boolean | null;
     updatedByUserId: string | null;
     updatedAt: Date;
   } = { updatedByUserId: updatedByUserId ?? null, updatedAt: new Date() };
@@ -74,6 +76,8 @@ export async function upsertOrganizationReviewSetting({
     set.blockTolerance = patch.blockTolerance;
   if (patch.trustedAuthorThreshold !== undefined)
     set.trustedAuthorThreshold = patch.trustedAuthorThreshold;
+  if (patch.cellWorkflowWrite !== undefined)
+    set.cellWorkflowWrite = patch.cellWorkflowWrite;
 
   const [row] = await db
     .insert(organizationReviewSettings)
@@ -85,6 +89,9 @@ export async function upsertOrganizationReviewSetting({
         : {}),
       ...(patch.trustedAuthorThreshold !== undefined
         ? { trustedAuthorThreshold: patch.trustedAuthorThreshold }
+        : {}),
+      ...(patch.cellWorkflowWrite !== undefined
+        ? { cellWorkflowWrite: patch.cellWorkflowWrite }
         : {}),
       updatedByUserId: updatedByUserId ?? null,
     })
@@ -113,4 +120,14 @@ export async function removeOrganizationReviewSetting({
     .where(eq(organizationReviewSettings.organizationId, organizationId))
     .returning({ organizationId: organizationReviewSettings.organizationId });
   return deleted.length > 0;
+}
+
+/**
+ * Whether remote cells may push to `.github/workflows` for this org (#609).
+ * Resolver default: a missing row, NULL and false all resolve OFF.
+ */
+export function isCellWorkflowWriteEnabled(
+  row: { cellWorkflowWrite?: boolean | null } | null | undefined,
+): boolean {
+  return row?.cellWorkflowWrite === true;
 }

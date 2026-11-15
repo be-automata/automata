@@ -1680,9 +1680,16 @@ still created before the deploy (step 2). Still run the schema gate before each 
 - GitHub App permissions on the repo: pull_requests write, contents write, issues write,
   checks read, actions read, metadata read. A missing permission latches and the lane refunds
   `missing-permission` instead of writing.
-- Remote-cell pushes that change `.github/workflows/` need the App's Workflows read/write permission
-  approved on the installation; without it the broker mints without it and GitHub rejects those pushes
-  (#606).
+- Remote-cell push tokens never carry `workflows: write` by default, so GitHub rejects a push that
+  changes `.github/workflows/` (#606). It is added only when BOTH an org admin turns on "Let remote
+  cells change CI workflow files" (Settings, Review) AND the App installation has Workflows
+  read/write approved (#609). The opt-in is read on every push, so turning it off applies to the next
+  one.
+- Customer guidance for that opt-in: keep CI secrets in GitHub environments with required reviewers,
+  and scope `push` triggers so agent branches do not receive secrets. A pushed workflow runs in CI
+  with whatever secrets its triggers can reach.
+- After an opt-in made mid-step, an identical retry of a refused workflow push replays the stored
+  refusal and does not call GitHub again. Push a new commit instead.
 - Branch protection is OPTIONAL. Record its state and the resulting CI gate source, never require
   it: `protection` (required checks), `all-checks` (no protection, or unreadable on a free plan:
   every check run and commit status must be green, with a 2-minute settle window), or

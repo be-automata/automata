@@ -455,3 +455,10 @@ export async function authorizeCellRequest(
     repo,
   };
 }
+
+/** Mints a one-repo write token; `allowWorkflows` is the org opt-in (#609). */
+export type WriteTokenMinter = (
+  owner: string,
+  repo: string,
+  opts: { allowWorkflows: boolean },
+) => Promise<{ token: string }>;

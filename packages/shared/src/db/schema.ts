@@ -1719,6 +1719,12 @@ export const organizationReviewSettings = pgTable(
      * default is a RESOLVER default, never a column default.
      */
     knowledgeEngine: boolean("knowledge_engine"),
+    /**
+     * Per-org opt-in letting remote cells push changes to `.github/workflows`
+     * (#609). NULL and false both resolve OFF: the default is a RESOLVER
+     * default, never a column default.
+     */
+    cellWorkflowWrite: boolean("cell_workflow_write"),
     /** Monthly knowledge budget in micro-USD. NULL = platform default. */
     knowledgeBudgetMicroUsd: bigint("knowledge_budget_micro_usd", {
       mode: "number",

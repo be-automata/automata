@@ -12,6 +12,8 @@ import { errorFromResponse } from "./error-from-response";
  */
 export interface OrgReviewSettingDto {
   blockTolerance: BlockTolerance | null;
+  /** Per-org opt-in for remote cells to push `.github/workflows` (#609). NULL and false are off. */
+  cellWorkflowWrite: boolean | null;
   updatedAt: string;
 }
 
@@ -60,6 +62,39 @@ export function useSetOrgReviewSettingMutation() {
       return json.setting;
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: orgReviewSettingsQueryKeys.detail(),
+      });
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+}
+
+/** PUTs `{ cellWorkflowWrite }` alone: the org's blockTolerance floor is left untouched. */
+export function useSetCellWorkflowWriteMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      cellWorkflowWrite,
+    }: {
+      cellWorkflowWrite: boolean | null;
+    }): Promise<OrgReviewSettingDto> => {
+      const res = await fetch("/api/org-review-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cellWorkflowWrite }),
+      });
+      if (!res.ok) {
+        throw await errorFromResponse(res);
+      }
+      const json = (await res.json()) as { setting: OrgReviewSettingDto };
+      return json.setting;
+    },
+    onSuccess: (setting) => {
+      // The query's data is the bare setting DTO: show the saved value at once.
+      queryClient.setQueryData(orgReviewSettingsQueryKeys.detail(), setting);
       queryClient.invalidateQueries({
         queryKey: orgReviewSettingsQueryKeys.detail(),
       });

@@ -405,28 +405,31 @@ export const WRITE_OPTIONAL_PERMISSIONS = { workflows: "write" } as const;
  * the remote-cell broker only: both legs of a push (the info/refs
  * advertisement and the receive-pack POST).
  *
- * contents:write and metadata:read are required; `workflows: write` is
- * included only when the installation grants it (owner decision on #606), so a
- * remote cell can change `.github/workflows/` only then. Otherwise GitHub
- * rejects such a push and the rejection reaches git. See
+ * contents:write and metadata:read are required. By default the token never
+ * carries `workflows`. With `allowWorkflows: true` (the org opt-in, #609),
+ * `workflows: write` is requested as optional, so it is included only when the
+ * installation grants it. Otherwise GitHub rejects a push that touches
+ * `.github/workflows/` and the rejection reaches git. See
  * mintRepoInstallationToken for lifetime, caching and `knownInstallationId`.
  */
 export async function getWriteInstallationToken(
   owner: string,
   repo: string,
-  knownInstallationId?: number,
+  opts?: { allowWorkflows?: boolean; knownInstallationId?: number },
 ): Promise<{ token: string; expiresAt: string }> {
   return mintRepoInstallationToken({
     owner,
     repo,
     required: WRITE_TOKEN_PERMISSIONS,
-    optional: WRITE_OPTIONAL_PERMISSIONS,
+    optional: opts?.allowWorkflows === true ? WRITE_OPTIONAL_PERMISSIONS : {},
     label: "write token",
     cacheToken: true,
-    // A push is never minted on a guess: a fallback token lacks workflows:write,
-    // and GitHub's rejection of a workflow-file push would be stored as final.
+    // The push token fails closed in every case (owner decision OD5, #609).
+    // For an org that opted in, a fallback token would lack workflows:write and
+    // GitHub's refusal of a workflow-file push would be stored as final for the
+    // step; other orgs get the same policy, kept as one simple rule.
     onPermissionsReadFailure: "fail",
-    knownInstallationId,
+    knownInstallationId: opts?.knownInstallationId,
   });
 }
 

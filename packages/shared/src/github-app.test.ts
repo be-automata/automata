@@ -205,12 +205,29 @@ describe("GitHub App", () => {
       expect("expires_at" in body).toBe(false);
     });
 
-    it("write: adds workflows:write when the installation grants it, omits it when read-only or absent", async () => {
+    it("write: by default never requests workflows, even when the installation grants it", async () => {
+      for (const opts of [undefined, { allowWorkflows: false }]) {
+        vi.restoreAllMocks();
+        resetAppInstance();
+        clearInstallationTokenCacheForTests();
+        const calls = mockRequests({
+          id: 42,
+          permissions: { ...PUSH_GRANTED, workflows: "write" },
+        });
+        await getWriteInstallationToken("o", "r", opts);
+        expect(posts(calls)[0]!.params.permissions).toEqual({
+          contents: "write",
+          metadata: "read",
+        });
+      }
+    });
+
+    it("write: allowWorkflows adds workflows:write only when the installation grants it", async () => {
       const granted = mockRequests({
         id: 42,
         permissions: { ...PUSH_GRANTED, workflows: "write" },
       });
-      await getWriteInstallationToken("o", "r");
+      await getWriteInstallationToken("o", "r", { allowWorkflows: true });
       expect(posts(granted)[0]!.params.permissions).toEqual({
         contents: "write",
         metadata: "read",
@@ -225,12 +242,33 @@ describe("GitHub App", () => {
           id: 42,
           permissions: { ...PUSH_GRANTED, ...extra },
         });
-        await getWriteInstallationToken("o", "r");
+        await getWriteInstallationToken("o", "r", { allowWorkflows: true });
         expect(posts(calls)[0]!.params.permissions).toEqual({
           contents: "write",
           metadata: "read",
         });
       }
+    });
+
+    it("write: a token minted with allowWorkflows is not reused for the same repo without it", async () => {
+      let n = 0;
+      const calls = mockRequests(
+        { id: 42, permissions: { ...PUSH_GRANTED, workflows: "write" } },
+        () => ({ token: `ghs_${++n}`, expires_at: "2099-01-01T00:00:00Z" }),
+      );
+      const withWf = await getWriteInstallationToken("o", "r", {
+        allowWorkflows: true,
+      });
+      const without = await getWriteInstallationToken("o", "r");
+      expect(withWf.token).not.toBe(without.token);
+      expect(posts(calls)).toHaveLength(2);
+      expect(posts(calls)[0]!.params.permissions).toMatchObject({
+        workflows: "write",
+      });
+      expect(posts(calls)[1]!.params.permissions).toEqual({
+        contents: "write",
+        metadata: "read",
+      });
     });
 
     it("a missing required permission throws MissingInstallationPermissionError naming it, with no POST", async () => {
@@ -415,7 +453,9 @@ describe("GitHub App", () => {
 
     it("a known installation id is the one minted for", async () => {
       const calls = mockRequests();
-      await getWriteInstallationToken("o", "r", 7);
+      await getWriteInstallationToken("o", "r", {
+        knownInstallationId: 7,
+      });
       expect(calls.map((c) => c.route)).toEqual([
         "GET /repos/{owner}/{repo}/installation",
         "POST /app/installations/{installation_id}/access_tokens",

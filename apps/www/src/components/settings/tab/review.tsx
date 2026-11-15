@@ -20,6 +20,7 @@ import {
   EFFECTIVE_DRAFT_DEFAULT,
   OrgDraftDefaultCard,
 } from "@/components/settings/review-tolerance/org-draft-default-card";
+import { CellWorkflowWriteCard } from "@/components/settings/review-tolerance/cell-workflow-write-card";
 import { useSupersedeDefaultQuery } from "@/queries/supersede-policy-queries";
 import { SupersedePolicySection } from "@/components/settings/review-supersede/supersede-policy-section";
 import { ReviewAgentSection } from "@/components/settings/review-agent/review-agent-section";
@@ -241,6 +242,7 @@ export function ReviewSettings() {
     <div className="flex flex-col gap-8">
       <OrgFloorCard />
       <OrgDraftDefaultCard />
+      <CellWorkflowWriteCard />
       <SupersedePolicySection />
       <ReviewAgentSection />
       <SelfHealSection />

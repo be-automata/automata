@@ -4,6 +4,10 @@ import { waitUntil } from "@/lib/wait-until";
 import { cellBrokerEnabled } from "@/lib/cell-broker-enabled";
 import { createGitBrokerHandler } from "@terragon/cell-broker/git";
 import {
+  getOrganizationReviewSetting,
+  isCellWorkflowWriteEnabled,
+} from "@terragon/shared/model/organization-review-settings";
+import {
   getCellReadInstallationToken,
   getWriteInstallationToken,
 } from "@terragon/shared/github-app";
@@ -19,6 +23,11 @@ const handler = createGitBrokerHandler({
   fetchImpl: (input, init) => fetch(input, init),
   mintReadToken: getCellReadInstallationToken,
   mintWriteToken: getWriteInstallationToken,
+  // Errors propagate: the broker answers 500 rather than minting on a guess.
+  allowWorkflowWrite: async (organizationId) =>
+    isCellWorkflowWriteEnabled(
+      await getOrganizationReviewSetting({ db, organizationId }),
+    ),
   sideEffectsEnabled: githubSideEffectsEnabled,
   enabled: cellBrokerEnabled,
   waitUntil,

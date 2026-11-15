@@ -21,7 +21,9 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * session's ACTIVE organization — the org id is never accepted from the
  * request body, only from the session.
  *
- * `blockTolerance` ONLY. `trustedAuthorThreshold` (the other axis on
+ * Two fields are writable: `blockTolerance` and `cellWorkflowWrite` (the
+ * per-org opt-in letting remote cells push to `.github/workflows`, #609; NULL
+ * and false both mean off). `trustedAuthorThreshold` (the other axis on
  * `organizationReviewSettings`) is NOT exposed here — its selector/route
  * vocabulary belongs to #72 (org trust-threshold floor; merged —
  * `resolveComposedFloorPolicy` lives in
@@ -38,9 +40,15 @@ import { getPostHogServer } from "@/lib/posthog-server";
  * Enforcement at review time ships when #73 wires the composed resolver in.
  */
 
-function toDto(row: { blockTolerance: string | null; updatedAt: Date }) {
+function toDto(row: {
+  blockTolerance: string | null;
+  cellWorkflowWrite: boolean | null;
+  updatedAt: Date;
+}) {
   return {
     blockTolerance: row.blockTolerance as BlockTolerance | null,
+    // Raw nullable, like blockTolerance: NULL means "never set" (resolves off).
+    cellWorkflowWrite: row.cellWorkflowWrite,
     updatedAt: row.updatedAt,
   };
 }
@@ -85,23 +93,33 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let body: { blockTolerance?: unknown };
+  let body: { blockTolerance?: unknown; cellWorkflowWrite?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
 
-  if (body.blockTolerance === undefined) {
+  if (
+    body.blockTolerance === undefined &&
+    body.cellWorkflowWrite === undefined
+  ) {
     return NextResponse.json(
-      { error: "blockTolerance is required" },
+      { error: "blockTolerance or cellWorkflowWrite is required" },
       { status: 400 },
     );
   }
 
   // null clears the floor (see upsertOrganizationReviewSetting doc). Any
   // other value must be a valid BlockTolerance.
-  if (body.blockTolerance !== null && !isBlockTolerance(body.blockTolerance)) {
+  if (
+    body.blockTolerance !== undefined &&
+    body.blockTolerance !== null &&
+    !isBlockTolerance(body.blockTolerance)
+  ) {
     return NextResponse.json(
       {
         error: `blockTolerance must be null or one of ${BLOCK_TOLERANCES.join(", ")}`,
@@ -110,12 +128,30 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // Clear-via-null, never row delete: a delete would destroy the
-  // `trustedAuthorThreshold` axis on the same row once #72/#73 write it.
+  if (
+    body.cellWorkflowWrite !== undefined &&
+    body.cellWorkflowWrite !== null &&
+    typeof body.cellWorkflowWrite !== "boolean"
+  ) {
+    return NextResponse.json(
+      { error: "cellWorkflowWrite must be a boolean or null" },
+      { status: 400 },
+    );
+  }
+
+  // Clear-via-null, never row delete: a delete would destroy the other axes
+  // on the same row. An absent key is not written.
   // `removeOrganizationReviewSetting` must never be called from this route.
-  const patch: { blockTolerance: string | null } = {
-    blockTolerance: body.blockTolerance,
-  };
+  const patch: {
+    blockTolerance?: string | null;
+    cellWorkflowWrite?: boolean | null;
+  } = {};
+  if (body.blockTolerance !== undefined) {
+    patch.blockTolerance = body.blockTolerance;
+  }
+  if (body.cellWorkflowWrite !== undefined) {
+    patch.cellWorkflowWrite = body.cellWorkflowWrite;
+  }
 
   const row = await upsertOrganizationReviewSetting({
     db,
@@ -124,17 +160,30 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     updatedByUserId: ctx.userId,
   });
 
-  getPostHogServer().capture({
-    distinctId: ctx.userId,
-    event:
-      body.blockTolerance === null
-        ? "org_review_floor_cleared"
-        : "org_review_floor_set",
-    properties: {
-      organizationId: ctx.organizationId,
-      blockTolerance: row.blockTolerance,
-    },
-  });
+  const posthog = getPostHogServer();
+  if (body.blockTolerance !== undefined) {
+    posthog.capture({
+      distinctId: ctx.userId,
+      event:
+        body.blockTolerance === null
+          ? "org_review_floor_cleared"
+          : "org_review_floor_set",
+      properties: {
+        organizationId: ctx.organizationId,
+        blockTolerance: row.blockTolerance,
+      },
+    });
+  }
+  if (body.cellWorkflowWrite !== undefined) {
+    posthog.capture({
+      distinctId: ctx.userId,
+      event: "org_cell_workflow_write_updated",
+      properties: {
+        organizationId: ctx.organizationId,
+        cellWorkflowWrite: row.cellWorkflowWrite,
+      },
+    });
+  }
 
   return NextResponse.json({ setting: toDto(row) });
 }
