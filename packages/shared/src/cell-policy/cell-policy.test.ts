@@ -165,7 +165,7 @@ const CASES: Case[] = [
     reasons: ["egress_open"],
   },
   {
-    name: "enforce mode keeps the measured egress",
+    name: "a customer_box profile without egress_mode is not held to egress_not_enforced",
     // egress_not_enforced is managed-tier only: a customer_box profile with no configuration is allowed.
     input: req(undefined, {
       ...without(allowlistProfile, "configuration"),

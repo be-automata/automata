@@ -109,7 +109,7 @@ test_observe_mode_counts_as_open_egress if {
 	denied_with(req(synthetic_cell, p), "egress_open")
 }
 
-test_enforce_mode_keeps_measured_egress if {
+test_customer_box_without_mode_is_not_held_to_enforce if {
 	# The egress_not_enforced rule is managed-tier only: a customer_box profile with no
 	# configuration is still allowed.
 	p := object.union(object.remove(allowlist_profile, ["configuration"]), {"tier": "customer_box"})

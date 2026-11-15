@@ -165,6 +165,16 @@ describe("compileCellEgress", () => {
     ["a trailing colon with no port", "host.example.com:", "invalid_host"],
     ["a bare star", "*", "invalid_host"],
     ["a TLD wildcard", "*.com", "invalid_host"],
+    [
+      "a wildcard over a two-label public suffix",
+      "*.co.uk",
+      "public_suffix_wildcard",
+    ],
+    [
+      "a wildcard over a private public suffix",
+      "*.github.io",
+      "public_suffix_wildcard",
+    ],
     ["an empty string", "", "invalid_host"],
     ["a single label", "localhost", "invalid_host"],
     ["a star inside the name", "a.*.example.com", "invalid_host"],
@@ -178,6 +188,15 @@ describe("compileCellEgress", () => {
       "t/bad@1": { id: "t/bad@1", allow: [entry] },
     };
     expect(codeOf(() => compile(["t/bad@1"], { catalog }))).toBe(code);
+  });
+
+  it("allows a wildcard over a registrable domain", () => {
+    const catalog: CellEgressCatalog = {
+      "t/ok@1": { id: "t/ok@1", allow: ["*.github.com", "*.example.com"] },
+    };
+    const keys = compile(["t/ok@1"], { catalog }).entries.map(cellEgressKey);
+    expect(keys).toContain("*.github.com");
+    expect(keys).toContain("*.example.com");
   });
 
   it("never echoes an entry that carries credentials", () => {

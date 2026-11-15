@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@terragon/utils/payload-seal";
+import { get as pslGet } from "psl";
 
 import {
   DOMAIN_RE,
@@ -56,6 +57,7 @@ export type CellEgressErrorCode =
   | "platform_override"
   | "bundle_id_mismatch"
   | "invalid_host"
+  | "public_suffix_wildcard"
   | "ip_literal"
   | "ipv6"
   | "port_not_443"
@@ -152,6 +154,17 @@ function normalizeEntry(raw: string): CellEgressEntry {
       "invalid_host",
       `invalid_host: '${raw}' is not a domain or *.domain`,
       raw,
+    );
+  }
+  // A wildcard over a public suffix (`*.co.uk`, `*.github.io`) would open every
+  // unrelated tenant under it. `get` is null when the name is itself a suffix.
+  // Wildcards over registrable multi-tenant domains (`*.amazonaws.com`) are not
+  // caught by this rule: they are a template-review concern.
+  if (wildcard && pslGet(name) === null) {
+    throw new CellEgressError(
+      "public_suffix_wildcard",
+      `public_suffix_wildcard: '*.${name}' is a wildcard over a public suffix`,
+      `*.${name}`,
     );
   }
   return { name, wildcard };
