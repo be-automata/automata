@@ -30,10 +30,10 @@ export function isEgressPolicyLevel(value: string): value is EgressPolicyLevel {
 }
 
 const PORT_RE = /^[0-9]{1,5}$/;
-const IPV4_RE =
+export const IPV4_RE =
   /^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
 // RFC-1035-ish label: alnum, hyphens inside, 1-63 chars; at least two labels.
-const DOMAIN_RE =
+export const DOMAIN_RE =
   /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/i;
 
 function splitHostPort(entry: string): { host: string; port: string | null } {
