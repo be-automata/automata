@@ -122,6 +122,9 @@ DATABASE_URL=... pnpm exec tsx deploy/migrate.ts --apply    # apply pending file
 DATABASE_URL=... pnpm exec tsx deploy/migrate.ts --mark-applied <id>...  # record, do not run
 ```
 
+`--apply` and `--mark-applied` take the advisory lock first and fail fast: a second run exits
+**3** (`another migration run holds the lock`) and touches nothing. The dry run takes no lock.
+
 - **Applied files are immutable.** The ledger stores a sha256 of each file (CRLF→LF); an
   edited applied file is drift and the runner exits 1 before doing anything. So does a
   ledger row whose file is gone (orphan). Fix forward with a new file.
@@ -137,7 +140,9 @@ DATABASE_URL=... pnpm exec tsx deploy/migrate.ts --mark-applied <id>...  # recor
   `pnpm --filter @terragon/migrate generate-baseline` (drizzle-kit generate, no database). The
   runner applies it only to a database with no tables; an existing database marks it.
 - **Direct connection only.** A Neon `-pooler.` host is refused: a pooler cannot hold the
-  session advisory lock that serializes concurrent runners.
+  session advisory lock that lets one runner at a time apply; a second `--apply` or
+  `--mark-applied` exits 3 with the lock message and touches nothing (it never waits, so a
+  `CREATE INDEX CONCURRENTLY` file cannot deadlock against it).
 - `applied_by` is `${GITHUB_ACTOR:-$USER}@${GITHUB_SHA:-git HEAD}`.
 - **Schema drift is a CI gate.** The `schema-drift` job builds one Postgres 18 database from
   the migration files and one from `schema.ts` (`drizzle-kit push`) and compares their
