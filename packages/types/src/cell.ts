@@ -27,8 +27,11 @@ export interface CellTags {
   expiresAt: string;
 }
 
-/** No `basic`: it needs base64 `user:pass` and substitutions this type does not model. */
-export type CellVaultAuth = "bearer" | "apiKey";
+/**
+ * Bearer only: OpenSandbox `apiKey` needs a header name this type does not carry,
+ * and `basic` needs base64 `user:pass` substitutions it does not model.
+ */
+export type CellVaultAuth = "bearer";
 
 export interface CellVaultEntry {
   name: string;
@@ -57,14 +60,14 @@ export interface CellCreatePlan {
 }
 
 /**
- * No `env`: exec env lands in the guest process environ (procfs), which the vault
- * keeps secrets out of, and spike 058 never measured whether execd logs it
- * (it does log `command`). Secrets go only through `CellCreatePlan.vault`.
+ * No `env` and no `stdin`: exec env lands in the guest process environ (procfs),
+ * which the vault keeps secrets out of, and spike 058 never measured whether execd
+ * logs it (it does log `command`); execd's command API has no stdin. Secrets go
+ * only through `CellCreatePlan.vault`.
  */
 export interface CellExecOptions {
   cwd?: string;
   timeoutMs?: number;
-  stdin?: string;
 }
 
 export interface CellExecResult {

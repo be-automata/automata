@@ -10,7 +10,8 @@
     "./daemon": "./src/daemon.ts",
     "./utils": "./src/utils.ts",
     "./env": "./src/env.ts",
-    "./constants": "./src/constants.ts"
+    "./constants": "./src/constants.ts",
+    "./opensandbox-cell": "./src/providers/opensandbox-cell.ts"
   },
   "scripts": {
     "tsc-watch": "tsc --watch --noEmit --preserveWatchOutput",
