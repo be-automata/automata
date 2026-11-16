@@ -643,6 +643,12 @@ describe("create retries and list-and-adopt", () => {
   });
 });
 
+function deleteCalls(server: ReturnType<typeof setup>["server"]): number {
+  return server.calls.filter(
+    (c) => c.method === "DELETE" && c.path === "/sandboxes/c1",
+  ).length;
+}
+
 describe("readiness", () => {
   it("counts a rejection and a non-2xx as not yet, then proceeds", async () => {
     const { server, provider, sleeps } = setup();
@@ -666,9 +672,9 @@ describe("readiness", () => {
     const err = await rejection(provider.create(plan()));
     expect(err.code).toBe("not_ready");
     expect(server.count("PUT /sandboxes/c1/networkpolicy")).toBe(1);
-    expect(server.count("DELETE /sandboxes/c1")).toBe(1);
+    expect(deleteCalls(server)).toBe(1);
     expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
-    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(0);
+    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(1);
   });
 });
 
@@ -724,9 +730,9 @@ describe("self-check fails closed (AC-4)", () => {
     expect(
       server.count("PUT /sandboxes/c1/networkpolicy?dropEstablished=true"),
     ).toBe(1);
-    expect(server.count("DELETE /sandboxes/c1")).toBe(1);
+    expect(deleteCalls(server)).toBe(1);
     expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
-    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(0);
+    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(1);
   });
 
   it("an error event carrying exit 3 (blocked) passes the self-check", async () => {
@@ -1302,7 +1308,7 @@ describe("delete, revoke, quarantine, copyOut", () => {
     happyRoutes(server);
     const err = await rejection(provider.create(plan()));
     expect(err.code).toBe("egress_not_enforced");
-    expect(server.count("DELETE /sandboxes/c1")).toBe(1);
+    expect(deleteCalls(server)).toBe(1);
     expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
   });
 
@@ -1679,6 +1685,35 @@ describe("an adopted cell's policy is verified (finding 4)", () => {
         (c) => c.method === "DELETE" && c.path === "/sandboxes/c1",
       ),
     ).toHaveLength(1);
+  });
+
+  function expectRevokeFirst(server: ReturnType<typeof setup>["server"]) {
+    const at = (m: string, p: string) =>
+      server.calls.findIndex((c) => c.method === m && c.path.startsWith(p));
+    const revoke = at("DELETE", "/sandboxes/c1/credential-vault");
+    const quarantine = at("PUT", "/sandboxes/c1/networkpolicy");
+    const del = server.calls.findIndex(
+      (c) => c.method === "DELETE" && c.path === "/sandboxes/c1",
+    );
+    expect(revoke).toBeGreaterThan(-1);
+    expect(revoke).toBeLessThan(quarantine);
+    expect(quarantine).toBeLessThan(del);
+  }
+
+  it("an adopted cell whose self-check fails revokes before quarantine and delete", async () => {
+    const { server, provider } = adoptSetup(() => policyResponse());
+    server.on("POST /sandboxes/c1/proxy/44772/command", () => json(500, {}));
+    const err = await rejection(provider.create(plan()));
+    expect(err.code).toBe("egress_not_enforced");
+    expectRevokeFirst(server);
+  });
+
+  it("an adopted cell whose readiness times out revokes before quarantine and delete", async () => {
+    const { server, provider } = adoptSetup(() => policyResponse());
+    server.on("GET /sandboxes/c1/proxy/44772/ping", () => json(503, {}));
+    const err = await rejection(provider.create(plan()));
+    expect(err.code).toBe("not_ready");
+    expectRevokeFirst(server);
   });
 
   it("orders an adopted cell: ping, policy, self-check, vault", async () => {

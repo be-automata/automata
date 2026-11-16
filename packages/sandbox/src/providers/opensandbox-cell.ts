@@ -633,11 +633,8 @@ export function createOpenSandboxCellProvider(
   }
 
   /** Internal cleanup: never throws, logs each failed step without secrets. */
-  async function teardownSteps(
-    cellId: string,
-    revokeFirst: boolean,
-  ): Promise<void> {
-    const steps = revokeFirst ? [revoke, quarantine, del] : [quarantine, del];
+  async function teardownSteps(cellId: string): Promise<void> {
+    const steps = [revoke, quarantine, del];
     for (const { op, code, status } of await runTeardown(cellId, steps)) {
       deps.logger.warn("cell teardown step failed", {
         cellId,
@@ -670,9 +667,7 @@ export function createOpenSandboxCellProvider(
       async () => {
         const found = await listByTags(key);
         if (found.length > 1) {
-          await Promise.allSettled(
-            found.map((f) => teardownSteps(f.cellId, true)),
-          );
+          await Promise.allSettled(found.map((f) => teardownSteps(f.cellId)));
           throw new CellProviderError("http_error", "create", status);
         }
         const only = found[0];
@@ -778,7 +773,7 @@ export function createOpenSandboxCellProvider(
       () => "mismatch",
     );
     if (verdict === "match") return;
-    await teardownSteps(cellId, true);
+    await teardownSteps(cellId);
     throw new CellProviderError("http_error", "create");
   }
 
@@ -887,21 +882,20 @@ export function createOpenSandboxCellProvider(
       try {
         await waitReady(cellId);
       } catch (error) {
-        await teardownSteps(cellId, false);
+        await teardownSteps(cellId);
         throw error;
       }
       await verifyAdoptedPolicy(cellId, plan);
     }
-    let vaultTried = false;
     try {
       if (!adopted) await waitReady(cellId);
       await selfCheck(cellId);
-      vaultTried = true;
       await writeVault(cellId, plan.vault);
     } catch (error) {
-      // Contract order: revoke (only once the vault may hold secrets) →
-      // quarantine → delete. Best-effort, so the original error is rethrown.
-      await teardownSteps(cellId, vaultTried);
+      // Contract order: revoke (an adopted cell's vault state is unknown; a
+      // 404 is a no-op) → quarantine → delete. Best-effort, so the original
+      // error is rethrown.
+      await teardownSteps(cellId);
       throw error;
     }
     deps.logger.info("cell created", { cellId });
