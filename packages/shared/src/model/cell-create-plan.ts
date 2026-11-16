@@ -7,6 +7,8 @@ import type {
   CellVaultEntry,
 } from "@terragon/types/cell";
 
+import { CELL_MIN_TTL_MS } from "@terragon/types/cell";
+
 import {
   CELL_EGRESS_MODEL_HOST,
   compileCellEgress,
@@ -113,6 +115,9 @@ export async function buildCellCreatePlan(
 ): Promise<CellCreatePlan> {
   const { stepKey, attempt, ttlMs } = input;
   assertPositiveFinite("ttlMs", ttlMs);
+  if (ttlMs < CELL_MIN_TTL_MS) {
+    throw new RangeError(`ttlMs must be at least ${CELL_MIN_TTL_MS}`);
+  }
   if (!Number.isSafeInteger(attempt) || attempt < 1) {
     throw new RangeError("attempt must be a positive integer");
   }

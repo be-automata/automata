@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CELL_MIN_TTL_MS,
   CELL_SELF_CHECK_BLOCKED_EXIT,
   type CellCreatePlan,
 } from "@terragon/types/cell";
@@ -8,6 +9,7 @@ import {
 import {
   CellProviderError,
   createOpenSandboxCellProvider,
+  OPENSANDBOX_MIN_TTL_MS,
   OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT,
   type OpenSandboxCellConfig,
   type OpenSandboxCellDeps,
@@ -46,6 +48,9 @@ function chunked(chunks: string[], fail?: Error, status = 200): Response {
   });
   return new Response(stream, { status });
 }
+
+const emptyList = () =>
+  json(200, { items: [], pagination: { hasNextPage: false } });
 
 function timeoutError(): Error {
   return new DOMException("The operation timed out.", "TimeoutError");
@@ -137,6 +142,13 @@ function plan(patch: Partial<CellCreatePlan> = {}): CellCreatePlan {
     profileId: "test/profile",
     ...patch,
   };
+}
+
+const PLAN_TAGS = plan().tags;
+
+/** A listed cell as the server returns it: id plus its metadata. */
+function cellItem(id: string, tags: object = PLAN_TAGS) {
+  return { id, metadata: tags };
 }
 
 function setup(
@@ -282,21 +294,46 @@ describe("create", () => {
     });
   });
 
-  it.each([
+  const BAD_2XX: [string, Handler][] = [
     ["no id", () => json(202, {})],
     ["an empty id", () => json(202, { id: "" })],
     ["a numeric id", () => json(201, { id: 7 })],
     ["a non-JSON body", () => new Response("accepted", { status: 202 })],
-  ])(
-    "a 2xx with %s throws http_error and calls nothing else",
+  ];
+
+  it.each(BAD_2XX)(
+    "a 2xx with %s and nothing listed throws http_error and warns once",
     async (_n, h) => {
-      const { server, provider } = setup();
+      const { server, provider, logger } = setup();
       server.on("POST /sandboxes", h);
+      server.on("GET /sandboxes?metadata", emptyList);
       const err = await rejection(provider.create(plan()));
       expect(err.code).toBe("http_error");
-      expect(server.calls).toHaveLength(1);
+      expect(server.count("POST /sandboxes/")).toBe(0);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "cell create response unusable",
+        {
+          op: "create",
+          stepKey: "step-1",
+          attempt: "2",
+        },
+      );
     },
   );
+
+  it.each(BAD_2XX)("a 2xx with %s adopts the listed cell", async (_n, h) => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    server.on("POST /sandboxes", h);
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [cellItem("c1")],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    await expect(provider.create(plan())).resolves.toEqual({ cellId: "c1" });
+  });
 });
 
 describe("create retries and list-and-adopt", () => {
@@ -329,7 +366,7 @@ describe("create retries and list-and-adopt", () => {
     server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
     server.on("GET /sandboxes?metadata", () =>
       json(200, {
-        items: [{ id: "c1", metadata: { stepKey: "step-1" } }],
+        items: [cellItem("c1")],
         pagination: { hasNextPage: false },
       }),
     );
@@ -345,6 +382,8 @@ describe("create retries and list-and-adopt", () => {
     );
     expect(Object.fromEntries(filter)).toEqual({
       automata: "cell",
+      worker: "w1",
+      epoch: "e1",
       stepKey: "step-1",
       attempt: "2",
     });
@@ -354,6 +393,55 @@ describe("create retries and list-and-adopt", () => {
       ),
     ).toHaveLength(1);
   });
+
+  it("a rejected create fetch lists and adopts the cell, then proceeds", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    server.on("POST /sandboxes", () => {
+      throw timeoutError();
+    });
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [cellItem("c1")],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    await expect(provider.create(plan())).resolves.toEqual({ cellId: "c1" });
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(1);
+  });
+
+  it("a rejected create fetch with nothing listed within the budget is http_error", async () => {
+    const { server, provider } = setup();
+    server.on("POST /sandboxes", () => {
+      throw timeoutError();
+    });
+    server.on("GET /sandboxes?metadata", emptyList);
+    const err = await rejection(provider.create(plan()));
+    expect(err).toMatchObject({ code: "http_error", op: "create" });
+    expect(err.cause).toBeUndefined();
+  });
+
+  it.each([
+    ["worker", { worker: "w2" }],
+    ["epoch", { epoch: "e2" }],
+  ])(
+    "adopt skips a listed cell whose %s differs: not adopted, not torn down",
+    async (_n, diff) => {
+      const { server, provider } = setup();
+      server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
+      server.on("GET /sandboxes?metadata", () =>
+        json(200, {
+          items: [cellItem("x", { ...PLAN_TAGS, ...diff })],
+          pagination: { hasNextPage: false },
+        }),
+      );
+      const err = await rejection(provider.create(plan()));
+      expect(err.code).toBe("http_error");
+      expect(server.count("PUT ")).toBe(0);
+      expect(server.count("DELETE ")).toBe(0);
+      expect(server.count("POST /sandboxes/x")).toBe(0);
+    },
+  );
 
   it("finds nothing at first, then a match within the budget", async () => {
     const { server, provider } = setup();
@@ -367,7 +455,7 @@ describe("create retries and list-and-adopt", () => {
       () => json(200, { items: [], pagination: { hasNextPage: false } }),
       () =>
         json(200, {
-          items: [{ id: "c1", metadata: {} }],
+          items: [cellItem("c1")],
           pagination: { hasNextPage: false },
         }),
     );
@@ -391,7 +479,7 @@ describe("create retries and list-and-adopt", () => {
     server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
     server.on("GET /sandboxes?metadata", () =>
       json(200, {
-        items: [{ id: "a" }, { id: "b" }],
+        items: [cellItem("a"), cellItem("b")],
         pagination: { hasNextPage: false },
       }),
     );
@@ -499,6 +587,7 @@ describe("self-check fails closed (AC-4)", () => {
     expect(OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT).toBe(
       CELL_SELF_CHECK_BLOCKED_EXIT,
     );
+    expect(OPENSANDBOX_MIN_TTL_MS).toBe(CELL_MIN_TTL_MS);
   });
 
   it("a BACKEND_RESPONSE_FAILED 502 is not retried", async () => {
@@ -919,16 +1008,19 @@ describe("listByTags", () => {
       "GET /sandboxes?metadata",
       () =>
         json(200, {
-          items: [{ id: "a", metadata: { worker: "w&=+%" } }],
+          items: [cellItem("a", { automata: "cell", worker: "w&=+%" })],
           pagination: { hasNextPage: true },
         }),
       () =>
-        json(200, { items: [{ id: "b" }], pagination: { hasNextPage: false } }),
+        json(200, {
+          items: [cellItem("b", { automata: "cell", worker: "w&=+%" })],
+          pagination: { hasNextPage: false },
+        }),
     );
     const out = await provider.listByTags({ worker: "w&=+%" });
     expect(out).toEqual([
-      { cellId: "a", tags: { worker: "w&=+%" } },
-      { cellId: "b", tags: {} },
+      { cellId: "a", tags: { automata: "cell", worker: "w&=+%" } },
+      { cellId: "b", tags: { automata: "cell", worker: "w&=+%" } },
     ]);
     const first = server.calls[0]!.path;
     const inner = new URLSearchParams({
@@ -941,18 +1033,20 @@ describe("listByTags", () => {
     expect(server.calls[1]!.path).toContain("&page=2&pageSize=100");
   });
 
+  const CELL_A = cellItem("a", { automata: "cell" });
+
   it.each([
-    ["hasNextPage absent", { items: [{ id: "a" }] }],
-    ["pagination absent", { items: [{ id: "a" }], pagination: {} }],
+    ["hasNextPage absent", { items: [CELL_A] }],
+    ["pagination absent", { items: [CELL_A], pagination: {} }],
     [
       "hasNextPage not true",
-      { items: [{ id: "a" }], pagination: { hasNextPage: "yes" } },
+      { items: [CELL_A], pagination: { hasNextPage: "yes" } },
     ],
   ])("stops after one page when %s", async (_n, page) => {
     const { server, provider } = setup();
     server.on("GET /sandboxes?metadata", () => json(200, page));
     await expect(provider.listByTags({})).resolves.toEqual([
-      { cellId: "a", tags: {} },
+      { cellId: "a", tags: { automata: "cell" } },
     ]);
     expect(server.calls).toHaveLength(1);
   });
@@ -961,8 +1055,7 @@ describe("listByTags", () => {
     const { server, provider } = setup();
     server.on(
       "GET /sandboxes?metadata",
-      () =>
-        json(200, { items: [{ id: "a" }], pagination: { hasNextPage: true } }),
+      () => json(200, { items: [CELL_A], pagination: { hasNextPage: true } }),
       () => json(200, { items: [], pagination: { hasNextPage: true } }),
     );
     await expect(provider.listByTags({})).resolves.toHaveLength(1);
@@ -993,6 +1086,38 @@ describe("listByTags", () => {
     expect(err).toMatchObject({ code: "http_error", op: "list", status: 200 });
     expect(err.message).toBe("list: http_error 200");
     expect(err.cause).toBeUndefined();
+  });
+
+  it("keeps the string tags of an item with a non-string value; matches on exact strings", async () => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [
+          cellItem("a", { automata: "cell", worker: "w1", extra: 5 }),
+          cellItem("b", { automata: "cell", worker: 1 }),
+          cellItem("c", { automata: "cell", worker: "w1 " }),
+        ],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    await expect(provider.listByTags({ worker: "w1" })).resolves.toEqual([
+      { cellId: "a", tags: { automata: "cell", worker: "w1" } },
+    ]);
+  });
+
+  it("drops an item lacking automata=cell", async () => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [
+          cellItem("a", { automata: "cell", worker: "w1" }),
+          cellItem("b", { worker: "w1" }),
+        ],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    const out = await provider.listByTags({ worker: "w1" });
+    expect(out.map((c) => c.cellId)).toEqual(["a"]);
   });
 
   it("an empty filter still lists only automata=cell", async () => {

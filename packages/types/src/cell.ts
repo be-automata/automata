@@ -54,6 +54,9 @@ export interface CellResources {
  */
 export const CELL_SELF_CHECK_BLOCKED_EXIT = 3;
 
+/** OpenSandbox's server minimum timeout is 60 s: a shorter cell TTL is refused by the server. */
+export const CELL_MIN_TTL_MS = 60_000;
+
 /** Carries raw secrets in `vault`: sealing it for transport is the caller's job. */
 export interface OpenSandboxCellCreatePlan {
   provider: "opensandbox";

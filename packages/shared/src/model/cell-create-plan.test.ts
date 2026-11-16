@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { CELL_MIN_TTL_MS } from "@terragon/types/cell";
+
 import type { CellPolicyProfile } from "../cell-policy/cell-policy";
 
 import {
@@ -121,7 +123,15 @@ describe("buildCellCreatePlan", () => {
     expect(plan.provider).toBe("opensandbox");
   });
 
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+  it("accepts a ttl of exactly CELL_MIN_TTL_MS", async () => {
+    const plan = await buildCellCreatePlan(
+      input({ ttlMs: CELL_MIN_TTL_MS }),
+      makeDeps(),
+    );
+    expect(plan.ttlMs).toBe(CELL_MIN_TTL_MS);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, CELL_MIN_TTL_MS - 1])(
     "S1-g: ttlMs %s throws RangeError before the guard and mint",
     async (ttlMs) => {
       const deps = makeDeps();

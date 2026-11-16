@@ -28,7 +28,9 @@ const DEFAULT_RETRY_BUDGET_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_SLACK_MS = 10_000;
-const MIN_TTL_SECONDS = 60;
+/** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
+export const OPENSANDBOX_MIN_TTL_MS = 60_000;
+const MIN_TTL_SECONDS = OPENSANDBOX_MIN_TTL_MS / 1000;
 const PING_INTERVAL_MS = 100;
 const LIST_PAGE_SIZE = 100;
 /** 100k cells: a server that never stops paging fails instead of looping. */
@@ -107,9 +109,13 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return (
-    isRecord(value) && Object.values(value).every((v) => typeof v === "string")
+/** The string-valued entries only: one odd value must not hide a cell's other tags. */
+function stringTags(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (e): e is [string, string] => typeof e[1] === "string",
+    ),
   );
 }
 
@@ -386,10 +392,15 @@ export function createOpenSandboxCellProvider(
     const defined = Object.entries(tags).filter(
       (e): e is [string, string] => typeof e[1] === "string",
     );
-    const filter = new URLSearchParams({
+    const wanted: Record<string, string> = {
       automata: "cell",
       ...Object.fromEntries(defined),
-    }).toString();
+    };
+    const filter = new URLSearchParams(wanted).toString();
+    // The server filters too; this re-check means a server that ignored a key
+    // can never hand us (and teardown) a cell that is not ours.
+    const matches = (e: CellListEntry): boolean =>
+      Object.entries(wanted).every(([k, v]) => e.tags[k] === v);
     const out: CellListEntry[] = [];
     for (let page = 1; page <= MAX_LIST_PAGES; page++) {
       const { res } = await send(
@@ -400,7 +411,7 @@ export function createOpenSandboxCellProvider(
       );
       await requireOk("list", res);
       const { entries, hasNextPage } = await readListPage(res);
-      out.push(...entries);
+      out.push(...entries.filter(matches));
       // An empty page ends the walk even if the server claims more.
       if (!hasNextPage || entries.length === 0) return out;
     }
@@ -422,7 +433,7 @@ export function createOpenSandboxCellProvider(
       }
       entries.push({
         cellId: item.id,
-        tags: isStringRecord(item.metadata) ? item.metadata : {},
+        tags: stringTags(item.metadata),
       });
     }
     const pagination = record.pagination;
@@ -540,9 +551,14 @@ export function createOpenSandboxCellProvider(
     await bestEffort(del, cellId);
   }
 
-  /** A non-delivery 502 may still have created the cell: find it by its tags. */
-  function adoptByTags(plan: CellCreatePlan): Promise<string> {
-    const key = { stepKey: plan.tags.stepKey, attempt: plan.tags.attempt };
+  /**
+   * A create whose delivery is unproven (non-delivery 502, transport failure,
+   * unusable 2xx) may still have made the cell: find it by the plan's full
+   * identity, so only this plan's cell is adopted or torn down.
+   */
+  function adoptByTags(plan: CellCreatePlan, status?: number): Promise<string> {
+    const { worker, epoch, stepKey, attempt } = plan.tags;
+    const key = { worker, epoch, stepKey, attempt };
     return withinBudget<string, undefined>(
       retryBudgetMs,
       async () => {
@@ -551,7 +567,7 @@ export function createOpenSandboxCellProvider(
           await Promise.allSettled(
             found.map((f) => teardownSteps(f.cellId, false)),
           );
-          throw new CellProviderError("http_error", "create", 502);
+          throw new CellProviderError("http_error", "create", status);
         }
         const only = found[0];
         return only
@@ -559,32 +575,65 @@ export function createOpenSandboxCellProvider(
           : { retryInMs: BACKOFF_BASE_MS, last: undefined };
       },
       () => {
-        throw new CellProviderError("http_error", "create", 502);
+        throw new CellProviderError("http_error", "create", status);
       },
     );
   }
 
+  /** A 2xx without a usable id: adopt by tags, else fail with one secret-free warn. */
+  async function adoptAfterBadBody(
+    plan: CellCreatePlan,
+    status: number,
+  ): Promise<string> {
+    try {
+      return await adoptByTags(plan, status);
+    } catch (error) {
+      deps.logger.warn("cell create response unusable", {
+        op: "create",
+        stepKey: plan.tags.stepKey,
+        attempt: plan.tags.attempt,
+      });
+      throw error;
+    }
+  }
+
+  /** `undefined` when the POST failed in transport, so its delivery is unknown. */
+  async function postCreate(plan: CellCreatePlan): Promise<Sent | undefined> {
+    try {
+      return await send("create", "POST", "/sandboxes", {
+        body: createBody(plan),
+        retry: "undelivered",
+      });
+    } catch (error) {
+      // Any transport failure of this POST is ambiguous: the server may have made the cell.
+      if (error instanceof CellProviderError && error.op === "create") {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   async function createSandbox(plan: CellCreatePlan): Promise<string> {
-    const { res, code } = await send("create", "POST", "/sandboxes", {
-      body: createBody(plan),
-      retry: "undelivered",
-    });
+    const sent = await postCreate(plan);
+    if (!sent) return adoptByTags(plan);
+    const { res, code } = sent;
     if (res.status === 502) {
       await discard(res);
       if (code === CONNECTION_FAILED) {
         throw new CellProviderError("http_error", "create", 502);
       }
-      return adoptByTags(plan);
+      return adoptByTags(plan, 502);
     }
     await requireOk("create", res);
-    const body: unknown = await readBody(
-      "create",
-      () => res.json(),
-      res.status,
-    );
-    const id = isRecord(body) ? body.id : undefined;
+    let id: unknown;
+    try {
+      const body: unknown = await res.json();
+      id = isRecord(body) ? body.id : undefined;
+    } catch {
+      id = undefined; // an unparseable body is treated like a missing id
+    }
     if (typeof id !== "string" || id === "") {
-      throw new CellProviderError("http_error", "create", res.status);
+      return adoptAfterBadBody(plan, res.status);
     }
     return id;
   }
