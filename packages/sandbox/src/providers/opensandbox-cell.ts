@@ -719,32 +719,65 @@ export function createOpenSandboxCellProvider(
     return a.every((k, i) => k !== undefined && k === b[i]);
   }
 
-  /** An adopted cell's live policy must be the plan's: anything else is torn down. */
+  /** True when the live policy body is the plan's enforcing deny-by-default one. */
+  function policyMatches(body: unknown, plan: CellCreatePlan): boolean {
+    return (
+      isRecord(body) &&
+      body.mode === "enforcing" &&
+      isRecord(body.policy) &&
+      body.policy.defaultAction === "deny" &&
+      sameRules(body.policy.egress, plan.networkPolicy.egress)
+    );
+  }
+
+  /** One policy read: a 5xx or transport failure is "retry"; any other miss is a mismatch. */
+  async function probePolicy(
+    cellId: string,
+    plan: CellCreatePlan,
+  ): Promise<"match" | "mismatch" | "retry"> {
+    let res: Response;
+    try {
+      res = await once("GET", cellPath(cellId, "/networkpolicy"), {
+        timeoutMs: requestTimeoutMs,
+      });
+    } catch {
+      return "retry"; // a cell still starting may not answer yet
+    }
+    if (res.status >= 500) {
+      await discard(res);
+      return "retry";
+    }
+    if (!res.ok) {
+      await discard(res);
+      return "mismatch";
+    }
+    try {
+      return policyMatches(await res.json(), plan) ? "match" : "mismatch";
+    } catch {
+      return "mismatch"; // a non-JSON body is not an enforcing policy
+    }
+  }
+
+  /**
+   * An adopted cell's live policy must be the plan's: anything else is torn down.
+   * Runs after `waitReady`; a 5xx or transport failure is retried within the
+   * readiness budget, a 2xx mismatch or a 404 fails at once.
+   */
   async function verifyAdoptedPolicy(
     cellId: string,
     plan: CellCreatePlan,
   ): Promise<void> {
-    try {
-      const { res } = await send(
-        "create",
-        "GET",
-        cellPath(cellId, "/networkpolicy"),
-        { retry: "idempotent" },
-      );
-      await requireOk("create", res);
-      const body: unknown = await res.json();
-      if (
-        isRecord(body) &&
-        body.mode === "enforcing" &&
-        isRecord(body.policy) &&
-        body.policy.defaultAction === "deny" &&
-        sameRules(body.policy.egress, plan.networkPolicy.egress)
-      ) {
-        return;
-      }
-    } catch {
-      // a 404, transport failure or non-JSON body is a mismatch
-    }
+    const verdict = await withinBudget<"match" | "mismatch", undefined>(
+      readyTimeoutMs,
+      async () => {
+        const probed = await probePolicy(cellId, plan);
+        return probed === "retry"
+          ? { retryInMs: PING_INTERVAL_MS, last: undefined }
+          : { done: probed };
+      },
+      () => "mismatch",
+    );
+    if (verdict === "match") return;
     await teardownSteps(cellId, true);
     throw new CellProviderError("http_error", "create");
   }
@@ -848,10 +881,20 @@ export function createOpenSandboxCellProvider(
   async function create(plan: CellCreatePlan): Promise<{ cellId: string }> {
     guardPlan(plan);
     const { cellId, adopted } = await createSandbox(plan);
-    if (adopted) await verifyAdoptedPolicy(cellId, plan);
+    if (adopted) {
+      // Ready first (a starting cell's policy read 5xxs), then the policy is
+      // proven, and only then the self-check and the vault.
+      try {
+        await waitReady(cellId);
+      } catch (error) {
+        await teardownSteps(cellId, false);
+        throw error;
+      }
+      await verifyAdoptedPolicy(cellId, plan);
+    }
     let vaultTried = false;
     try {
-      await waitReady(cellId);
+      if (!adopted) await waitReady(cellId);
       await selfCheck(cellId);
       vaultTried = true;
       await writeVault(cellId, plan.vault);

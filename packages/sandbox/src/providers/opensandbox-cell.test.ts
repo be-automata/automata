@@ -1653,4 +1653,46 @@ describe("an adopted cell's policy is verified (finding 4)", () => {
       expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
     },
   );
+  it("retries a 503 policy read until the matching policy, then writes the vault", async () => {
+    const { server, provider, sleeps } = adoptSetup(() => policyResponse());
+    server.on(
+      "GET /sandboxes/c1/networkpolicy",
+      () => json(503, {}),
+      () => json(503, {}),
+      () => policyResponse(),
+    );
+    await expect(provider.create(plan())).resolves.toEqual({ cellId: "c1" });
+    expect(server.count("GET /sandboxes/c1/networkpolicy")).toBe(3);
+    expect(sleeps.filter((ms) => ms === 100)).toHaveLength(2);
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(1);
+  });
+
+  it("a policy read that 5xxs until the ready budget tears down with no vault", async () => {
+    const { server, provider, sleeps } = adoptSetup(() => json(503, {}));
+    const err = await rejection(provider.create(plan()));
+    expect(err).toMatchObject({ code: "http_error", op: "create" });
+    expect(sleeps.filter((ms) => ms === 100).length).toBeLessThanOrEqual(600);
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
+    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(1);
+    expect(
+      server.calls.filter(
+        (c) => c.method === "DELETE" && c.path === "/sandboxes/c1",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("orders an adopted cell: ping, policy, self-check, vault", async () => {
+    const { server, provider } = adoptSetup(() => policyResponse());
+    await provider.create(plan());
+    const at = (needle: string) =>
+      server.calls.findIndex((c) => `${c.method} ${c.path}`.startsWith(needle));
+    const ping = at("GET /sandboxes/c1/proxy/44772/ping");
+    const policy = at("GET /sandboxes/c1/networkpolicy");
+    const cmd = at("POST /sandboxes/c1/proxy/44772/command");
+    const vault = at("POST /sandboxes/c1/credential-vault");
+    expect(ping).toBeGreaterThan(-1);
+    expect(ping).toBeLessThan(policy);
+    expect(policy).toBeLessThan(cmd);
+    expect(cmd).toBeLessThan(vault);
+  });
 });
