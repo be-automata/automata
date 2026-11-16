@@ -277,6 +277,9 @@ describe(
     }
 
     beforeAll(async () => {
+      // First, before anything that can fail: a stale file from an earlier
+      // passing run must not outlive this one.
+      rmSync(evidenceFile(), { force: true });
       if (process.env.OPENSANDBOX_IT_REUSE !== "1") {
         await runScript("up.sh");
       }
@@ -297,8 +300,6 @@ describe(
         },
       );
       exampleIp = (await lookup("example.org", { family: 4 })).address;
-      // A stale file from an earlier passing run must not outlive this one.
-      rmSync(evidenceFile(), { force: true });
       baseline = await snapshot();
       expect(baseline.networks.length, "baseline networks").toBeGreaterThan(0);
       expect(baseline.netfilter.length, "baseline netfilter").toBeGreaterThan(
