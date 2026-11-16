@@ -484,6 +484,10 @@ describe("create retries and list-and-adopt", () => {
       }),
     );
     for (const id of ["a", "b"]) {
+      server.on(
+        `DELETE /sandboxes/${id}/credential-vault`,
+        () => new Response(null, { status: 204 }),
+      );
       server.on(`PUT /sandboxes/${id}/networkpolicy?dropEstablished=true`, () =>
         json(200, {}),
       );
@@ -496,8 +500,16 @@ describe("create retries and list-and-adopt", () => {
     expect(err.code).toBe("http_error");
     expect(server.count("PUT /sandboxes/a/networkpolicy")).toBe(1);
     expect(server.count("PUT /sandboxes/b/networkpolicy")).toBe(1);
-    expect(server.count("DELETE /sandboxes/a")).toBe(1);
-    expect(server.count("DELETE /sandboxes/b")).toBe(1);
+    for (const id of ["a", "b"]) {
+      const order = server.calls
+        .map((c) => `${c.method} ${c.path}`)
+        .filter((c) => c.includes(`/sandboxes/${id}`));
+      expect(order).toEqual([
+        `DELETE /sandboxes/${id}/credential-vault`,
+        `PUT /sandboxes/${id}/networkpolicy?dropEstablished=true`,
+        `DELETE /sandboxes/${id}`,
+      ]);
+    }
   });
 });
 
@@ -959,6 +971,122 @@ describe("delete, revoke, quarantine, copyOut", () => {
       "PUT /sandboxes/c1/networkpolicy?dropEstablished=true",
       "DELETE /sandboxes/c1",
     ]);
+  });
+
+  it("teardown attempts every step and rejects when all three fail", async () => {
+    const { server, provider } = setup();
+    server.on("DELETE /sandboxes/c1/credential-vault", () =>
+      json(500, { key: API_KEY }),
+    );
+    server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
+      json(500, { key: API_KEY }),
+    );
+    server.on("DELETE /sandboxes/c1", () => json(500, { key: API_KEY }));
+    const err: unknown = await provider.teardown("c1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AggregateError);
+    const agg = err as AggregateError;
+    expect(agg.message).toBe("teardown");
+    expect(agg.errors).toHaveLength(3);
+    expect(agg.errors.every((e) => e instanceof CellProviderError)).toBe(true);
+    expect(
+      JSON.stringify([agg.message, agg.errors.map((e) => e.message)]),
+    ).not.toContain(API_KEY);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "DELETE /sandboxes/c1/credential-vault",
+      "PUT /sandboxes/c1/networkpolicy?dropEstablished=true",
+      "DELETE /sandboxes/c1",
+    ]);
+  });
+
+  it("teardown rejects with the one failing step's error and still runs the rest", async () => {
+    const { server, provider } = setup();
+    server.on("DELETE /sandboxes/c1/credential-vault", () => json(404, {}));
+    server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
+      json(500, { key: API_KEY }),
+    );
+    server.on("DELETE /sandboxes/c1", () => json(404, {}));
+    const err = await rejection(provider.teardown("c1"));
+    expect(err.op).toBe("quarantine");
+    expect(err.status).toBe(500);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toContain(
+      "DELETE /sandboxes/c1",
+    );
+  });
+
+  it("exec fails closed and cancels the stream once the body passes maxExecOutputBytes", async () => {
+    const { server, provider } = setup({ maxExecOutputBytes: 100 });
+    const cancelled = vi.fn();
+    const enc = new TextEncoder();
+    server.on(
+      "POST /sandboxes/c1/proxy/44772/command",
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(c) {
+              c.enqueue(enc.encode(`: ${"x".repeat(60)}\n`));
+            },
+            cancel: cancelled,
+          }),
+          { status: 200 },
+        ),
+    );
+    const err = await rejection(provider.exec("c1", ["/x"]));
+    expect(err.code).toBe("http_error");
+    expect(err.message).not.toContain("xxx");
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("exec decodes a code point and a CRLF split across byte chunks", async () => {
+    const { server, provider } = setup();
+    const bytes = new TextEncoder().encode(
+      'data: {"type":"stdout","text":"ñ"}\r\n\r\n' +
+        'data: {"type":"execution_complete","exit_code":0}\r\n\r\n',
+    );
+    const mid = bytes.indexOf(0xc3) + 1; // inside the two-byte "ñ"
+    const crlf = bytes.indexOf(0x0d) + 1; // between \r and \n
+    server.on(
+      "POST /sandboxes/c1/proxy/44772/command",
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(bytes.slice(0, mid));
+              c.enqueue(bytes.slice(mid, crlf));
+              c.enqueue(bytes.slice(crlf));
+              c.close();
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    await expect(provider.exec("c1", ["/x"])).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "ñ",
+    });
+  });
+
+  it("exec accepts a body exactly at maxExecOutputBytes and rejects one byte less", async () => {
+    const done = 'data: {"type":"execution_complete","exit_code":0}\n\n';
+    const bytes = new TextEncoder().encode(done).byteLength;
+    const execWithCap = (maxExecOutputBytes: number) => {
+      const { server, provider } = setup({ maxExecOutputBytes });
+      server.on(
+        "POST /sandboxes/c1/proxy/44772/command",
+        () => new Response(done, { status: 200 }),
+      );
+      return provider.exec("c1", ["/x"]);
+    };
+    await expect(execWithCap(bytes)).resolves.toMatchObject({ exitCode: 0 });
+    expect((await rejection(execWithCap(bytes - 1))).code).toBe("http_error");
+  });
+
+  it("an over-cap self-check tears down and fails closed", async () => {
+    const { server, provider } = setup({ maxExecOutputBytes: 10 });
+    happyRoutes(server);
+    const err = await rejection(provider.create(plan()));
+    expect(err.code).toBe("egress_not_enforced");
+    expect(server.count("DELETE /sandboxes/c1")).toBe(1);
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
   });
 
   it("quarantine sends deny-all and throws http_error on another non-2xx", async () => {

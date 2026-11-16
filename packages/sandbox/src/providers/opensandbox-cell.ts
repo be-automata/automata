@@ -28,6 +28,7 @@ const DEFAULT_RETRY_BUDGET_MS = 10_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_SLACK_MS = 10_000;
+const DEFAULT_MAX_EXEC_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
 export const OPENSANDBOX_MIN_TTL_MS = 60_000;
 const MIN_TTL_SECONDS = OPENSANDBOX_MIN_TTL_MS / 1000;
@@ -63,6 +64,8 @@ export interface OpenSandboxCellConfig {
   readyTimeoutMs?: number;
   retryBudgetMs?: number;
   requestTimeoutMs?: number;
+  /** Cap on the raw exec SSE body in bytes, default 16 MiB; over it exec fails. */
+  maxExecOutputBytes?: number;
 }
 
 export interface OpenSandboxCellDeps {
@@ -144,6 +147,35 @@ async function readBody<T>(
     return await read();
   } catch {
     throw new CellProviderError("http_error", op, status);
+  }
+}
+
+/**
+ * Reads a body as text, counting raw bytes. Over `maxBytes` the stream is
+ * cancelled and the read fails with no output in the error.
+ */
+async function readCappedText(
+  op: string,
+  res: Response,
+  maxBytes: number,
+): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      total += value.byteLength;
+      if (total > maxBytes) throw new CellProviderError("http_error", op);
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    // Over the cap, aborted or broken: release the connection, report no output.
+    await reader.cancel().catch(() => undefined);
+    throw new CellProviderError("http_error", op);
   }
 }
 
@@ -273,6 +305,9 @@ export function createOpenSandboxCellProvider(
   const retryBudgetMs = config.retryBudgetMs ?? DEFAULT_RETRY_BUDGET_MS;
   const requestTimeoutMs =
     config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
+  const maxExecOutputBytes =
+    config.maxExecOutputBytes ?? DEFAULT_MAX_EXEC_OUTPUT_BYTES;
 
   const execd = (id: string, suffix: string): string =>
     cellPath(id, `/proxy/${port}/${suffix}`);
@@ -484,7 +519,7 @@ export function createOpenSandboxCellProvider(
       timeoutMs: timeout + EXEC_SLACK_MS,
     });
     await requireOk("exec", res);
-    const text = await readBody("exec", () => res.text());
+    const text = await readCappedText("exec", res, maxExecOutputBytes);
     const outcome = parseExecStream(text);
     if (!outcome) throw new CellProviderError("http_error", "exec");
     return outcome;
@@ -526,29 +561,49 @@ export function createOpenSandboxCellProvider(
   }
 
   /** Logs the op, code and status only: never a body, header or credential. */
-  async function bestEffort(
-    step: (cellId: string) => Promise<unknown>,
+  /** Runs every step whatever fails earlier and returns the failures. */
+  async function runTeardown(
     cellId: string,
-  ): Promise<void> {
-    try {
-      await step(cellId);
-    } catch (error) {
-      deps.logger.warn("cell teardown step failed", {
-        cellId,
-        ...(error instanceof CellProviderError
-          ? { op: error.op, code: error.code, status: error.status }
-          : {}),
-      });
+    steps: ReadonlyArray<(cellId: string) => Promise<unknown>>,
+  ): Promise<CellProviderError[]> {
+    const failures: CellProviderError[] = [];
+    for (const step of steps) {
+      try {
+        await step(cellId);
+      } catch (error) {
+        failures.push(
+          error instanceof CellProviderError
+            ? error
+            : new CellProviderError("http_error", "teardown"),
+        );
+      }
     }
+    return failures;
   }
 
+  /** Internal cleanup: never throws, logs each failed step without secrets. */
   async function teardownSteps(
     cellId: string,
     revokeFirst: boolean,
   ): Promise<void> {
-    if (revokeFirst) await bestEffort(revoke, cellId);
-    await bestEffort(quarantine, cellId);
-    await bestEffort(del, cellId);
+    const steps = revokeFirst ? [revoke, quarantine, del] : [quarantine, del];
+    for (const { op, code, status } of await runTeardown(cellId, steps)) {
+      deps.logger.warn("cell teardown step failed", {
+        cellId,
+        op,
+        code,
+        status,
+      });
+    }
+  }
+
+  /** Public teardown: every step runs, then one error or an AggregateError. */
+  async function teardownStrict(cellId: string): Promise<void> {
+    const failures = await runTeardown(cellId, [revoke, quarantine, del]);
+    const [first] = failures;
+    if (!first) return;
+    if (failures.length === 1) throw first;
+    throw new AggregateError(failures, "teardown");
   }
 
   /**
@@ -565,7 +620,7 @@ export function createOpenSandboxCellProvider(
         const found = await listByTags(key);
         if (found.length > 1) {
           await Promise.allSettled(
-            found.map((f) => teardownSteps(f.cellId, false)),
+            found.map((f) => teardownSteps(f.cellId, true)),
           );
           throw new CellProviderError("http_error", "create", status);
         }
@@ -719,7 +774,7 @@ export function createOpenSandboxCellProvider(
     revoke,
     quarantine,
     delete: del,
-    teardown: (cellId) => teardownSteps(cellId, true),
+    teardown: teardownStrict,
     listByTags,
   };
 }
