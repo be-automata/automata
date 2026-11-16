@@ -10,6 +10,7 @@ import type {
 import {
   CELL_EGRESS_MODEL_HOST,
   compileCellEgress,
+  normalizeCellBrokerHost,
   toOpenSandboxNetworkPolicy,
   type CompileCellEgressDeps,
 } from "./cell-egress";
@@ -70,6 +71,7 @@ const BROKER_PATHS: readonly string[] = [
 
 function buildVault(
   input: CellCreatePlanInput,
+  brokerHost: string,
   brokerToken: string,
 ): CellVaultEntry[] {
   return [
@@ -82,12 +84,18 @@ function buildVault(
     },
     {
       name: "broker",
-      hosts: [input.egress.brokerHost],
+      hosts: [brokerHost],
       paths: BROKER_PATHS,
       auth: "bearer",
       credential: brokerToken,
     },
   ];
+}
+
+function assertPositiveFinite(field: string, value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${field} must be a positive finite number`);
+  }
 }
 
 /**
@@ -99,10 +107,14 @@ export async function buildCellCreatePlan(
   deps: CellCreatePlanDeps,
 ): Promise<CellCreatePlan> {
   const { stepKey, attempt, ttlMs } = input;
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-    throw new RangeError("ttlMs must be a positive finite number");
+  assertPositiveFinite("ttlMs", ttlMs);
+  if (!Number.isSafeInteger(attempt) || attempt < 1) {
+    throw new RangeError("attempt must be a positive integer");
   }
+  assertPositiveFinite("resources.cpu", input.resources.cpu);
+  assertPositiveFinite("resources.memoryMiB", input.resources.memoryMiB);
   if (input.runtime !== "runc") throw new CellPlanError("runtime_not_runc");
+  const brokerHost = normalizeCellBrokerHost(input.egress.brokerHost);
   const set = compileCellEgress(input.egressRefs, input.egress);
   const networkPolicy = toOpenSandboxNetworkPolicy(set);
   assertCellEgressEnforced({ profile: input.profile, now: deps.now() });
@@ -120,7 +132,7 @@ export async function buildCellCreatePlan(
       expiresAt: String(bearer.expiresAt.getTime()),
     },
     networkPolicy,
-    vault: buildVault(input, bearer.token),
+    vault: buildVault(input, brokerHost, bearer.token),
     resources: input.resources,
     ttlMs,
     egressDigest: set.digest,

@@ -132,6 +132,52 @@ describe("buildCellCreatePlan", () => {
     },
   );
 
+  it.each([
+    ["attempt", { attempt: 0 }],
+    ["attempt", { attempt: 1.5 }],
+    ["attempt", { attempt: Number.NaN }],
+    ["resources.cpu", { resources: { cpu: 0, memoryMiB: 2048 } }],
+    ["resources.memoryMiB", { resources: { cpu: 2, memoryMiB: -1 } }],
+    ["resources.cpu", { resources: { cpu: Number.NaN, memoryMiB: 2048 } }],
+  ] as const)(
+    "%s out of range throws RangeError before the guard and mint",
+    async (_field, patch) => {
+      const deps = makeDeps();
+      const bad = profile({ configuration: { egress_mode: "observe" } });
+      await expect(
+        buildCellCreatePlan(input({ ...patch, profile: bad }), deps),
+      ).rejects.toBeInstanceOf(RangeError);
+      expect(deps.mintBearer).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([` ${BROKER.toUpperCase()}. `, `${BROKER}:443`])(
+    "the broker vault host matches the policy target for %j",
+    async (brokerHost) => {
+      const plan = await buildCellCreatePlan(
+        input({ egress: { brokerHost, catalog: CATALOG } }),
+        makeDeps(),
+      );
+      const broker = plan.vault.find((v) => v.name === "broker");
+      expect(broker?.hosts).toEqual([BROKER]);
+      expect(plan.networkPolicy.egress).toContainEqual({
+        action: "allow",
+        target: BROKER,
+      });
+    },
+  );
+
+  it("a wildcard broker host is refused before mint", async () => {
+    const deps = makeDeps();
+    await expect(
+      buildCellCreatePlan(
+        input({ egress: { brokerHost: `*.${BROKER}`, catalog: CATALOG } }),
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_host" });
+    expect(deps.mintBearer).not.toHaveBeenCalled();
+  });
+
   it("S1-h: the vault holds the model and broker entries, tags carry the expiry", async () => {
     const deps = makeDeps();
     const plan = await buildCellCreatePlan(input(), deps);

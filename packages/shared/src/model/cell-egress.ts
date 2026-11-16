@@ -91,6 +91,23 @@ export function platformCellEgressBundle(brokerHost: string): CellEgressBundle {
   };
 }
 
+/**
+ * The broker host exactly as the compiled set allows it (trimmed, lowercased,
+ * no trailing dot, no `:443`), so a credential bound to it matches the policy
+ * target. A wildcard is refused: the broker bearer goes to one host only.
+ */
+export function normalizeCellBrokerHost(brokerHost: string): string {
+  const entry = normalizeEntry(brokerHost);
+  if (entry.wildcard) {
+    throw new CellEgressError(
+      "invalid_host",
+      `invalid_host: broker host '${cellEgressKey(entry)}' must not be a wildcard`,
+      cellEgressKey(entry),
+    );
+  }
+  return entry.name;
+}
+
 export function cellEgressKey(entry: CellEgressEntry): string {
   return entry.wildcard ? `*.${entry.name}` : entry.name;
 }
