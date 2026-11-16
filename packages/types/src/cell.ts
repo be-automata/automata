@@ -47,8 +47,16 @@ export interface CellResources {
   memoryMiB: number;
 }
 
+/**
+ * Self-check probe contract: the probe opens TLS and HTTP to a host the policy
+ * denies. Exit 3 means it was blocked (egress enforced); exit 0 means it
+ * reached the host; any other exit is inconclusive and counts as not enforced.
+ */
+export const CELL_SELF_CHECK_BLOCKED_EXIT = 3;
+
 /** Carries raw secrets in `vault`: sealing it for transport is the caller's job. */
-export interface CellCreatePlan {
+export interface OpenSandboxCellCreatePlan {
+  provider: "opensandbox";
   runtime: "runc";
   tags: CellTags;
   networkPolicy: OpenSandboxNetworkPolicy;
@@ -58,6 +66,19 @@ export interface CellCreatePlan {
   egressDigest: string;
   profileId: string;
 }
+
+/** One member today; #635 (Gondolin) adds its own variant, discriminated by `provider`. */
+export type CellCreatePlan = OpenSandboxCellCreatePlan;
+
+export type CellProviderErrorCode =
+  | "wrong_provider"
+  | "runtime_not_runc"
+  | "policy_required"
+  | "ttl_too_short"
+  | "invalid_argv"
+  | "not_ready"
+  | "egress_not_enforced"
+  | "http_error";
 
 /**
  * No `env` and no `stdin`: exec env lands in the guest process environ (procfs),
@@ -95,5 +116,10 @@ export interface ICellProvider {
   quarantine(cellId: string): Promise<void>;
   /** 404 is "gone". */
   delete(cellId: string): Promise<"deleted" | "gone">;
+  /**
+   * The provider's part after the control plane's revokeAttempt: provider vault
+   * clear, then quarantine, then delete. Each step treats 404 as done.
+   */
+  teardown(cellId: string): Promise<void>;
   listByTags(tags: Partial<CellTags>): Promise<CellListEntry[]>;
 }

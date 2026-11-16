@@ -130,6 +130,7 @@ export async function buildCellCreatePlan(
   const bearer = await deps.mintBearer({ stepKey, attempt, ttlMs });
   if (!bearer.ok) throw new CellPlanError("bearer_refused", bearer.reason);
   return {
+    provider: "opensandbox",
     runtime: "runc",
     tags: {
       automata: "cell",

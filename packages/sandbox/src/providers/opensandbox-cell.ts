@@ -9,12 +9,17 @@ import type {
   CellExecOptions,
   CellExecResult,
   CellListEntry,
+  CellProviderErrorCode,
   CellTags,
   CellVaultEntry,
   ICellProvider,
 } from "@terragon/types/cell";
 
-/** The self-check probe exits with this code when the denied host was blocked. */
+/**
+ * Kept equal to `CELL_SELF_CHECK_BLOCKED_EXIT` in @terragon/types (a test
+ * asserts it): this file imports the contract type-only, so the sandbox
+ * package needs no runtime dependency on types.
+ */
 export const OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT = 3;
 
 const DEFAULT_EXECD_PORT = 44772;
@@ -26,18 +31,11 @@ const EXEC_SLACK_MS = 10_000;
 const MIN_TTL_SECONDS = 60;
 const PING_INTERVAL_MS = 100;
 const LIST_PAGE_SIZE = 100;
+/** 100k cells: a server that never stops paging fails instead of looping. */
+const MAX_LIST_PAGES = 1_000;
 const BACKOFF_BASE_MS = 250;
 const BACKOFF_CAP_MS = 2_000;
 const CONNECTION_FAILED = "BACKEND_CONNECTION_FAILED";
-
-export type CellProviderErrorCode =
-  | "runtime_not_runc"
-  | "policy_required"
-  | "ttl_too_short"
-  | "invalid_argv"
-  | "not_ready"
-  | "egress_not_enforced"
-  | "http_error";
 
 /** The message carries the op, code and status only: never a body or header. */
 export class CellProviderError extends Error {
@@ -58,7 +56,7 @@ export interface OpenSandboxCellConfig {
   image: string;
   entrypoint: readonly string[];
   execdPort?: number;
-  /** The probe exits `OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT` when egress is blocked. */
+  /** The probe contract is `CELL_SELF_CHECK_BLOCKED_EXIT` in @terragon/types. */
   selfCheck: { argv: readonly string[] };
   readyTimeoutMs?: number;
   retryBudgetMs?: number;
@@ -83,13 +81,22 @@ interface SendOptions {
   timeoutMs?: number;
 }
 
+interface Sent {
+  res: Response;
+  /** The 502 body's `code`, parsed once and only for a POST that retries on it. */
+  code?: string;
+}
+
+/** A step finishes with `done`, or asks for another attempt after `retryInMs`. */
+type RetryStep<T, L = undefined> = { done: T } | { retryInMs: number; last: L };
+
 interface CommandOutcome extends CellExecResult {
   errored: boolean;
 }
 
 interface ListPage {
-  items?: { id: string; metadata?: Record<string, string> }[];
-  pagination?: { hasNextPage?: boolean };
+  entries: CellListEntry[];
+  hasNextPage: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -100,8 +107,49 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    isRecord(value) && Object.values(value).every((v) => typeof v === "string")
+  );
+}
+
+/** Frees a response body this code ignores, so the connection is not held. */
+async function discard(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel();
+  } catch {
+    // An already-read or locked body has nothing left to free.
+  }
+}
+
+async function requireOk(op: string, res: Response): Promise<void> {
+  if (res.ok) return;
+  await discard(res);
+  throw new CellProviderError("http_error", op, res.status);
+}
+
+/** A failed body read maps to http_error with no cause: a parse error quotes the body. */
+async function readBody<T>(
+  op: string,
+  read: () => Promise<T>,
+  status?: number,
+): Promise<T> {
+  try {
+    return await read();
+  } catch {
+    throw new CellProviderError("http_error", op, status);
+  }
+}
+
+function cellPath(id: string, suffix = ""): string {
+  return `/sandboxes/${encodeURIComponent(id)}${suffix}`;
+}
+
 function guardPlan(plan: CellCreatePlan): void {
   // Callers can be untyped, so re-check what the type promises.
+  if ((plan.provider as string) !== "opensandbox") {
+    throw new CellProviderError("wrong_provider", "create");
+  }
   if ((plan.runtime as string) !== "runc") {
     throw new CellProviderError("runtime_not_runc", "create");
   }
@@ -113,7 +161,11 @@ function guardPlan(plan: CellCreatePlan): void {
   ) {
     throw new CellProviderError("policy_required", "create");
   }
-  if (Math.ceil(plan.ttlMs / 1000) < MIN_TTL_SECONDS) {
+  // NaN or Infinity would serialize as `timeout: null`.
+  if (
+    !Number.isFinite(plan.ttlMs) ||
+    Math.ceil(plan.ttlMs / 1000) < MIN_TTL_SECONDS
+  ) {
     throw new CellProviderError("ttl_too_short", "create");
   }
 }
@@ -135,25 +187,63 @@ function vaultBody(vault: readonly CellVaultEntry[]): unknown {
   };
 }
 
+/**
+ * The data lines of each event: `data:` lines up to a blank line (SSE
+ * multi-line data), or a bare `{...}` line as spike 058 parsed it. `event:`,
+ * `id:` and `:` comment lines are ignored.
+ */
+function streamEvents(text: string): string[][] {
+  const events: string[][] = [];
+  let data: string[] = [];
+  const flush = (): void => {
+    if (data.length > 0) events.push(data);
+    data = [];
+  };
+  for (const rawLine of text.split(/\r?\n/)) {
+    if (rawLine.startsWith("data:")) {
+      data.push(rawLine.slice(5).replace(/^ /, ""));
+    } else if (rawLine.trim() === "") {
+      flush();
+    } else if (rawLine.trimStart().startsWith("{")) {
+      flush();
+      events.push([rawLine]);
+    }
+  }
+  flush();
+  return events;
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * One event's JSON: its data lines joined (multi-line data) or, when the
+ * server sent one JSON object per `data:` line with no blank line between
+ * events, each line on its own. A truncated event yields nothing.
+ */
+function eventObjects(lines: readonly string[]): unknown[] {
+  const joined = parseJson(lines.join("\n"));
+  if (joined !== undefined || lines.length === 1) return [joined];
+  return lines.map(parseJson);
+}
+
 function parseExecStream(text: string): CommandOutcome | undefined {
-  let stdout = "";
-  let stderr = "";
+  const stdout: string[] = [];
+  const stderr: string[] = [];
   let exitCode: number | undefined;
   let errored = false;
-  for (const line of text.split("\n")) {
-    const raw = line.replace(/^data:\s*/, "").trim();
-    if (!raw.startsWith("{")) continue;
-    let event: unknown;
-    try {
-      event = JSON.parse(raw);
-    } catch {
-      continue; // a partial line
-    }
+  // A truncated event parses to nothing: without a terminal event the run fails.
+  for (const event of streamEvents(text).flatMap(eventObjects)) {
     if (!isRecord(event)) continue;
     if (event.type === "stdout" && typeof event.text === "string") {
-      stdout += event.text;
+      stdout.push(event.text);
     } else if (event.type === "stderr" && typeof event.text === "string") {
-      stderr += event.text;
+      stderr.push(event.text);
     } else if (event.type === "execution_complete") {
       exitCode = asNumber(event.exit_code) ?? 0;
     } else if (event.type === "error") {
@@ -164,7 +254,7 @@ function parseExecStream(text: string): CommandOutcome | undefined {
   }
   return exitCode === undefined
     ? undefined
-    : { exitCode, stdout, stderr, errored };
+    : { exitCode, stdout: stdout.join(""), stderr: stderr.join(""), errored };
 }
 
 export function createOpenSandboxCellProvider(
@@ -179,7 +269,7 @@ export function createOpenSandboxCellProvider(
     config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
   const execd = (id: string, suffix: string): string =>
-    `/sandboxes/${encodeURIComponent(id)}/proxy/${port}/${suffix}`;
+    cellPath(id, `/proxy/${port}/${suffix}`);
 
   async function once(
     method: string,
@@ -198,10 +288,33 @@ export function createOpenSandboxCellProvider(
     });
   }
 
+  /**
+   * Runs `step` until it stops asking for a retry or the budget is spent. The
+   * budget also counts the sleeps it asked for, so a loop stays bounded even
+   * when an injected clock never advances; in real time `now()` covers them.
+   */
+  async function withinBudget<T, L>(
+    budgetMs: number,
+    step: (attempt: number) => Promise<RetryStep<T, L>>,
+    exhausted: (last: L) => T,
+  ): Promise<T> {
+    const start = deps.now();
+    let sleptMs = 0;
+    for (let attempt = 0; ; attempt++) {
+      const outcome = await step(attempt);
+      if ("done" in outcome) return outcome.done;
+      if (Math.max(deps.now() - start, sleptMs) >= budgetMs) {
+        return exhausted(outcome.last);
+      }
+      sleptMs += outcome.retryInMs;
+      await deps.sleep(outcome.retryInMs);
+    }
+  }
+
   /** The JSON body's `code` only; the body itself is never kept or logged. */
   async function bodyCode(res: Response): Promise<string | undefined> {
     try {
-      const parsed: unknown = JSON.parse(await res.clone().text());
+      const parsed: unknown = JSON.parse(await res.text());
       return isRecord(parsed) && typeof parsed.code === "string"
         ? parsed.code
         : undefined;
@@ -210,38 +323,63 @@ export function createOpenSandboxCellProvider(
     }
   }
 
-  async function mayRetry(res: Response, mode: RetryMode): Promise<boolean> {
-    if (res.status !== 502) return false;
-    return mode === "idempotent" || (await bodyCode(res)) === CONNECTION_FAILED;
-  }
-
-  async function send(
+  async function sendOnce(
     op: string,
     method: string,
     path: string,
     o: SendOptions,
-  ): Promise<Response> {
-    const start = deps.now();
-    for (let attempt = 0; ; attempt++) {
-      let res: Response;
-      try {
-        res = await once(method, path, {
-          body: o.body,
-          timeoutMs: o.timeoutMs ?? requestTimeoutMs,
-        });
-      } catch {
-        throw new CellProviderError("http_error", op); // no cause: it may echo a request
-      }
-      if (!(await mayRetry(res, o.retry))) return res;
-      if (deps.now() - start >= retryBudgetMs) return res;
-      await deps.sleep(
-        Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS),
-      );
+    attempt: number,
+  ): Promise<RetryStep<Sent, Sent>> {
+    let res: Response;
+    try {
+      res = await once(method, path, {
+        body: o.body,
+        timeoutMs: o.timeoutMs ?? requestTimeoutMs,
+      });
+    } catch {
+      throw new CellProviderError("http_error", op); // no cause: it may echo a request
     }
+    if (res.status !== 502) return { done: { res } };
+    const code = o.retry === "undelivered" ? await bodyCode(res) : undefined;
+    const sent: Sent = { res, code };
+    if (o.retry === "undelivered" && code !== CONNECTION_FAILED) {
+      return { done: sent };
+    }
+    await discard(res);
+    return {
+      retryInMs: Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS),
+      last: sent,
+    };
   }
 
-  function requireOk(op: string, res: Response): void {
-    if (!res.ok) throw new CellProviderError("http_error", op, res.status);
+  function send(
+    op: string,
+    method: string,
+    path: string,
+    o: SendOptions,
+  ): Promise<Sent> {
+    return withinBudget(
+      retryBudgetMs,
+      (attempt) => sendOnce(op, method, path, o, attempt),
+      (last) => last,
+    );
+  }
+
+  /** For an idempotent call where 404 means the work is already done; true when it was 404. */
+  async function send404AsDone(
+    op: string,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<boolean> {
+    const { res } = await send(op, method, path, { body, retry: "idempotent" });
+    if (res.status === 404) {
+      await discard(res);
+      return true;
+    }
+    await requireOk(op, res);
+    await discard(res);
+    return false;
   }
 
   async function listByTags(tags: Partial<CellTags>): Promise<CellListEntry[]> {
@@ -253,54 +391,67 @@ export function createOpenSandboxCellProvider(
       ...Object.fromEntries(defined),
     }).toString();
     const out: CellListEntry[] = [];
-    for (let page = 1; ; page++) {
-      const res = await send(
+    for (let page = 1; page <= MAX_LIST_PAGES; page++) {
+      const { res } = await send(
         "list",
         "GET",
         `/sandboxes?metadata=${encodeURIComponent(filter)}&page=${page}&pageSize=${LIST_PAGE_SIZE}`,
         { retry: "idempotent" },
       );
-      requireOk("list", res);
-      const body = (await res.json()) as ListPage;
-      for (const item of body.items ?? []) {
-        out.push({ cellId: item.id, tags: item.metadata ?? {} });
-      }
-      if (!body.pagination?.hasNextPage) return out;
+      await requireOk("list", res);
+      const { entries, hasNextPage } = await readListPage(res);
+      out.push(...entries);
+      // An empty page ends the walk even if the server claims more.
+      if (!hasNextPage || entries.length === 0) return out;
     }
+    throw new CellProviderError("http_error", "list");
+  }
+
+  /** Fails closed on a malformed page: adoption must never miscount cells. */
+  async function readListPage(res: Response): Promise<ListPage> {
+    const body: unknown = await readBody("list", () => res.json(), res.status);
+    const record = isRecord(body) ? body : {};
+    const items = record.items;
+    if (items !== undefined && !Array.isArray(items)) {
+      throw new CellProviderError("http_error", "list", res.status);
+    }
+    const entries: CellListEntry[] = [];
+    for (const item of items ?? []) {
+      if (!isRecord(item) || typeof item.id !== "string" || item.id === "") {
+        throw new CellProviderError("http_error", "list", res.status);
+      }
+      entries.push({
+        cellId: item.id,
+        tags: isStringRecord(item.metadata) ? item.metadata : {},
+      });
+    }
+    const pagination = record.pagination;
+    return {
+      entries,
+      hasNextPage: isRecord(pagination) && pagination.hasNextPage === true,
+    };
   }
 
   async function del(cellId: string): Promise<"deleted" | "gone"> {
-    const res = await send(
-      "delete",
-      "DELETE",
-      `/sandboxes/${encodeURIComponent(cellId)}`,
-      { retry: "idempotent" },
-    );
-    if (res.status === 404) return "gone";
-    requireOk("delete", res);
-    return "deleted";
+    const gone = await send404AsDone("delete", "DELETE", cellPath(cellId));
+    return gone ? "gone" : "deleted";
   }
 
   async function quarantine(cellId: string): Promise<void> {
-    const res = await send(
+    await send404AsDone(
       "quarantine",
       "PUT",
-      `/sandboxes/${encodeURIComponent(cellId)}/networkpolicy?dropEstablished=true`,
-      { body: { defaultAction: "deny", egress: [] }, retry: "idempotent" },
+      cellPath(cellId, "/networkpolicy?dropEstablished=true"),
+      { defaultAction: "deny", egress: [] },
     );
-    if (res.status === 404) return;
-    requireOk("quarantine", res);
   }
 
   async function revoke(cellId: string): Promise<void> {
-    const res = await send(
+    await send404AsDone(
       "revoke",
       "DELETE",
-      `/sandboxes/${encodeURIComponent(cellId)}/credential-vault`,
-      { retry: "idempotent" },
+      cellPath(cellId, "/credential-vault"),
     );
-    if (res.status === 404) return;
-    requireOk("revoke", res);
   }
 
   async function runCommand(
@@ -312,7 +463,7 @@ export function createOpenSandboxCellProvider(
       throw new CellProviderError("invalid_argv", "exec");
     }
     const timeout = opts?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const res = await send("exec", "POST", execd(cellId, "command"), {
+    const { res } = await send("exec", "POST", execd(cellId, "command"), {
       body: {
         argv: [...argv],
         timeout,
@@ -321,13 +472,8 @@ export function createOpenSandboxCellProvider(
       retry: "undelivered",
       timeoutMs: timeout + EXEC_SLACK_MS,
     });
-    requireOk("exec", res);
-    let text: string;
-    try {
-      text = await res.text();
-    } catch {
-      throw new CellProviderError("http_error", "exec");
-    }
+    await requireOk("exec", res);
+    const text = await readBody("exec", () => res.text());
     const outcome = parseExecStream(text);
     if (!outcome) throw new CellProviderError("http_error", "exec");
     return outcome;
@@ -343,14 +489,14 @@ export function createOpenSandboxCellProvider(
   }
 
   async function copyOut(cellId: string, path: string): Promise<Uint8Array> {
-    const res = await send(
+    const { res } = await send(
       "copyOut",
       "GET",
       `${execd(cellId, "files/download")}?path=${encodeURIComponent(path)}`,
       { retry: "idempotent" },
     );
-    requireOk("copyOut", res);
-    return new Uint8Array(await res.arrayBuffer());
+    await requireOk("copyOut", res);
+    return new Uint8Array(await readBody("copyOut", () => res.arrayBuffer()));
   }
 
   function createBody(plan: CellCreatePlan): unknown {
@@ -368,55 +514,75 @@ export function createOpenSandboxCellProvider(
     };
   }
 
-  async function teardownMany(ids: readonly string[]): Promise<void> {
-    for (const id of ids) {
-      for (const step of [quarantine, del] as const) {
-        try {
-          await step(id);
-        } catch {
-          deps.logger.warn("cell teardown step failed", { cellId: id });
-        }
-      }
+  /** Logs the op, code and status only: never a body, header or credential. */
+  async function bestEffort(
+    step: (cellId: string) => Promise<unknown>,
+    cellId: string,
+  ): Promise<void> {
+    try {
+      await step(cellId);
+    } catch (error) {
+      deps.logger.warn("cell teardown step failed", {
+        cellId,
+        ...(error instanceof CellProviderError
+          ? { op: error.op, code: error.code, status: error.status }
+          : {}),
+      });
     }
+  }
+
+  async function teardownSteps(
+    cellId: string,
+    revokeFirst: boolean,
+  ): Promise<void> {
+    if (revokeFirst) await bestEffort(revoke, cellId);
+    await bestEffort(quarantine, cellId);
+    await bestEffort(del, cellId);
   }
 
   /** A non-delivery 502 may still have created the cell: find it by its tags. */
-  async function adoptByTags(plan: CellCreatePlan): Promise<string> {
-    const start = deps.now();
+  function adoptByTags(plan: CellCreatePlan): Promise<string> {
     const key = { stepKey: plan.tags.stepKey, attempt: plan.tags.attempt };
-    for (;;) {
-      const found = await listByTags(key);
-      if (found.length === 1 && found[0]) return found[0].cellId;
-      if (found.length > 1) {
-        await teardownMany(found.map((f) => f.cellId));
+    return withinBudget<string, undefined>(
+      retryBudgetMs,
+      async () => {
+        const found = await listByTags(key);
+        if (found.length > 1) {
+          await Promise.allSettled(
+            found.map((f) => teardownSteps(f.cellId, false)),
+          );
+          throw new CellProviderError("http_error", "create", 502);
+        }
+        const only = found[0];
+        return only
+          ? { done: only.cellId }
+          : { retryInMs: BACKOFF_BASE_MS, last: undefined };
+      },
+      () => {
         throw new CellProviderError("http_error", "create", 502);
-      }
-      if (deps.now() - start >= retryBudgetMs) {
-        throw new CellProviderError("http_error", "create", 502);
-      }
-      await deps.sleep(BACKOFF_BASE_MS);
-    }
+      },
+    );
   }
 
   async function createSandbox(plan: CellCreatePlan): Promise<string> {
-    const res = await send("create", "POST", "/sandboxes", {
+    const { res, code } = await send("create", "POST", "/sandboxes", {
       body: createBody(plan),
       retry: "undelivered",
     });
     if (res.status === 502) {
-      if ((await bodyCode(res)) === CONNECTION_FAILED) {
+      await discard(res);
+      if (code === CONNECTION_FAILED) {
         throw new CellProviderError("http_error", "create", 502);
       }
       return adoptByTags(plan);
     }
-    requireOk("create", res);
-    let id: unknown;
-    try {
-      const body: unknown = await res.json();
-      id = isRecord(body) ? body.id : undefined;
-    } catch {
-      id = undefined;
-    }
+    await requireOk("create", res);
+    const body: unknown = await readBody(
+      "create",
+      () => res.json(),
+      res.status,
+    );
+    const id = isRecord(body) ? body.id : undefined;
     if (typeof id !== "string" || id === "") {
       throw new CellProviderError("http_error", "create", res.status);
     }
@@ -428,21 +594,24 @@ export function createOpenSandboxCellProvider(
       const res = await once("GET", execd(cellId, "ping"), {
         timeoutMs: requestTimeoutMs,
       });
+      await discard(res);
       return res.ok;
     } catch {
       return false; // not yet
     }
   }
 
-  async function waitReady(cellId: string): Promise<void> {
-    const start = deps.now();
-    for (;;) {
-      if (await pingOk(cellId)) return;
-      if (deps.now() - start >= readyTimeoutMs) {
+  function waitReady(cellId: string): Promise<void> {
+    return withinBudget(
+      readyTimeoutMs,
+      async () =>
+        (await pingOk(cellId))
+          ? { done: undefined }
+          : { retryInMs: PING_INTERVAL_MS, last: undefined },
+      () => {
         throw new CellProviderError("not_ready", "ready");
-      }
-      await deps.sleep(PING_INTERVAL_MS);
-    }
+      },
+    );
   }
 
   /** Fail closed: only the probe's blocked exit proves the policy is enforced. */
@@ -465,21 +634,14 @@ export function createOpenSandboxCellProvider(
     cellId: string,
     vault: readonly CellVaultEntry[],
   ): Promise<void> {
-    const res = await send(
+    const { res } = await send(
       "vault",
       "POST",
-      `/sandboxes/${encodeURIComponent(cellId)}/credential-vault`,
+      cellPath(cellId, "/credential-vault"),
       { body: vaultBody(vault), retry: "undelivered" },
     );
-    requireOk("vault", res);
-  }
-
-  async function bestEffort(step: () => Promise<unknown>, cellId: string) {
-    try {
-      await step();
-    } catch {
-      deps.logger.warn("cell teardown step failed", { cellId });
-    }
+    await requireOk("vault", res);
+    await discard(res);
   }
 
   async function create(plan: CellCreatePlan): Promise<{ cellId: string }> {
@@ -492,9 +654,9 @@ export function createOpenSandboxCellProvider(
       vaultTried = true;
       await writeVault(cellId, plan.vault);
     } catch (error) {
-      if (vaultTried) await bestEffort(() => revoke(cellId), cellId);
-      await bestEffort(() => quarantine(cellId), cellId);
-      await bestEffort(() => del(cellId), cellId);
+      // Contract order: revoke (only once the vault may hold secrets) →
+      // quarantine → delete. Best-effort, so the original error is rethrown.
+      await teardownSteps(cellId, vaultTried);
       throw error;
     }
     deps.logger.info("cell created", { cellId });
@@ -508,6 +670,7 @@ export function createOpenSandboxCellProvider(
     revoke,
     quarantine,
     delete: del,
+    teardown: (cellId) => teardownSteps(cellId, true),
     listByTags,
   };
 }

@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CellCreatePlan } from "@terragon/types/cell";
+import {
+  CELL_SELF_CHECK_BLOCKED_EXIT,
+  type CellCreatePlan,
+} from "@terragon/types/cell";
 
 import {
   CellProviderError,
   createOpenSandboxCellProvider,
   OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT,
   type OpenSandboxCellConfig,
+  type OpenSandboxCellDeps,
 } from "./opensandbox-cell";
 
 const API_KEY = "API-KEY-CANARY-123";
@@ -28,6 +32,23 @@ function json(status: number, body: unknown): Response {
 function sse(events: unknown[]): Response {
   const text = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
   return new Response(text, { status: 200 });
+}
+
+/** A body delivered in the given chunks, then closed or errored (an aborted read). */
+function chunked(chunks: string[], fail?: Error, status = 200): Response {
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(enc.encode(chunk));
+      if (fail) controller.error(fail);
+      else controller.close();
+    },
+  });
+  return new Response(stream, { status });
+}
+
+function timeoutError(): Error {
+  return new DOMException("The operation timed out.", "TimeoutError");
 }
 
 const probe = (code: number) =>
@@ -87,6 +108,7 @@ function happyRoutes(server: ReturnType<typeof makeServer>) {
 
 function plan(patch: Partial<CellCreatePlan> = {}): CellCreatePlan {
   return {
+    provider: "opensandbox",
     runtime: "runc",
     tags: {
       automata: "cell",
@@ -117,7 +139,10 @@ function plan(patch: Partial<CellCreatePlan> = {}): CellCreatePlan {
   };
 }
 
-function setup(configPatch: Partial<OpenSandboxCellConfig> = {}) {
+function setup(
+  configPatch: Partial<OpenSandboxCellConfig> = {},
+  depsPatch: Partial<OpenSandboxCellDeps> = {},
+) {
   const server = makeServer();
   let clock = 0;
   const sleeps: number[] = [];
@@ -143,6 +168,7 @@ function setup(configPatch: Partial<OpenSandboxCellConfig> = {}) {
       },
       now: () => clock,
       logger,
+      ...depsPatch,
     },
   );
   return { server, provider, sleeps, logs, logger };
@@ -162,6 +188,11 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("create guards (AC-2)", () => {
   it.each([
+    [
+      "provider not opensandbox",
+      { provider: "gondolin" } as unknown,
+      "wrong_provider",
+    ],
     ["runtime not runc", { runtime: "runsc" } as unknown, "runtime_not_runc"],
     [
       "no networkPolicy",
@@ -179,6 +210,8 @@ describe("create guards (AC-2)", () => {
       "policy_required",
     ],
     ["ttl under 60 s", { ttlMs: 59_000 } as unknown, "ttl_too_short"],
+    ["ttl NaN", { ttlMs: Number.NaN } as unknown, "ttl_too_short"],
+    ["ttl Infinity", { ttlMs: Infinity } as unknown, "ttl_too_short"],
   ])("%s: refused with zero fetch calls", async (_n, patch, code) => {
     const { server, provider } = setup();
     const err = await rejection(
@@ -249,20 +282,21 @@ describe("create", () => {
     });
   });
 
-  it("a 2xx without an id throws http_error", async () => {
-    const { server, provider } = setup();
-    server.on("POST /sandboxes", () => json(202, {}));
-    const err = await rejection(provider.create(plan()));
-    expect(err.code).toBe("http_error");
-  });
-
-  it("a 500 on create is http_error and not retried", async () => {
-    const { server, provider } = setup();
-    server.on("POST /sandboxes", () => json(500, { code: "X" }));
-    const err = await rejection(provider.create(plan()));
-    expect(err).toMatchObject({ code: "http_error", status: 500 });
-    expect(server.count("POST /sandboxes")).toBe(1);
-  });
+  it.each([
+    ["no id", () => json(202, {})],
+    ["an empty id", () => json(202, { id: "" })],
+    ["a numeric id", () => json(201, { id: 7 })],
+    ["a non-JSON body", () => new Response("accepted", { status: 202 })],
+  ])(
+    "a 2xx with %s throws http_error and calls nothing else",
+    async (_n, h) => {
+      const { server, provider } = setup();
+      server.on("POST /sandboxes", h);
+      const err = await rejection(provider.create(plan()));
+      expect(err.code).toBe("http_error");
+      expect(server.calls).toHaveLength(1);
+    },
+  );
 });
 
 describe("create retries and list-and-adopt", () => {
@@ -429,6 +463,24 @@ describe("self-check fails closed (AC-4)", () => {
       "a BACKEND_RESPONSE_FAILED 502",
       () => json(502, { code: "BACKEND_RESPONSE_FAILED" }),
     ],
+    [
+      "a non-JSON 502",
+      () => new Response("<html>bad gateway</html>", { status: 502 }),
+    ],
+    [
+      "a body read aborted before the terminal event",
+      () => chunked(['data: {"type":"stdout","text":"x"}\n\n'], timeoutError()),
+    ],
+    [
+      "a truncated terminal event",
+      () => chunked(['data: {"type":"execution_complete","exit_c']),
+    ],
+    [
+      "a timeout on the request",
+      () => {
+        throw timeoutError();
+      },
+    ],
   ])("%s: tears down, never writes the vault", async (_n, command) => {
     const { server, provider } = setup();
     happyRoutes(server);
@@ -441,7 +493,12 @@ describe("self-check fails closed (AC-4)", () => {
     expect(server.count("DELETE /sandboxes/c1")).toBe(1);
     expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
     expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(0);
-    expect(OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT).toBe(3);
+  });
+
+  it("the adapter's probe exit equals the contract constant", () => {
+    expect(OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT).toBe(
+      CELL_SELF_CHECK_BLOCKED_EXIT,
+    );
   });
 
   it("a BACKEND_RESPONSE_FAILED 502 is not retried", async () => {
@@ -495,17 +552,26 @@ describe("vault write", () => {
     ]);
   });
 
-  it("a teardown failure is logged and the original error is thrown", async () => {
-    const { server, provider, logger } = setup();
+  it("every teardown step failing still throws the original error", async () => {
+    const { server, provider, logger, logs } = setup();
     happyRoutes(server);
     server.on("POST /sandboxes/c1/credential-vault", () => json(500, {}));
+    server.on("DELETE /sandboxes/c1/credential-vault", () => {
+      throw new Error(`down ${API_KEY}`);
+    });
     server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
-      json(500, {}),
+      json(501, { key: API_KEY }),
     );
+    server.on("DELETE /sandboxes/c1", () => json(500, { key: API_KEY }));
     const err = await rejection(provider.create(plan()));
-    expect(err.op).toBe("vault");
-    expect(logger.warn).toHaveBeenCalled();
-    expect(server.count("DELETE /sandboxes/c1")).toBe(2); // vault + sandbox share the prefix
+    expect(err).toMatchObject({ code: "http_error", op: "vault", status: 500 });
+    expect(logger.warn).toHaveBeenCalledTimes(3);
+    expect(logger.warn.mock.calls.map((c) => c[1])).toEqual([
+      { cellId: "c1", op: "revoke", code: "http_error", status: undefined },
+      { cellId: "c1", op: "quarantine", code: "http_error", status: 501 },
+      { cellId: "c1", op: "delete", code: "http_error", status: 500 },
+    ]);
+    expect(JSON.stringify(logs)).not.toContain(API_KEY);
   });
 });
 
@@ -565,6 +631,88 @@ describe("exec", () => {
     );
   });
 
+  it("a request timeout or an aborted body read is http_error with no cause", async () => {
+    const { server, provider } = setup();
+    server.on(
+      "POST /sandboxes/c1/proxy/44772/command",
+      () => {
+        throw timeoutError();
+      },
+      () => chunked(['data: {"type":"stdout","text":"x"}\n'], timeoutError()),
+    );
+    for (let i = 0; i < 2; i++) {
+      const err = await rejection(provider.exec("c1", ["x"]));
+      expect(err).toMatchObject({ code: "http_error", op: "exec" });
+      expect(err.cause).toBeUndefined();
+    }
+    expect(server.count("POST /sandboxes/c1/proxy/44772/command")).toBe(2);
+  });
+
+  it("a non-JSON 502 on /command is not retried", async () => {
+    const { server, provider, sleeps } = setup();
+    server.on(
+      "POST /sandboxes/c1/proxy/44772/command",
+      () => new Response("<html>bad gateway</html>", { status: 502 }),
+    );
+    const err = await rejection(provider.exec("c1", ["x"]));
+    expect(err).toMatchObject({ code: "http_error", status: 502 });
+    expect(err.message).not.toContain("html");
+    expect(sleeps).toEqual([]);
+  });
+
+  it.each([
+    [
+      "lines split across chunks",
+      () =>
+        chunked([
+          'data: {"type":"std',
+          'out","text":"a"}\n\ndata: {"type":"execution_',
+          'complete","exit_code":4}\n\n',
+        ]),
+    ],
+    [
+      "multi-line data in one event",
+      () =>
+        chunked([
+          'data: {"type":"stdout",\ndata: "text":"a"}\n\n',
+          'data: {"type":"execution_complete",\ndata: "exit_code":4}\n\n',
+        ]),
+    ],
+    [
+      "CRLF, comments and event lines",
+      () =>
+        chunked([
+          ": keep-alive\r\nevent: message\r\n",
+          'data: {"type":"stdout","text":"a"}\r\n\r\n',
+          'data:{"type":"execution_complete","exit_code":4}\r\n\r\n',
+        ]),
+    ],
+    [
+      "one event per data line with no blank line between",
+      () =>
+        chunked([
+          'data: {"type":"stdout","text":"a"}\n',
+          'data: {"type":"execution_complete","exit_code":4}\n',
+        ]),
+    ],
+    [
+      "bare JSON lines",
+      () =>
+        chunked([
+          '{"type":"stdout","text":"a"}\n',
+          '{"type":"execution_complete","exit_code":4}\n',
+        ]),
+    ],
+  ])("parses %s", async (_n, body) => {
+    const { server, provider } = setup();
+    server.on("POST /sandboxes/c1/proxy/44772/command", body);
+    await expect(provider.exec("c1", ["x"])).resolves.toEqual({
+      exitCode: 4,
+      stdout: "a",
+      stderr: "",
+    });
+  });
+
   it("a 150 s exec gets its own timeout, not requestTimeoutMs", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const { server, provider } = setup({ requestTimeoutMs: 30_000 });
@@ -600,30 +748,128 @@ describe("retry rules", () => {
     expect(sleeps).toEqual([250, 500, 1000, 2000, 2000, 2000, 2000, 2000]);
   });
 
-  it("a 500 is not retried", async () => {
+  const frozen = { now: () => 0, sleep: async () => {} };
+
+  it.each([
+    [
+      "readiness pings (1000 ms / 100 ms, plus the first)",
+      { readyTimeoutMs: 1000 },
+      "not_ready",
+      "GET /sandboxes/c1/proxy/44772/ping",
+      11,
+      (s: ReturnType<typeof setup>) => {
+        happyRoutes(s.server);
+        s.server.on("GET /sandboxes/c1/proxy/44772/ping", () => json(503, {}));
+        return s.provider.create(plan());
+      },
+    ],
+    [
+      "an idempotent 502 retry",
+      {},
+      "http_error",
+      "DELETE /sandboxes/c1",
+      9,
+      (s: ReturnType<typeof setup>) => {
+        s.server.on("DELETE /sandboxes/c1", () => json(502, {}));
+        return s.provider.delete("c1");
+      },
+    ],
+    [
+      "list-and-adopt",
+      {},
+      "http_error",
+      "GET /sandboxes?metadata",
+      41,
+      (s: ReturnType<typeof setup>) => {
+        s.server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
+        s.server.on("GET /sandboxes?metadata", () =>
+          json(200, { items: [], pagination: { hasNextPage: false } }),
+        );
+        return s.provider.create(plan());
+      },
+    ],
+  ])(
+    "%s stays bounded when the injected clock never advances",
+    async (_n, config, code, key, calls, act) => {
+      const s = setup(config, frozen);
+      const err = await rejection(act(s));
+      expect(err.code).toBe(code);
+      expect(s.server.count(key)).toBe(calls);
+    },
+  );
+
+  it.each([
+    [
+      "create",
+      "POST /sandboxes",
+      (p: ReturnType<typeof setup>["provider"]) => p.create(plan()),
+    ],
+    [
+      "delete",
+      "DELETE /sandboxes/c1",
+      (p: ReturnType<typeof setup>["provider"]) => p.delete("c1"),
+    ],
+  ])("a 500 on %s is http_error and not retried", async (_n, key, act) => {
     const { server, provider, sleeps } = setup();
-    server.on("DELETE /sandboxes/c1", () => json(500, {}));
-    await rejection(provider.delete("c1"));
-    expect(server.count("DELETE /sandboxes/c1")).toBe(1);
+    server.on(key, () => json(500, { code: "X" }));
+    const err = await rejection(act(provider));
+    expect(err).toMatchObject({ code: "http_error", status: 500 });
+    expect(server.count(key)).toBe(1);
     expect(sleeps).toEqual([]);
   });
 });
 
 describe("delete, revoke, quarantine, copyOut", () => {
-  it("delete returns gone on 404", async () => {
+  it.each([200, 202, 204])("delete returns deleted on %i", async (status) => {
     const { server, provider } = setup();
-    server.on("DELETE /sandboxes/c1", () => json(404, {}));
-    await expect(provider.delete("c1")).resolves.toBe("gone");
+    server.on(
+      "DELETE /sandboxes/c1",
+      () => new Response(status === 204 ? null : "{}", { status }),
+    );
+    await expect(provider.delete("c1")).resolves.toBe("deleted");
   });
 
-  it("revoke and quarantine are no-ops on 404", async () => {
+  it.each([
+    ["delete", "DELETE /sandboxes/c1", "gone"],
+    ["revoke", "DELETE /sandboxes/c1/credential-vault", undefined],
+    [
+      "quarantine",
+      "PUT /sandboxes/c1/networkpolicy?dropEstablished=true",
+      undefined,
+    ],
+  ] as const)("%s on 404 is done", async (op, key, expected) => {
+    const { server, provider } = setup();
+    server.on(key, () => json(404, {}));
+    await expect(provider[op]("c1")).resolves.toBe(expected);
+  });
+
+  it("an ignored body is cancelled, not left open", async () => {
+    const { server, provider } = setup();
+    const cancelled = vi.fn();
+    server.on(
+      "DELETE /sandboxes/c1",
+      () =>
+        new Response(new ReadableStream({ cancel: cancelled }), {
+          status: 202,
+        }),
+    );
+    await provider.delete("c1");
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("teardown revokes, quarantines, then deletes, each 404 being done", async () => {
     const { server, provider } = setup();
     server.on("DELETE /sandboxes/c1/credential-vault", () => json(404, {}));
     server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
       json(404, {}),
     );
-    await expect(provider.revoke("c1")).resolves.toBeUndefined();
-    await expect(provider.quarantine("c1")).resolves.toBeUndefined();
+    server.on("DELETE /sandboxes/c1", () => json(404, {}));
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "DELETE /sandboxes/c1/credential-vault",
+      "PUT /sandboxes/c1/networkpolicy?dropEstablished=true",
+      "DELETE /sandboxes/c1",
+    ]);
   });
 
   it("quarantine sends deny-all and throws http_error on another non-2xx", async () => {
@@ -655,6 +901,15 @@ describe("delete, revoke, quarantine, copyOut", () => {
       "http_error",
     );
   });
+
+  it("copyOut maps an aborted body read to http_error", async () => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes/c1/proxy/44772/files/download?path=", () =>
+      chunked(["partial"], timeoutError()),
+    );
+    const err = await rejection(provider.copyOut("c1", "/x"));
+    expect(err).toMatchObject({ code: "http_error", op: "copyOut" });
+  });
 });
 
 describe("listByTags", () => {
@@ -684,6 +939,60 @@ describe("listByTags", () => {
       `/sandboxes?metadata=${encodeURIComponent(inner)}&page=1&pageSize=100`,
     );
     expect(server.calls[1]!.path).toContain("&page=2&pageSize=100");
+  });
+
+  it.each([
+    ["hasNextPage absent", { items: [{ id: "a" }] }],
+    ["pagination absent", { items: [{ id: "a" }], pagination: {} }],
+    [
+      "hasNextPage not true",
+      { items: [{ id: "a" }], pagination: { hasNextPage: "yes" } },
+    ],
+  ])("stops after one page when %s", async (_n, page) => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes?metadata", () => json(200, page));
+    await expect(provider.listByTags({})).resolves.toEqual([
+      { cellId: "a", tags: {} },
+    ]);
+    expect(server.calls).toHaveLength(1);
+  });
+
+  it("an empty page ends the walk even if hasNextPage stays true", async () => {
+    const { server, provider } = setup();
+    server.on(
+      "GET /sandboxes?metadata",
+      () =>
+        json(200, { items: [{ id: "a" }], pagination: { hasNextPage: true } }),
+      () => json(200, { items: [], pagination: { hasNextPage: true } }),
+    );
+    await expect(provider.listByTags({})).resolves.toHaveLength(1);
+    expect(server.calls).toHaveLength(2);
+  });
+
+  it("a server that never stops paging fails after the page cap", async () => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, { items: [{ id: "a" }], pagination: { hasNextPage: true } }),
+    );
+    const err = await rejection(provider.listByTags({}));
+    expect(err).toMatchObject({ code: "http_error", op: "list" });
+    expect(server.calls).toHaveLength(1_000);
+  });
+
+  it.each([
+    [
+      "a non-JSON body",
+      () => new Response(`<html>${API_KEY}</html>`, { status: 200 }),
+    ],
+    ["items not an array", () => json(200, { items: {} })],
+    ["an item without an id", () => json(200, { items: [{ metadata: {} }] })],
+  ])("%s is http_error and never quotes the body", async (_n, h) => {
+    const { server, provider } = setup();
+    server.on("GET /sandboxes?metadata", h);
+    const err = await rejection(provider.listByTags({}));
+    expect(err).toMatchObject({ code: "http_error", op: "list", status: 200 });
+    expect(err.message).toBe("list: http_error 200");
+    expect(err.cause).toBeUndefined();
   });
 
   it("an empty filter still lists only automata=cell", async () => {
@@ -741,12 +1050,17 @@ describe("secrets never leak (canary)", () => {
     happyRoutes(s.server);
     arrange(s);
     const err = await rejection(s.provider.create(plan()));
+    // An Error cause stringifies to {}, so read its message and stack directly.
+    const cause = err.cause instanceof Error ? err.cause : undefined;
     const surfaces = [
       JSON.stringify(s.logs),
       err.message,
       JSON.stringify(err),
       JSON.stringify(err.cause ?? null),
-      String(err.stack?.split("\n")[0]),
+      String(err.cause),
+      cause?.message,
+      cause?.stack,
+      err.stack,
     ].join("\n");
     expect(surfaces).not.toContain(API_KEY);
     expect(surfaces).not.toContain(CREDENTIAL);

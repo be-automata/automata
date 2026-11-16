@@ -118,6 +118,7 @@ describe("buildCellCreatePlan", () => {
     expect(plan.egressDigest).toBe(set.digest);
     expect(plan.profileId).toBe("test/profile");
     expect(plan.runtime).toBe("runc");
+    expect(plan.provider).toBe("opensandbox");
   });
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
