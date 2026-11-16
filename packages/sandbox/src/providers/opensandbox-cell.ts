@@ -29,6 +29,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_SLACK_MS = 10_000;
 const DEFAULT_MAX_EXEC_OUTPUT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_COPY_OUT_BYTES = 64 * 1024 * 1024;
+const DEFAULT_COPY_OUT_TIMEOUT_MS = 120_000;
 /** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
 export const OPENSANDBOX_MIN_TTL_MS = 60_000;
 const MIN_TTL_SECONDS = OPENSANDBOX_MIN_TTL_MS / 1000;
@@ -66,6 +68,10 @@ export interface OpenSandboxCellConfig {
   requestTimeoutMs?: number;
   /** Cap on the raw exec SSE body in bytes, default 16 MiB; over it exec fails. */
   maxExecOutputBytes?: number;
+  /** Cap on a copyOut body in bytes, default 64 MiB; over it copyOut fails. */
+  maxCopyOutBytes?: number;
+  /** Deadline for a copyOut request including its body read, default 120 s. */
+  copyOutTimeoutMs?: number;
 }
 
 export interface OpenSandboxCellDeps {
@@ -94,10 +100,6 @@ interface Sent {
 
 /** A step finishes with `done`, or asks for another attempt after `retryInMs`. */
 type RetryStep<T, L = undefined> = { done: T } | { retryInMs: number; last: L };
-
-interface CommandOutcome extends CellExecResult {
-  errored: boolean;
-}
 
 interface ListPage {
   entries: CellListEntry[];
@@ -151,36 +153,71 @@ async function readBody<T>(
 }
 
 /**
- * Reads a body as text, counting raw bytes. Over `maxBytes` the stream is
- * cancelled and the read fails with no output in the error.
+ * Reads a body as bytes, counting them. Over `maxBytes`, or on any failure,
+ * the stream is cancelled and the read fails with no content in the error.
  */
-async function readCappedText(
+async function readCappedBytes(
   op: string,
   res: Response,
   maxBytes: number,
-): Promise<string> {
+): Promise<Uint8Array> {
   const reader = res.body?.getReader();
-  if (!reader) return "";
-  const decoder = new TextDecoder();
+  if (!reader) return new Uint8Array(0);
+  const chunks: Uint8Array[] = [];
   let total = 0;
-  let text = "";
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) return text + decoder.decode();
+      if (done) break;
       total += value.byteLength;
       if (total > maxBytes) throw new CellProviderError("http_error", op);
-      text += decoder.decode(value, { stream: true });
+      chunks.push(value);
     }
   } catch {
     // Over the cap, aborted or broken: release the connection, report no output.
     await reader.cancel().catch(() => undefined);
     throw new CellProviderError("http_error", op);
   }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+async function readCappedText(
+  op: string,
+  res: Response,
+  maxBytes: number,
+): Promise<string> {
+  return new TextDecoder().decode(await readCappedBytes(op, res, maxBytes));
 }
 
 function cellPath(id: string, suffix = ""): string {
   return `/sandboxes/${encodeURIComponent(id)}${suffix}`;
+}
+
+const isNonBlank = (v: unknown): boolean =>
+  typeof v === "string" && v.trim() !== "";
+const isPositive = (v: unknown): boolean =>
+  typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/** Identity tags and resources the adapter relies on; callers can be untyped. */
+function assertPlanFields(plan: CellCreatePlan): void {
+  const tags: Record<string, unknown> = isRecord(plan.tags) ? plan.tags : {};
+  const res: Record<string, unknown> = isRecord(plan.resources)
+    ? plan.resources
+    : {};
+  const tagsOk =
+    tags.automata === "cell" &&
+    ["worker", "epoch", "stepKey", "attempt", "expiresAt"].every((k) =>
+      isNonBlank(tags[k]),
+    );
+  if (!tagsOk || !isPositive(res.cpu) || !isPositive(res.memoryMiB)) {
+    throw new CellProviderError("invalid_plan", "create");
+  }
 }
 
 function guardPlan(plan: CellCreatePlan): void {
@@ -199,6 +236,7 @@ function guardPlan(plan: CellCreatePlan): void {
   ) {
     throw new CellProviderError("policy_required", "create");
   }
+  assertPlanFields(plan);
   // NaN or Infinity would serialize as `timeout: null`.
   if (
     !Number.isFinite(plan.ttlMs) ||
@@ -270,7 +308,8 @@ function eventObjects(lines: readonly string[]): unknown[] {
   return lines.map(parseJson);
 }
 
-function parseExecStream(text: string): CommandOutcome | undefined {
+/** `undefined` without a terminal event, or on any execd `error` event. */
+function parseExecStream(text: string): CellExecResult | undefined {
   const stdout: string[] = [];
   const stderr: string[] = [];
   let exitCode: number | undefined;
@@ -285,14 +324,13 @@ function parseExecStream(text: string): CommandOutcome | undefined {
     } else if (event.type === "execution_complete") {
       exitCode = asNumber(event.exit_code) ?? 0;
     } else if (event.type === "error") {
+      // An error fails the run, even if a completion follows it.
       errored = true;
-      const inner = isRecord(event.error) ? event.error : {};
-      exitCode = asNumber(inner.exit_code) ?? asNumber(event.exit_code) ?? -1;
     }
   }
-  return exitCode === undefined
+  return errored || exitCode === undefined
     ? undefined
-    : { exitCode, stdout: stdout.join(""), stderr: stderr.join(""), errored };
+    : { exitCode, stdout: stdout.join(""), stderr: stderr.join("") };
 }
 
 export function createOpenSandboxCellProvider(
@@ -306,6 +344,9 @@ export function createOpenSandboxCellProvider(
   const requestTimeoutMs =
     config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
+  const maxCopyOutBytes = config.maxCopyOutBytes ?? DEFAULT_MAX_COPY_OUT_BYTES;
+  const copyOutTimeoutMs =
+    config.copyOutTimeoutMs ?? DEFAULT_COPY_OUT_TIMEOUT_MS;
   const maxExecOutputBytes =
     config.maxExecOutputBytes ?? DEFAULT_MAX_EXEC_OUTPUT_BYTES;
 
@@ -500,11 +541,11 @@ export function createOpenSandboxCellProvider(
     );
   }
 
-  async function runCommand(
+  async function exec(
     cellId: string,
     argv: readonly string[],
     opts?: CellExecOptions,
-  ): Promise<CommandOutcome> {
+  ): Promise<CellExecResult> {
     if (argv.length === 0 || !argv[0]) {
       throw new CellProviderError("invalid_argv", "exec");
     }
@@ -525,24 +566,15 @@ export function createOpenSandboxCellProvider(
     return outcome;
   }
 
-  async function exec(
-    cellId: string,
-    argv: string[],
-    opts?: CellExecOptions,
-  ): Promise<CellExecResult> {
-    const { exitCode, stdout, stderr } = await runCommand(cellId, argv, opts);
-    return { exitCode, stdout, stderr };
-  }
-
   async function copyOut(cellId: string, path: string): Promise<Uint8Array> {
     const { res } = await send(
       "copyOut",
       "GET",
       `${execd(cellId, "files/download")}?path=${encodeURIComponent(path)}`,
-      { retry: "idempotent" },
+      { retry: "idempotent", timeoutMs: copyOutTimeoutMs },
     );
     await requireOk("copyOut", res);
-    return new Uint8Array(await readBody("copyOut", () => res.arrayBuffer()));
+    return readCappedBytes("copyOut", res, maxCopyOutBytes);
   }
 
   function createBody(plan: CellCreatePlan): unknown {
@@ -630,26 +662,16 @@ export function createOpenSandboxCellProvider(
           : { retryInMs: BACKOFF_BASE_MS, last: undefined };
       },
       () => {
+        // The one secret-free warn every adopt path that finds nothing emits.
+        deps.logger.warn("cell create adoption found nothing", {
+          op: "create",
+          stepKey: plan.tags.stepKey,
+          attempt: plan.tags.attempt,
+          ...(status === undefined ? {} : { status }),
+        });
         throw new CellProviderError("http_error", "create", status);
       },
     );
-  }
-
-  /** A 2xx without a usable id: adopt by tags, else fail with one secret-free warn. */
-  async function adoptAfterBadBody(
-    plan: CellCreatePlan,
-    status: number,
-  ): Promise<string> {
-    try {
-      return await adoptByTags(plan, status);
-    } catch (error) {
-      deps.logger.warn("cell create response unusable", {
-        op: "create",
-        stepKey: plan.tags.stepKey,
-        attempt: plan.tags.attempt,
-      });
-      throw error;
-    }
   }
 
   /** `undefined` when the POST failed in transport, so its delivery is unknown. */
@@ -688,7 +710,7 @@ export function createOpenSandboxCellProvider(
       id = undefined; // an unparseable body is treated like a missing id
     }
     if (typeof id !== "string" || id === "") {
-      return adoptAfterBadBody(plan, res.status);
+      return adoptByTags(plan, res.status);
     }
     return id;
   }
@@ -720,16 +742,13 @@ export function createOpenSandboxCellProvider(
 
   /** Fail closed: only the probe's blocked exit proves the policy is enforced. */
   async function selfCheck(cellId: string): Promise<void> {
-    let outcome: CommandOutcome;
+    let outcome: CellExecResult;
     try {
-      outcome = await runCommand(cellId, config.selfCheck.argv);
+      outcome = await exec(cellId, config.selfCheck.argv);
     } catch {
       throw new CellProviderError("egress_not_enforced", "selfcheck");
     }
-    if (
-      outcome.errored ||
-      outcome.exitCode !== OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT
-    ) {
+    if (outcome.exitCode !== OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT) {
       throw new CellProviderError("egress_not_enforced", "selfcheck");
     }
   }

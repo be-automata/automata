@@ -224,6 +224,42 @@ describe("create guards (AC-2)", () => {
     ["ttl under 60 s", { ttlMs: 59_000 } as unknown, "ttl_too_short"],
     ["ttl NaN", { ttlMs: Number.NaN } as unknown, "ttl_too_short"],
     ["ttl Infinity", { ttlMs: Infinity } as unknown, "ttl_too_short"],
+    ...(["worker", "epoch", "stepKey", "attempt", "expiresAt"] as const)
+      .flatMap(
+        (k) =>
+          [
+            [`blank tags.${k}`, { tags: { ...PLAN_TAGS, [k]: " " } }],
+            [`missing tags.${k}`, { tags: { ...PLAN_TAGS, [k]: undefined } }],
+          ] as [string, unknown][],
+      )
+      .map(
+        ([n, patch]) => [n, patch, "invalid_plan"] as [string, unknown, string],
+      ),
+    [
+      "tags.automata not cell",
+      { tags: { ...PLAN_TAGS, automata: "x" } } as unknown,
+      "invalid_plan",
+    ],
+    [
+      "cpu 0",
+      { resources: { cpu: 0, memoryMiB: 64 } } as unknown,
+      "invalid_plan",
+    ],
+    [
+      "cpu NaN",
+      { resources: { cpu: Number.NaN, memoryMiB: 64 } } as unknown,
+      "invalid_plan",
+    ],
+    [
+      "memory negative",
+      { resources: { cpu: 1, memoryMiB: -1 } } as unknown,
+      "invalid_plan",
+    ],
+    [
+      "memory Infinity",
+      { resources: { cpu: 1, memoryMiB: Infinity } } as unknown,
+      "invalid_plan",
+    ],
   ])("%s: refused with zero fetch calls", async (_n, patch, code) => {
     const { server, provider } = setup();
     const err = await rejection(
@@ -312,11 +348,12 @@ describe("create", () => {
       expect(server.count("POST /sandboxes/")).toBe(0);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn).toHaveBeenCalledWith(
-        "cell create response unusable",
+        "cell create adoption found nothing",
         {
           op: "create",
           stepKey: "step-1",
           attempt: "2",
+          status: expect.any(Number),
         },
       );
     },
@@ -337,6 +374,39 @@ describe("create", () => {
 });
 
 describe("create retries and list-and-adopt", () => {
+  it.each([
+    [
+      "transport failure",
+      () => {
+        throw timeoutError();
+      },
+      undefined,
+    ],
+    ["non-connection 502", () => json(502, { code: "OTHER" }), 502],
+  ] as [string, Handler, number | undefined][])(
+    "%s with nothing listed warns exactly once and leaks no secret",
+    async (_n, h, status) => {
+      const { server, provider, logger, logs } = setup();
+      server.on("POST /sandboxes", h);
+      server.on("GET /sandboxes?metadata", emptyList);
+      const err = await rejection(provider.create(plan()));
+      expect(err.code).toBe("http_error");
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "cell create adoption found nothing",
+        {
+          op: "create",
+          stepKey: "step-1",
+          attempt: "2",
+          ...(status === undefined ? {} : { status }),
+        },
+      );
+      const all = JSON.stringify(logs) + err.message + JSON.stringify(err);
+      expect(all).not.toContain(API_KEY);
+      expect(all).not.toContain(CREDENTIAL);
+    },
+  );
+
   it("retries a 502 BACKEND_CONNECTION_FAILED on create", async () => {
     const { server, provider, sleeps } = setup();
     happyRoutes(server);
@@ -699,15 +769,31 @@ describe("exec", () => {
     });
   });
 
-  it("defaults a missing exit_code to 0 and maps an error event to its exit code", async () => {
+  it("defaults a missing exit_code to 0", async () => {
     const { server, provider } = setup();
-    server.on(
-      "POST /sandboxes/c1/proxy/44772/command",
-      () => sse([{ type: "execution_complete" }]),
-      () => sse([{ type: "error", error: { exit_code: 9 } }]),
+    server.on("POST /sandboxes/c1/proxy/44772/command", () =>
+      sse([{ type: "execution_complete" }]),
     );
     expect((await provider.exec("c1", ["x"])).exitCode).toBe(0);
-    expect((await provider.exec("c1", ["x"])).exitCode).toBe(9);
+  });
+
+  it.each([
+    [
+      "an error event with exit 0",
+      [{ type: "error", error: { exit_code: 0 } }],
+    ],
+    [
+      "an error event then execution_complete exit 0",
+      [
+        { type: "error", error: { message: "boom" } },
+        { type: "execution_complete", exit_code: 0 },
+      ],
+    ],
+  ])("exec throws http_error on %s", async (_n, events) => {
+    const { server, provider } = setup();
+    server.on("POST /sandboxes/c1/proxy/44772/command", () => sse(events));
+    const err = await rejection(provider.exec("c1", ["x"]));
+    expect(err).toMatchObject({ code: "http_error", op: "exec" });
   });
 
   it.each([[[]], [[""]]])("refuses argv %j with no HTTP call", async (argv) => {
@@ -1117,6 +1203,36 @@ describe("delete, revoke, quarantine, copyOut", () => {
     expect((await rejection(provider.copyOut("c1", "/x"))).code).toBe(
       "http_error",
     );
+  });
+
+  it("copyOut cancels the stream and fails once the body passes maxCopyOutBytes", async () => {
+    const { server, provider } = setup({ maxCopyOutBytes: 100 });
+    const cancelled = vi.fn();
+    server.on(
+      "GET /sandboxes/c1/proxy/44772/files/download?path=",
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(c) {
+              c.enqueue(new Uint8Array(60));
+            },
+            cancel: cancelled,
+          }),
+          { status: 200 },
+        ),
+    );
+    const err = await rejection(provider.copyOut("c1", "/x"));
+    expect(err).toMatchObject({ code: "http_error", op: "copyOut" });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("copyOut accepts a body exactly at maxCopyOutBytes", async () => {
+    const { server, provider } = setup({ maxCopyOutBytes: 5 });
+    server.on(
+      "GET /sandboxes/c1/proxy/44772/files/download?path=",
+      () => new Response(new Uint8Array([1, 2, 3, 4, 5]), { status: 200 }),
+    );
+    expect((await provider.copyOut("c1", "/x")).byteLength).toBe(5);
   });
 
   it("copyOut maps an aborted body read to http_error", async () => {

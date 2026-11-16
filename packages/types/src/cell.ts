@@ -79,6 +79,7 @@ export type CellProviderErrorCode =
   | "policy_required"
   | "ttl_too_short"
   | "invalid_argv"
+  | "invalid_plan"
   | "not_ready"
   | "egress_not_enforced"
   | "http_error";
