@@ -1,6 +1,7 @@
 /**
- * Cell contract (#634 S1): the provider-neutral shapes a cell create plan and
- * the cell provider speak. Types only; the OpenSandbox adapter is S2.
+ * Cell contract (#634 S1): the shapes a cell create plan and the cell provider
+ * speak. The plan is pre-rendered for its provider (OD-1), so the policy and
+ * vault are OpenSandbox-shaped. Types only; the OpenSandbox adapter is S2.
  */
 
 export interface OpenSandboxNetworkRule {
@@ -31,8 +32,8 @@ export type CellVaultAuth = "bearer" | "apiKey";
 
 export interface CellVaultEntry {
   name: string;
-  hosts: string[];
-  paths?: string[];
+  hosts: readonly string[];
+  paths?: readonly string[];
   auth: CellVaultAuth;
   /** The raw secret (the provider adds any `Bearer ` prefix). Never log it, never put it in an error. */
   credential: string;
@@ -55,9 +56,13 @@ export interface CellCreatePlan {
   profileId: string;
 }
 
+/**
+ * No `env`: exec env lands in the guest process environ (procfs), which the vault
+ * keeps secrets out of, and spike 058 never measured whether execd logs it
+ * (it does log `command`). Secrets go only through `CellCreatePlan.vault`.
+ */
 export interface CellExecOptions {
   cwd?: string;
-  env?: Record<string, string>;
   timeoutMs?: number;
   stdin?: string;
 }

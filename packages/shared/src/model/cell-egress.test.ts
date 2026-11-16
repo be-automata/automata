@@ -360,9 +360,12 @@ describe("renderers", () => {
     }
   });
 
-  it("AC4: toAgent37Network throws on an empty or over-cap set", () => {
+  it.each([
+    ["toAgent37Network", toAgent37Network],
+    ["toOpenSandboxNetworkPolicy", toOpenSandboxNetworkPolicy],
+  ] as const)("AC4: %s throws on an empty or over-cap set", (_name, render) => {
     const empty: CellEgressSet = { entries: [], bundles: [], digest: "x" };
-    expect(codeOf(() => toAgent37Network(empty))).toBe("empty_set");
+    expect(codeOf(() => render(empty))).toBe("empty_set");
     const big: CellEgressSet = {
       entries: Array.from({ length: CELL_EGRESS_MAX_ENTRIES + 1 }, (_, i) => ({
         name: `h${i}.example.com`,
@@ -371,7 +374,7 @@ describe("renderers", () => {
       bundles: [],
       digest: "x",
     };
-    expect(codeOf(() => toAgent37Network(big))).toBe("too_many_entries");
+    expect(codeOf(() => render(big))).toBe("too_many_entries");
   });
 
   it("toProxyShape pins :443, a wildcard also emits its apex", () => {
@@ -409,21 +412,5 @@ describe("renderers", () => {
       })),
     );
     expect(policy.egress.at(-1)).toEqual({ action: "deny", ports: [80] });
-  });
-
-  it("toOpenSandboxNetworkPolicy throws on an empty or over-cap set", () => {
-    const empty: CellEgressSet = { entries: [], bundles: [], digest: "x" };
-    expect(codeOf(() => toOpenSandboxNetworkPolicy(empty))).toBe("empty_set");
-    const big: CellEgressSet = {
-      entries: Array.from({ length: CELL_EGRESS_MAX_ENTRIES + 1 }, (_, i) => ({
-        name: `h${i}.example.com`,
-        wildcard: false,
-      })),
-      bundles: [],
-      digest: "x",
-    };
-    expect(codeOf(() => toOpenSandboxNetworkPolicy(big))).toBe(
-      "too_many_entries",
-    );
   });
 });

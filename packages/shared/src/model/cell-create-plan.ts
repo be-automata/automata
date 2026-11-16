@@ -1,4 +1,5 @@
 import type { CellPolicyProfile } from "../cell-policy/cell-policy";
+import type { mintBearer as mintBearerWithDb } from "./cell-authority";
 import type {
   CellCreatePlan,
   CellResources,
@@ -16,28 +17,30 @@ import { assertCellEgressEnforced } from "./cell-egress-guard";
 
 export type CellPlanErrorCode = "runtime_not_runc" | "bearer_refused";
 
-/** A refused plan. The message never contains a token. */
+/**
+ * A refused plan. The message is the fixed code only: `reason` comes from the
+ * injected `mintBearer` and is never interpolated, so a caller that puts a
+ * token in it cannot leak it through the message.
+ */
 export class CellPlanError extends Error {
   readonly code: CellPlanErrorCode;
-  readonly reason?: string;
+  readonly reason?: MintBearerRefusal;
 
-  constructor(code: CellPlanErrorCode, reason?: string) {
-    super(reason ? `${code}: ${reason}` : code);
+  constructor(code: CellPlanErrorCode, reason?: MintBearerRefusal) {
+    super(code);
     this.name = "CellPlanError";
     this.code = code;
     this.reason = reason;
   }
 }
 
-export interface MintBearerArgs {
-  stepKey: string;
-  attempt: number;
-  ttlMs: number;
-}
-
-export type MintBearerResult =
-  | { ok: true; token: string; expiresAt: Date }
-  | { ok: false; reason: string };
+/** `mintBearer` with `db` bound by the caller; type-only, so the builder never loads the DB module. */
+export type MintBearerArgs = Omit<Parameters<typeof mintBearerWithDb>[0], "db">;
+export type MintBearerResult = Awaited<ReturnType<typeof mintBearerWithDb>>;
+export type MintBearerRefusal = Extract<
+  MintBearerResult,
+  { ok: false }
+>["reason"];
 
 export interface CellCreatePlanDeps {
   now: () => Date;
@@ -58,8 +61,12 @@ export interface CellCreatePlanInput {
   runtime: string;
 }
 
-const MODEL_PATHS = ["/v1/*", "/api/*"];
-const BROKER_PATHS = ["/api/cell/*", "/api/v3/*", "/api/graphql"];
+const MODEL_PATHS: readonly string[] = ["/v1/*", "/api/*"];
+const BROKER_PATHS: readonly string[] = [
+  "/api/cell/*",
+  "/api/v3/*",
+  "/api/graphql",
+];
 
 function buildVault(
   input: CellCreatePlanInput,
@@ -105,7 +112,9 @@ export async function buildCellCreatePlan(
     runtime: "runc",
     tags: {
       automata: "cell",
-      ...input.tags,
+      // Named, not spread: a wider object passed as `tags` must not add metadata keys.
+      worker: input.tags.worker,
+      epoch: input.tags.epoch,
       stepKey,
       attempt: String(attempt),
       expiresAt: String(bearer.expiresAt.getTime()),

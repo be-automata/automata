@@ -7,8 +7,10 @@ import {
   CellPlanError,
   type CellCreatePlanDeps,
   type CellCreatePlanInput,
+  type MintBearerRefusal,
 } from "./cell-create-plan";
 import {
+  CELL_EGRESS_MODEL_HOST,
   compileCellEgress,
   toOpenSandboxNetworkPolicy,
   CellEgressError,
@@ -72,23 +74,13 @@ function makeDeps(
   };
 }
 
-async function errorOf(p: Promise<unknown>): Promise<unknown> {
-  try {
-    await p;
-  } catch (e) {
-    return e;
-  }
-  return undefined;
-}
-
 describe("buildCellCreatePlan", () => {
   it("S1-a: a refused profile throws and mints nothing", async () => {
     const deps = makeDeps();
     const bad = profile({ configuration: { egress_mode: "observe" } });
-    const err = await errorOf(
+    await expect(
       buildCellCreatePlan(input({ profile: bad }), deps),
-    );
-    expect(err).toBeInstanceOf(CellEgressNotEnforcedError);
+    ).rejects.toBeInstanceOf(CellEgressNotEnforcedError);
     expect(deps.mintBearer).not.toHaveBeenCalled();
   });
 
@@ -97,28 +89,25 @@ describe("buildCellCreatePlan", () => {
     async (runtime) => {
       const deps = makeDeps();
       // An unresolvable ref would throw CellEgressError if compile ran first.
-      const err = await errorOf(
-        buildCellCreatePlan(
-          input({ runtime, egressRefs: ["test/missing@1"] }),
-          deps,
-        ),
+      const p = buildCellCreatePlan(
+        input({ runtime, egressRefs: ["test/missing@1"] }),
+        deps,
       );
-      expect(err).toBeInstanceOf(CellPlanError);
-      expect((err as CellPlanError).code).toBe("runtime_not_runc");
+      await expect(p).rejects.toBeInstanceOf(CellPlanError);
+      await expect(p).rejects.toMatchObject({ code: "runtime_not_runc" });
       expect(deps.mintBearer).not.toHaveBeenCalled();
     },
   );
 
   it("propagates a CellEgressError from compile without minting", async () => {
     const deps = makeDeps();
-    const err = await errorOf(
+    await expect(
       buildCellCreatePlan(input({ egressRefs: ["test/missing@1"] }), deps),
-    );
-    expect(err).toBeInstanceOf(CellEgressError);
+    ).rejects.toBeInstanceOf(CellEgressError);
     expect(deps.mintBearer).not.toHaveBeenCalled();
   });
 
-  it("S1-c: networkPolicy is the rendered policy, default deny, ending in the port-80 deny", async () => {
+  it("S1-c: networkPolicy is exactly the rendered policy", async () => {
     const deps = makeDeps();
     const plan = await buildCellCreatePlan(input(), deps);
     const set = compileCellEgress(["test/npm@1", "test/wild@1"], {
@@ -126,11 +115,6 @@ describe("buildCellCreatePlan", () => {
       catalog: CATALOG,
     });
     expect(plan.networkPolicy).toEqual(toOpenSandboxNetworkPolicy(set));
-    expect(plan.networkPolicy.defaultAction).toBe("deny");
-    expect(plan.networkPolicy.egress.at(-1)).toEqual({
-      action: "deny",
-      ports: [80],
-    });
     expect(plan.egressDigest).toBe(set.digest);
     expect(plan.profileId).toBe("test/profile");
     expect(plan.runtime).toBe("runc");
@@ -141,10 +125,9 @@ describe("buildCellCreatePlan", () => {
     async (ttlMs) => {
       const deps = makeDeps();
       const bad = profile({ configuration: { egress_mode: "observe" } });
-      const err = await errorOf(
+      await expect(
         buildCellCreatePlan(input({ ttlMs, profile: bad }), deps),
-      );
-      expect(err).toBeInstanceOf(RangeError);
+      ).rejects.toBeInstanceOf(RangeError);
       expect(deps.mintBearer).not.toHaveBeenCalled();
     },
   );
@@ -160,7 +143,7 @@ describe("buildCellCreatePlan", () => {
     expect(plan.vault).toEqual([
       {
         name: "model",
-        hosts: ["api.anthropic.com"],
+        hosts: [CELL_EGRESS_MODEL_HOST],
         paths: ["/v1/*", "/api/*"],
         auth: "bearer",
         credential: MODEL_TOKEN,
@@ -185,14 +168,43 @@ describe("buildCellCreatePlan", () => {
     expect(plan.resources).toEqual({ cpu: 2, memoryMiB: 2048 });
   });
 
-  it("S1-f: a bearer refusal throws CellPlanError with the reason and no token", async () => {
-    const deps = makeDeps(async () => ({ ok: false, reason: "fenced" }));
-    const err = await errorOf(buildCellCreatePlan(input(), deps));
-    expect(err).toBeInstanceOf(CellPlanError);
-    const e = err as CellPlanError;
-    expect(e.code).toBe("bearer_refused");
-    expect(e.reason).toBe("fenced");
-    expect(e.message).not.toContain(MODEL_TOKEN);
-    expect(e.message).not.toContain(BROKER_TOKEN);
+  it("S1-f: a bearer refusal keeps its reason but never puts it in the message", async () => {
+    // The injected mint is untrusted: prove a token-bearing reason cannot leak.
+    const leaky =
+      `upstream said ${BROKER_TOKEN} / ${MODEL_TOKEN}` as MintBearerRefusal;
+    const deps = makeDeps(async () => ({ ok: false, reason: leaky }));
+    const p = buildCellCreatePlan(input(), deps);
+    await expect(p).rejects.toBeInstanceOf(CellPlanError);
+    await expect(p).rejects.toMatchObject({
+      code: "bearer_refused",
+      reason: leaky,
+      message: "bearer_refused",
+    });
+    await expect(p).rejects.not.toThrow(BROKER_TOKEN);
+    await expect(p).rejects.not.toThrow(MODEL_TOKEN);
+  });
+
+  it("tags carry only the named keys, even from a wider tags object", async () => {
+    const wide = { worker: "w1", epoch: "e1", automata: "other", extra: "x" };
+    const plan = await buildCellCreatePlan(input({ tags: wide }), makeDeps());
+    expect(Object.keys(plan.tags).sort()).toEqual([
+      "attempt",
+      "automata",
+      "epoch",
+      "expiresAt",
+      "stepKey",
+      "worker",
+    ]);
+    expect(plan.tags.automata).toBe("cell");
+  });
+
+  it("the rendered policy does not depend on the order of egressRefs", async () => {
+    const a = await buildCellCreatePlan(input(), makeDeps());
+    const b = await buildCellCreatePlan(
+      input({ egressRefs: ["test/wild@1", "test/npm@1"] }),
+      makeDeps(),
+    );
+    expect(b.networkPolicy).toEqual(a.networkPolicy);
+    expect(b.egressDigest).toBe(a.egressDigest);
   });
 });
