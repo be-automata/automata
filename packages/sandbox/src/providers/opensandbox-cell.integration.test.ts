@@ -183,20 +183,15 @@ function check<G extends keyof ConformanceChecks>(
 const NETWORK_ERROR =
   /^(TimeoutError|timeout|URLError|gaierror|OSError|ConnectionRefusedError|ConnectionResetError|ConnectionAbortedError|BrokenPipeError|SSLError|SSLCertVerificationError|SSLEOFError|SSLZeroReturnError|RemoteDisconnected|IncompleteRead)\b/;
 
-/** Blocked: the probe failed with a network error (refused, reset, timeout, TLS). */
+/**
+ * Blocked: the probe failed with a network error (refused, reset, timeout,
+ * TLS). Any HTTP status counts as reached, even a 5xx: an upstream such as
+ * httpbin.org answers 502/503 itself, so a status cannot tell the proxy's
+ * refusal from a real reach. The credential proxy answers TCP handshakes on
+ * :80 and :443, so those ports are probed with real HTTP/TLS requests.
+ */
 function blocked(r: ProbeResult | undefined): boolean {
   return r !== undefined && r.ok === false && NETWORK_ERROR.test(r.err ?? "");
-}
-
-/**
- * The credential proxy is transparent on :80 as well as :443: a TCP connect to
- * any IP on :80 succeeds at once (measured here), so :80 is probed with a real
- * HTTP request to a target that answers 200 when reached. Not reached = the
- * request failed or only the proxy answered (an error status).
- */
-function httpNotReached(r: ProbeResult | undefined): boolean {
-  if (r === undefined) return false;
-  return r.ok ? r.status !== undefined && r.status >= 500 : blocked(r);
 }
 
 /** Names the guest legitimately carries (the sandbox id, a proxy mode flag). */
@@ -353,7 +348,7 @@ describe(
         check(
           "egress_enforced",
           "allowed_80_blocked",
-          httpNotReached(r[1]),
+          blocked(r[1]),
           brief(r[1]),
         );
         check(
@@ -372,7 +367,7 @@ describe(
         check(
           "egress_enforced",
           "denied_ip_80_blocked",
-          httpNotReached(r[4]),
+          blocked(r[4]),
           brief(r[4]),
         );
         check("egress_enforced", "dot_blocked", blocked(r[5]), brief(r[5]));
