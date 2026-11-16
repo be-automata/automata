@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
 import { createDb } from "../db";
+import type { ExecutionProfile, ProfileEvidence } from "../db/types";
+import {
+  assertCellEgressEnforced,
+  CellEgressNotEnforcedError,
+} from "./cell-egress-guard";
 import {
   canonicalJson,
   executionProfileConfigHash,
@@ -225,5 +230,70 @@ describe("evidence renewal helpers (DB)", () => {
       "2026-12-15T04:00:00.000Z",
     ]);
     expect(await insertProfileEvidenceRows({ db, rows: [] })).toEqual([]);
+  });
+});
+
+describe("conformance rows feed the egress guard", () => {
+  const measuredAt = new Date("2026-11-16T00:00:00Z");
+  const profile: ExecutionProfile = {
+    id: "opensandbox/runc",
+    provider: "opensandbox",
+    tier: "customer_box",
+    configuration: { egress_mode: "enforce" },
+    configHash: "h",
+    createdAt: measuredAt,
+    updatedAt: measuredAt,
+  } as ExecutionProfile;
+
+  // Literal fixture shaped like the sandbox evidence builder's rows, as the
+  // database returns them (generated expiresAt = measuredAt + 30 days).
+  const rows = (allowlist: string[]): ProfileEvidence[] =>
+    (
+      [
+        ["egress", "allowlist"],
+        ["egress_allowlist", allowlist],
+        ["metadata_blocked", true],
+        ["peer_isolated", true],
+        ["teardown_verified", true],
+        ["secret_brokering", true],
+        ["dns_closed", false],
+        ["provider_creds_in_guest", false],
+        ["provider_endpoints_reachable", false],
+      ] as Array<[string, unknown]>
+    ).map(
+      ([capability, value], i) =>
+        ({
+          id: `row-${i}`,
+          profileId: profile.id,
+          capability,
+          measuredAt,
+          expiresAt: new Date(measuredAt.getTime() + 30 * DAY_MS),
+          source: "conformance",
+          artifactDigest: "sha256:deadbeef",
+          platformSha: "abc123",
+          result: { value, checks: ["c"] },
+          createdAt: measuredAt,
+        }) as ProfileEvidence,
+    );
+
+  const now = new Date("2026-11-17T00:00:00Z");
+
+  it("passes assertCellEgressEnforced", () => {
+    const { profile: record } = profileRecordForPolicy(
+      profile,
+      rows(["httpbin.org"]),
+    );
+    expect(() =>
+      assertCellEgressEnforced({ profile: record, now }),
+    ).not.toThrow();
+  });
+
+  it("refuses allowlist_empty with an empty egress_allowlist", () => {
+    const { profile: record } = profileRecordForPolicy(profile, rows([]));
+    const refuse = () => assertCellEgressEnforced({ profile: record, now });
+    expect(refuse).toThrow(CellEgressNotEnforcedError);
+    expect(refuse).toThrow(
+      expect.objectContaining({ reason: "allowlist_empty" }),
+    );
   });
 });
