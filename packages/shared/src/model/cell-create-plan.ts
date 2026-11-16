@@ -92,6 +92,11 @@ function buildVault(
   ];
 }
 
+/** The message names the field only: `value` may be a secret (the model token). */
+function assertNonBlank(field: string, value: string): void {
+  if (value.trim() === "") throw new RangeError(`${field} must not be blank`);
+}
+
 function assertPositiveFinite(field: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0) {
     throw new RangeError(`${field} must be a positive finite number`);
@@ -113,6 +118,10 @@ export async function buildCellCreatePlan(
   }
   assertPositiveFinite("resources.cpu", input.resources.cpu);
   assertPositiveFinite("resources.memoryMiB", input.resources.memoryMiB);
+  assertNonBlank("stepKey", stepKey);
+  assertNonBlank("tags.worker", input.tags.worker);
+  assertNonBlank("tags.epoch", input.tags.epoch);
+  assertNonBlank("modelToken", input.modelToken);
   if (input.runtime !== "runc") throw new CellPlanError("runtime_not_runc");
   const brokerHost = normalizeCellBrokerHost(input.egress.brokerHost);
   const set = compileCellEgress(input.egressRefs, input.egress);

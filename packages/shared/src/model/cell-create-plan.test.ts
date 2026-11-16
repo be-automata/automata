@@ -139,6 +139,10 @@ describe("buildCellCreatePlan", () => {
     ["resources.cpu", { resources: { cpu: 0, memoryMiB: 2048 } }],
     ["resources.memoryMiB", { resources: { cpu: 2, memoryMiB: -1 } }],
     ["resources.cpu", { resources: { cpu: Number.NaN, memoryMiB: 2048 } }],
+    ["stepKey", { stepKey: "" }],
+    ["tags.worker", { tags: { worker: " ", epoch: "e1" } }],
+    ["tags.epoch", { tags: { worker: "w1", epoch: "" } }],
+    ["modelToken", { modelToken: "\t" }],
   ] as const)(
     "%s out of range throws RangeError before the guard and mint",
     async (_field, patch) => {
