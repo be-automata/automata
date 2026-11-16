@@ -5,6 +5,7 @@ import { matchEgress } from "@terragon/worker/agent-run/egress-proxy";
 import {
   compileCellEgress,
   toAgent37Network,
+  toOpenSandboxNetworkPolicy,
   toProxyShape,
 } from "./cell-egress";
 import { BROKER, CATALOG } from "./__fixtures__/cell-egress";
@@ -62,5 +63,19 @@ describe("cell egress parity: proxy shape vs Agent37 model", () => {
   it.each(PROBES)("row %i: %s:%s", (_row, host, port, expected) => {
     expect(matchEgress(shape, host, port)).toBe(expected);
     expect(agent37Decide(allow, host, port)).toBe(expected);
+  });
+});
+
+describe("cell egress parity: OpenSandbox policy vs proxy shape", () => {
+  it("S1-d: allow targets equal the proxy allowlist minus :443, as sets", () => {
+    const targets = toOpenSandboxNetworkPolicy(SET)
+      .egress.filter((r) => r.action === "allow")
+      .map((r) => r.target);
+    const proxy = toProxyShape(SET).allowlist.map((a) =>
+      a.replace(/:443$/, ""),
+    );
+    expect(new Set(targets)).toEqual(new Set(proxy));
+    expect(targets).toContain("*.example.org");
+    expect(targets).toContain("example.org");
   });
 });

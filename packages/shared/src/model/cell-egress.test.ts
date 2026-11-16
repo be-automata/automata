@@ -6,6 +6,7 @@ import {
   cellEgressKey,
   compileCellEgress,
   toAgent37Network,
+  toOpenSandboxNetworkPolicy,
   toProxyShape,
   type CellEgressCatalog,
   type CellEgressErrorCode,
@@ -396,5 +397,33 @@ describe("renderers", () => {
     expect(
       codeOf(() => toProxyShape({ entries: [], bundles: [], digest: "x" })),
     ).toBe("empty_set");
+  });
+
+  it("toOpenSandboxNetworkPolicy: default deny, allow per name, trailing port-80 deny", () => {
+    const policy = toOpenSandboxNetworkPolicy(set);
+    expect(policy.defaultAction).toBe("deny");
+    expect(policy.egress.slice(0, -1)).toEqual(
+      toAgent37Network(set).allow.map((target) => ({
+        action: "allow",
+        target,
+      })),
+    );
+    expect(policy.egress.at(-1)).toEqual({ action: "deny", ports: [80] });
+  });
+
+  it("toOpenSandboxNetworkPolicy throws on an empty or over-cap set", () => {
+    const empty: CellEgressSet = { entries: [], bundles: [], digest: "x" };
+    expect(codeOf(() => toOpenSandboxNetworkPolicy(empty))).toBe("empty_set");
+    const big: CellEgressSet = {
+      entries: Array.from({ length: CELL_EGRESS_MAX_ENTRIES + 1 }, (_, i) => ({
+        name: `h${i}.example.com`,
+        wildcard: false,
+      })),
+      bundles: [],
+      digest: "x",
+    };
+    expect(codeOf(() => toOpenSandboxNetworkPolicy(big))).toBe(
+      "too_many_entries",
+    );
   });
 });

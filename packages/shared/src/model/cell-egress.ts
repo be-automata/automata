@@ -1,6 +1,10 @@
 /// <reference path="./psl.d.ts" />
 import { createHash } from "node:crypto";
 
+import type {
+  OpenSandboxNetworkPolicy,
+  OpenSandboxNetworkRule,
+} from "@terragon/types/cell";
 import { canonicalJson } from "@terragon/utils/payload-seal";
 import { get as pslGet } from "psl";
 
@@ -395,5 +399,23 @@ export function toProxyShape(set: CellEgressSet): EgressPolicyShape {
   return {
     level: "domain",
     allowlist: assertRenderable(set).map((name) => `${name}:443`),
+  };
+}
+
+/**
+ * The OpenSandbox network policy: default deny, one allow per rendered name
+ * (a wildcard also emits its apex). The trailing targetless port-80 deny is
+ * required: domain rules are not port-scoped, so :80 on an allowed host is open
+ * without it.
+ */
+export function toOpenSandboxNetworkPolicy(
+  set: CellEgressSet,
+): OpenSandboxNetworkPolicy {
+  const allows = assertRenderable(set).map(
+    (target): OpenSandboxNetworkRule => ({ action: "allow", target }),
+  );
+  return {
+    defaultAction: "deny",
+    egress: [...allows, { action: "deny", ports: [80] }],
   };
 }
