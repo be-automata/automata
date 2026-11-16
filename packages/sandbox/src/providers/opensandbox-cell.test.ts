@@ -109,6 +109,21 @@ function happyRoutes(server: ReturnType<typeof makeServer>) {
   server.on("DELETE /sandboxes/c1", () => new Response(null, { status: 204 }));
   server.on("GET /sandboxes/c1/proxy/44772/ping", () => json(200, {}));
   server.on("POST /sandboxes", () => json(202, { id: "c1" }));
+  server.on("GET /sandboxes/c1/networkpolicy", () => policyResponse());
+}
+
+/** The server's echo of the plan's policy: reordered, with a targetless deny. */
+function policyResponse(patch: Record<string, unknown> = {}): Response {
+  return json(200, {
+    status: "ok",
+    mode: "enforcing",
+    enforcementMode: "dns+nft",
+    policy: {
+      egress: [{ action: "allow", target: "broker.test", ports: [443] }],
+      defaultAction: "deny",
+      ...patch,
+    },
+  });
 }
 
 function plan(patch: Partial<CellCreatePlan> = {}): CellCreatePlan {
@@ -621,8 +636,12 @@ describe("self-check fails closed (AC-4)", () => {
       () => sse([{ type: "error", error: { message: "boom" } }]),
     ],
     [
-      "an error event even carrying exit 3",
-      () => sse([{ type: "error", error: { exit_code: 3 } }]),
+      "an error event carrying exit 1",
+      () => sse([{ type: "error", error: { exit_code: 1 } }]),
+    ],
+    [
+      "an execution_complete without an exit code",
+      () => sse([{ type: "execution_complete" }]),
     ],
     ["a 500 from /command", () => json(500, {})],
     [
@@ -663,6 +682,18 @@ describe("self-check fails closed (AC-4)", () => {
     expect(server.count("DELETE /sandboxes/c1")).toBe(1);
     expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
     expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(0);
+  });
+
+  it("an error event carrying exit 3 (blocked) passes the self-check", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    server.on("POST /sandboxes/c1/proxy/44772/command", () =>
+      sse([
+        { type: "error", error: { ename: "CommandExecError", exit_code: 3 } },
+      ]),
+    );
+    await expect(provider.create(plan())).resolves.toEqual({ cellId: "c1" });
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(1);
   });
 
   it("the adapter's probe exit equals the contract constant", () => {
@@ -769,18 +800,55 @@ describe("exec", () => {
     });
   });
 
-  it("defaults a missing exit_code to 0", async () => {
+  it.each([
+    [
+      "an error event with error.exit_code 7",
+      [{ type: "error", error: { exit_code: 7 } }],
+      7,
+    ],
+    [
+      "an error event with a top-level exit_code 5",
+      [{ type: "error", exit_code: 5 }],
+      5,
+    ],
+    [
+      "an error exit code beating execution_complete",
+      [
+        { type: "error", error: { exit_code: 2 } },
+        { type: "execution_complete", exit_code: 0 },
+      ],
+      2,
+    ],
+    [
+      "an error exit code beating a malformed execution_complete",
+      [
+        { type: "error", error: { exit_code: 2 } },
+        { type: "execution_complete" },
+      ],
+      2,
+    ],
+  ])("exec returns the exit code of %s", async (_n, events, code) => {
     const { server, provider } = setup();
-    server.on("POST /sandboxes/c1/proxy/44772/command", () =>
-      sse([{ type: "execution_complete" }]),
-    );
-    expect((await provider.exec("c1", ["x"])).exitCode).toBe(0);
+    server.on("POST /sandboxes/c1/proxy/44772/command", () => sse(events));
+    expect((await provider.exec("c1", ["x"])).exitCode).toBe(code);
   });
 
   it.each([
     [
-      "an error event with exit 0",
-      [{ type: "error", error: { exit_code: 0 } }],
+      "an execution_complete without exit_code",
+      [{ type: "execution_complete" }],
+    ],
+    [
+      "an execution_complete with a non-numeric exit_code",
+      [{ type: "execution_complete", exit_code: "0" }],
+    ],
+    [
+      "an execution_complete with a fractional exit_code",
+      [{ type: "execution_complete", exit_code: 1.5 }],
+    ],
+    [
+      "an error event without an exit code",
+      [{ type: "error", error: { ename: "boom" } }],
     ],
     [
       "an error event then execution_complete exit 0",
@@ -1442,4 +1510,81 @@ describe("secrets never leak (canary)", () => {
     expect(JSON.stringify(s.logs)).not.toContain(API_KEY);
     expect(JSON.stringify(s.logs)).not.toContain(CREDENTIAL);
   });
+});
+
+describe("an adopted cell's policy is verified (finding 4)", () => {
+  function adoptSetup(policy: () => Response) {
+    const ctx = setup();
+    happyRoutes(ctx.server);
+    ctx.server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
+    ctx.server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [cellItem("c1")],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    ctx.server.on("GET /sandboxes/c1/networkpolicy", policy);
+    return ctx;
+  }
+
+  it('proceeds when the policy matches, reordered and with target ""', async () => {
+    const { server, provider } = adoptSetup(() =>
+      policyResponse({
+        egress: [
+          { action: "deny", target: "", ports: [80] },
+          { action: "allow", target: "broker.test", ports: [443] },
+        ],
+      }),
+    );
+    const p = plan({
+      networkPolicy: {
+        defaultAction: "deny",
+        egress: [
+          { action: "allow", target: "broker.test", ports: [443] },
+          { action: "deny", ports: [80] },
+        ],
+      },
+    });
+    await expect(provider.create(p)).resolves.toEqual({ cellId: "c1" });
+    expect(server.count("GET /sandboxes/c1/networkpolicy")).toBe(1);
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(1);
+  });
+
+  it.each([
+    [
+      "deny_all mode",
+      () =>
+        json(200, {
+          mode: "deny_all",
+          policy: { defaultAction: "deny", egress: [] },
+        }),
+    ],
+    [
+      "an extra allow rule",
+      () =>
+        policyResponse({
+          egress: [
+            { action: "allow", target: "broker.test", ports: [443] },
+            { action: "allow", target: "evil.test" },
+          ],
+        }),
+    ],
+    ["a non-deny default", () => policyResponse({ defaultAction: "allow" })],
+    ["a non-JSON body", () => new Response("<html>", { status: 200 })],
+    ["a 404", () => json(404, {})],
+  ])(
+    "%s: revokes, tears down and never writes the vault",
+    async (_n, policy) => {
+      const { server, provider } = adoptSetup(policy);
+      const err = await rejection(provider.create(plan()));
+      expect(err).toMatchObject({ code: "http_error", op: "create" });
+      expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(1);
+      expect(
+        server.calls.filter(
+          (c) => c.method === "DELETE" && c.path === "/sandboxes/c1",
+        ),
+      ).toHaveLength(1);
+      expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
+    },
+  );
 });

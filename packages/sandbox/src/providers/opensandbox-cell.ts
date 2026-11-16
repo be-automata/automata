@@ -110,10 +110,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
-}
-
 /** The string-valued entries only: one odd value must not hide a cell's other tags. */
 function stringTags(value: unknown): Record<string, string> {
   if (!isRecord(value)) return {};
@@ -308,11 +304,31 @@ function eventObjects(lines: readonly string[]): unknown[] {
   return lines.map(parseJson);
 }
 
-/** `undefined` without a terminal event, or on any execd `error` event. */
+function asInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : undefined;
+}
+
+/** An `error` event's exit code: `error.exit_code`, else (older servers) top-level. */
+function errorExitCode(event: Record<string, unknown>): number | undefined {
+  const inner = isRecord(event.error)
+    ? asInteger(event.error.exit_code)
+    : undefined;
+  return inner ?? asInteger(event.exit_code);
+}
+
+/**
+ * `undefined` (a failed run) without a terminal event, on an `error` event with
+ * no integer exit code, or on an `execution_complete` without one. An `error`
+ * event with an exit code is a completed run, and its code wins over an
+ * `execution_complete`.
+ */
 function parseExecStream(text: string): CellExecResult | undefined {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  let exitCode: number | undefined;
+  let completeCode: number | undefined;
+  let errorCode: number | undefined;
   let errored = false;
   // A truncated event parses to nothing: without a terminal event the run fails.
   for (const event of streamEvents(text).flatMap(eventObjects)) {
@@ -322,12 +338,14 @@ function parseExecStream(text: string): CellExecResult | undefined {
     } else if (event.type === "stderr" && typeof event.text === "string") {
       stderr.push(event.text);
     } else if (event.type === "execution_complete") {
-      exitCode = asNumber(event.exit_code) ?? 0;
+      completeCode = asInteger(event.exit_code);
     } else if (event.type === "error") {
-      // An error fails the run, even if a completion follows it.
-      errored = true;
+      const code = errorExitCode(event);
+      if (code === undefined) errored = true;
+      else errorCode ??= code;
     }
   }
+  const exitCode = errorCode ?? completeCode;
   return errored || exitCode === undefined
     ? undefined
     : { exitCode, stdout: stdout.join(""), stderr: stderr.join("") };
@@ -592,7 +610,6 @@ export function createOpenSandboxCellProvider(
     };
   }
 
-  /** Logs the op, code and status only: never a body, header or credential. */
   /** Runs every step whatever fails earlier and returns the failures. */
   async function runTeardown(
     cellId: string,
@@ -674,6 +691,62 @@ export function createOpenSandboxCellProvider(
     );
   }
 
+  async function adopt(
+    plan: CellCreatePlan,
+    status?: number,
+  ): Promise<{ cellId: string; adopted: boolean }> {
+    return { cellId: await adoptByTags(plan, status), adopted: true };
+  }
+
+  /** The unordered multiset key of one rule, normalised like the server's echo. */
+  function ruleKey(rule: unknown): string | undefined {
+    if (!isRecord(rule) || typeof rule.action !== "string") return undefined;
+    const { action, target, ports } = rule;
+    const list = Array.isArray(ports) && ports.length > 0 ? ports : undefined;
+    return JSON.stringify({
+      action,
+      target: typeof target === "string" && target !== "" ? target : undefined,
+      ports: list ? [...list].sort() : undefined,
+    });
+  }
+
+  function sameRules(got: unknown, want: readonly unknown[]): boolean {
+    if (!Array.isArray(got) || got.length !== want.length) return false;
+    const a = got.map(ruleKey).sort();
+    const b = want.map(ruleKey).sort();
+    return a.every((k, i) => k !== undefined && k === b[i]);
+  }
+
+  /** An adopted cell's live policy must be the plan's: anything else is torn down. */
+  async function verifyAdoptedPolicy(
+    cellId: string,
+    plan: CellCreatePlan,
+  ): Promise<void> {
+    try {
+      const { res } = await send(
+        "create",
+        "GET",
+        cellPath(cellId, "/networkpolicy"),
+        { retry: "idempotent" },
+      );
+      await requireOk("create", res);
+      const body: unknown = await res.json();
+      if (
+        isRecord(body) &&
+        body.mode !== "deny_all" &&
+        isRecord(body.policy) &&
+        body.policy.defaultAction === "deny" &&
+        sameRules(body.policy.egress, plan.networkPolicy.egress)
+      ) {
+        return;
+      }
+    } catch {
+      // a 404, transport failure or non-JSON body is a mismatch
+    }
+    await teardownSteps(cellId, true);
+    throw new CellProviderError("http_error", "create");
+  }
+
   /** `undefined` when the POST failed in transport, so its delivery is unknown. */
   async function postCreate(plan: CellCreatePlan): Promise<Sent | undefined> {
     try {
@@ -690,16 +763,19 @@ export function createOpenSandboxCellProvider(
     }
   }
 
-  async function createSandbox(plan: CellCreatePlan): Promise<string> {
+  /** `adopted` when the id came from list-and-adopt rather than the create reply. */
+  async function createSandbox(
+    plan: CellCreatePlan,
+  ): Promise<{ cellId: string; adopted: boolean }> {
     const sent = await postCreate(plan);
-    if (!sent) return adoptByTags(plan);
+    if (!sent) return adopt(plan);
     const { res, code } = sent;
     if (res.status === 502) {
       await discard(res);
       if (code === CONNECTION_FAILED) {
         throw new CellProviderError("http_error", "create", 502);
       }
-      return adoptByTags(plan, 502);
+      return adopt(plan, 502);
     }
     await requireOk("create", res);
     let id: unknown;
@@ -710,9 +786,9 @@ export function createOpenSandboxCellProvider(
       id = undefined; // an unparseable body is treated like a missing id
     }
     if (typeof id !== "string" || id === "") {
-      return adoptByTags(plan, res.status);
+      return adopt(plan, res.status);
     }
-    return id;
+    return { cellId: id, adopted: false };
   }
 
   async function pingOk(cellId: string): Promise<boolean> {
@@ -769,7 +845,8 @@ export function createOpenSandboxCellProvider(
 
   async function create(plan: CellCreatePlan): Promise<{ cellId: string }> {
     guardPlan(plan);
-    const cellId = await createSandbox(plan);
+    const { cellId, adopted } = await createSandbox(plan);
+    if (adopted) await verifyAdoptedPolicy(cellId, plan);
     let vaultTried = false;
     try {
       await waitReady(cellId);
