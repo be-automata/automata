@@ -1,6 +1,10 @@
 /// <reference path="./psl.d.ts" />
 import { createHash } from "node:crypto";
 
+import type {
+  OpenSandboxNetworkPolicy,
+  OpenSandboxNetworkRule,
+} from "@terragon/types/cell";
 import { canonicalJson } from "@terragon/utils/payload-seal";
 import { get as pslGet } from "psl";
 
@@ -85,6 +89,23 @@ export function platformCellEgressBundle(brokerHost: string): CellEgressBundle {
     id: CELL_EGRESS_PLATFORM_BUNDLE,
     allow: [brokerHost, CELL_EGRESS_MODEL_HOST],
   };
+}
+
+/**
+ * The broker host exactly as the compiled set allows it (trimmed, lowercased,
+ * no trailing dot, no `:443`), so a credential bound to it matches the policy
+ * target. A wildcard is refused: the broker bearer goes to one host only.
+ */
+export function normalizeCellBrokerHost(brokerHost: string): string {
+  const entry = normalizeEntry(brokerHost);
+  if (entry.wildcard) {
+    throw new CellEgressError(
+      "invalid_host",
+      `invalid_host: broker host '${cellEgressKey(entry)}' must not be a wildcard`,
+      cellEgressKey(entry),
+    );
+  }
+  return entry.name;
 }
 
 export function cellEgressKey(entry: CellEgressEntry): string {
@@ -395,5 +416,23 @@ export function toProxyShape(set: CellEgressSet): EgressPolicyShape {
   return {
     level: "domain",
     allowlist: assertRenderable(set).map((name) => `${name}:443`),
+  };
+}
+
+/**
+ * The OpenSandbox network policy: default deny, one allow per rendered name
+ * (a wildcard also emits its apex). The trailing targetless port-80 deny is
+ * required: domain rules are not port-scoped, so :80 on an allowed host is open
+ * without it.
+ */
+export function toOpenSandboxNetworkPolicy(
+  set: CellEgressSet,
+): OpenSandboxNetworkPolicy {
+  const allows = assertRenderable(set).map(
+    (target): OpenSandboxNetworkRule => ({ action: "allow", target }),
+  );
+  return {
+    defaultAction: "deny",
+    egress: [...allows, { action: "deny", ports: [80] }],
   };
 }
