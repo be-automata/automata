@@ -31,6 +31,9 @@ const EXEC_SLACK_MS = 10_000;
 const DEFAULT_MAX_EXEC_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_COPY_OUT_BYTES = 64 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const MAX_LIST_PAGE_BYTES = 1024 * 1024;
+const MAX_POLICY_BODY_BYTES = 64 * 1024;
+const MAX_CREATE_REPLY_BYTES = 64 * 1024;
 const DEFAULT_COPY_OUT_TIMEOUT_MS = 120_000;
 /** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
 export const OPENSANDBOX_MIN_TTL_MS = 60_000;
@@ -190,6 +193,20 @@ async function readCappedText(
   maxBytes: number,
 ): Promise<string> {
   return new TextDecoder().decode(await readCappedBytes(op, res, maxBytes));
+}
+
+/** Capped JSON read; an over-cap or unparseable body fails with no content in the error. */
+async function readCappedJson(
+  op: string,
+  res: Response,
+  maxBytes: number,
+): Promise<unknown> {
+  const text = await readCappedText(op, res, maxBytes);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new CellProviderError("http_error", op);
+  }
 }
 
 function cellPath(id: string, suffix = ""): string {
@@ -516,7 +533,11 @@ export function createOpenSandboxCellProvider(
 
   /** Fails closed on a malformed page: adoption must never miscount cells. */
   async function readListPage(res: Response): Promise<ListPage> {
-    const body: unknown = await readBody("list", () => res.json(), res.status);
+    const body: unknown = await readBody(
+      "list",
+      () => readCappedJson("list", res, MAX_LIST_PAGE_BYTES),
+      res.status,
+    );
     const record = isRecord(body) ? body : {};
     const items = record.items;
     if (items !== undefined && !Array.isArray(items)) {
@@ -747,7 +768,12 @@ export function createOpenSandboxCellProvider(
       return "mismatch";
     }
     try {
-      return policyMatches(await res.json(), plan) ? "match" : "mismatch";
+      return policyMatches(
+        await readCappedJson("policy", res, MAX_POLICY_BODY_BYTES),
+        plan,
+      )
+        ? "match"
+        : "mismatch";
     } catch {
       return "mismatch"; // a non-JSON body is not an enforcing policy
     }
@@ -810,7 +836,7 @@ export function createOpenSandboxCellProvider(
     await requireOk("create", res);
     let id: unknown;
     try {
-      const body: unknown = await res.json();
+      const body = await readCappedJson("create", res, MAX_CREATE_REPLY_BYTES);
       id = isRecord(body) ? body.id : undefined;
     } catch {
       id = undefined; // an unparseable body is treated like a missing id

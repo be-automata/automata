@@ -1731,3 +1731,58 @@ describe("an adopted cell's policy is verified (finding 4)", () => {
     expect(cmd).toBeLessThan(vault);
   });
 });
+
+describe("JSON replies are byte-capped", () => {
+  /** An endless body that records its cancellation. */
+  function endless(status: number, cancelled: () => void): Response {
+    const enc = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(c) {
+          c.enqueue(enc.encode(" ".repeat(32 * 1024)));
+        },
+        cancel: cancelled,
+      }),
+      { status },
+    );
+  }
+
+  it("an over-cap list page is http_error and the stream is cancelled", async () => {
+    const { server, provider } = setup();
+    const cancelled = vi.fn();
+    server.on("GET /sandboxes?metadata", () => endless(200, cancelled));
+    const err = await rejection(provider.listByTags({}));
+    expect(err).toMatchObject({ code: "http_error", op: "list" });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("an over-cap policy read-back is a mismatch: teardown, no vault, cancelled", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    const cancelled = vi.fn();
+    server.on("POST /sandboxes", () => json(502, { code: "OTHER" }));
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [cellItem("c1")],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    server.on("GET /sandboxes/c1/networkpolicy", () => endless(200, cancelled));
+    const err = await rejection(provider.create(plan()));
+    expect(err).toMatchObject({ code: "http_error", op: "create" });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(server.count("POST /sandboxes/c1/credential-vault")).toBe(0);
+    expect(server.count("DELETE /sandboxes/c1/credential-vault")).toBe(1);
+  });
+
+  it("an over-cap create reply is unusable: list-and-adopt, cancelled", async () => {
+    const { server, provider } = setup();
+    const cancelled = vi.fn();
+    server.on("POST /sandboxes", () => endless(202, cancelled));
+    server.on("GET /sandboxes?metadata", emptyList);
+    const err = await rejection(provider.create(plan()));
+    expect(err.code).toBe("http_error");
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(server.count("GET /sandboxes?metadata")).toBeGreaterThan(0);
+  });
+});
