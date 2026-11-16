@@ -29,9 +29,19 @@ run_dind() {
     -p 127.0.0.1:18091:8090 -e DOCKER_TLS_CERTDIR= "$DIND" --host unix:///var/run/docker.sock >/dev/null
 }
 
-docker rm -f osbit-dind >/dev/null 2>&1 || true
+# -v: the old daemon's anonymous /var/lib/docker volume holds GBs of images.
+docker rm -fv osbit-dind >/dev/null 2>&1 || true
 run_dind
-for _ in $(seq 1 60); do docker exec osbit-dind docker info >/dev/null 2>&1 && break; sleep 1; done
+dind_ready=0
+for _ in $(seq 1 60); do
+  if docker exec osbit-dind docker info >/dev/null 2>&1; then dind_ready=1; break; fi
+  sleep 1
+done
+if [ "$dind_ready" != 1 ]; then
+  echo "dind did not become ready in 60 s" >&2
+  docker logs osbit-dind 2>&1 | tail -20 >&2 || true
+  exit 1
+fi
 D() { docker exec osbit-dind "$@"; }
 
 for pair in "$SERVER osbit/server:1.2.1" "$EXECD osbit/execd:1.2.1" "$EGRESS osbit/egress:1.2.1" "$PY osbit/py:3.12"; do
