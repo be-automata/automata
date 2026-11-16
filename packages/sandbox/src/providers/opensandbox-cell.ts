@@ -30,6 +30,7 @@ const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_SLACK_MS = 10_000;
 const DEFAULT_MAX_EXEC_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_COPY_OUT_BYTES = 64 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const DEFAULT_COPY_OUT_TIMEOUT_MS = 120_000;
 /** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
 export const OPENSANDBOX_MIN_TTL_MS = 60_000;
@@ -414,7 +415,8 @@ export function createOpenSandboxCellProvider(
   /** The JSON body's `code` only; the body itself is never kept or logged. */
   async function bodyCode(res: Response): Promise<string | undefined> {
     try {
-      const parsed: unknown = JSON.parse(await res.text());
+      const text = await readCappedText("create", res, MAX_ERROR_BODY_BYTES);
+      const parsed: unknown = JSON.parse(text);
       return isRecord(parsed) && typeof parsed.code === "string"
         ? parsed.code
         : undefined;
@@ -733,7 +735,7 @@ export function createOpenSandboxCellProvider(
       const body: unknown = await res.json();
       if (
         isRecord(body) &&
-        body.mode !== "deny_all" &&
+        body.mode === "enforcing" &&
         isRecord(body.policy) &&
         body.policy.defaultAction === "deny" &&
         sameRules(body.policy.egress, plan.networkPolicy.egress)
@@ -770,12 +772,12 @@ export function createOpenSandboxCellProvider(
     const sent = await postCreate(plan);
     if (!sent) return adopt(plan);
     const { res, code } = sent;
-    if (res.status === 502) {
+    if (res.status >= 500) {
       await discard(res);
-      if (code === CONNECTION_FAILED) {
+      if (res.status === 502 && code === CONNECTION_FAILED) {
         throw new CellProviderError("http_error", "create", 502);
       }
-      return adopt(plan, 502);
+      return adopt(plan, res.status);
     }
     await requireOk("create", res);
     let id: unknown;

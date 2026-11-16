@@ -112,6 +112,16 @@ function happyRoutes(server: ReturnType<typeof makeServer>) {
   server.on("GET /sandboxes/c1/networkpolicy", () => policyResponse());
 }
 
+function policyModeResponse(mode: string | undefined): Response {
+  return json(200, {
+    ...(mode === undefined ? {} : { mode }),
+    policy: {
+      egress: [{ action: "allow", target: "broker.test", ports: [443] }],
+      defaultAction: "deny",
+    },
+  });
+}
+
 /** The server's echo of the plan's policy: reordered, with a targetless deny. */
 function policyResponse(patch: Record<string, unknown> = {}): Response {
   return json(200, {
@@ -421,6 +431,41 @@ describe("create retries and list-and-adopt", () => {
       expect(all).not.toContain(CREDENTIAL);
     },
   );
+
+  it.each([[503], [504]])(
+    "a %i on create lists and adopts the one match",
+    async (status) => {
+      const { server, provider } = setup();
+      happyRoutes(server);
+      server.on("POST /sandboxes", () => json(status, {}));
+      server.on("GET /sandboxes?metadata", () =>
+        json(200, {
+          items: [cellItem("c1")],
+          pagination: { hasNextPage: false },
+        }),
+      );
+      await expect(provider.create(plan())).resolves.toEqual({ cellId: "c1" });
+      expect(server.count("GET /sandboxes?metadata")).toBe(1);
+    },
+  );
+
+  it("a 500 on create with nothing listed warns once and throws http_error", async () => {
+    const { server, provider, logger } = setup();
+    server.on("POST /sandboxes", () => json(500, {}));
+    server.on("GET /sandboxes?metadata", emptyList);
+    const err = await rejection(provider.create(plan()));
+    expect(err).toMatchObject({ code: "http_error", status: 500 });
+    expect(server.count("POST /sandboxes")).toBe(1);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 400 on create is a plain http_error with no list call", async () => {
+    const { server, provider } = setup();
+    server.on("POST /sandboxes", () => json(400, {}));
+    const err = await rejection(provider.create(plan()));
+    expect(err).toMatchObject({ code: "http_error", status: 400 });
+    expect(server.count("GET /sandboxes?metadata")).toBe(0);
+  });
 
   it("retries a 502 BACKEND_CONNECTION_FAILED on create", async () => {
     const { server, provider, sleeps } = setup();
@@ -903,6 +948,29 @@ describe("exec", () => {
     expect(server.count("POST /sandboxes/c1/proxy/44772/command")).toBe(2);
   });
 
+  it("an over-cap 502 body on /command is not retried and is cancelled", async () => {
+    const { server, provider, sleeps } = setup();
+    const cancelled = vi.fn();
+    const enc = new TextEncoder();
+    server.on(
+      "POST /sandboxes/c1/proxy/44772/command",
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(c) {
+              c.enqueue(enc.encode("x".repeat(32 * 1024)));
+            },
+            cancel: cancelled,
+          }),
+          { status: 502 },
+        ),
+    );
+    const err = await rejection(provider.exec("c1", ["x"]));
+    expect(err).toMatchObject({ code: "http_error", status: 502 });
+    expect(sleeps).toEqual([]);
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
   it("a non-JSON 502 on /command is not retried", async () => {
     const { server, provider, sleeps } = setup();
     server.on(
@@ -1054,11 +1122,6 @@ describe("retry rules", () => {
   );
 
   it.each([
-    [
-      "create",
-      "POST /sandboxes",
-      (p: ReturnType<typeof setup>["provider"]) => p.create(plan()),
-    ],
     [
       "delete",
       "DELETE /sandboxes/c1",
@@ -1559,6 +1622,9 @@ describe("an adopted cell's policy is verified (finding 4)", () => {
           policy: { defaultAction: "deny", egress: [] },
         }),
     ],
+    ["observe mode", () => policyModeResponse("observe")],
+    ["disabled mode", () => policyModeResponse("disabled")],
+    ["a missing mode", () => policyModeResponse(undefined)],
     [
       "an extra allow rule",
       () =>
