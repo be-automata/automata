@@ -130,8 +130,9 @@ Rules 1-9 and the command design rules are not exercised: no command, output or 
 ### picomatch residual (accepted-risk candidate, decision is the person's)
 
 GHSA-fc5q-39xc-vjpf: ReDoS on a single-branch repeated extglob **pattern** (`+(*)`); the attacker must
-control the glob pattern, not the path. Reachability evidence is in "Validate cycle 1 corrections"
-below (no user-controlled pattern reaches picomatch in a production path).
+control the glob pattern, not the path. Reachability evidence: the "Picomatch reachability, corrected"
+paragraph above and docs/specs/670/gate-log.md (no user-controlled pattern reaches picomatch in a
+production path).
 
 ## Phases (binding, from the validator)
 
