@@ -143,3 +143,16 @@ The launcher still never reads the credential. The worker (PR-E) treats a creden
 | `install-opensandbox.sh` re-run              | 0. Every line `ok`, including the new **`run-dir-visible`** (a container reads the marker) and **`worker-denied` (permission denied)**. Key file root:root 600; unit active; health 200; loopback only; 401 without the key, 200 with it |
 | `install-opensandbox.sh --check`             | 0                                                                                                                                                                                                                                        |
 | P0 probe (`/root/p0-out10`)                  | **`P0 VERDICT: rootless`, 34 PASS / 0 FAIL**                                                                                                                                                                                             |
+
+## `/simplify` (`5de04a8a`) and the live re-run on the old layout
+
+The pass moved the server config to `/var/lib/automata-opensandbox/run`, which is removed on stop, so the `/run` heuristics are gone. The worker's `LoadCredential=` moved into a drop-in that `install-opensandbox.sh` installs. It also added shared helpers: `opensandbox-bom.sh`, `render-opensandbox-config.sh` and `rootless-socket-checks.sh`.
+
+**Re-run on the box,** which still had the old `/run` layout from earlier runs. Every step exited 0:
+
+- `install-rootless-docker.sh --profile opensandbox`: exit 0, with no `run-dir` line.
+- `install-opensandbox.sh`: exit 0. `ok` for `key-file` (root:root 600), `run-dir` (`/var/lib/automata-opensandbox/run`, automata-opensandbox 700), `worker-dropin` (matches the repo file), `unit-active`, `health` 200, `loopback-only`, `unauthenticated` 401 and `authenticated` 200.
+- `--check`: exit 0. The legacy `/run/automata-opensandbox/config.toml` is gone.
+- The config on disk is removed on `systemctl stop`, and health is 200 again after `start`.
+- **P0 probe (`/root/p0-out11`): `P0 VERDICT: rootless`, 34 PASS / 0 FAIL.**
+- Limit: this box has no rendered worker unit (full provisioning never ran on it), so the drop-in is verified as a file, and its effect on the unit is pinned by unit tests.
