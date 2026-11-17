@@ -6,29 +6,49 @@ NODE_ENV NEXT_PUBLIC_APP_URL`). Each line is the command and its real exit code.
 
 ## Verification gates
 
-| Gate                           | Command                                                                   | Exit                     |
-| ------------------------------ | ------------------------------------------------------------------------- | ------------------------ |
-| install                        | `CI=true pnpm install --frozen-lockfile --prefer-offline`                 | 0                        |
-| docs codegen                   | `pnpm --filter @terragon/docs exec fumadocs-mdx`                          | 0                        |
-| docs build                     | `pnpm --filter @terragon/docs build`                                      | 0                        |
-| typecheck                      | `pnpm turbo tsc-check`                                                    | 0                        |
-| lint                           | `pnpm turbo lint`                                                         | 0                        |
-| format                         | `pnpm turbo format-check`                                                 | 0                        |
-| utils                          | `pnpm --filter @terragon/utils exec vitest run --no-file-parallelism`     | 0                        |
-| knowledge                      | `pnpm --filter @terragon/knowledge exec vitest run --no-file-parallelism` | 0                        |
-| agent                          | `pnpm --filter @terragon/agent exec vitest run --no-file-parallelism`     | 0                        |
-| shared                         | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism`    | 0                        |
-| www                            | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism`       | 0                        |
-| daemon                         | `pnpm --filter @terragon/daemon exec vitest run --no-file-parallelism`    | 1 (host-only, see below) |
-| daemon minus `runtime.test.ts` | `... vitest run --no-file-parallelism --exclude src/runtime.test.ts`      | 0 (13 files, 256 tests)  |
-| sandbox                        | `pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism`   | 0                        |
-| migrate                        | `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism`   | 0                        |
-| worker                         | `pnpm --filter @terragon/worker exec vitest run --no-file-parallelism`    | 0                        |
-| cli                            | `pnpm --filter @terragon-labs/cli exec vitest run --no-file-parallelism`  | 0                        |
-| review                         | `pnpm --filter @terragon/review test`                                     | 0                        |
-| audit (CI gate)                | `pnpm audit --prod --audit-level critical`                                | 0                        |
-| www deps build                 | `pnpm turbo build --filter='@terragon/www^...' --force` (0 of 4 cached)   | 0                        |
-| e2e build                      | `pnpm --filter @terragon/www e2e:build`                                   | 0                        |
+| Gate                           | Command                                                                                                | Exit                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ | ------------------------ |
+| install                        | `CI=true pnpm install --frozen-lockfile --prefer-offline`                                              | 0                        |
+| docs codegen                   | `pnpm --filter @terragon/docs exec fumadocs-mdx`                                                       | 0                        |
+| docs build                     | `pnpm --filter @terragon/docs build`                                                                   | 0                        |
+| typecheck                      | `pnpm turbo tsc-check`                                                                                 | 0                        |
+| lint                           | `pnpm turbo lint`                                                                                      | 0                        |
+| format                         | `pnpm turbo format-check`                                                                              | 0                        |
+| utils                          | `pnpm --filter @terragon/utils exec vitest run --no-file-parallelism`                                  | 0                        |
+| knowledge                      | `pnpm --filter @terragon/knowledge exec vitest run --no-file-parallelism`                              | 0                        |
+| agent                          | `pnpm --filter @terragon/agent exec vitest run --no-file-parallelism`                                  | 0                        |
+| shared                         | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism`                                 | 0                        |
+| www                            | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism`                                    | 0                        |
+| daemon                         | `pnpm --filter @terragon/daemon exec vitest run --no-file-parallelism`                                 | 1 (host-only, see below) |
+| daemon minus `runtime.test.ts` | `... vitest run --no-file-parallelism --exclude src/runtime.test.ts`                                   | 0 (13 files, 256 tests)  |
+| sandbox                        | `pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism`                                | 0                        |
+| migrate                        | `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism`                                | 0                        |
+| worker                         | `pnpm --filter @terragon/worker exec vitest run --no-file-parallelism`                                 | 0                        |
+| cli                            | `pnpm --filter @terragon-labs/cli exec vitest run --no-file-parallelism`                               | 0                        |
+| review                         | `pnpm --filter @terragon/review test`                                                                  | 0                        |
+| audit (CI gate)                | `pnpm audit --prod --audit-level critical`                                                             | 0                        |
+| www deps build                 | `pnpm turbo build --filter='@terragon/www^...' --force` (0 of 4 cached)                                | 0                        |
+| e2e build                      | `pnpm --filter @terragon/www e2e:build`                                                                | 0                        |
+| www Workers bundle             | `opennextjs-cloudflare build` in apps/www, with the `e2eBuildEnv()` placeholder env                    | 0                        |
+| broadcast Workers bundle       | esbuild `src/server.ts src/sandbox.ts --bundle --platform=neutral --conditions=workerd,worker,browser` | 0                        |
+| CLI / mcp-server builds        | `pnpm --filter @terragon-labs/cli build`; `pnpm --filter @terragon/mcp-server build`                   | 0, 0                     |
+
+The www Workers bundle needs the e2e placeholder env because page-data collection validates required
+env vars (without it the build stops on `Missing environment variables`, before any bundling). A live
+e2b sandbox smoke on the deployed Workers needs deploy credentials and is deferred to after merge.
+
+### Proven by CI on the PR, not locally
+
+- the full daemon suite (see below);
+- the `e2e` lane (`.github/workflows/ci.yml:253`), which runs `e2e:build` then the Playwright suite;
+- the `worker-e2e` job (`ci.yml:215`, the `HATCHET_IT=1` suites in CLAUDE.md), which exercises the
+  worker's hatchet gRPC client on @grpc/grpc-js 1.14.7 and axios 1.21.1.
+
+### zod
+
+No zod override: it rewrote the MCP SDK's `zod: ^3.25 || ^4.0` spec and broke the zod-3 peer that
+`@google/gemini-cli-core` supplies in packages/daemon. Direct pins (4.6.7) and fumadocs-mdx 11.10.1
+already put every production path on 4.6.7.
 
 ### daemon: 4 host-only failures, identical on `origin/main`
 
@@ -53,23 +73,23 @@ The two remaining high advisories are both GHSA-fc5q-39xc-vjpf (picomatch ≤4.0
 
 ## Resolved versions (AC2, `pnpm why -r <pkg>`)
 
-| Package                   | Versions in the graph                                                      | Needed                                  |
-| ------------------------- | -------------------------------------------------------------------------- | --------------------------------------- |
-| undici                    | 6.29.1, 7.30.0, 7.30.1, 8.12.4                                             | ≥6.29.1 / ≥8.12.2 (7.x not affected)    |
-| follow-redirects          | 1.16.3                                                                     | ≥1.16.2                                 |
-| axios                     | 1.21.1                                                                     | ≥1.20.0                                 |
-| fast-uri                  | 3.1.9                                                                      | ≥3.1.7                                  |
-| @modelcontextprotocol/sdk | 1.32.2                                                                     | ≥1.32.0                                 |
-| body-parser               | 2.4.0                                                                      | ≥2.4.0                                  |
-| @grpc/grpc-js             | 1.14.7                                                                     | ≥1.14.5                                 |
-| prosemirror-view          | 1.42.9 (one copy)                                                          | ≥1.42.3                                 |
-| prosemirror-model         | 1.25.13 (one copy)                                                         | ≥1.25.12 (prosemirror-view's own range) |
-| markdown-it               | 14.3.3                                                                     | ≥14.3.3                                 |
-| zod                       | 4.6.7; 3.22.4 and 3.25.76 dev-only (`pnpm why -r --prod 'zod@3'` is empty) | ≥4.6.6                                  |
-| js-yaml                   | 4.3.2                                                                      | ≥4.3.2                                  |
-| vite                      | 6.4.6                                                                      | ≥6.4.4                                  |
-| e2b                       | 2.63.0 (no `undici8` alias left in pnpm-lock.yaml)                         | ≥2.56.0                                 |
-| picomatch                 | 2.3.2, 4.0.5                                                               | no fix exists                           |
+| Package                   | Versions in the graph                                                      | Needed                                                                             |
+| ------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| undici                    | 6.29.1, 7.30.0, 7.30.1, 8.12.4                                             | ≥6.29.1 / ≥8.12.2 (7.30.0 is dev-only, via gemini-cli-core; not in the prod audit) |
+| follow-redirects          | 1.16.3                                                                     | ≥1.16.2                                                                            |
+| axios                     | 1.21.1                                                                     | ≥1.20.0                                                                            |
+| fast-uri                  | 3.1.9                                                                      | ≥3.1.7                                                                             |
+| @modelcontextprotocol/sdk | 1.32.2                                                                     | ≥1.32.0                                                                            |
+| body-parser               | 2.4.0                                                                      | ≥2.4.0                                                                             |
+| @grpc/grpc-js             | 1.14.7                                                                     | ≥1.14.5                                                                            |
+| prosemirror-view          | 1.42.9 (one copy)                                                          | ≥1.42.3                                                                            |
+| prosemirror-model         | 1.25.13 (one copy)                                                         | ≥1.25.12 (prosemirror-view's own range)                                            |
+| markdown-it               | 14.3.3                                                                     | ≥14.3.3                                                                            |
+| zod                       | 4.6.7; 3.22.4 and 3.25.76 dev-only (`pnpm why -r --prod 'zod@3'` is empty) | ≥4.6.6                                                                             |
+| js-yaml                   | 4.3.2                                                                      | ≥4.3.2                                                                             |
+| vite                      | 6.4.6                                                                      | ≥6.4.4                                                                             |
+| e2b                       | 2.63.0 (no `undici8` alias left in pnpm-lock.yaml)                         | ≥2.56.0                                                                            |
+| picomatch                 | 2.3.2, 4.0.5                                                               | no fix exists                                                                      |
 
 ## MCP smoke (AC4)
 
