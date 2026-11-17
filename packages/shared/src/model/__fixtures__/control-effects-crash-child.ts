@@ -48,9 +48,9 @@ function withKillPoint(
 ): EffectTarget<string> {
   return {
     findByMarker: (key) => inner.findByMarker(key),
-    async apply(key, payload) {
+    async apply(key, payload, signal) {
       if (killPoint === "before-apply") killSelf();
-      await inner.apply(key, payload);
+      await inner.apply(key, payload, signal);
       if (killPoint === "after-apply") killSelf();
     },
   };

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,10 +14,11 @@ import { controlEffects } from "../db/schema";
 import { effectKey } from "./control-effects";
 import { createTestOrg } from "./test-helpers";
 
+// Non-null: set by the shared globalSetup.
 const db = createDb(env.DATABASE_URL!);
 const PACKAGE_DIR = fileURLToPath(new URL("../..", import.meta.url));
 const CHILD = "src/model/__fixtures__/control-effects-crash-child.ts";
-const SPAWN_TIMEOUT_MS = 60_000;
+const SPAWN_TIMEOUT_MS = 20_000;
 const TEST_TIMEOUT_MS = 60_000;
 
 type KillPoint = "before-apply" | "after-apply";
@@ -36,8 +37,11 @@ interface Scenario {
 }
 
 const dirs: string[] = [];
+const children = new Set<ChildProcess>();
 
 afterEach(() => {
+  for (const child of children) child.kill("SIGKILL");
+  children.clear();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true });
 });
 
@@ -57,8 +61,10 @@ function deliver(
     const child = spawn(process.execPath, ["--import", "tsx", CHILD], {
       cwd: PACKAGE_DIR,
       timeout: SPAWN_TIMEOUT_MS,
+      killSignal: "SIGKILL",
       env: {
         ...process.env,
+        // Non-null: set by the shared globalSetup.
         DATABASE_URL: env.DATABASE_URL!,
         CRASH_DIR: s.dir,
         ORG_ID: s.organizationId,
@@ -68,19 +74,21 @@ function deliver(
         NO_RECONCILE: opts.noReconcile ? "1" : "",
       },
     });
+    children.add(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("error", reject);
-    child.on("close", (code, signal) =>
+    child.on("close", (code, signal) => {
+      children.delete(child);
       resolve({
         killed: signal === "SIGKILL" || code === 137,
         code,
         stdout,
         stderr,
-      }),
-    );
+      });
+    });
   });
 }
 
@@ -110,9 +118,8 @@ describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => 
     "AC1: killed after the intent, before the upload: uploaded exactly once after the restart",
     async () => {
       const s = await newScenario();
-      expect((await deliver(s, { killPoint: "before-apply" })).killed).toBe(
-        true,
-      );
+      const d = await deliver(s, { killPoint: "before-apply" });
+      expect(d.killed, d.stderr).toBe(true);
       expect(markerCount(s)).toBe(0);
       expect((await readRow(s))?.doneAt).toBeNull();
       expect(outcomeOf(await deliver(s))).toBe("applied");
@@ -125,9 +132,8 @@ describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => 
     "AC2: killed after the upload, before effect_done: reconciled by marker, nothing uploaded again",
     async () => {
       const s = await newScenario();
-      expect((await deliver(s, { killPoint: "after-apply" })).killed).toBe(
-        true,
-      );
+      const d = await deliver(s, { killPoint: "after-apply" });
+      expect(d.killed, d.stderr).toBe(true);
       expect(markerCount(s)).toBe(1);
       expect((await readRow(s))?.doneAt).toBeNull();
       expect(outcomeOf(await deliver(s))).toBe("reconciled");
@@ -143,9 +149,8 @@ describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => 
     "AC5: with reconcile disabled the same crash uploads a second copy",
     async () => {
       const s = await newScenario();
-      expect((await deliver(s, { killPoint: "after-apply" })).killed).toBe(
-        true,
-      );
+      const d = await deliver(s, { killPoint: "after-apply" });
+      expect(d.killed, d.stderr).toBe(true);
       expect(markerCount(s)).toBe(1);
       expect(outcomeOf(await deliver(s, { noReconcile: true }))).toBe(
         "applied",
