@@ -645,25 +645,43 @@ async function backdate(stepKey: string) {
     .where(and(eq(cellStep.stepKey, stepKey), isNotNull(cellStep.lastSeenAt)));
 }
 
-/** Holds the step's row lock in a transaction that COMMITS on release. */
+/**
+ * Holds the step's row lock in a transaction that COMMITS on release. A write
+ * that throws rejects at once (the test fails instead of waiting forever for a
+ * lock that was never taken); callers release in `finally`.
+ */
 async function holdAndCommit(
   write: (tx: Pick<DB, "update">) => Promise<unknown>,
 ) {
   let locked!: () => void;
+  let failed!: (error: unknown) => void;
   let release!: () => void;
-  const lockedP = new Promise<void>((r) => (locked = r));
+  const lockedP = new Promise<void>((res, rej) => {
+    locked = res;
+    failed = rej;
+  });
   const releasedP = new Promise<void>((r) => (release = r));
   const done = db.transaction(async (tx) => {
-    await write(tx);
+    try {
+      await write(tx);
+    } catch (error) {
+      failed(error);
+      throw error;
+    }
     locked();
     await releasedP;
   });
+  // Surfaced through lockedP; awaiting `done` still sees the rejection.
+  done.catch(() => undefined);
   await lockedP;
   return { release, done };
 }
 
+/** Below the 5 s test timeout, so a statement that never blocks fails the test. */
+const BLOCK_WAIT_MS = 3000;
+
 async function waitUntilBlocked(): Promise<void> {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + BLOCK_WAIT_MS;
   while (Date.now() < deadline) {
     const r = await db.execute(
       sql`select count(*)::int as n from pg_stat_activity
@@ -760,11 +778,25 @@ describe("#656 PR-A openNextAttempt", () => {
         .where(eq(cellStep.stepKey, s.stepKey)),
     );
     const open = s.next();
-    await waitUntilBlocked();
-    holder.release();
+    try {
+      await waitUntilBlocked();
+    } finally {
+      holder.release();
+    }
     await holder.done;
     expect(await open).toEqual({ ok: false, reason: "step_done" });
     expect((await row(s.stepKey)).currentAttempt).toBe(1);
+  });
+
+  it("6c a lock holder whose write throws rejects instead of hanging the suite", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await expect(
+      holdAndCommit(async () => {
+        throw new Error("write failed");
+      }),
+    ).rejects.toThrow("write failed");
+    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
   });
 
   it("6b the 1000th attempt opens, the 1001st is refused", async () => {
@@ -863,8 +895,11 @@ describe("#656 PR-A stampSeen", () => {
         .where(eq(cellStep.stepKey, s.stepKey)),
     );
     const stamp = stampSeen({ db, stepKey: s.stepKey, attempt: 1 });
-    await waitUntilBlocked();
-    holder.release();
+    try {
+      await waitUntilBlocked();
+    } finally {
+      holder.release();
+    }
     await holder.done;
     expect(await stamp).toBe(false);
     expect((await row(s.stepKey)).currentAttempt).toBe(2);
