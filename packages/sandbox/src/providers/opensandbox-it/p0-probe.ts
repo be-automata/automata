@@ -344,13 +344,60 @@ async function runEnforced(
   await ipv6Checks(rep, provider, id, a);
 }
 
+/** The server's error code and message for a refused deny-all; neither holds a secret. */
+async function quarantineRefusal(
+  a: P0Args,
+  apiKey: string,
+  id: string,
+): Promise<string> {
+  const res = await fetch(
+    `${a.baseUrl}/sandboxes/${encodeURIComponent(id)}/networkpolicy?dropEstablished=true`,
+    {
+      method: "PUT",
+      headers: {
+        "OPEN-SANDBOX-API-KEY": apiKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ defaultAction: "deny", egress: [] }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  const body = (await res.json().catch(() => ({}))) as {
+    code?: unknown;
+    message?: unknown;
+  };
+  const why = [body.code, body.message]
+    .filter((v): v is string => typeof v === "string")
+    .join(": ")
+    .replace(/[^\x20-\x7e]/g, " ")
+    .slice(0, 300);
+  return `status ${res.status}${why ? ` (${why})` : ""}`;
+}
+
 async function denyAllThenDelete(
   rep: Reporter,
   provider: ICellProvider,
   id: string,
   a: P0Args,
+  apiKey: string,
 ): Promise<void> {
-  await provider.quarantine(id);
+  try {
+    await provider.quarantine(id);
+  } catch {
+    // Record why, then still delete the cell and run the negative control.
+    rep.add(
+      "FAIL",
+      "deny-all-accepted",
+      await quarantineRefusal(a, apiKey, id),
+    );
+    await provider.teardown(id);
+    return;
+  }
+  rep.add(
+    "PASS",
+    "deny-all-accepted",
+    "PUT networkpolicy dropEstablished=true",
+  );
   const [r] = await probe(provider, id, [
     { kind: "https", url: `https://${a.allowHost}/get` },
   ]);
@@ -460,7 +507,7 @@ export async function runProbe(a: P0Args, rep: Reporter): Promise<void> {
   try {
     if (id !== null) {
       await runEnforced(rep, provider, id, a, canary);
-      await denyAllThenDelete(rep, provider, id, a);
+      await denyAllThenDelete(rep, provider, id, a, apiKey);
     }
     await negativeControl(rep, provider, a, apiKey);
   } finally {
