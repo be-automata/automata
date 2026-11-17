@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildDnsQuery,
@@ -6,6 +6,7 @@ import {
   normalizeIptablesSave,
   parseProbeOutput,
   probeArgv,
+  rawApi,
 } from "./harness";
 
 describe("normalizeIptablesSave", () => {
@@ -216,5 +217,43 @@ describe("dns6, udpdns and ipv6_route probes", () => {
 
   it("still refuses bare TCP on :80 and :443", () => {
     expect(() => probeArgv([{ kind: "tcp", host: "h", port: 443 }])).toThrow();
+  });
+});
+
+describe("rawApi with an explicit server", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // card: protects=the P0 probe's raw calls go to the server and key it was given, not the IT's; fails_when=opts.baseUrl or opts.apiKey is ignored; no_claim=the server's reply
+  it("uses the given base URL and key, and parses a JSON body", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response('{"code":"X"}', { status: 400 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await rawApi(
+      "PUT",
+      "/sandboxes/a",
+      { x: 1 },
+      { baseUrl: "http://127.0.0.1:18092", apiKey: "k" },
+    );
+    expect(res).toEqual({ status: 400, body: { code: "X" } });
+    const call = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    expect(call[0]).toBe("http://127.0.0.1:18092/sandboxes/a");
+    expect(call[1].headers["OPEN-SANDBOX-API-KEY"]).toBe("k");
+  });
+
+  it("keeps a non-JSON body as text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("nope", { status: 502 })),
+    );
+    expect(
+      await rawApi("GET", "/x", undefined, {
+        baseUrl: "http://h",
+        apiKey: "k",
+      }),
+    ).toEqual({ status: 502, body: "nope" });
   });
 });

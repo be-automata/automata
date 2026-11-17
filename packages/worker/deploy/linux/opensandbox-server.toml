@@ -6,7 +6,7 @@
 # the image tags and the PLACEHOLDER key.
 #
 # `__API_KEY__` is never a value: ExecStartPre renders this file into
-# /run/automata-opensandbox/config.toml (0600) from the root-only credential, so
+# /var/lib/automata-opensandbox/run/config.toml (0600) from the root-only credential, so
 # the key is in no file of the repo, no argv and no environment.
 [server]
 host = "127.0.0.1"

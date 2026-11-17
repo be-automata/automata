@@ -122,6 +122,8 @@ On the throwaway box, a throwaway unit carried the worker unit's two credential 
 
 The launcher still never reads the credential. The worker (PR-E) treats a credential without an `OPENSANDBOX_API_KEY=` line as "OpenSandbox not configured" and keeps the cell path off.
 
+**Superseded by the drop-in (simplify pass).** The finding stands, but the `none` fallback no longer ships: the base worker unit has no credential line, and `install-opensandbox.sh` installs `automata-worker.service.d/opensandbox.conf` (only `LoadCredential=`) on a box that hosts the server. A box without OpenSandbox has no credential at all, the launcher's `-s` guard exports nothing, and PR-E fails closed when `WORKER_OPENSANDBOX_API_KEY_FILE` is unset. The live check of the drop-in on the throwaway box is recorded below once run.
+
 ## Refinement (8 findings, all fixed in `fc4990d4`) and the live re-run
 
 - **High:** `install-rootless-docker.sh`'s AppArmor block reused `profile`, clobbering the runner/opensandbox selector on hosts with restricted user namespaces and no distro rootlesskit profile. The live box had the distro profile, so the P0 and G1 runs never took that branch. The local is now `aa_profile`, and a test pins it.

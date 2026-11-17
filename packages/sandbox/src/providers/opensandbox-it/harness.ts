@@ -98,6 +98,14 @@ export interface RawApiResponse {
   body: unknown;
 }
 
+export interface RawApiOptions {
+  /** Default: the IT server. The P0 probe passes its throwaway server. */
+  baseUrl?: string;
+  /** Default: the IT run's key (`readApiKey`). */
+  apiKey?: string;
+  timeoutMs?: number;
+}
+
 /**
  * A raw lifecycle API call with the run's key. For the negative control only:
  * the adapter refuses a create without a policy (`policy_required`) by design.
@@ -106,15 +114,16 @@ export async function rawApi(
   method: string,
   path: string,
   body?: unknown,
+  opts: RawApiOptions = {},
 ): Promise<RawApiResponse> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+  const res = await fetch(`${opts.baseUrl ?? API_BASE_URL}${path}`, {
     method,
     headers: {
-      "OPEN-SANDBOX-API-KEY": readApiKey(),
+      "OPEN-SANDBOX-API-KEY": opts.apiKey ?? readApiKey(),
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
   });
   const text = await res.text();
   let parsed: unknown = text;

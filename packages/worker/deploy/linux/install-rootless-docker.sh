@@ -54,12 +54,10 @@ umask 022
 #   - NO shared group and no group grant to the worker: the socket dir
 #     /run/automata-opensandbox-docker is 0700 and the socket 0600, both owned
 #     by the account, so only that account (and root) reaches the daemon;
-#   - /run/automata-opensandbox (0700, same owner): the server's rendered config
-#     and the P0 probe's state. Both dirs come from one tmpfiles.d file and
-#     exist BEFORE the daemon starts (rootlesskit copies /run up at start; a
-#     directory made later is invisible to it), and a daemon already running
-#     is restarted once when a container cannot read a marker under the run dir
-#     (or, with no image to test with, when the daemon is older than the dirs);
+#   - the server's rendered config and the P0 probe's state live under
+#     /var/lib/automata-opensandbox, not /run: rootlesskit copies /run up when
+#     the daemon starts, so a directory made there later is invisible to
+#     containers (install-opensandbox.sh makes them);
 #   - the user unit automata-opensandbox-docker.service (this dir);
 #   - verify also proves the worker account can NOT reach the socket.
 #
@@ -74,6 +72,10 @@ umask 022
 
 SUBID_COUNT=65536
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# docker_as, rootless_cgroup2, socket_denied (shared with the P0 probe)
+# shellcheck source=/dev/null
+. "$HERE/rootless-socket-checks.sh"
+socket_info="" # what the last of those checks saw
 
 usage() {
   echo "usage: $0 [--profile runner|opensandbox] [--worker-user NAME] [--check]" >&2
@@ -120,10 +122,9 @@ case "$profile" in
     GROUP=
     SOCK_DIR=/run/automata-opensandbox-docker
     SOCK="$SOCK_DIR/docker.sock"
-    RUN_DIR=/run/automata-opensandbox
     UNIT=automata-opensandbox-docker.service
     tmpfiles=/etc/tmpfiles.d/automata-opensandbox-docker.conf
-    want_tmpfiles="$(printf 'd %s 0700 %s %s -\nd %s 0700 %s %s -' "$SOCK_DIR" "$RUNNER" "$RUNNER" "$RUN_DIR" "$RUNNER" "$RUNNER")"
+    want_tmpfiles="d $SOCK_DIR 0700 $RUNNER $RUNNER -"
     ;;
   *) usage ;;
 esac
@@ -140,6 +141,17 @@ die() {
 [ "$(uname -s)" = Linux ] || die "Linux only"
 [ -f /sys/fs/cgroup/cgroup.controllers ] || die "cgroup v2 (unified hierarchy) is required"
 id -u "$worker_user" >/dev/null 2>&1 || die "worker account $worker_user does not exist"
+
+# check_rootless_socket USER: the daemon answers USER, rootless on cgroup v2
+# (returns non-zero on a FAIL).
+check_rootless_socket() {
+  if rootless_cgroup2 "$1"; then
+    echo "ok   rootless-socket     $SOCK answers $1: cgroup v2, rootless"
+  else
+    echo "FAIL rootless-socket     $SOCK does not answer $1 as a rootless cgroup-v2 daemon: $socket_info"
+    return 1
+  fi
+}
 
 # verify_account_limits UID: the daemon account's subuid/subgid ranges, linger
 # and cgroup delegation (shared by both profiles; returns non-zero on a FAIL).
@@ -175,7 +187,7 @@ verify_account_limits() {
 
 # ── verification (also the tail of every install run) ─────────────────────────
 verify() {
-  local fail=0 uid run_group info got
+  local fail=0 uid run_group got
   uid="$(id -u "$RUNNER" 2>/dev/null)" || {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
@@ -213,62 +225,25 @@ verify() {
   fi
   verify_account_limits "$uid" || fail=1
   # As the WORKER, through its group grant, with no DOCKER_HOST of its own.
-  if info="$(runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
-    info --format '{{.CgroupVersion}} {{json .SecurityOptions}}' 2>&1)"; then
-    case "$info" in
-      2\ *rootless*) echo "ok   rootless-socket     $SOCK answers the worker: cgroup v2, rootless" ;;
-      *)
-        echo "FAIL rootless-socket     $SOCK answers but is not rootless on cgroup v2: $info"
-        fail=1
-        ;;
-    esac
-  else
-    echo "FAIL rootless-socket     $SOCK does not answer the worker: $info"
-    fail=1
-  fi
+  check_rootless_socket "$worker_user" || fail=1
   return "$fail"
-}
-
-# run_dir_visibility: can a container on the dedicated daemon read a marker
-# written under $RUN_DIR? Prints visible | invisible | unknown (no socket, no
-# local image to run, or the marker could not be written). The dedicated
-# daemon copies /run up when it starts, so a daemon that started before the
-# directory was made (or remade) cannot see it.
-run_dir_visibility() {
-  local want got img marker
-  [ -S "$SOCK" ] || { echo unknown; return 0; }
-  img="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
-    image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' | head -n 1 || true)"
-  [ -n "$img" ] || { echo unknown; return 0; }
-  want="marker-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-  marker="$RUN_DIR/.visible-$$"
-  if ! printf '%s' "$want" | runuser -u "$RUNNER" -- tee "$marker" >/dev/null 2>&1; then
-    echo unknown
-    return 0
-  fi
-  got="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
-    run --rm --network none --entrypoint cat -v "$RUN_DIR:/x:ro" "$img" "/x/.visible-$$" 2>/dev/null || true)"
-  rm -f "$marker"
-  if [ "$got" = "$want" ]; then echo visible; else echo invisible; fi
 }
 
 # The opensandbox profile's checks: the account owns a 0700 dir and a 0600
 # socket, reaches the daemon (rootless, cgroup v2), and the worker does NOT.
 verify_opensandbox() {
-  local fail=0 uid info got wd
+  local fail=0 uid got rc=0
   uid="$(id -u "$RUNNER" 2>/dev/null)" || {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
   }
-  for d in "$SOCK_DIR" "$RUN_DIR"; do
-    got="$(stat -c '%U:%G %a' "$d" 2>/dev/null || echo missing)"
-    if [ "$got" = "$RUNNER:$RUNNER 700" ]; then
-      echo "ok   dir-perms           $d is $got"
-    else
-      echo "FAIL dir-perms           $d is $got, want $RUNNER:$RUNNER 700"
-      fail=1
-    fi
-  done
+  got="$(stat -c '%U:%G %a' "$SOCK_DIR" 2>/dev/null || echo missing)"
+  if [ "$got" = "$RUNNER:$RUNNER 700" ]; then
+    echo "ok   dir-perms           $SOCK_DIR is $got"
+  else
+    echo "FAIL dir-perms           $SOCK_DIR is $got, want $RUNNER:$RUNNER 700"
+    fail=1
+  fi
   got="$(stat -c '%U:%G %a' "$SOCK" 2>/dev/null || echo missing)"
   if [ -S "$SOCK" ] && [ "$got" = "$RUNNER:$RUNNER 600" ]; then
     echo "ok   socket-perms        $SOCK is $got"
@@ -277,38 +252,21 @@ verify_opensandbox() {
     fail=1
   fi
   verify_account_limits "$uid" || fail=1
-  if info="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
-    info --format '{{.CgroupVersion}} {{json .SecurityOptions}}' 2>&1)"; then
-    case "$info" in
-      2\ *rootless*) echo "ok   rootless-socket     $SOCK answers $RUNNER: cgroup v2, rootless" ;;
-      *)
-        echo "FAIL rootless-socket     $SOCK answers but is not rootless on cgroup v2: $info"
-        fail=1
-        ;;
-    esac
-  else
-    echo "FAIL rootless-socket     $SOCK does not answer $RUNNER: $info"
-    fail=1
-  fi
-  case "$(run_dir_visibility)" in
-    visible) echo "ok   run-dir-visible     a container reads a marker under $RUN_DIR" ;;
-    unknown) echo "ok   run-dir-visible     not checked (no local image to run yet)" ;;
+  check_rootless_socket "$RUNNER" || fail=1
+  # The negative check: no group grant exists, so the worker must be refused,
+  # and refused for permission (any other failure would not prove the denial).
+  socket_denied "$worker_user" || rc=$?
+  case "$rc" in
+    0) echo "ok   worker-denied       $worker_user cannot reach $SOCK (permission denied)" ;;
+    1)
+      echo "FAIL worker-denied       $worker_user reaches $SOCK (it must not)"
+      fail=1
+      ;;
     *)
-      echo "FAIL run-dir-visible     a container cannot read a marker under $RUN_DIR (stale /run copy: restart the daemon)"
+      echo "FAIL worker-denied       $worker_user was refused for another reason: $(printf '%s' "$socket_info" | tr -cd 'A-Za-z0-9._ :/-' | cut -c1-120)"
       fail=1
       ;;
   esac
-  # The negative check: no group grant exists, so the worker must be refused,
-  # and refused for permission (any other failure would not prove the denial).
-  if wd="$(runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info 2>&1)"; then
-    echo "FAIL worker-denied       $worker_user reaches $SOCK (it must not)"
-    fail=1
-  elif printf '%s' "$wd" | grep -qi 'permission denied'; then
-    echo "ok   worker-denied       $worker_user cannot reach $SOCK (permission denied)"
-  else
-    echo "FAIL worker-denied       $worker_user was refused for another reason: $(printf '%s' "$wd" | tr -cd 'A-Za-z0-9._ :/-' | cut -c1-120)"
-    fail=1
-  fi
   return "$fail"
 }
 
@@ -396,16 +354,6 @@ done
 runner_uid="$(id -u "$RUNNER")"
 
 # ── socket dir, delegation, linger ───────────────────────────────────────────
-# opensandbox: a daemon that is already running holds a stale /run copy-up when
-# a directory below was made after it started. Whether it is stale is decided
-# below from what a container can see, not from "the dirs were new" (a re-run
-# after a mid-run failure finds them already made).
-run_dir_new=0
-if [ "$profile" = opensandbox ]; then
-  for d in "$SOCK_DIR" "$RUN_DIR"; do
-    [ -d "$d" ] || run_dir_new=1
-  done
-fi
 if [ "$(cat "$tmpfiles" 2>/dev/null || true)" != "$want_tmpfiles" ]; then
   printf '%s\n' "$want_tmpfiles" >"$tmpfiles"
 fi
@@ -454,20 +402,7 @@ as_runner() {
 }
 as_runner systemctl --user daemon-reload
 as_runner systemctl --user enable "$UNIT" >/dev/null
-run_dir_stale=0
-if [ "$profile" = opensandbox ] && [ "$run_dir_new" -eq 0 ] && as_runner systemctl --user is-active --quiet "$UNIT"; then
-  vis="$(run_dir_visibility)"
-  if [ "$vis" = invisible ]; then
-    run_dir_stale=1
-  elif [ "$vis" = unknown ]; then
-    # No image to probe with: compare the daemon's start with the dirs' ctime.
-    started="$(date -d "$(as_runner systemctl --user show -p ActiveEnterTimestamp --value "$UNIT")" +%s 2>/dev/null || echo 0)"
-    for d in "$SOCK_DIR" "$RUN_DIR"; do
-      [ "$(stat -c %Z "$d" 2>/dev/null || echo 0)" -le "$started" ] || run_dir_stale=1
-    done
-  fi
-fi
-if [ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ] || [ "$run_dir_stale" -eq 1 ]; then
+if [ "$changed_unit" -eq 1 ]; then
   as_runner systemctl --user restart "$UNIT"
 else
   as_runner systemctl --user start "$UNIT"

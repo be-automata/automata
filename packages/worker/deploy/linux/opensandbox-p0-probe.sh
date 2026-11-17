@@ -6,7 +6,7 @@ set -euo pipefail
 # the OpenSandbox egress policy on x86_64 / Ubuntu 24.04? THROWAWAY BOXES ONLY.
 #
 # The bash half does the root-side checks (environment record, daemon checks,
-# the /run copy-up marker, a throwaway server on 127.0.0.1:18092, the sidecar
+# the state-dir marker, a throwaway server on 127.0.0.1:18092, the sidecar
 # ruleset, survivors). The cell probes are the TypeScript driver, which reuses
 # the IT harness and makes the enforced cell with the PRODUCTION adapter:
 #   packages/sandbox/src/providers/opensandbox-it/p0-probe.ts
@@ -17,7 +17,7 @@ set -euo pipefail
 #   P0 VERDICT: FAIL (<checks>) -> dind fallback      (exit 1)
 # NOTE lines never count as PASS (an untested IPv6 bypass is `NOTE ipv6-vacuous`).
 #
-# The throwaway key lives only in a 0600 file under /run/automata-opensandbox/p0
+# The throwaway key lives only in a 0600 file under /var/lib/automata-opensandbox/p0
 # and reaches the driver by file path: never argv, environment or output.
 #
 # Run as root, from a checkout with `pnpm install --frozen-lockfile` done:
@@ -28,24 +28,23 @@ RUNNER=automata-opensandbox
 WORKER_USER=automata
 SOCK_DIR=/run/automata-opensandbox-docker
 SOCK="$SOCK_DIR/docker.sock"
-RUN_DIR=/run/automata-opensandbox
-P0="$RUN_DIR/p0"
+RUNNER_HOME=/var/lib/automata-opensandbox
+P0="$RUNNER_HOME/p0"
+# docker_as (rootless-socket-checks.sh) reads this client config dir, never ~/.docker
+# shellcheck disable=SC2034 # read by docker_as
+DOCKER_CONFIG_DIR="$P0/dockercfg"
 PORT=18092
 SERVER_NAME=automata-osb-p0-server
 DATA_VOLUME=automata-osb-p0-data
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$HERE/../../../.." && pwd)"
 
-# The IT BOM (packages/sandbox/opensandbox-it/up.sh), pulled by digest and
-# re-tagged locally; a test pins these four to the ones in up.sh.
-# opensandbox/server:release-1.2.1
-SERVER=opensandbox/server@sha256:07f9b39adb8cadf68357dd1b86367068210e960fc4cb50e11b75176387557ea7
-# opensandbox/execd:release-1.2.1
-EXECD=opensandbox/execd@sha256:6b12d17844ac7167271488302c71934e47f76abb9ddab19ec8529bd1c1c56b23
-# opensandbox/egress:release-1.2.1
-EGRESS=opensandbox/egress@sha256:84b98d3b5989a87389c977f6433f8cd3c7998d03aa15aaae41ebcb15b7eb8000
-# python:3.12-slim
-PY=python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+# docker_as, rootless_cgroup2, socket_denied (shared with install-rootless-docker.sh)
+# and the BOM with pull_one (shared with install-opensandbox.sh).
+# shellcheck source=/dev/null
+. "$HERE/rootless-socket-checks.sh"
+# shellcheck source=/dev/null
+. "$HERE/opensandbox-bom.sh"
 
 usage() {
   echo "usage: $0 --i-know-this-is-throwaway --out DIR" >&2
@@ -101,10 +100,7 @@ check() { # check NAME DETAIL <command...>: PASS when the command succeeds
 
 # dk ARGS...: docker on the DEDICATED daemon, as its account, with a client
 # config under the probe's own directory (no ~/.docker).
-dk() {
-  runuser -u "$RUNNER" -- env -u DOCKER_HOST XDG_RUNTIME_DIR="/run/user/$runner_uid" \
-    DOCKER_CONFIG="$P0/dockercfg" docker -H "unix://$SOCK" "$@"
-}
+dk() { XDG_RUNTIME_DIR="/run/user/$runner_uid" docker_as "$RUNNER" "$@"; }
 clean_text() { tr -cd 'A-Za-z0-9._ :/+@=,-' | cut -c1-120; }
 
 snapshot() {
@@ -116,11 +112,9 @@ snapshot() {
   } | sort
 }
 
-# shellcheck disable=SC2329 # invoked through `check` or a trap
+# shellcheck disable=SC2329 # invoked through a trap
 teardown_probe() {
-  save_server_log
-  dk rm -f -v "$SERVER_NAME" >/dev/null 2>&1 || true
-  dk volume rm -f "$DATA_VOLUME" >/dev/null 2>&1 || true
+  teardown_server_only
   if [ -d "$P0" ]; then
     runuser -u "$RUNNER" -- find "$P0" -mindepth 1 -delete 2>/dev/null || true
     rmdir "$P0" 2>/dev/null || true
@@ -146,23 +140,6 @@ record_environment() {
 }
 
 # shellcheck disable=SC2329 # invoked through `check` or a trap
-rootless_cgroup2() {
-  local info
-  info="$(dk info --format '{{.SecurityOptions}} cgroup{{.CgroupVersion}}' 2>/dev/null)" || return 1
-  case "$info" in *rootless*cgroup2*) return 0 ;; *) return 1 ;; esac
-}
-
-# shellcheck disable=SC2329 # invoked through `check` or a trap
-worker_cannot_reach() {
-  local out
-  # Refused AND for permission: another failure proves nothing about the denial.
-  if out="$(runuser -u "$WORKER_USER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info 2>&1)"; then
-    return 1
-  fi
-  printf '%s' "$out" | grep -qi 'permission denied'
-}
-
-# shellcheck disable=SC2329 # invoked through `check` or a trap
 runner_distinct() {
   local mine theirs
   mine="$(dk info --format '{{.DockerRootDir}}')"
@@ -171,8 +148,8 @@ runner_distinct() {
 }
 
 daemon_checks() {
-  check daemon-rootless-cgroup2 "docker info on the dedicated socket" rootless_cgroup2
-  check worker-denied "$WORKER_USER cannot reach the socket" worker_cannot_reach
+  check daemon-rootless-cgroup2 "docker info on the dedicated socket" rootless_cgroup2 "$RUNNER"
+  check worker-denied "$WORKER_USER cannot reach the socket" socket_denied "$WORKER_USER"
   if [ -S /run/automata-docker/docker.sock ]; then
     check runner-daemon-distinct "other socket, other data root" runner_distinct
   else
@@ -181,31 +158,23 @@ daemon_checks() {
 }
 
 pull_images() {
-  local pair ref tag attempt
-  for pair in "$SERVER automata-osb/server:1.2.1" "$EXECD automata-osb/execd:1.2.1" \
-    "$EGRESS automata-osb/egress:1.2.1" "$PY automata-osb/py:3.12"; do
-    ref="${pair% *}"
-    tag="${pair#* }"
-    for attempt in 1 2 3; do
-      dk pull -q "$ref" >/dev/null && break
-      [ "$attempt" = 3 ] && die "pull failed: $ref"
-      sleep $((attempt * 5))
-    done
-    dk tag "$ref" "$tag"
+  local pair
+  for pair in "${BOM_PAIRS[@]}"; do
+    pull_one "${pair% *}"
+    dk tag "${pair% *}" "${pair#* }"
   done
   emit NOTE images-pulled "4 by digest, tagged automata-osb/*"
 }
 
 prepare_state() {
-  [ -d "$RUN_DIR" ] || die "$RUN_DIR is missing: the opensandbox profile's tmpfiles entry creates it"
+  [ -d "$RUNNER_HOME" ] || die "$RUNNER_HOME is missing: install-rootless-docker.sh --profile opensandbox makes it"
   runuser -u "$RUNNER" -- mkdir -p -m 0700 "$P0" "$P0/dockercfg"
 }
 
-# The copy-up check behind decision 4: a marker written under /run/automata-opensandbox
-# must be visible inside a container of the dedicated daemon (rootlesskit copies /run
-# up at its start). On FAIL, G1 uses the /var/lib fallback.
+# A marker the account writes under its state dir must be readable inside a
+# container of the dedicated daemon: the same bind mount the server unit relies on.
 # shellcheck disable=SC2329 # invoked through `check` or a trap
-run_dir_visible() {
+state_dir_visible() {
   local want got
   want="p0-marker-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   printf '%s' "$want" | runuser -u "$RUNNER" -- tee "$P0/marker" >/dev/null
@@ -218,10 +187,8 @@ render_config() {
   (
     umask 077
     openssl rand -hex 32 >"$P0/key"
-    awk -v port="$PORT" 'NR == FNR { k = $0; next }
-      /^port = / { print "port = " port; next }
-      { sub(/__API_KEY__/, k); print }' "$P0/key" "$HERE/opensandbox-server.toml" >"$P0/config.toml"
   )
+  "$HERE/render-opensandbox-config.sh" "$P0/key" "$HERE/opensandbox-server.toml" "$P0/config.toml" "$PORT"
   chown "$RUNNER:$RUNNER" "$P0/key" "$P0/config.toml"
 }
 
@@ -351,7 +318,7 @@ has_pass() {
 # A verdict needs these to have actually passed, so a driver that died early is not "rootless".
 require_passes() {
   local c
-  for c in run-dir-visible self-check-blocked allowed-https-200 example-dns-nxdomain negative-control-4of4 sidecar-ruleset-policy-drop; do
+  for c in state-dir-visible self-check-blocked allowed-https-200 example-dns-nxdomain negative-control-4of4 sidecar-ruleset-policy-drop; do
     has_pass "$c" || emit FAIL "required-$c" "never passed"
   done
 }
@@ -389,7 +356,7 @@ record_environment
 daemon_checks
 prepare_state
 pull_images
-check run-dir-visible "marker under $RUN_DIR/p0 read back in a container" run_dir_visible
+check state-dir-visible "marker under $P0 read back in a container" state_dir_visible
 baseline="$(snapshot)"
 render_config
 start_server

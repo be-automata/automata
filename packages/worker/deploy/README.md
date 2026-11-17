@@ -1156,8 +1156,14 @@ cd /opt/automata-platform/packages/worker/deploy/linux
 `install-opensandbox.sh` runs the daemon profile itself, so the first line is only for
 inspecting that step alone. The API key is generated once into `/etc/automata/opensandbox.env`
 (root:root, 0600, one `OPENSANDBOX_API_KEY=<hex>` line) and never printed. The server unit
-takes it through `LoadCredential=`, and the worker unit takes the same file through its own
-`LoadCredential=`, so the key is in no other file and in no process environment.
+takes it through `LoadCredential=` and renders its config (the only place the key is written
+out, mode 0600) to `/var/lib/automata-opensandbox/run/config.toml` with
+`render-opensandbox-config.sh`; the unit removes that file when it stops. The installer also
+adds the drop-in `/etc/systemd/system/automata-worker.service.d/opensandbox.conf` (the repo
+file `automata-worker-opensandbox.conf`: `LoadCredential=` for the same key file), so the
+key is in no other file and in no process environment. It does **not** restart the worker:
+the worker takes the credential at its next `automata-worker-safe-restart`. A box without
+OpenSandbox has no drop-in and its worker unit is unchanged.
 
 ### 2. Pre-pull the cell image (optional, by digest)
 
@@ -1256,16 +1262,17 @@ The per-user flag `opensandboxCells` still gates `cell-plan`.
 The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
 `WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_GUEST_IMAGE`.
 
-- The launcher exports the first two whenever `$CREDENTIALS_DIRECTORY/opensandbox.env` is
-  non-empty: the file path, and `http://127.0.0.1:8090` unless `worker-box.env` overrides
-  it. On a box without the key file the unit still boots, because the fallback is
-  `SetCredential=opensandbox.env:none` (an empty value fails on systemd 255). The credential
-  is then the literal `none`, so under systemd both names are ALWAYS exported. Fail-closed
-  rests on PR-E treating a credential with no `OPENSANDBOX_API_KEY=` line as "not
-  configured"; the launcher does not decide it.
+- The launcher exports the first two only when `$CREDENTIALS_DIRECTORY/opensandbox.env`
+  exists and is non-empty: the file path, and `http://127.0.0.1:8090` unless `worker-box.env`
+  overrides it. That credential comes from the drop-in
+  `automata-worker.service.d/opensandbox.conf` that `install-opensandbox.sh` installs. On a
+  box without OpenSandbox there is no drop-in, so no credential and nothing is exported, and
+  the unit boots as before. PR-E fails closed when `WORKER_OPENSANDBOX_API_KEY_FILE` is
+  unset; the launcher does not decide it.
 - Set `WORKER_OPENSANDBOX_GUEST_IMAGE` (digest-pinned; a tag is refused) in `worker-box.env`.
 - Re-render the worker unit and launcher, `systemctl daemon-reload`, then restart with
-  `automata-worker-safe-restart`. The worker picks the change up only on that restart.
+  `automata-worker-safe-restart`. The worker picks up the drop-in's credential only on that
+  restart (the installer never restarts it).
 
 ### Findings every operator must know
 

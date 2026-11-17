@@ -10,12 +10,14 @@ import {
   buildPlan,
   deploymentTag,
   hasNetCaps,
+  ipv4Rows,
   isBlocked,
   parseArgs,
-  reportDns6,
-  reportIpv4,
   reportIpv6Bypass,
+  reportRows,
   Reporter,
+  serverReason,
+  type P0Args,
 } from "./p0-probe";
 
 const r = (o: Partial<ProbeResult> & { ok: boolean }): ProbeResult => ({
@@ -127,37 +129,103 @@ describe("deploymentTag and buildPlan labels", () => {
   });
 });
 
-describe("reports use isBlocked, not any ok:false", () => {
-  const probes = (): ProbeResult[] =>
-    Array.from({ length: 17 }, () => r({ ok: false, err: "TimeoutError" }));
+describe("serverReason", () => {
+  it("joins a JSON body's code and message, or keeps a text body", () => {
+    expect(serverReason({ code: "SANDBOX::X", message: "bad" })).toBe(
+      "SANDBOX::X: bad",
+    );
+    expect(serverReason({ code: "only" })).toBe("only");
+    expect(serverReason("plain text")).toBe("plain text");
+  });
+
+  // negative controls: nothing printable beyond ASCII, nothing past 300 chars, nothing from other shapes
+  it("strips non-printable characters, caps the length and ignores other shapes", () => {
+    expect(serverReason("a\u00fcb\nc")).toBe("a b c");
+    expect(serverReason("x".repeat(500))).toHaveLength(300);
+    expect(serverReason(null)).toBe("");
+    expect(serverReason({ code: 4, message: ["x"] })).toBe("");
+  });
+});
+
+describe("the enforced-cell check rows", () => {
+  const ARGS: P0Args = {
+    baseUrl: "http://127.0.0.1:18092",
+    keyFile: "/k",
+    allowHost: "httpbin.org",
+    exampleV4: "93.184.215.14",
+    exampleV6: null,
+    boxIp: "10.0.0.5",
+    out: null,
+  };
+  const rows = ipv4Rows(ARGS, "canary");
+  const at = (name: string) => rows.findIndex((x) => x.name === name);
+  const blockedAll = (): ProbeResult[] =>
+    rows.map(() => r({ ok: false, err: "TimeoutError" }));
+  const failedWith = (name: string, result: ProbeResult): string[] => {
+    const results = blockedAll();
+    results[at(name)] = result;
+    const rep = new Reporter();
+    reportRows(rep, rows, results);
+    return rep.failed();
+  };
+
+  it("has unique names and folds dns6 into the batch", () => {
+    const names = rows.map((x) => x.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain("dns6-no-answer");
+    expect(rows.map((x) => x.spec.kind)).toContain("dns6");
+  });
 
   it("udp-dns needs the reply id to match the query", () => {
     silent();
-    const good = probes();
-    good[7] = r({ ok: true, idMatch: true, rcode: 3, answers: 0 });
-    const spoof = probes();
-    spoof[7] = r({ ok: true, idMatch: false, rcode: 3, answers: 0 });
-    const a = new Reporter();
-    reportIpv4(a, good);
-    const b = new Reporter();
-    reportIpv4(b, spoof);
-    expect(a.failed()).not.toContain("udp-dns-sidecar-nxdomain");
-    expect(b.failed()).toContain("udp-dns-sidecar-nxdomain");
+    const name = "udp-dns-sidecar-nxdomain";
+    const reply = (idMatch: boolean) =>
+      r({ ok: true, idMatch, rcode: 3, answers: 0 });
+    expect(failedWith(name, reply(true))).not.toContain(name);
+    expect(failedWith(name, reply(false))).toContain(name);
     vi.restoreAllMocks();
   });
 
   it("dns6-no-answer fails on a probe bug", () => {
     silent();
-    const ok = new Reporter();
-    reportDns6(ok, r({ ok: false, err: "gaierror:-2" }));
-    const bug = new Reporter();
-    reportDns6(bug, r({ ok: false, err: "NameError" }));
-    expect(ok.failed()).toEqual([]);
-    expect(bug.failed()).toEqual(["dns6-no-answer"]);
+    const name = "dns6-no-answer";
+    expect(failedWith(name, r({ ok: false, err: "gaierror:-2" }))).toEqual([
+      "allowed-https-200",
+      "example-dns-nxdomain",
+      "udp-dns-sidecar-nxdomain",
+      "canary-scan-clean",
+    ]);
+    expect(failedWith(name, r({ ok: false, err: "NameError" }))).toContain(
+      name,
+    );
     vi.restoreAllMocks();
   });
 
-  it("ipv6-udp-dns-no-answer fails on a bug and on a spoofed id", () => {
+  // negative controls: a missing result and an HTTP-level answer are not a block
+  it("a missing result or an HTTP answer fails a blocked row", () => {
+    silent();
+    const rep = new Reporter();
+    reportRows(rep, rows, []);
+    expect(rep.failed()).toContain("metadata-blocked");
+    expect(
+      failedWith("metadata-blocked", r({ ok: true, status: 200 })),
+    ).toContain("metadata-blocked");
+    vi.restoreAllMocks();
+  });
+
+  it("the gateway is a NOTE, never a pass or a failure", () => {
+    silent();
+    const rep = new Reporter();
+    reportRows(rep, rows, blockedAll());
+    expect(rep.lines.find((l) => l.check === "guest-gateway")?.status).toBe(
+      "NOTE",
+    );
+    vi.restoreAllMocks();
+  });
+});
+
+describe("ipv6-udp-dns-no-answer", () => {
+  it("fails on a bug and on a spoofed id", () => {
     silent();
     const blocked = r({ ok: false, err: "TimeoutError" });
     const cases: [ProbeResult, boolean][] = [
@@ -203,35 +271,49 @@ describe("the guest's ipv6_route parser on /proc/net/ipv6_route samples", () => 
   const REJECT_LO = row(Z, "00", Z, "00200200", "lo");
   const REJECT_ETH = row(Z, "00", Z, "00000200", "eth0");
 
-  const run = (rows: string[]): unknown => {
+  // One python process for every sample: the probe's code runs once per
+  // sample file, with the route path swapped in.
+  const DRIVER = `import contextlib, io, json, sys
+cfg = json.load(sys.stdin)
+out = []
+for f in cfg["files"]:
+    sys.argv = ["-c", '[{"kind":"ipv6_route"}]']
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        exec(compile(cfg["py"].replace("/proc/net/ipv6_route", f), "probe", "exec"), {"__name__": "probe"})
+    out.append(json.loads(buf.getvalue().strip())[0].get("default"))
+print(json.dumps(out))`;
+
+  const runAll = (samples: string[][]): unknown[] => {
     const dir = mkdtempSync(join(tmpdir(), "ipv6route-"));
-    const file = join(dir, "ipv6_route");
-    writeFileSync(file, `${rows.join("\n")}\n`);
-    const py = (probeArgv([{ kind: "ipv6_route" }])[2] ?? "").replace(
-      "/proc/net/ipv6_route",
-      file,
-    );
-    const out = spawnSync(
-      "python3",
-      ["-I", "-c", py, '[{"kind":"ipv6_route"}]'],
-      {
-        encoding: "utf8",
-      },
-    );
+    const files = samples.map((rows, i) => {
+      const file = join(dir, `ipv6_route-${i}`);
+      writeFileSync(file, `${rows.join("\n")}\n`);
+      return file;
+    });
+    const py = probeArgv([{ kind: "ipv6_route" }])[2] ?? "";
+    const out = spawnSync("python3", ["-I", "-c", DRIVER], {
+      encoding: "utf8",
+      input: JSON.stringify({ py, files }),
+    });
     expect(out.status).toBe(0);
-    return (JSON.parse(out.stdout.trim()) as { default?: boolean }[])[0]
-      ?.default;
+    return JSON.parse(out.stdout.trim()) as unknown[];
   };
 
+  const results = runAll([
+    [LINK_LOCAL, DEFAULT_ETH, REJECT_LO],
+    [LINK_LOCAL],
+    [LINK_LOCAL, REJECT_LO],
+    [REJECT_ETH],
+    [""],
+  ]);
+
   it("finds a gateway default route", () => {
-    expect(run([LINK_LOCAL, DEFAULT_ETH, REJECT_LO])).toBe(true);
+    expect(results[0]).toBe(true);
   });
 
   // negative controls
   it("ignores link-local-only, reject-only and lo-only tables", () => {
-    expect(run([LINK_LOCAL])).toBe(false);
-    expect(run([LINK_LOCAL, REJECT_LO])).toBe(false);
-    expect(run([REJECT_ETH])).toBe(false);
-    expect(run([""])).toBe(false);
+    expect(results.slice(1)).toEqual([false, false, false, false]);
   });
 });

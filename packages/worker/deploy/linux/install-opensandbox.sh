@@ -10,14 +10,19 @@ umask 022
 #
 # What it does (idempotent: every step checks before it changes):
 #   1. runs install-rootless-docker.sh --profile opensandbox;
-#   2. pulls the four BOM images by digest into the dedicated store (empty
-#      DOCKER_CONFIG, 3 tries) and tags them automata-osb/*;
+#   2. pulls the four BOM images (opensandbox-bom.sh) by digest into the
+#      dedicated store (empty DOCKER_CONFIG, 3 tries) and tags them automata-osb/*;
 #   3. creates /etc/automata/opensandbox.env when absent: root:root 0600, one
 #      line OPENSANDBOX_API_KEY=<64 hex>, generated under umask 077. When it
 #      exists it is verified (owner, mode, shape) and refused if wrong. The key
 #      is never printed, never in argv, and the shell trace is never on;
-#   4. installs the config template and automata-opensandbox.service, enables
-#      and starts it (restarts it only when the unit or the template changed);
+#   4. installs the config template, render-opensandbox-config.sh and
+#      automata-opensandbox.service, makes the account's 0700 run dir for the
+#      rendered config, enables and starts the unit (restarts it only when a
+#      file, the key or an image changed), and installs the worker drop-in
+#      automata-worker.service.d/opensandbox.conf (LoadCredential= for the same
+#      key file). The worker is NOT restarted: it takes the credential at its
+#      next restart (automata-worker-safe-restart);
 #   5. verifies: /health 200 on 127.0.0.1:8090, the listener on loopback only,
 #      an authenticated GET /sandboxes is 200 and an unauthenticated one is 401.
 #
@@ -30,17 +35,6 @@ umask 022
 # Server logs: journalctl -u automata-opensandbox (the dedicated daemon's
 # logging driver cannot be read back with `docker logs`).
 
-# The IT BOM (packages/sandbox/opensandbox-it/up.sh), pulled by digest and
-# re-tagged locally; a test pins these four to the ones in up.sh.
-# opensandbox/server:release-1.2.1
-SERVER=opensandbox/server@sha256:07f9b39adb8cadf68357dd1b86367068210e960fc4cb50e11b75176387557ea7
-# opensandbox/execd:release-1.2.1
-EXECD=opensandbox/execd@sha256:6b12d17844ac7167271488302c71934e47f76abb9ddab19ec8529bd1c1c56b23
-# opensandbox/egress:release-1.2.1
-EGRESS=opensandbox/egress@sha256:84b98d3b5989a87389c977f6433f8cd3c7998d03aa15aaae41ebcb15b7eb8000
-# python:3.12-slim
-PY=python@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
-
 RUNNER=automata-opensandbox
 RUNNER_HOME=/var/lib/automata-opensandbox
 SOCK=/run/automata-opensandbox-docker/docker.sock
@@ -49,8 +43,16 @@ UNIT=automata-opensandbox.service
 UNIT_DEST="/etc/systemd/system/$UNIT"
 TEMPLATE_DIR=/usr/local/share/automata-opensandbox
 TEMPLATE="$TEMPLATE_DIR/opensandbox-server.toml"
+RENDER="$TEMPLATE_DIR/render-opensandbox-config.sh"
+# The rendered config (it holds the key). Not under /run: rootlesskit copies /run
+# up when the dedicated daemon starts, so a directory made there later is
+# invisible to the containers.
+RUN_DIR="$RUNNER_HOME/run"
+WORKER_DROPIN=/etc/systemd/system/automata-worker.service.d/opensandbox.conf
 PORT=8090
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$HERE/opensandbox-bom.sh"
 
 usage() {
   echo "usage: $0 [--check] [--pull-cell-image REF@sha256:DIGEST]" >&2
@@ -112,16 +114,6 @@ pull_cell_image() {
   log "pulled $cell_image"
 }
 
-pull_one() {
-  local ref="$1" attempt
-  dk image inspect "$ref" >/dev/null 2>&1 && return 0
-  for attempt in 1 2 3; do
-    dk pull -q "$ref" >/dev/null && return 0
-    [ "$attempt" = 3 ] && die "pull failed: $ref"
-    sleep $((attempt * 5))
-  done
-}
-
 # ── the key file ─────────────────────────────────────────────────────────────
 verify_key_file() {
   local got
@@ -159,19 +151,34 @@ ensure_key_file() {
 
 # ── verification (also the tail of every install run) ────────────────────────
 verify_server() {
-  local fail=0 _ addrs hdr_dir code
+  local fail=0 _ addrs hdr_dir code got
   verify_key_file || fail=1
+  got="$(stat -c '%U:%G %a' "$RUN_DIR" 2>/dev/null || echo missing)"
+  if [ "$got" = "$RUNNER:$RUNNER 700" ]; then
+    echo "ok   run-dir             $RUN_DIR is $got"
+  else
+    echo "FAIL run-dir             $RUN_DIR is $got, want $RUNNER:$RUNNER 700"
+    fail=1
+  fi
+  if cmp -s "$HERE/automata-worker-opensandbox.conf" "$WORKER_DROPIN"; then
+    echo "ok   worker-dropin       $WORKER_DROPIN matches the repo file"
+  else
+    echo "FAIL worker-dropin       $WORKER_DROPIN is missing or differs from automata-worker-opensandbox.conf"
+    fail=1
+  fi
   if systemctl is-active --quiet "$UNIT"; then
     echo "ok   unit-active         $UNIT"
   else
     echo "FAIL unit-active         $UNIT is not active (journalctl -u ${UNIT%.service})"
     return 1
   fi
+  code=000
   for _ in $(seq 1 60); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"
+    [ "$code" = 200 ] && break
     sleep 1
   done
-  if [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)" = 200 ]; then
+  if [ "$code" = 200 ]; then
     echo "ok   health              127.0.0.1:$PORT/health is 200"
   else
     echo "FAIL health              127.0.0.1:$PORT/health did not answer 200"
@@ -223,8 +230,7 @@ prepare_client_config
 
 # ── 2. the images, by digest ─────────────────────────────────────────────────
 changed=0
-for pair in "$SERVER automata-osb/server:1.2.1" "$EXECD automata-osb/execd:1.2.1" \
-  "$EGRESS automata-osb/egress:1.2.1" "$PY automata-osb/py:3.12"; do
+for pair in "${BOM_PAIRS[@]}"; do
   pull_one "${pair% *}"
   # A tag that now points at another image (a bumped pin) restarts the unit.
   before="$(dk image inspect -f '{{.Id}}' "${pair#* }" 2>/dev/null || true)"
@@ -237,15 +243,21 @@ log "images pulled by digest and tagged automata-osb/*"
 ensure_key_file
 [ "${key_new:-0}" -eq 0 ] || changed=1
 
-# ── 4. the template and the unit ─────────────────────────────────────────────
+# ── 4. the template, the unit and the worker drop-in ─────────────────────────
+# install_changed SRC DEST MODE: installs SRC as root when DEST differs; 0 when it did.
+install_changed() {
+  cmp -s "$1" "$2" && return 1
+  log "installing $2"
+  install -D -o root -g root -m "$3" "$1" "$2"
+}
+
 install -d -o root -g root -m 0755 "$TEMPLATE_DIR"
-for pair in "$HERE/opensandbox-server.toml $TEMPLATE" "$HERE/$UNIT $UNIT_DEST"; do
-  if ! cmp -s "${pair% *}" "${pair#* }"; then
-    log "installing ${pair#* }"
-    install -o root -g root -m 0644 "${pair% *}" "${pair#* }"
-    changed=1
-  fi
-done
+install -d -o "$RUNNER" -g "$RUNNER" -m 0700 "$RUN_DIR"
+if install_changed "$HERE/opensandbox-server.toml" "$TEMPLATE" 0644; then changed=1; fi
+if install_changed "$HERE/render-opensandbox-config.sh" "$RENDER" 0755; then changed=1; fi
+if install_changed "$HERE/$UNIT" "$UNIT_DEST" 0644; then changed=1; fi
+# The worker only reads it at its next restart; it is never restarted here.
+install_changed "$HERE/automata-worker-opensandbox.conf" "$WORKER_DROPIN" 0644 || true
 systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1
 if [ "$changed" -eq 1 ]; then
@@ -253,6 +265,10 @@ if [ "$changed" -eq 1 ]; then
 else
   systemctl start "$UNIT"
 fi
+# The first layout rendered the config under /run/automata-opensandbox (a key at
+# rest on tmpfs): drop what it left, now that the unit no longer mounts it.
+rm -f /run/automata-opensandbox/config.toml
+rmdir /run/automata-opensandbox 2>/dev/null || true
 
 # ── 5. verify ────────────────────────────────────────────────────────────────
 verify_server

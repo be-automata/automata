@@ -30,6 +30,7 @@ import {
   GUEST_IMAGE,
   parseProbeOutput,
   probeArgv,
+  rawApi,
   SELF_CHECK_ARGV,
   sleep,
   type ProbeResult,
@@ -219,84 +220,142 @@ async function capEff(
   return m[1];
 }
 
-function ipv4Probes(a: P0Args, canary: string): ProbeSpec[] {
+interface Verdict {
+  status: Status;
+  detail: string;
+}
+
+/** One enforced-cell check: the guest probe to run and how to judge its result. */
+export interface CheckRow {
+  name: string;
+  spec: ProbeSpec;
+  judge: (r: ProbeResult | undefined) => Verdict;
+}
+
+const pass = (ok: boolean, r: ProbeResult | undefined): Verdict => ({
+  status: ok ? "PASS" : "FAIL",
+  detail: brief(r),
+});
+const row = (
+  name: string,
+  spec: ProbeSpec,
+  ok: (r: ProbeResult | undefined) => boolean,
+): CheckRow => ({ name, spec, judge: (r) => pass(ok(r), r) });
+const blockedRow = (name: string, spec: ProbeSpec): CheckRow =>
+  row(name, spec, isBlocked);
+
+/** The IPv4 batch plus dns6, in report order; `ipv6_route` is probed beside it. */
+export function ipv4Rows(a: P0Args, canary: string): CheckRow[] {
   const gw = (port: number): string => `http://@gateway:${port}/`;
+  const tlsIp = (ip: string, sni: string): ProbeSpec => ({
+    kind: "tls_ip",
+    ip,
+    sni,
+  });
   return [
-    { kind: "https", url: `https://${a.allowHost}/get` },
-    { kind: "http", url: `http://${a.allowHost}/get` },
-    { kind: "dns", host: "example.org" },
-    { kind: "tls_ip", ip: a.exampleV4, sni: "example.org" },
-    { kind: "http", url: `http://${a.exampleV4}/` },
-    { kind: "tls_ip", ip: "1.1.1.1", sni: "cloudflare-dns.com" },
-    { kind: "tcp", host: "1.1.1.1", port: 853 },
-    { kind: "udpdns", server: "8.8.8.8", host: "example.org" },
-    { kind: "http", url: "http://169.254.169.254/latest/meta-data/" },
-    { kind: "http", url: `${gw(18092)}health` },
-    { kind: "http", url: gw(8888) },
-    { kind: "tcp", host: "10.0.2.2", port: 18092 },
-    { kind: "tcp", host: "10.0.2.2", port: 8888 },
-    { kind: "tcp", host: a.boxIp, port: 8888 },
-    { kind: "http", url: SIDECAR_POLICY_URL },
-    { kind: "gateway" },
+    row(
+      "allowed-https-200",
+      { kind: "https", url: `https://${a.allowHost}/get` },
+      (r) => r?.status === 200,
+    ),
+    blockedRow("allowed-80-blocked", {
+      kind: "http",
+      url: `http://${a.allowHost}/get`,
+    }),
+    row(
+      "example-dns-nxdomain",
+      { kind: "dns", host: "example.org" },
+      (r) => isBlocked(r) && (r?.err ?? "").startsWith("gaierror"),
+    ),
+    blockedRow("example-ip-tls-blocked", tlsIp(a.exampleV4, "example.org")),
+    blockedRow("example-ip-http-blocked", {
+      kind: "http",
+      url: `http://${a.exampleV4}/`,
+    }),
+    blockedRow("doh-by-ip-blocked", tlsIp("1.1.1.1", "cloudflare-dns.com")),
+    blockedRow("dot-853-blocked", { kind: "tcp", host: "1.1.1.1", port: 853 }),
+    row(
+      "udp-dns-sidecar-nxdomain",
+      { kind: "udpdns", server: "8.8.8.8", host: "example.org" },
+      (r) =>
+        r?.ok === true &&
+        r.idMatch === true &&
+        r.rcode === 3 &&
+        r.answers === 0,
+    ),
+    blockedRow("metadata-blocked", {
+      kind: "http",
+      url: "http://169.254.169.254/latest/meta-data/",
+    }),
+    blockedRow("gateway-18092-blocked", {
+      kind: "http",
+      url: `${gw(18092)}health`,
+    }),
+    blockedRow("gateway-8888-blocked", { kind: "http", url: gw(8888) }),
+    blockedRow("slirp-host-18092-blocked", {
+      kind: "tcp",
+      host: "10.0.2.2",
+      port: 18092,
+    }),
+    blockedRow("slirp-host-8888-blocked", {
+      kind: "tcp",
+      host: "10.0.2.2",
+      port: 8888,
+    }),
+    blockedRow("box-ip-8888-blocked", {
+      kind: "tcp",
+      host: a.boxIp,
+      port: 8888,
+    }),
+    row(
+      "sidecar-policy-refuses-guest",
+      { kind: "http", url: SIDECAR_POLICY_URL },
+      (r) => isBlocked(r) || r?.status === 401 || r?.status === 403,
+    ),
     {
-      kind: "canary_scan",
-      canaries: [canary],
-      namePattern: "KEY|TOKEN|CANARY",
+      name: "guest-gateway",
+      spec: { kind: "gateway" },
+      judge: (r) => ({ status: "NOTE", detail: String(r?.gateway ?? "none") }),
     },
+    {
+      name: "canary-scan-clean",
+      spec: {
+        kind: "canary_scan",
+        canaries: [canary],
+        namePattern: "KEY|TOKEN|CANARY",
+      },
+      judge: (r) => ({
+        status:
+          r?.ok === true && r.found?.every((f) => !f) === true
+            ? "PASS"
+            : "FAIL",
+        detail: `scanned=${r?.scanned ?? 0}`,
+      }),
+    },
+    blockedRow("dns6-no-answer", { kind: "dns6", host: "example.org" }),
   ];
 }
 
-export function reportIpv4(rep: Reporter, r: ProbeResult[]): void {
-  const at = (i: number): ProbeResult | undefined => r[i];
-  const blocked = (name: string, i: number): void =>
-    rep.check(name, isBlocked(at(i)), brief(at(i)));
-  rep.check("allowed-https-200", at(0)?.status === 200, brief(at(0)));
-  blocked("allowed-80-blocked", 1);
-  rep.check(
-    "example-dns-nxdomain",
-    isBlocked(at(2)) && (at(2)?.err ?? "").startsWith("gaierror"),
-    brief(at(2)),
-  );
-  blocked("example-ip-tls-blocked", 3);
-  blocked("example-ip-http-blocked", 4);
-  blocked("doh-by-ip-blocked", 5);
-  blocked("dot-853-blocked", 6);
-  rep.check(
-    "udp-dns-sidecar-nxdomain",
-    at(7)?.ok === true &&
-      at(7)?.idMatch === true &&
-      at(7)?.rcode === 3 &&
-      at(7)?.answers === 0,
-    brief(at(7)),
-  );
-  blocked("metadata-blocked", 8);
-  blocked("gateway-18092-blocked", 9);
-  blocked("gateway-8888-blocked", 10);
-  blocked("slirp-host-18092-blocked", 11);
-  blocked("slirp-host-8888-blocked", 12);
-  blocked("box-ip-8888-blocked", 13);
-  const refused =
-    isBlocked(at(14)) || at(14)?.status === 401 || at(14)?.status === 403;
-  rep.check("sidecar-policy-refuses-guest", refused, brief(at(14)));
-  rep.add("NOTE", "guest-gateway", String(at(15)?.gateway ?? "none"));
-  rep.check(
-    "canary-scan-clean",
-    at(16)?.ok === true && at(16)?.found?.every((f) => !f) === true,
-    `scanned=${at(16)?.scanned ?? 0}`,
-  );
+/** Judges `results[i]` with `rows[i]` and reports each line. */
+export function reportRows(
+  rep: Reporter,
+  rows: readonly CheckRow[],
+  results: readonly (ProbeResult | undefined)[],
+): void {
+  rows.forEach((r, i) => {
+    const v = r.judge(results[i]);
+    rep.add(v.status, r.name, v.detail);
+  });
 }
 
-async function ipv6Checks(
+/** The IPv6 bypass probes, run only when the guest has a default v6 route. */
+async function ipv6Bypass(
   rep: Reporter,
   provider: ICellProvider,
   id: string,
   a: P0Args,
+  route: ProbeResult | undefined,
 ): Promise<void> {
-  const [dns6, route] = await probe(provider, id, [
-    { kind: "dns6", host: "example.org" },
-    { kind: "ipv6_route" },
-  ]);
-  reportDns6(rep, dns6);
   if (route?.default !== true || a.exampleV6 === null) {
     const why =
       route?.default === true
@@ -310,10 +369,6 @@ async function ipv6Checks(
     { kind: "udpdns", server: "2001:4860:4860::8888", host: "example.org" },
   ]);
   reportIpv6Bypass(rep, tls, udp);
-}
-
-export function reportDns6(rep: Reporter, dns6: ProbeResult | undefined): void {
-  rep.check("dns6-no-answer", isBlocked(dns6), brief(dns6));
 }
 
 export function reportIpv6Bypass(
@@ -367,45 +422,60 @@ async function runEnforced(
     again.exitCode === 3,
     `exit ${again.exitCode}`,
   );
-  reportIpv4(rep, await probe(provider, id, ipv4Probes(a, canary)));
+  const rows = ipv4Rows(a, canary);
+  const results = await probe(provider, id, [
+    ...rows.map((r) => r.spec),
+    { kind: "ipv6_route" },
+  ]);
+  reportRows(rep, rows, results);
   const caps = await capEff(provider, id);
   rep.check("guest-no-net-caps", !hasNetCaps(caps), "NET_ADMIN/NET_RAW bits");
-  await ipv6Checks(rep, provider, id, a);
+  await ipv6Bypass(rep, provider, id, a, results[rows.length]);
 }
 
-/** The server's error code and message for a refused deny-all; neither holds a secret. */
+/**
+ * The server's error code and message of a refused call; neither holds a
+ * secret. Printable ASCII only, at most 300 characters.
+ */
+export function serverReason(body: unknown): string {
+  let why = "";
+  if (typeof body === "string") {
+    why = body;
+  } else if (typeof body === "object" && body !== null) {
+    const { code, message } = body as { code?: unknown; message?: unknown };
+    why = [code, message]
+      .filter((v): v is string => typeof v === "string")
+      .join(": ");
+  }
+  return why.replace(/[^\x20-\x7e]/g, " ").slice(0, 300);
+}
+
+const refusal = (status: number, body: unknown): string => {
+  const why = serverReason(body);
+  return `status ${status}${why ? ` (${why})` : ""}`;
+};
+
+/** Why the server refused a deny-all. */
 async function quarantineRefusal(
   a: P0Args,
   apiKey: string,
   id: string,
 ): Promise<string> {
-  const res = await fetch(
-    `${a.baseUrl}/sandboxes/${encodeURIComponent(id)}/networkpolicy?dropEstablished=true`,
-    {
-      method: "PUT",
-      headers: {
-        "OPEN-SANDBOX-API-KEY": apiKey,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ defaultAction: "deny", egress: [] }),
-      signal: AbortSignal.timeout(30_000),
-    },
+  const res = await rawApi(
+    "PUT",
+    `/sandboxes/${encodeURIComponent(id)}/networkpolicy?dropEstablished=true`,
+    { defaultAction: "deny", egress: [] },
+    { baseUrl: a.baseUrl, apiKey },
   );
-  // The body may be JSON ({code, message}) or plain text; keep printable ASCII only.
-  const text = await res.text().catch(() => "");
-  let why = text;
-  try {
-    const body = JSON.parse(text) as { code?: unknown; message?: unknown };
-    why = [body.code, body.message]
-      .filter((v): v is string => typeof v === "string")
-      .join(": ");
-  } catch {
-    // not JSON: keep the text
-  }
-  why = why.replace(/[^\x20-\x7e]/g, " ").slice(0, 300);
-  return `status ${res.status}${why ? ` (${why})` : ""}`;
+  return refusal(res.status, res.body);
 }
 
+/**
+ * Deny-all the enforced cell, check it, and delete it. Returning means the
+ * cell is deleted, and the final cleanup then skips it: on 1.2.1 a revoke or
+ * quarantine of a deleted cell answers 502 (its sidecar is gone), not 404, so a
+ * second adapter teardown of it throws (#656 finding).
+ */
 async function denyAllThenDelete(
   rep: Reporter,
   provider: ICellProvider,
@@ -428,7 +498,6 @@ async function denyAllThenDelete(
     );
     // Not teardown(): it re-runs the refused quarantine and would mask the cause.
     await provider.delete(id);
-    gone.add(id);
     return;
   }
   rep.add(
@@ -446,15 +515,12 @@ async function denyAllThenDelete(
     (await provider.delete(id)) === "gone",
     "404",
   );
-  gone.add(id);
 }
 
-/**
- * Cells this run confirmed deleted. The final cleanup skips them: on 1.2.1 a
- * revoke or quarantine of a deleted cell answers 502 (its sidecar is gone),
- * not 404, so a second adapter teardown of a gone cell throws (#656 finding).
- */
-const gone = new Set<string>();
+function idOf(body: unknown): string {
+  const id = (body as { id?: unknown } | null)?.id;
+  return typeof id === "string" ? id : "";
+}
 
 async function negativeControl(
   rep: Reporter,
@@ -462,13 +528,10 @@ async function negativeControl(
   a: P0Args,
   apiKey: string,
 ): Promise<void> {
-  const res = await fetch(`${a.baseUrl}/sandboxes`, {
-    method: "POST",
-    headers: {
-      "OPEN-SANDBOX-API-KEY": apiKey,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
+  const res = await rawApi(
+    "POST",
+    "/sandboxes",
+    {
       image: { uri: GUEST_IMAGE },
       entrypoint: [...GUEST_ENTRYPOINT],
       timeout: 600,
@@ -478,26 +541,15 @@ async function negativeControl(
         worker: "p0",
         stepKey: `p0-neg-${randomBytes(4).toString("hex")}`,
       },
-    }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  const body = (await res.json().catch(() => ({}))) as {
-    id?: unknown;
-    code?: unknown;
-    message?: unknown;
-  };
-  const id = typeof body.id === "string" ? body.id : "";
+    },
+    { baseUrl: a.baseUrl, apiKey, timeoutMs: 60_000 },
+  );
+  const id = idOf(res.body);
   if (id === "") {
-    // The server's error code and message say why; neither holds a secret.
-    const why = [body.code, body.message]
-      .filter((v): v is string => typeof v === "string")
-      .join(": ")
-      .replace(/[^\x20-\x7e]/g, " ")
-      .slice(0, 300);
     rep.add(
       "FAIL",
       "negative-control-4of4",
-      `create status ${res.status}${why ? ` (${why})` : ""}`,
+      `create ${refusal(res.status, res.body)}`,
     );
     return;
   }
@@ -552,15 +604,17 @@ export async function runProbe(a: P0Args, rep: Reporter): Promise<void> {
     },
   );
   const id = await enforcedCell(rep, provider, a, canary);
+  let deleted = false;
   try {
     if (id !== null) {
       await runEnforced(rep, provider, id, a, canary);
       await denyAllThenDelete(rep, provider, id, a, apiKey);
+      deleted = true;
     }
     await negativeControl(rep, provider, a, apiKey);
   } finally {
     // Idempotent (404 is done): leaves no cell behind after a mid-run error.
-    if (id !== null && !gone.has(id)) await provider.teardown(id);
+    if (id !== null && !deleted) await provider.teardown(id);
   }
 }
 

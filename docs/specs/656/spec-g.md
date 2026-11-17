@@ -345,7 +345,7 @@ The steps run in this order, which secures the hostname before it is tunnelled (
 
 ## Left to PR-E
 
-- **Required PR-E test for the `none` file:** `SetCredential=opensandbox.env:none` makes the credential file non-empty on a box without OpenSandbox, so under systemd the launcher always exports `WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_URL`. Fail-closed rests on PR-E's parser: a file whose content is `none` (no `OPENSANDBOX_API_KEY=` line) must read as "OpenSandbox not configured", the cell path stays off and a marked run fails closed with its code. PR-E must pin this with a test on the literal `none` file, plus a negative control (a file with exactly one `OPENSANDBOX_API_KEY=<64 hex>` line enables the path).
+- **Fail closed on an unset key file:** the worker unit no longer carries a `SetCredential=` fallback. The credential comes from a drop-in that exists only on a box with the OpenSandbox server (see "Superseded by the simplify pass" below), so on any other box the launcher exports neither `WORKER_OPENSANDBOX_API_KEY_FILE` nor `WORKER_OPENSANDBOX_URL`. PR-E fails closed when `WORKER_OPENSANDBOX_API_KEY_FILE` is unset: the cell path stays off and a marked run fails closed with its code. The old PR-E test for a credential file holding `none` is no longer needed.
 
 ## Left to the live steps (main session, `hcloud --context automata`) and to the person
 
@@ -498,3 +498,11 @@ Fix 3 adds files (the driver, and the harness change with its test), so G0 is sp
 3. Gateway probes are added: `http://@gateway:18092/health` and `http://@gateway:8888/` (as the IT does at `:356`).
 4. The driver's full plan is spelled out: the tags `automata`, `worker`, `epoch`, `deployment`, `stepKey`, `attempt` and `expiresAt`; `resources`; and `ttlMs`.
 5. `dns6` runs whether or not the guest has an IPv6 route.
+
+## Superseded by the simplify pass
+
+These decisions above were changed after the live runs (`gate-log-g.md` keeps the findings that led to them):
+
+- **Rendered config location (decision 4):** the server's config is rendered to `/var/lib/automata-opensandbox/run/config.toml` (0700 directory made by `install-opensandbox.sh`; `ReadWritePaths` and the container mount point there), not `/run/automata-opensandbox`. This is the fallback decision 4 named: rootlesskit copies `/run` up when the dedicated daemon starts, which is why the marker, visibility and ctime heuristics existed, and they are gone. Only the daemon's socket dir `/run/automata-opensandbox-docker` stays under `/run`. The unit removes the rendered file in `ExecStopPost`. The probe's state moved to `/var/lib/automata-opensandbox/p0`, and its marker check is `state-dir-visible`.
+- **Worker credential (decision 4, "Worker"):** the base `automata-worker.service` has no `LoadCredential=` or `SetCredential=`. `install-opensandbox.sh` installs `automata-worker.service.d/opensandbox.conf` (repo file `automata-worker-opensandbox.conf`, only `[Service]` and `LoadCredential=`) after the key file exists, and does not restart the worker. This replaces the `SetCredential=opensandbox.env:none` fallback.
+- **Shared files:** `opensandbox-bom.sh` (the BOM and `pull_one`), `render-opensandbox-config.sh` (the config render, used by the unit and the probe) and `rootless-socket-checks.sh` (the rootless and worker-denied checks, used by the installer and the probe).
