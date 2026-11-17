@@ -18,7 +18,6 @@ import {
   openStep,
   releaseEffect,
   revokeAttempt,
-  revokeAttemptBearers,
   stampSeen,
   verifyBearer,
 } from "./cell-authority";
@@ -30,6 +29,9 @@ import {
 
 const db = createDb(env.DATABASE_URL!);
 const STEP_TIMEOUT = 30 * 60_000;
+
+/** A fresh request nonce: each call is a new open that advances the attempt. */
+const freshNonce = () => randomUUID().replaceAll("-", "");
 
 async function newStep(
   effectBudget: number | null = null,
@@ -64,8 +66,10 @@ async function newStep(
     stepTimeoutMs: STEP_TIMEOUT,
     effectBudget,
     allowedRef,
+    nonce: freshNonce(),
   };
-  const next = () => openNextAttempt({ db, step });
+  const next = () =>
+    openNextAttempt({ db, step: { ...step, nonce: freshNonce() } });
   const owner = { stepKey, organizationId, threadId };
   return { stepKey, organizationId, threadId, owner, step, open, next, bearer };
 }
@@ -684,10 +688,12 @@ const BLOCK_WAIT_MS = 3000;
 async function waitUntilBlocked(): Promise<void> {
   const deadline = Date.now() + BLOCK_WAIT_MS;
   while (Date.now() < deadline) {
+    // Any statement on cell_step waiting on a lock: the open now blocks on its
+    // nonce read (SELECT … FOR UPDATE) before it reaches the upsert.
     const r = await db.execute(
       sql`select count(*)::int as n from pg_stat_activity
           where wait_event_type = 'Lock' and datname = current_database()
-            and query ilike '%last_seen_at%'`,
+            and pid <> pg_backend_pid() and query ilike '%cell_step%'`,
     );
     if (Number(r.rows[0]?.n) >= 1) return;
     await new Promise((res) => setTimeout(res, 20));
@@ -1091,7 +1097,7 @@ describe("#656 PR-A openStep lease", () => {
 describe("#656 PR-C openNextAttempt nonce", () => {
   const nonceA = "nonce-aaaaaaaaaaaaaaaa";
   const nonceB = "nonce-bbbbbbbbbbbbbbbb";
-  const open = (s: Awaited<ReturnType<typeof newStep>>, nonce?: string) =>
+  const open = (s: Awaited<ReturnType<typeof newStep>>, nonce: string) =>
     openNextAttempt({ db, step: { ...s.step, nonce } });
 
   it("1 the same nonce twice gives the same attempt, restamps and fences nothing", async () => {
@@ -1112,25 +1118,6 @@ describe("#656 PR-C openNextAttempt nonce", () => {
     expect(r.fresh).toBe(true);
     expect(r.revokedThrough).toBeNull();
     expect((await verifyBearer({ db, token: b1 })).ok).toBe(true);
-  });
-
-  it("2 revokeAttemptBearers leaves exactly one live bearer for the replayed attempt", async () => {
-    const s = await newStep(null, null);
-    await open(s, nonceA);
-    const first = await s.bearer(1);
-    const replay = await open(s, nonceA);
-    expect(replay).toMatchObject({ replayed: true });
-    // negative control: without the revoke both verify
-    const second = await s.bearer(1);
-    expect((await verifyBearer({ db, token: first })).ok).toBe(true);
-    expect((await verifyBearer({ db, token: second })).ok).toBe(true);
-    expect(
-      await revokeAttemptBearers({ db, stepKey: s.stepKey, attempt: 1 }),
-    ).toBe(2);
-    const third = await s.bearer(1);
-    expect((await verifyBearer({ db, token: first })).ok).toBe(false);
-    expect((await verifyBearer({ db, token: second })).ok).toBe(false);
-    expect((await verifyBearer({ db, token: third })).ok).toBe(true);
   });
 
   it("3 a new nonce opens current + 1 and fences the old bearer", async () => {
@@ -1188,11 +1175,17 @@ describe("#656 PR-C openNextAttempt nonce", () => {
     ).toEqual([1, 2]);
   });
 
-  it("7 no nonce keeps PR-A behaviour and clears a stored nonce; a malformed nonce is a RangeError", async () => {
+  it("7 a new nonce on an existing step advances the attempt and replaces the stored nonce; a malformed nonce is a RangeError", async () => {
     const s = await newStep(null, null);
     await open(s, nonceA);
-    expect(await open(s)).toEqual({ ok: true, attempt: 2 });
-    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 3 });
+    expect(await open(s, nonceB)).toEqual({ ok: true, attempt: 2 });
+    const stored = (
+      await db
+        .select({ nonce: cellStep.openNonce })
+        .from(cellStep)
+        .where(eq(cellStep.stepKey, s.stepKey))
+    )[0];
+    expect(stored?.nonce).toBe(nonceB);
     for (const bad of ["short", "has space aaaaaaaaaaaaaaaa", "x".repeat(65)]) {
       await expect(open(s, bad)).rejects.toThrow(RangeError);
     }

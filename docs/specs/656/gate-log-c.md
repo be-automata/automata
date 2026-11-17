@@ -62,3 +62,31 @@ There were no High findings: 3 Medium and 4 Low.
 - www: 4500 passed;
 - the live `OPENSANDBOX_IT` suite: 10/10;
 - tsc, `tsc-check --force`, `lint --force`, `lint-migrations`.
+
+## `/simplify`
+
+**Applied:**
+
+- The adapter imports `isCellLabelValue`; its copied label pattern and the test that kept the two copies equal are gone.
+- `mintBearer` uses `SelfHealTx`.
+- The dead `revokeAttemptBearers` is removed.
+- `exists` goes through `send404AsDone`.
+- `openNextAttempt`'s nonce is required: its only production caller always sends one, so the no-nonce SQL path is gone.
+- A redundant `IS NOT NULL` is dropped.
+- One `resolveOpenSandboxEnv()` reads the OpenSandbox and Access env once.
+
+**Skipped:**
+
+- `.for("update")` stays. It is redundant under the advisory lock, but costs nothing and is a second guard.
+- The OAuth lookup stays outside `Promise.all`, because it may refresh a token.
+- `replayed` stays, because the replay tests read it.
+
+**Race-test probe:** with the nonce required, an open blocks on its `SELECT … FOR UPDATE` before it reaches the upsert. `waitUntilBlocked` now matches any `cell_step` statement waiting on a lock. Its deadline is 3 s, below vitest's 5 s test timeout, which also closes PR-A's roborev 1235 follow-up about this helper hanging.
+
+**Gates after the pass** (outside the Claude sandbox), all exit 0:
+
+- sandbox: 589 passed;
+- www: 4500 passed;
+- shared: 1732 passed plus 6a, which failed on the stale probe; after the fix, `cell-authority` passed 59/59 three runs in a row;
+- the live `OPENSANDBOX_IT` suite: 10/10;
+- tsc, `tsc-check --force`, `lint --force`.

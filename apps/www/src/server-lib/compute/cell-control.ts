@@ -12,13 +12,7 @@ import {
 } from "@terragon/sandbox/opensandbox-cell";
 import type { ICellProvider } from "@terragon/types/cell";
 
-import {
-  cellBrokerHost,
-  httpsOrigin,
-  opensandboxAccessState,
-  opensandboxConfigured,
-  opensandboxUrlAndKeySet,
-} from "./cell-gate";
+import { cellBrokerHost, resolveOpenSandboxEnv } from "./cell-gate";
 
 /**
  * Cell control plane (#634 S4): the provider handle and the reconciler wiring.
@@ -93,13 +87,11 @@ function prefixedLogger(prefix: string, withFields: boolean) {
 }
 
 export function cellProvider(): ICellProvider | null {
-  if (!opensandboxConfigured()) {
+  const resolved = resolveOpenSandboxEnv();
+  if (resolved.state === "off") return null;
+  if (resolved.state === "invalid") {
     // Half-set, or Access headers over a non-https URL: stay off, say so once.
-    if (
-      opensandboxUrlAndKeySet() &&
-      opensandboxAccessState() === "invalid" &&
-      !warnedAccessMisconfig
-    ) {
+    if (!warnedAccessMisconfig) {
       warnedAccessMisconfig = true;
       console.warn(
         "[cell] OpenSandbox Access config is incomplete or the URL is not https; the cell control plane is off",
@@ -107,20 +99,14 @@ export function cellProvider(): ICellProvider | null {
     }
     return null;
   }
-  let doFetch: typeof fetch = (input, init) => fetch(input, init);
-  if (opensandboxAccessState() === "ok") {
-    const origin = httpsOrigin(env.OPENSANDBOX_URL);
-    if (origin === null) return null;
-    doFetch = accessFetch({
-      origin,
-      clientId: env.OPENSANDBOX_ACCESS_CLIENT_ID.trim(),
-      clientSecret: env.OPENSANDBOX_ACCESS_CLIENT_SECRET.trim(),
-    });
-  }
+  const { url, apiKey, access } = resolved;
+  const doFetch: typeof fetch = access
+    ? accessFetch(access)
+    : (input, init) => fetch(input, init);
   return createOpenSandboxCellProvider(
     {
-      baseUrl: env.OPENSANDBOX_URL,
-      apiKey: env.OPENSANDBOX_API_KEY,
+      baseUrl: url,
+      apiKey,
       image: env.OPENSANDBOX_GUEST_IMAGE,
       entrypoint: GUEST_ENTRYPOINT,
       selfCheck: { argv: SELF_CHECK_ARGV },

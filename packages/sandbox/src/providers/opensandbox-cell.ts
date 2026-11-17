@@ -1,21 +1,22 @@
 /**
  * OpenSandbox cell adapter (#634 S2): `ICellProvider` over the OpenSandbox 1.2.1
  * lifecycle API and execd. A pure HTTP adapter: no env reads, no DB, no wiring.
- * Imports only the cell contract (type-only) and Node built-ins, so it never
+ * Imports only the cell contract (types, plus the label rule) and Node built-ins, so it never
  * pulls e2b or Daytona.
  */
-import type {
-  CellCreatePlan,
-  CellExecOptions,
-  CellExecResult,
-  CellList,
-  CellListEntry,
-  CellListOptions,
-  CellLogger,
-  CellProviderErrorCode,
-  CellTags,
-  CellVaultEntry,
-  ICellProvider,
+import {
+  isCellLabelValue,
+  type CellCreatePlan,
+  type CellExecOptions,
+  type CellExecResult,
+  type CellList,
+  type CellListEntry,
+  type CellListOptions,
+  type CellLogger,
+  type CellProviderErrorCode,
+  type CellTags,
+  type CellVaultEntry,
+  type ICellProvider,
 } from "@terragon/types/cell";
 
 /**
@@ -52,13 +53,6 @@ const BACKOFF_CAP_MS = 2_000;
  * it): this file imports the contract type-only.
  */
 export const OPENSANDBOX_HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
-/**
- * Kept equal to `CELL_LABEL_VALUE_PATTERN` in @terragon/types (a test asserts
- * it): this file imports the contract type-only.
- */
-export const OPENSANDBOX_LABEL_VALUE_PATTERN =
-  /^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$/;
-const LABEL_MAX_LENGTH = 63;
 const SANDBOX_NOT_FOUND_SUFFIX = "::SANDBOX_NOT_FOUND";
 const CONNECTION_FAILED = "BACKEND_CONNECTION_FAILED";
 
@@ -244,14 +238,7 @@ function assertPlanFields(plan: CellCreatePlan): void {
     );
   const labelsOk = Object.entries(tags).every(
     ([k, v]) =>
-      !k.includes("/") &&
-      OPENSANDBOX_LABEL_VALUE_PATTERN.test(k) &&
-      k.length > 0 &&
-      k.length <= LABEL_MAX_LENGTH &&
-      typeof v === "string" &&
-      v.length > 0 &&
-      v.length <= LABEL_MAX_LENGTH &&
-      OPENSANDBOX_LABEL_VALUE_PATTERN.test(v),
+      isCellLabelValue(k) && typeof v === "string" && isCellLabelValue(v),
   );
   if (
     !tagsOk ||
@@ -708,16 +695,7 @@ export function createOpenSandboxCellProvider(
 
   /** True while the cell is there; false only for upstream's SANDBOX_NOT_FOUND 404. */
   async function exists(cellId: string): Promise<boolean> {
-    const { res } = await send("exists", "GET", cellPath(cellId), {
-      retry: "idempotent",
-    });
-    if (res.status === 404) {
-      if (await isSandboxNotFound(res, "exists")) return false;
-      throw new CellProviderError("http_error", "exists", 404);
-    }
-    await requireOk("exists", res);
-    await discard(res);
-    return true;
+    return !(await send404AsDone("exists", "GET", cellPath(cellId)));
   }
 
   async function revoke(cellId: string): Promise<void> {

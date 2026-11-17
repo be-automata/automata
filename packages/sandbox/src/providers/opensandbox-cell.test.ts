@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CELL_LABEL_MAX_LENGTH,
-  CELL_LABEL_VALUE_PATTERN,
   CELL_MIN_TTL_MS,
   cellStepKey,
   isCellLabelValue,
@@ -16,7 +15,6 @@ import {
   CellProviderError,
   createOpenSandboxCellProvider,
   OPENSANDBOX_HEADER_NAME_PATTERN,
-  OPENSANDBOX_LABEL_VALUE_PATTERN,
   OPENSANDBOX_MIN_TTL_MS,
   OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT,
   type OpenSandboxCellConfig,
@@ -2072,15 +2070,6 @@ describe("label guard (#656 PR-C)", () => {
     await expect(
       provider.create(plan({ tags: tagsWith({ stepKey: "cell-x" }) })),
     ).resolves.toBeDefined();
-  });
-
-  it("the local pattern equals the contract's", () => {
-    expect(OPENSANDBOX_LABEL_VALUE_PATTERN.source).toBe(
-      CELL_LABEL_VALUE_PATTERN.source,
-    );
-    expect(OPENSANDBOX_LABEL_VALUE_PATTERN.flags).toBe(
-      CELL_LABEL_VALUE_PATTERN.flags,
-    );
   });
 });
 
