@@ -18,6 +18,10 @@ import {
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
 import type { CredentialKind } from "../model/credential-kind";
+import type {
+  AgentBusLane,
+  AgentCapabilities,
+} from "../model/agent-bus/capabilities";
 import type { SandboxProvider, SandboxSize } from "@terragon/types/sandbox";
 import type { SandboxStatus, BootingSubstatus } from "@terragon/sandbox/types";
 import {
@@ -3338,6 +3342,42 @@ export const cellStep = pgTable(
   (table) => [
     index("cell_step_thread_id_index").on(table.threadId),
     index("cell_step_organization_id_index").on(table.organizationId),
+  ],
+);
+
+/**
+ * One row per run on the agent bus (spec #659): the run's place in its tree, its
+ * lane, and the capabilities it was granted. `rootThreadId` is the root of the
+ * tree (the run's own thread for a root); sends stay inside one tree.
+ */
+export const agentRun = pgTable(
+  "agent_run",
+  {
+    threadId: text("thread_id")
+      .primaryKey()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    parentThreadId: text("parent_thread_id").references(() => thread.id, {
+      onDelete: "set null",
+    }),
+    /** The root of this run's tree (= threadId for a root). Sends stay inside one tree. */
+    rootThreadId: text("root_thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    lane: text("lane").$type<AgentBusLane>().notNull(),
+    capabilities: jsonb("capabilities").$type<AgentCapabilities>().notNull(),
+    depth: integer("depth").notNull().default(0),
+    outliveParent: boolean("outlive_parent").notNull().default(false),
+    deadline: timestamp("deadline", { mode: "date" }),
+    blockedAt: timestamp("blocked_at", { mode: "date" }),
+    blockedReason: text("blocked_reason"),
+    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("agent_run_parent_thread_id_index").on(table.parentThreadId),
+    index("agent_run_root_thread_id_index").on(table.rootThreadId),
   ],
 );
 

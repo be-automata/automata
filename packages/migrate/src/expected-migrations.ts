@@ -26,5 +26,6 @@ export const EXPECTED_MIGRATION_IDS = [
   "2026-11-13-cell-broker-authority",
   "2026-11-14-org-cell-workflow-write",
   "2026-11-15-cell-step-allowed-ref",
+  "2026-11-17-agent-run",
   "2026-11-17-execution-profile-seed-opensandbox-runc",
 ] as const;
