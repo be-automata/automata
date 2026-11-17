@@ -95,57 +95,72 @@ Names/types in the SQL file must match drizzle exactly (`schema-drift` CI job). 
 `"2026-11-19-agent-messages"`to`EXPECTED_MIGRATION_IDS`(it must sort LAST:`packages/migrate/src/files.test.ts:108`). Migration must pass
 `node deploy/lint-migrations.ts`.
 
-### Module `packages/shared/src/model/agent-bus/messages.ts` (never imports www)
+### Module `packages/shared/src/model/agent-bus/messages.ts` (never imports www) — as shipped
 
 ```ts
 export interface AgentMessage { id: number; fromRun: string; toRun: string; body: string; createdAt: Date }
-type Tx = Parameters<Parameters<DB["transaction"]>[0]>[0]; // precedent: knowledge-store.ts:55, self-heal-tx.ts:6
-export type ApplyMessage = (tx: Tx | DB, message: AgentMessage) => Promise<void>; // INSIDE the receive tx (DB only in the unsafe test path)
+type Tx = Parameters<Parameters<DB["transaction"]>[0]>[0]; // precedent: knowledge-store.ts:55
+export type ApplyMessage = (tx: Tx, message: AgentMessage) => Promise<void>; // always INSIDE the receive tx
 export type SendError = AgentBusError | "idem_key_conflict";
+interface BusLogger { error(message: string, error: unknown): void } // injected; default console.error
 
 insertMessage({ db, from, to, key, body }) → Promise<{ id: number; duplicate: boolean } | { conflict: true }>
-  // insert … on conflict (from_run, idem_key) do nothing returning id; on conflict select existing;
-  // existing (to_run, body) differ → { conflict: true }.
+  // body normalized first: stored = sanitizeForJson(body) (A7); insert … on conflict (from_run, idem_key)
+  // do nothing returning id; on conflict select existing; existing (to_run, body) ≠ (to, stored) → { conflict: true }.
 
-sendMessage({ db, organizationId, from, to, key, body, apply })
+sendMessage({ db, organizationId, from, to, key, body, apply, logger? })
   → Promise<{ ok: true; id: number; duplicate: boolean; applied: number } | { ok: false; error: SendError }>
-  // 1. getRunForOrg(from), getRunForOrg(to); from null → "not_found"; authorizeSend → refusal writes NOTHING.
-  // 2. insertMessage (its own statement, committed). 3. receiveFor(to). applied = receiveFor's count.
+  // 1. getRunForOrg(from), getRunForOrg(to); authorizeSend → a refusal writes NOTHING (AC4).
+  // 2. insertMessage (committed). 3. receiveFor(to, onApplied): a receive that throws is LOGGED (id, target,
+  //    error name only) and the send still resolves ok with the count applied before the error — the row is
+  //    durable and the sweeper delivers it. A send never rejects after its insert committed.
 
-receiveFor({ db, toRun, apply, unsafeApplyOutsideTransaction? }) → Promise<{ applied: number }>
+receiveFor({ db, toRun, apply, onApplied? }) → Promise<{ applied: number }>
   // loop, one db.transaction per message:
-  //  (1) select … where to_run=$1 and consumed_at is null order by id for update skip locked limit 1 — none → stop
+  //  (0) select … from thread where id = toRun FOR UPDATE   (serializes receivers per target: id order)
+  //  (1) select … from agent_messages where to_run=$1 and consumed_at is null order by id
+  //      for update skip locked limit 1 — none → stop
   //  (2) insert into agent_applied(msg_id, run) … on conflict do nothing returning msg_id
-  //  (3) if inserted: await apply(tx, msg)   [unsafeApplyOutsideTransaction: apply(db, msg) — TEST-ONLY
-  //      negative control for AC3; JSDoc says so; never set in production code]
-  //  (4) update agent_messages set consumed_at = now() where id = msg.id   (5) commit
+  //  (3) if inserted: await apply(tx, row)   (4) consumed_at = now()   (5) commit; onApplied(count)
   // An apply that throws rolls the tx back and rethrows (A3).
 
-recentlyDeliveredTargets({ db, withinMs = 120_000 }) → Promise<string[]>  // distinct to_run with consumed_at > now() - withinMs (A6)
+recentlyDeliveredTargets({ db, withinMs = 120_000, limit = 200 }) → Promise<string[]>
+  // to_run with consumed_at > now() - withinMs, grouped, newest max(consumed_at) first (A6).
 
-sweepUnconsumed({ db, apply, olderThanMs = 10_000, limit = 100 }) → Promise<{ targets: string[]; applied: number }>
-  // select distinct to_run where consumed_at is null and created_at < now() - olderThanMs (uses the partial index),
-  // receiveFor each; one target's failure is logged (injected logger or console.error) and does not stop the others.
+sweepUnconsumed({ db, apply, olderThanMs = 10_000, limit = 100, logger? }) → Promise<{ targets: string[]; applied: number }>
+  // to_run with an unconsumed message older than olderThanMs, INNER JOIN thread (rows to deleted threads are
+  // inert), grouped, ordered by min(created_at); receiveFor each; one target's failure is logged and does not
+  // stop the others.
 
-queuedFollowUpApply: ApplyMessage   // the production apply, in shared so the crash drill exercises it
-  // in tx: select the target thread's primary chat (oldest thread_chat by created_at) FOR UPDATE;
-  // none → throw; then update thread_chat set queued_messages = COALESCE(queued_messages,'[]') || $json
-  // with the D2 message, sanitizeForJson applied.
+queuedFollowUpApply: ApplyMessage   // the production apply, in shared so the crash drills exercise it
+  // UPDATE thread_chat SET queued_messages = appendQueuedMessagesSql(...) WHERE id = (oldest thread_chat of the
+  // thread) RETURNING id; 0 rows → UPDATE thread SET queued_messages = … (legacy thread, the production default);
+  // 0 rows → throw (thread missing). D2 framing. appendQueuedMessagesSql (queued-messages-sql.ts) is shared with
+  // updateThreadChat.
 ```
 
-### www binding `apps/www/src/server-lib/agent-bus/delivery.ts`
+Negative control (AC3): no production flag. The crash fixture
+(`agent-bus/__fixtures__/messages-crash-child.ts`) with `UNSAFE=1` runs the apply on the plain `db` instead of
+the receive transaction. It runs on a chat-model target: on a legacy target the outside write waits on the
+thread row lock the receive holds.
+
+### www binding `apps/www/src/server-lib/agent-bus/delivery.ts` — as shipped
 
 - `sendAgentMessage(args)` = `sendMessage({ ...args, db, apply: queuedFollowUpApply })`, then when
-  `applied > 0` → `kickTarget(to)`.
-- `runAgentBusSweep()` = `sweepUnconsumed({ db, apply: queuedFollowUpApply })`, then `kickTarget` for every target in `targets` ∪ `recentlyDeliveredTargets()` (A6; kick is idempotent).
-- `kickTarget(threadId)`: load thread (userId, shadow) + primary chat (id, status); skip when the
-  user's tier is `none`, `shadow`, or `isAgentWorking(status)` (A5, mirrors `follow-up.ts:130-175`); else
-  `await maybeProcessFollowUpQueue({ userId, threadId, threadChatId })`; before the skip checks, also
-  `publishBroadcastUserMessage` the same way `updateThreadChat` does (`threads.ts:1036-1039`), so the UI shows the queued message. Errors logged, not thrown
-  (delivery is already committed).
-- `cron.ts`: `runAgentBusSweepSafe()` (dynamic import like the other Safe runners, logs+swallows), wired per D1.
-- `delivery.test.ts`: skip on tier none / shadow / working / blocked, kick when idle, a kick error is swallowed and
-  does not reject `sendAgentMessage`, the sweep kicks swept + recently delivered targets.
+  `applied > 0` → `kickTarget(to)`; a kick error never rejects the send.
+- `runAgentBusSweep()` = `sweepUnconsumed({ db, apply: queuedFollowUpApply })`, then `kickTarget` for each target
+  of `recentlyDeliveredTargets()` (swept targets are always among them; A6; the kick is idempotent).
+- `kickTarget(threadId)`: one query for the thread (userId, shadow, status, terminal), its oldest `thread_chat`
+  (left join; none → `LEGACY_THREAD_CHAT_ID` and the thread's status) and `agent_run.blocked_at`. Missing thread →
+  return. Broadcast the queued message (`publishBroadcastUserMessage`, as `updateThreadChat` does) in every
+  case; skip the drain when shadow, blocked, terminal (A8), `isAgentWorking(status)`, or tier `none`
+  (the tier lookup runs only when the other checks pass, concurrently with the broadcast); else
+  `await maybeProcessFollowUpQueue({ userId, threadId, threadChatId })`. Errors logged, never thrown.
+- `cron.ts`: `runAgentBusSweepSafe()` (dynamic import like the other Safe runners, logs + swallows), in
+  `runScheduledTasksCron`'s `finally` after `runKnowledgeReconcileSweepSafe()` (D1).
+- `delivery.test.ts`: skip on tier none / shadow / working / blocked / terminal (broadcast still sent), kick when
+  idle (chat-model and legacy), a kick error is swallowed and does not reject `sendAgentMessage`, the sweep kicks
+  recently delivered targets once each.
 
 No caller of `sendAgentMessage` exists yet — S5 adds the MCP tool. That is expected.
 
@@ -157,7 +172,7 @@ No caller of `sendAgentMessage` exists yet — S5 adds the MCP tool. That is exp
    message; rerun child without kill; assert counts on `agent_applied`, `thread_chat.queued_messages` length, `consumed_at`).
 2. Sender crash (b): child runs `sendMessage`, killed in apply (after the insert committed, before answering);
    retry `sendMessage` same key → `duplicate: true`, same id; exactly 1 `agent_messages` row; delivered once.
-3. Negative control: same as (1) with `unsafeApplyOutsideTransaction` → 4 queued follow-ups for 3 messages.
+3. Negative control: same as (1) on a chat-model target with the fixture's `UNSAFE=1` (apply on the plain db) → 4 queued follow-ups for 3 messages.
 4. A refused send (each refusal class reachable: `not_found`, lane pair, terminal/blocked) writes no
    `agent_messages`/`agent_applied` row → `messages.test.ts`.
 5. A message left unconsumed (receive never ran, `created_at` backdated > 10 s) is delivered by one
