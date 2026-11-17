@@ -529,8 +529,17 @@ async function main(): Promise<number> {
   try {
     await runProbe(args, rep);
   } catch (error) {
+    // An AggregateError (adapter teardown) names each failed step: op and status only.
+    const parts =
+      error instanceof AggregateError
+        ? error.errors.map((e: unknown) =>
+            e instanceof CellProviderError
+              ? `${e.op}:${e.code}${e.status ? `:${e.status}` : ""}`
+              : "other",
+          )
+        : [];
     const msg = error instanceof Error ? error.message : "unknown";
-    rep.add("FAIL", "driver-error", msg);
+    rep.add("FAIL", "driver-error", [msg, ...parts].join(" "));
   }
   const summary = { checks: rep.lines, timingsMs: rep.timingsMs };
   if (args.out !== null) writeFileSync(args.out, JSON.stringify(summary));
