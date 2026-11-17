@@ -4,25 +4,35 @@ Every command was run from the worktree root (`.claude/worktrees/660`, branch `f
 base `origin/main` @ `e3d74abb`). Exit codes are real (`echo "rc=$?"` after each command) unless the row says
 otherwise.
 
-## Final code tree (`cbee19e0`; later commits change docs only)
+## Final code tree (`18d243e7`; the commits after it change `docs/specs/660/` only)
+
+Run once, in order, on the final tree, each command's own exit code captured (no pipes).
 
 | Gate | Command | Exit | Output |
 |---|---|---|---|
 | install | `pnpm install --frozen-lockfile --prefer-offline` | 0 | lockfile in sync |
 | typecheck | `pnpm turbo tsc-check` | 0 | 21/21 tasks |
-| lint | `pnpm turbo lint` | 0 | |
+| lint | `pnpm turbo lint` | 0 | 2/2 tasks |
 | format | `pnpm turbo format-check` | 0 | 18/18 tasks |
 | migration lint | `node deploy/lint-migrations.ts` | 0 | `lint-migrations: OK — 21 file(s) linted, 5 grandfathered` |
 | migrate tests | `pnpm --filter @terragon/migrate test` | 0 | 5 files, 45 tests (the new id sorts last: `files.test.ts`) |
-| shared tests (full) | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism` | 0 | 98 files, 1714 tests (see "Load-sensitive tests" for the run before it) |
-| agent-bus tests | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism src/model/agent-bus` | 0 | 105 tests incl. the 4 crash drills; the crash file was run 3× in a row green |
-| coverage | `pnpm --filter @terragon/shared exec vitest run --coverage --no-file-parallelism src/model/agent-bus` | 0 | `messages.ts` 99.16% statements, 95.91% branches (refinement round; the simplify round removed code, not branches) |
-| www touched tests | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism src/server-lib/agent-bus src/server-lib/cron.test.ts src/server-lib/cron-routes.static.test.ts` | 0 | 3 files, 45 tests (42 after the it.each collapse) |
-| www tests (full) | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` | 1 | 2 failed / 4470 passed / 9 skipped: `admin.test.ts` 5000 ms timeouts; that file re-run alone: 30/30, rc 0. See below. |
-| schema drift (AC: migration ≡ drizzle) | postgres:18 throwaway container; `DATABASE_URL=$PG/a pnpm exec tsx deploy/migrate.ts --apply` (×2); `DATABASE_URL=$PG/b pnpm -C packages/shared exec drizzle-kit push --force`; `pnpm exec tsx deploy/schema-drift.ts --a $PG/a --b $PG/b` | see note | `applied 26 migration(s)` then `applied 0 migration(s)`; `compared 1531 objects in a (a) with 1531 in b (b)`, `schema drift: none (0 allowlisted difference(s))`. These commands were piped through `tail`, so the recorded codes are `tail`'s; the verdict rests on the printed drift line. Also run on Postgres 16 in phase 1 (same result). |
-| roborev (via roborev-guard) | `roborev-guard review --branch --wait` | 1 → fix rounds | job 1239 (`e3d74ab..cbee19e`): Pass + 1 Low (spec contract stale) → fixed `4133f00e`. Job 1240 (`..72aed2a`): Pass + 1 Medium (the kick awaited the drain, which can boot a sandbox: a send and the serial cron sweep blocked) + 1 Low (a failed broadcast skipped the drain) → fixed: the drain goes through `waitUntil` like `queueFollowUpInternal`, the broadcast is caught on its own; refinement re-review of the delta: clean (3 low/nit items applied). Final job: see the PR. |
+| shared tests (full) | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism` | 0 | 98 files, 1714 tests |
+| coverage | `pnpm --filter @terragon/shared exec vitest run --coverage --no-file-parallelism src/model/agent-bus` | 0 | 4 files, 105 tests; `messages.ts` 99.1% statements, 95.45% branches, 87.5% functions, 99.1% lines (uncovered 96-97) |
+| www tests (full) | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` | 0 | 336 files passed, 1 skipped; 4476 tests passed, 9 skipped |
+| schema drift | postgres:18 throwaway container: `DATABASE_URL=$PG/a pnpm exec tsx deploy/migrate.ts --apply` (×2); `DATABASE_URL=$PG/b pnpm -C packages/shared exec drizzle-kit push --force`; `pnpm exec tsx deploy/schema-drift.ts --a $PG/a --b $PG/b` | 0 / 0 / 0 / 0 | `applied 26 migration(s)`, then `applied 0 migration(s)`; `compared 1531 objects in a (a) with 1531 in b (b)`, `schema drift: none (0 allowlisted difference(s))` |
+| roborev (via roborev-guard) | `roborev-guard review --branch --wait` | see "Roborev" | |
 
-## Load-sensitive tests (not touched by this branch)
+## Roborev
+
+| Job | Range | Assessment | Findings → outcome |
+|---|---|---|---|
+| 1239 | `..cbee19e` | Pass | Low: spec contract stale → `4133f00e` |
+| 1240 | `..72aed2a` | Pass | Medium: the kick awaited the drain (sandbox boot); Low: a failed broadcast skipped the drain → `6fd24ac9` |
+| 1243 | `..6fd24ac` | Pass | Low: re-kick re-broadcast; hardening: `FOR NO KEY UPDATE` → `18d243e7` (round 3 approved by the owner) |
+| 1244 | `..18d243e` | Pass | Low: spec www contract stale → `4ec06b84` |
+| 1245 | `..4ec06b8` | Pass | Low: this gate log claimed an older final tree → this rewrite, with every gate rerun on `18d243e7` |
+
+## Load-sensitive tests during development (history; the final run above is green)
 
 Full-suite runs on this machine ran under heavy load (one www run: 817 s, 449 s of setup). Each time a
 different file this branch does not touch timed out at 5000 ms, and each passed alone:
@@ -32,7 +42,7 @@ different file this branch does not touch timed out at 5000 ms, and each passed 
 - www: `e2e.test.ts` (2), `supersede-sweep.order.test.ts` (1) → both alone 21/21, rc 0.
 - www: `admin.test.ts` (2, a timeout and a spy assertion that fired after it) → alone 30/30, rc 0.
 
-None of these files imports the code this branch adds. The PR's CI is the clean full-suite run of record.
+None of these files imports the code this branch adds; the final full runs above are green.
 
 ## Acceptance criteria → proof
 
