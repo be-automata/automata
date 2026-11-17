@@ -90,7 +90,10 @@ export async function getRunForOrg({
 /**
  * Registers `threadId` as the root of its own tree. Idempotent: an existing row
  * is returned unchanged (whatever its lane, even if it is a child). `null` when
- * the thread is absent or belongs to no organization or another one.
+ * the thread is absent, belongs to no organization or another one, or is the
+ * child of a run on the bus: such a thread joins only through
+ * `createChildRun`, so it can never escape its parent's narrowing by
+ * registering first. A plain fork (its parent is not on the bus) can be a root.
  */
 export async function ensureRootRun({
   db,
@@ -111,12 +114,21 @@ export async function ensureRootRun({
     .select({
       organizationId: thread.organizationId,
       githubRepoFullName: thread.githubRepoFullName,
+      parentThreadId: thread.parentThreadId,
     })
     .from(thread)
     .where(eq(thread.id, threadId))
     .limit(1);
   const row = rows[0];
   if (row?.organizationId !== organizationId) return null;
+  if (row.parentThreadId !== null) {
+    const parentRun = await db
+      .select({ threadId: agentRun.threadId })
+      .from(agentRun)
+      .where(eq(agentRun.threadId, row.parentThreadId))
+      .limit(1);
+    if (parentRun.length > 0) return null;
+  }
 
   await db
     .insert(agentRun)

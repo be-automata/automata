@@ -115,6 +115,40 @@ describe("agent run ledger", () => {
       expect(await rowCount(threadId)).toBe(1);
     });
 
+    it("refuses a root for a thread whose parent is on the bus; a plain fork can be one", async () => {
+      const { organizationId, rootId, childId } = await rootAndChild();
+      expect(
+        await ensureRootRun({
+          db,
+          threadId: childId,
+          organizationId,
+          lane: "task",
+        }),
+      ).toBeNull();
+      expect(await rowCount(childId)).toBe(0);
+      // The child can still join through createChildRun, narrowed.
+      const child = await createChildRun({
+        db,
+        organizationId,
+        parentThreadId: rootId,
+        childThreadId: childId,
+        request: { lane: "task" },
+      });
+      expect(child.ok).toBe(true);
+
+      const offBusParent = await orgThread(organizationId);
+      const forkId = await orgThread(organizationId, {
+        parentThreadId: offBusParent,
+      });
+      const fork = await ensureRootRun({
+        db,
+        threadId: forkId,
+        organizationId,
+        lane: "task",
+      });
+      expect(fork?.rootThreadId).toBe(forkId);
+    });
+
     it("gives a review root read access to its repo, a task root write", async () => {
       const organizationId = await createTestOrg({ db });
       const reviewId = await orgThread(organizationId);
