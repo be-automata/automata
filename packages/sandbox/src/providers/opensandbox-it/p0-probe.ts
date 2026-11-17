@@ -384,6 +384,10 @@ async function denyAllThenDelete(
   a: P0Args,
   apiKey: string,
 ): Promise<void> {
+  // Production order (adapter teardown): the vault first. OpenSandbox 1.2.1
+  // validates vault bindings against a new policy, so a deny-all is refused
+  // (400) while a binding's host is still in the vault.
+  await provider.revoke(id);
   try {
     await provider.quarantine(id);
   } catch {
