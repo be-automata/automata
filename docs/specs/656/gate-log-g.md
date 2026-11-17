@@ -121,3 +121,23 @@ On the throwaway box, a throwaway unit carried the worker unit's two credential 
 **An empty fallback does not apply on systemd 255.** As first written, the worker unit would not start on any box without the key file, production `automata-exec-1` included. The unit now ships `SetCredential=opensandbox.env:none`. A test pins it, with a negative control against the empty form.
 
 The launcher still never reads the credential. The worker (PR-E) treats a credential without an `OPENSANDBOX_API_KEY=` line as "OpenSandbox not configured" and keeps the cell path off.
+
+## Refinement (8 findings, all fixed in `fc4990d4`) and the live re-run
+
+- **High:** `install-rootless-docker.sh`'s AppArmor block reused `profile`, clobbering the runner/opensandbox selector on hosts with restricted user namespaces and no distro rootlesskit profile. The live box had the distro profile, so the P0 and G1 runs never took that branch. The local is now `aa_profile`, and a test pins it.
+- **Mediums:**
+  - The probe's refused deny-all path now deletes the cell and still runs the negative control.
+  - The throwaway guard refuses an active worker or a seal key even with the flag.
+  - The dedicated daemon restarts when a container cannot see the `/run` marker.
+  - The README and launcher describe the real `none` fallback.
+- **Lows:** the stale `.new` key file is removed first; the `/etc/automata` mode is kept; a new key or image restarts the server; `server.log` drops lines holding the key; tests are tightened.
+
+**Live re-run on `automata-cell-uat-656` at `fc4990d4`.** Every step exited 0:
+
+| Step                                         | Result                                                                                                                                                                                                                                   |
+| :------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`             | 0                                                                                                                                                                                                                                        |
+| `install-rootless-docker.sh` re-run (runner) | 0                                                                                                                                                                                                                                        |
+| `install-opensandbox.sh` re-run              | 0. Every line `ok`, including the new **`run-dir-visible`** (a container reads the marker) and **`worker-denied` (permission denied)**. Key file root:root 600; unit active; health 200; loopback only; 401 without the key, 200 with it |
+| `install-opensandbox.sh --check`             | 0                                                                                                                                                                                                                                        |
+| P0 probe (`/root/p0-out10`)                  | **`P0 VERDICT: rootless`, 34 PASS / 0 FAIL**                                                                                                                                                                                             |
