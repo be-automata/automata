@@ -20,6 +20,8 @@ interface ReconcileExpiredCellsInput {
   now: () => number;
   logger: CellLogger;
   limit?: number;
+  /** In [0, 1); injected so tests are deterministic. Default Math.random. */
+  random?: () => number;
 }
 
 export interface ReconcileResult {
@@ -69,6 +71,20 @@ function isExpired(
   return Number(raw) <= nowMs;
 }
 
+/**
+ * A shuffled copy (Fisher-Yates). Expired cells are visited in a random order
+ * each run, so cells whose teardown keeps failing cannot hold the same `limit`
+ * slots forever and starve the healthy ones behind them.
+ */
+function shuffled<T>(items: readonly T[], random: () => number): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(random() * (i + 1));
+    [out[i], out[j]] = [out[j] as T, out[i] as T];
+  }
+  return out;
+}
+
 export async function reconcileExpiredCells(
   input: ReconcileExpiredCellsInput,
 ): Promise<ReconcileResult> {
@@ -84,9 +100,11 @@ export async function reconcileExpiredCells(
     deferred: 0,
   };
 
-  for (const entry of entries) {
-    const key = parseKey(entry.tags);
-    if (!isExpired(entry.tags, key, nowMs)) continue;
+  const expired = entries
+    .map((entry) => ({ entry, key: parseKey(entry.tags) }))
+    .filter(({ entry, key }) => isExpired(entry.tags, key, nowMs));
+
+  for (const { entry, key } of shuffled(expired, input.random ?? Math.random)) {
     if (result.expired >= limit) {
       result.deferred += 1;
       continue;

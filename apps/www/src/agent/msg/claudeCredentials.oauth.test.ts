@@ -94,3 +94,36 @@ describe("getClaudeOauthAccessToken (real database)", () => {
     ).toBeNull();
   });
 });
+
+describe("getClaudeOauthAccessToken (lookup failure)", () => {
+  it("throws when the lookup reports an error, and never returns null for it", async () => {
+    await expect(
+      getClaudeOauthAccessToken({ userId: "u" }, async () => ({
+        contents: null,
+        error: "Failed to get Claude credentials",
+      })),
+    ).rejects.toThrow("claude credential lookup failed");
+  });
+
+  it("is null for an API-key file, built-in credits and unparseable contents", async () => {
+    const reading = (contents: string | null) => async () => ({
+      contents,
+      error: null,
+    });
+    for (const contents of [
+      JSON.stringify({ anthropicApiKey: "k" }),
+      null,
+      "{not json",
+    ]) {
+      expect(
+        await getClaudeOauthAccessToken({ userId: "u" }, reading(contents)),
+      ).toBeNull();
+    }
+    expect(
+      await getClaudeOauthAccessToken(
+        { userId: "u" },
+        reading(JSON.stringify({ claudeAiOauth: { accessToken: "t" } })),
+      ),
+    ).toBe("t");
+  });
+});

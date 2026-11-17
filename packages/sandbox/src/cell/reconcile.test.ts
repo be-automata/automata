@@ -32,6 +32,8 @@ function setup(
       now: () => NOW,
       logger,
       limit: over.limit,
+      // Just under 1 keeps every element in place: list order, no shuffle.
+      random: () => 0.9999999,
     });
   return { calls, provider, revoke, logger, run };
 }
@@ -169,5 +171,70 @@ describe("reconcileExpiredCells", () => {
     ]);
     expect(logged).not.toContain("secret-ish");
     expect(logged).not.toContain("expiresAt");
+  });
+
+  it("reaches a healthy expired cell behind always-failing ones within a few runs", async () => {
+    // A stable list order with 20 failing cells ahead of one healthy cell
+    // would starve it at limit 20; the shuffle must reach it.
+    const cells = [
+      ...Array.from({ length: 20 }, (_, n) => ({
+        cellId: `bad${n}`,
+        tags: tags(`cell:bad${n}`, NOW - 1),
+      })),
+      { cellId: "good", tags: tags("cell:good", NOW - 1) },
+    ];
+    const reaped = new Set<string>();
+    const s = setup(cells, {
+      teardown: async (id) => {
+        if (id.startsWith("bad")) throw new Error("stuck");
+        reaped.add(id);
+      },
+    });
+    // Deterministic LCG, so the test is stable.
+    let seed = 12345;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) % 4294967296;
+      return seed / 4294967296;
+    };
+    let runs = 0;
+    while (!reaped.has("good") && runs < 10) {
+      runs += 1;
+      await reconcileExpiredCells({
+        provider: s.provider,
+        revoke: s.revoke,
+        now: () => NOW,
+        logger: s.logger,
+        random,
+      });
+    }
+    expect(reaped.has("good")).toBe(true);
+    expect(runs).toBeLessThanOrEqual(10);
+  });
+
+  it("shuffling keeps revoke before teardown for every cell it visits", async () => {
+    const cells = [1, 2, 3, 4, 5].map((n) => ({
+      cellId: `c${n}`,
+      tags: tags(`cell:${n}`, NOW - 1),
+    }));
+    const s = setup(cells);
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    await reconcileExpiredCells({
+      provider: s.provider,
+      revoke: s.revoke,
+      now: () => NOW,
+      logger: s.logger,
+      random,
+    });
+    expect(s.calls).toHaveLength(10);
+    for (let i = 0; i < s.calls.length; i += 2) {
+      const revoke = s.calls[i] ?? "";
+      const teardown = s.calls[i + 1] ?? "";
+      expect(revoke.startsWith("revoke:cell:")).toBe(true);
+      expect(teardown).toBe(`teardown:c${revoke.split(":")[2]}`);
+    }
   });
 });

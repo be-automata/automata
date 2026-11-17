@@ -480,22 +480,26 @@ export function claudeOauthAccessTokenFromContents(
 }
 
 /**
- * The user's Claude OAuth access token for this org, or null when there is
- * none: built-in credits, an API key, a failed read or an unparseable file.
- * Never falls back to anything else (a cell must not run on borrowed
- * credentials). The value is a live credential: never log it.
+ * The user's Claude OAuth access token for this org, or null when there is no
+ * OAuth credential: built-in credits, an API key or an unparseable file. A
+ * failed lookup THROWS (getClaudeCredentialsJSONOrNull reports it as `error`),
+ * so the caller can tell "no credential" from "could not look". Never falls
+ * back to anything else (a cell must not run on borrowed credentials). The
+ * value is a live credential: never log it.
  */
-export async function getClaudeOauthAccessToken({
-  userId,
-  organizationId,
-}: {
-  userId: string;
-  organizationId?: string | null;
-}): Promise<string | null> {
-  const { contents } = await getClaudeCredentialsJSONOrNull({
+export async function getClaudeOauthAccessToken(
+  {
     userId,
     organizationId,
-  });
+  }: {
+    userId: string;
+    organizationId?: string | null;
+  },
+  // Injected only by tests.
+  read: typeof getClaudeCredentialsJSONOrNull = getClaudeCredentialsJSONOrNull,
+): Promise<string | null> {
+  const { contents, error } = await read({ userId, organizationId });
+  if (error !== null) throw new Error(`claude credential lookup failed`);
   return contents === null
     ? null
     : claudeOauthAccessTokenFromContents(contents);

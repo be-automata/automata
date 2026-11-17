@@ -67,3 +67,11 @@ The route's own tests cover how the database side judges a report.
   - a shared bounded-JSON helper and a parameterized measured-at window (both would change the box and addon-callback routes);
   - a page cap on the reconciler's listing (it needs an adapter change: S5);
   - `no-store` on the shared auth refusals (it would change `agent-credentials` responses).
+
+## Roborev
+
+- **Job on `786e27ac`:** Pass, with one Medium and two Lows.
+  - **Medium, fixed: reconciler starvation.** Expired cells whose teardown keeps failing could fill the per-run limit forever. Expired cells are now shuffled every run (Fisher–Yates, injected `random`). A test shows a healthy expired cell queued behind 20 that always fail is reaped within 10 runs.
+  - **Low #2, fixed: a regression from `/simplify`.** `getClaudeOauthAccessToken` throws when the lookup itself fails, so the route answers 5xx, not 422 `no_model_credential`. It returns null only when there is no OAuth credential.
+  - **Low #3, follow-up:** run the profile and egress refusals before the credential lookup, which can refresh the token.
+- **After the fixes, all exit 0:** live IT 9/9, sandbox 475 passed, www full suite, `tsc-check`, lint.

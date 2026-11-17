@@ -114,8 +114,8 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     return refuse("agent_not_supported", 422);
   }
 
-  // A cell never falls back to built-in credits or an API key: OAuth only. A
-  // non-ThreadError failure propagates (500).
+  // A cell never falls back to built-in credits or an API key: OAuth only. Null
+  // means "no OAuth credential" (422); a failed lookup throws and propagates (5xx).
   const modelToken = await getClaudeOauthAccessToken({
     userId: ctx.userId,
     organizationId,
