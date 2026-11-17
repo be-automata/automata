@@ -65,7 +65,7 @@ PR-A ships library code and one nullable column. Nothing calls the new functions
 
 4. **The stale rule can be switched off.** `deadCellAttempts` takes `staleMs: number | null`, where `null` disables the lease rule. PR-C can wire `isDead` with `null` before PR-D and PR-E stamp the lease. Without this, a cell opened by `openNextAttempt` and never stamped again would be reaped 5 minutes in. That is the most likely ordering bug in the 7-PR plan.
 5. **`finishStep({db, stepKey})` is added here, because `markStepDone` cannot serve R1.** R1 has `thread-status` run "`revokeAttempt` and `markStepDone`". But `markStepDone` needs the attempt's bearer, and www stores only its hash (`cell-authority.ts:224-233`). The terminal read is the run's verdict: the thread is no longer working, so every attempt is dead. `finishStep` revokes through the current attempt and sets `done_at` in one statement. It is idempotent.
-6. **`CellKey` and `cellKeyId` move to `@terragon/types/cell`.** Both shared and the reconciler then use one definition, with no duplicate structural type. `packages/sandbox/src/cell/reconcile.ts` re-exports both, so its existing importers are unchanged. Because `cellKeyId` is a runtime value, `@terragon/types` moves from sandbox's `devDependencies` to `dependencies`. `deadCellAttempts` still returns `CellKey[]`, and PR-C's `isDead` maps them with `cellKeyId`.
+6. **`CellKey` and `cellKeyId` move to `@terragon/types/cell`.** Both shared and the reconciler then use one definition, with no duplicate structural type. `packages/sandbox/src/cell/reconcile.ts` imports them from there and does not re-export; its test imports from `@terragon/types/cell`. Because `cellKeyId` is a runtime value, `@terragon/types` moves from sandbox's `devDependencies` to `dependencies`. `deadCellAttempts` returns the `Set<string>` of `cellKeyId` ids, so PR-C's `isDead` passes it through.
 7. **Attempt cap.** `openNextAttempt` refuses past `CELL_MAX_ATTEMPTS = 1000`, the bound `cell-plan`'s body schema enforces today (`route.ts:51`). A loop of `cell-plan` calls must not grow the integer without bound. With `retries: 0`, a real step sees a handful of attempts.
 
 ## Contract
@@ -271,7 +271,7 @@ export async function deadCellAttempts({
   db: DB;
   keys: readonly CellKey[];
   staleMs: number | null;
-}): Promise<CellKey[]>;
+}): Promise<Set<string>>;
 ```
 
 - **Input:**
@@ -290,7 +290,7 @@ export async function deadCellAttempts({
   - a missing row, for example when a thread deletion cascaded the step: bounded by `expiresAt`;
   - `attempt > current_attempt` (a tag naming a future attempt);
   - `last_seen_at IS NULL` on the current attempt with no other rule true.
-- **Output:** each dead input key once, in input order.
+- **Output:** a `Set<string>` of `cellKeyId(key)` for each dead input key (a duplicate key is one member).
 
 ## What is left to later PRs
 
@@ -298,7 +298,7 @@ export async function deadCellAttempts({
 | :--- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | PR-C | `cell-plan` calls `openNextAttempt` instead of `openStep`, drops `attempt` from the body (`route.ts:51`), maps `attempt_limit`/`step_done`/`conflict` to 409, and returns `attempt` in the response so the worker tags the cell with it | Rewrite `route.test.ts:204-215` (fencing now comes from two calls, not chosen numbers)                                                                                                                                                                   |
 | PR-C | The label-safe `stepKey` (for example `cell-<apiKeyId>`, if the `apiKeyId` charset is label-safe)                                                                                                                                       | **The tag value must equal `cell_step.step_key` byte for byte.** A tag-only encoding would make every `deadCellAttempts` lookup miss. That fails safe, but the lease rule would silently never fire. No change in PR-A: the authority is format-agnostic |
-| PR-C | `runCellReconciler` passes `isDead: async (keys) => new Set((await deadCellAttempts({db, keys, staleMs})).map(cellKeyId))`                                                                                                              | `staleMs` is `null` until PR-D's and PR-E's stamps are live in the same deploy, then `CELL_LEASE_STALE_MS`                                                                                                                                               |
+| PR-C | `runCellReconciler` passes `isDead: async (keys) => deadCellAttempts({db, keys, staleMs})`                                                                                                                                              | `staleMs` is `null` until PR-D's and PR-E's stamps are live in the same deploy, then `CELL_LEASE_STALE_MS`                                                                                                                                               |
 | PR-D | `thread-status` terminal read: `finishStep({db, stepKey})` for a cell run, next to the daemon-token revoke                                                                                                                              | Not `markStepDone` (it needs a bearer www does not hold)                                                                                                                                                                                                 |
 | PR-D | `stampSeen` on each cell run's `thread-status` read                                                                                                                                                                                     | **`thread-status` has no attempt today** (`route.ts:32-46`). The worker must send it, for example an optional `cellAttempt` that is strictly validated. Stamping "whatever is current" would let a zombie's polls renew its successor's lease            |
 | PR-E | The worker stamps (through PR-D's path) during create, clone and daemon start, at least every `CELL_LEASE_STALE_MS / 2`                                                                                                                 | —                                                                                                                                                                                                                                                        |
@@ -373,7 +373,7 @@ Backdate leases with `db.update(cellStep).set({ lastSeenAt: sql\`now() - interva
     - **a NULL lease (opened by `openStep`, backdating has no effect): kept**;
     - an unknown step: kept;
     - an attempt above the current one: kept;
-    - a duplicate key: returned once.
+    - a duplicate key: one member of the set.
 14. With `staleMs: null`, the backdated current attempt is kept; the other dead keys are unchanged.
 15. Empty `keys` returns `[]`. A zero attempt or a `NaN` `staleMs` throws `RangeError`. **1001 keys throws `RangeError`, while 1000 keys runs the query.**
     15a. **A database error propagates.** Pass a `db` whose `select` throws, for example a stub `{ select: () => { throw new Error("db down") } }` cast to `DB`. `deadCellAttempts` rejects with that error: it neither returns `[]` nor swallows it. AC-5's fail-safe ("reap expired only") lives in `deadKeyIds` (`reconcile.ts:114-128`), which needs the throw. Its catch is already covered by PR-B's reconciler tests.

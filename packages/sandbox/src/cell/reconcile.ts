@@ -12,8 +12,6 @@ import {
   type ICellProvider,
 } from "@terragon/types/cell";
 
-export { cellKeyId, type CellKey } from "@terragon/types/cell";
-
 /**
  * Cells reaped per run. Each reap is a few provider requests and the run sits
  * in a Workers cron invocation (a subrequest budget), so the default is small;

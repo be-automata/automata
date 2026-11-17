@@ -93,6 +93,53 @@ function assertStepShape(step: {
 }
 
 /**
+ * Explains an empty upsert: the shared refusals in one order. Org/thread
+ * mismatch (or a vanished row) is a `conflict`, then a done step (a
+ * finishStep tombstone has no ref to compare), then an `allowedRef` mismatch.
+ * Otherwise the row is returned for the caller's own tail.
+ */
+async function classifyMiss(
+  db: DB,
+  step: {
+    stepKey: string;
+    organizationId: string;
+    threadId: string;
+    allowedRef: string | null;
+  },
+): Promise<
+  | { reason: "conflict" | "step_done" }
+  | { currentAttempt: number; revokedThrough: number | null }
+> {
+  const existing = (
+    await db
+      .select({
+        currentAttempt: cellStep.currentAttempt,
+        doneAt: cellStep.doneAt,
+        revokedThrough: cellStep.revokedThrough,
+        organizationId: cellStep.organizationId,
+        threadId: cellStep.threadId,
+        allowedRef: cellStep.allowedRef,
+      })
+      .from(cellStep)
+      .where(eq(cellStep.stepKey, step.stepKey))
+      .limit(1)
+  )[0];
+  if (
+    !existing ||
+    existing.organizationId !== step.organizationId ||
+    existing.threadId !== step.threadId
+  ) {
+    return { reason: "conflict" };
+  }
+  if (existing.doneAt) return { reason: "step_done" };
+  if (existing.allowedRef !== step.allowedRef) return { reason: "conflict" };
+  return {
+    currentAttempt: existing.currentAttempt,
+    revokedThrough: existing.revokedThrough,
+  };
+}
+
+/**
  * Take the lease for `attempt` with a CALLER-CHOSEN attempt number. After #656
  * PR-C this is the fixture and spike primitive; production opens through
  * `openNextAttempt`. It does not lease: advancing clears `last_seen_at`, so a
@@ -160,33 +207,12 @@ export async function openStep({
     .returning({ stepKey: cellStep.stepKey });
   if (rows[0]) return { ok: true };
 
-  const existing = (
-    await db
-      .select({
-        currentAttempt: cellStep.currentAttempt,
-        doneAt: cellStep.doneAt,
-        revokedThrough: cellStep.revokedThrough,
-        organizationId: cellStep.organizationId,
-        threadId: cellStep.threadId,
-        allowedRef: cellStep.allowedRef,
-      })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, step.stepKey))
-      .limit(1)
-  )[0];
-  if (
-    !existing ||
-    existing.organizationId !== step.organizationId ||
-    existing.threadId !== step.threadId ||
-    existing.allowedRef !== step.allowedRef
-  ) {
-    return { ok: false, reason: "conflict" };
-  }
-  if (existing.doneAt) return { ok: false, reason: "step_done" };
-  if (isRevoked(step.attempt, existing.revokedThrough)) {
+  const miss = await classifyMiss(db, step);
+  if ("reason" in miss) return { ok: false, reason: miss.reason };
+  if (isRevoked(step.attempt, miss.revokedThrough)) {
     return { ok: false, reason: "revoked" };
   }
-  if (existing.currentAttempt === step.attempt) return { ok: true };
+  if (miss.currentAttempt === step.attempt) return { ok: true };
   return { ok: false, reason: "stale_attempt" };
 }
 
@@ -245,31 +271,8 @@ export async function openNextAttempt({
     .returning({ attempt: cellStep.currentAttempt });
   if (rows[0]) return { ok: true, attempt: rows[0].attempt };
 
-  const existing = (
-    await db
-      .select({
-        currentAttempt: cellStep.currentAttempt,
-        doneAt: cellStep.doneAt,
-        organizationId: cellStep.organizationId,
-        threadId: cellStep.threadId,
-        allowedRef: cellStep.allowedRef,
-      })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, step.stepKey))
-      .limit(1)
-  )[0];
-  if (
-    !existing ||
-    existing.organizationId !== step.organizationId ||
-    existing.threadId !== step.threadId
-  ) {
-    return { ok: false, reason: "conflict" };
-  }
-  // A done tombstone (finishStep before any open) has no allowedRef to compare.
-  if (existing.doneAt) return { ok: false, reason: "step_done" };
-  if (existing.allowedRef !== step.allowedRef) {
-    return { ok: false, reason: "conflict" };
-  }
+  const miss = await classifyMiss(db, step);
+  if ("reason" in miss) return { ok: false, reason: miss.reason };
   return { ok: false, reason: "attempt_limit" };
 }
 
@@ -356,7 +359,8 @@ export async function finishStep({
 }
 
 /**
- * The keys positively known dead, for the reconciler's isDead (#656 scope 7).
+ * The `stepKey#attempt` ids (`cellKeyId`) positively known dead, the shape the
+ * reconciler's isDead consumes (#656 scope 7).
  * Unknown steps, NULL leases and attempts above the current one are kept.
  * `staleMs: null` disables the lease rule. Throws on a database error (the
  * reconciler catches it and reaps expired only).
@@ -369,8 +373,8 @@ export async function deadCellAttempts({
   db: DB;
   keys: readonly CellKey[];
   staleMs: number | null;
-}): Promise<CellKey[]> {
-  if (keys.length === 0) return [];
+}): Promise<Set<string>> {
+  if (keys.length === 0) return new Set();
   if (keys.length > DEAD_READ_MAX_KEYS) {
     throw new RangeError(`keys must not exceed ${DEAD_READ_MAX_KEYS}`);
   }
@@ -393,20 +397,18 @@ export async function deadCellAttempts({
     .from(cellStep)
     .where(inArray(cellStep.stepKey, [...new Set(keys.map((k) => k.stepKey))]));
   const byStep = new Map(rows.map((r) => [r.stepKey, r]));
-  const seen = new Set<string>();
-  const dead: CellKey[] = [];
+  const dead = new Set<string>();
   for (const key of keys) {
-    const id = cellKeyId(key);
     const row = byStep.get(key.stepKey);
-    if (!row || seen.has(id)) continue;
-    const isDead =
+    if (!row) continue;
+    if (
       isRevoked(key.attempt, row.revokedThrough) ||
       row.currentAttempt > key.attempt ||
       row.done ||
-      (key.attempt === row.currentAttempt && row.stale);
-    if (!isDead) continue;
-    seen.add(id);
-    dead.push({ stepKey: key.stepKey, attempt: key.attempt });
+      (key.attempt === row.currentAttempt && row.stale)
+    ) {
+      dead.add(cellKeyId(key));
+    }
   }
   return dead;
 }

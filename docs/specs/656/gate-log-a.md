@@ -30,3 +30,19 @@ Branch `feat/656-a-lease-authority`, off `main` at `c596e47f` (after #652's cont
   - `cellKeyId` replaces a hand-built key;
   - tests 13 and 14 assert full keys.
 - **After the fixes (outside the Claude sandbox):** `cell-authority` 52, shared 1726, www 4458 (9 skipped), all exit 0.
+
+## `/simplify`
+
+Applied:
+
+- One private `classifyMiss` serves `openStep` and `openNextAttempt`, with one refusal order: org/thread, then done, then ref. **Behaviour change:** `openStep` on a done step with a different ref now returns `step_done` instead of `conflict`.
+- `deadCellAttempts` returns the `Set<string>` of `cellKeyId` that `isDead` consumes.
+- The re-export is gone from `reconcile.ts`.
+- `leaseStep` is folded into `newStep`; test 6 is gone (6b covers it).
+
+Skipped:
+
+- Sharing `control-effects.test.ts`'s lock helpers: that is #652's file.
+- Replacing the tombstone: that would be a schema change.
+
+**After the pass (outside the Claude sandbox):** shared 1725, www 4458 (9 skipped). Both exit 0, so `openStep`'s new order breaks none of its existing callers.
