@@ -127,10 +127,13 @@ idle_in_transaction_session_timeout = 0` (pattern of `self-heal-tx.ts`), then
 ## Phases (from the validator)
 
 1. **Schema and migration:** `packages/shared/src/db/schema.ts`,
-   `deploy/migrations/2026-11-18-control-effects.sql`, `packages/migrate/src/expected-migrations.ts`.
+   `deploy/migrations/2026-11-18-control-effects.sql`, `packages/migrate/src/expected-migrations.ts`,
+   and `control_effects` in `REHOME_EXCLUDED_TABLES` (`packages/shared/src/model/rehome-repos-to-org.ts`;
+   `rehome-repos-to-org.test.ts` requires every `organization_id` table to be MOVE or EXCLUDE).
    Gates: `node deploy/lint-migrations.ts deploy/migrations`; `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism`; `pnpm turbo tsc-check`; the CI schema-drift steps locally.
 2. **Ledger:** `packages/shared/src/model/control-effects.ts`,
-   `packages/shared/src/model/control-effects.test.ts`. Gates: the shared vitest file; `pnpm turbo lint`; `pnpm turbo format-check`.
+   `packages/shared/src/model/control-effects.test.ts`; `assertPositiveInt` moves from
+   `cell-authority.ts` to `packages/shared/src/utils.ts` so both modules share it. Gates: the shared vitest file; `pnpm turbo lint`; `pnpm turbo format-check`.
 3. **Crash drill:** `packages/shared/src/model/__fixtures__/control-effects-crash-child.ts`,
    `packages/shared/src/model/control-effects.crash.test.ts`. Gate: the shared vitest file.
 4. **Full gates:** `pnpm install --frozen-lockfile --prefer-offline`; `pnpm turbo tsc-check lint format-check`; the shared and migrate vitest suites; `node --test 'deploy/*.test.ts'`; coverage

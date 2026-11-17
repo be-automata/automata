@@ -1,7 +1,11 @@
 # #652 gate log
 
 All commands were run from the worktree root on 2026-11-17, against local Docker Postgres (the shared
-suite's throwaway database). Final tree: `db820fa4` (code) + `b6a30fdf` (spec text).
+suite's throwaway database). First run on `db820fa4` (code) + `b6a30fdf` (spec text). On `287ea1a3`
+(the pre-landing review fixes: the organization-scoped 32-hex effect key) the tsc, lint-migrations,
+migrate, shared and deploy-test lanes were rerun under the ship evidence ledger with the same exits
+and counts, and prettier was rechecked on the changed files. `287ea1a3` touched no schema, lockfile
+or package with a lint task, so the install, lint and schema-drift rows stand from the first run.
 
 | Command                                                                                              | Exit | Result                                          |
 | ---------------------------------------------------------------------------------------------------- | ---- | ----------------------------------------------- |
@@ -33,7 +37,8 @@ the repo's `node_modules` or lockfile.
 | 4   | `control-effects.test.ts` › "AC4: a new digest is a new key and a second effect" and `control-effects.crash.test.ts` › "AC4: a changed output digest produces a second effect"                                                                |
 | 5   | `control-effects.crash.test.ts` › "AC5: with reconcile disabled the same crash uploads a second copy" (two marker files)                                                                                                                      |
 
-Verbose run of both files: 22/22 passed, exit 0.
+Verbose run of both files: 22/22 passed, exit 0 (on `287ea1a3`, inside the ledger's shared run:
+17 + 5 = 22/22).
 
 ## Negative controls
 
