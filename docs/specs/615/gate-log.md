@@ -1,7 +1,8 @@
 # #615 gate log
 
-Branch `fix/615-forged-capability-flake`, base `origin/main` @ `c596e47f` (unchanged at ship
-time, so `git merge --no-ff origin/main` was a no-op). Machine: macOS, Node 22.23.4, vitest
+Branch `fix/615-forged-capability-flake`, cut from `origin/main` @ `c596e47f`. Before the push,
+`git merge --no-ff origin/main` brought in `65beb636` (#676, another area), and every gate below
+was re-run on that merged tree. Machine: macOS, Node 22.23.4, vitest
 3.2.7, Docker Postgres for www tests. Run 2026-11-17.
 
 ## Before: the old forgery was sometimes the real capability (AC-4)
@@ -72,7 +73,7 @@ This matches the CI failure on #613 (run 43650292577, `expected 200 to be 401`).
   Tests  1 passed | 9 skipped (10)
   ```
 
-## Gates (AC-5), on the final tree
+## Gates (AC-5), on the merged tree
 
 | Gate                                                                                             | Exit | Detail                                                                      |
 | :----------------------------------------------------------------------------------------------- | :--- | :-------------------------------------------------------------------------- |
@@ -80,15 +81,21 @@ This matches the CI failure on #613 (run 43650292577, `expected 200 to be 401`).
 | `pnpm turbo lint`                                                                                | 0    | 2/2 tasks                                                                   |
 | `pnpm turbo format-check`                                                                        | 0    | 18/18 tasks                                                                 |
 | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism "src/app/api/addon-callback"` | 0    | 10/10 tests                                                                 |
-| `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` (full)                       | 0    | 335 files passed, 1 skipped; 4459 tests passed, 9 skipped, 0 failed (970 s) |
+| `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` (full)                       | 0    | 336 files passed, 1 skipped; 4481 tests passed, 9 skipped, 0 failed (577 s) |
 
-The full www suite needed 3 runs. The machine was shared with other agents' test suites (load
-average 17-37). Two earlier runs failed in files this change does not touch:
-`src/server-lib/audit/loop-breaker.test.ts` hit 5000 ms timeouts in 3 tests, and one run also
-had a `supersede-sweep.order.test.ts` failure. Both files pass alone: `loop-breaker.test.ts` 35/35
-in 3 of 3 runs, `supersede-sweep.order.test.ts` 3/3. The third full run passed with exit 0.
+Load-induced timeouts in untouched files. The machine was shared with other agents' test suites
+(load average 15-37), and full runs before the final green one hit 5000 ms timeouts in files this
+change does not touch:
+
+- before the merge: `src/server-lib/audit/loop-breaker.test.ts` (3 tests, twice) and
+  `supersede-sweep.order.test.ts` (1 test, once). The third pre-merge run passed (4459/4459).
+- after the merge: `src/app/api/self-heal/[owner]/[repo]/route.test.ts` (1 test, once). The next
+  run passed (4481/4481, the row above).
+
+Each of those files passes alone: `loop-breaker.test.ts` 35/35 in 3 of 3 runs,
+`supersede-sweep.order.test.ts` 3/3, the self-heal tests 282/282 in 3 of 3 runs.
 
 ## Scope (AC-6)
 
-`git diff --stat origin/main`: `apps/www/src/app/api/addon-callback/[capability]/route.test.ts`,
+`git diff --stat origin/main` (after the merge): `apps/www/src/app/api/addon-callback/[capability]/route.test.ts`,
 `docs/specs/615/spec.md`, `docs/specs/615/gate-log.md`. No production file changed.
