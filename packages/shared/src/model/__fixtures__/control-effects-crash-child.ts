@@ -24,7 +24,9 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function killSelf(): never {
+/** Prints the sentinel the driver checks, so a spawn timeout cannot pass as a kill. */
+function killSelf(point: string): never {
+  process.stderr.write(`killing at ${point}\n`);
   process.kill(process.pid, "SIGKILL");
   throw new Error("unreachable: SIGKILL did not end the process");
 }
@@ -39,9 +41,9 @@ function fileTarget(
 ): EffectTarget<string> {
   return {
     async apply(key) {
-      if (opts.killPoint === "before-apply") killSelf();
+      if (opts.killPoint === "before-apply") killSelf("before-apply");
       writeFileSync(join(dir, `${randomUUID()}.marker`), key);
-      if (opts.killPoint === "after-apply") killSelf();
+      if (opts.killPoint === "after-apply") killSelf("after-apply");
     },
     async findByMarker(key) {
       if (!opts.reconcile) return false;

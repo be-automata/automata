@@ -27,8 +27,11 @@ export interface EffectTarget<P> {
    * `apply` settles.
    */
   apply(key: string, payload: P, signal: AbortSignal): Promise<void>;
-  /** True when an effect carrying `key` as its marker already exists. */
-  findByMarker(key: string): Promise<boolean>;
+  /**
+   * True when an effect carrying `key` as its marker already exists. Runs under
+   * the same lock and `signal` as `apply`, and must honour it too.
+   */
+  findByMarker(key: string, signal: AbortSignal): Promise<boolean>;
 }
 
 export interface EffectKeyParts {
@@ -46,8 +49,11 @@ export interface RunEffectInput<P> extends EffectKeyParts {
   payload: P;
   /** How long a delivery waits behind the key's lock. Default 10 s. */
   lockTimeoutMs?: number;
-  /** Aborts the signal handed to `apply` after this long. Default 60 s. */
-  applyTimeoutMs?: number;
+  /**
+   * Deadline for the target calls (`findByMarker`, then `apply`): one signal,
+   * aborted after this long. Default 60 s.
+   */
+  targetTimeoutMs?: number;
 }
 
 export class ControlEffectKeyCollisionError extends Error {
@@ -58,15 +64,16 @@ export class ControlEffectKeyCollisionError extends Error {
 }
 
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
-const DEFAULT_APPLY_TIMEOUT_MS = 60_000;
+const DEFAULT_TARGET_TIMEOUT_MS = 60_000;
 const KEY_LENGTH = 16;
 
 /**
  * `sha256(mission|step|effect|outputDigest)` as hex, first 16 chars. Each part
  * must be non-empty and free of `|`, so two different tuples never join alike.
- * `organizationId` is not part of the key: two organizations with an identical
- * tuple collide (`ControlEffectKeyCollisionError`). That is harmless while the
- * mission is a globally unique run id.
+ * `organizationId` is not part of the key, so `mission` must be a
+ * server-generated, globally unique id (today the parent run id), never tenant
+ * input: two organizations with an identical tuple would collide
+ * (`ControlEffectKeyCollisionError`).
  */
 export function effectKey(parts: EffectKeyParts): string {
   const values = [parts.mission, parts.step, parts.effect, parts.outputDigest];
@@ -128,21 +135,26 @@ async function insertIntent(
  * row is completed as reconciled.
  *
  * Exactly-once is preferred over liveness. The lock is held until `apply`
- * returns or throws and is never released mid-effect; `apply` gets an
- * `AbortSignal` that fires after `applyTimeoutMs`, and the target must honour
- * it. A hung holder only delays waiters: they throw at `lockTimeoutMs`, and the
+ * returns or throws and is never released mid-effect; `findByMarker` and
+ * `apply` share an `AbortSignal` that fires after `targetTimeoutMs`, and the
+ * target must honour it. A hung holder only delays waiters: they throw at `lockTimeoutMs`, and the
  * intent stays for a later delivery. A failing `apply` or `findByMarker`
  * propagates and leaves the intent. Residual risk: a holder partitioned from the
  * database but still reaching its target loses its connection (the lock goes
  * with it) while its `apply` may land late.
+ *
+ * Pool cost: each running effect holds one pooled connection in an open
+ * transaction for up to `targetTimeoutMs`, and each delivery waiting on the
+ * lock holds another for up to `lockTimeoutMs`. Callers bound how many effects
+ * run at once per process so unrelated queries keep a connection.
  */
 export async function runEffect<P>(
   input: RunEffectInput<P>,
 ): Promise<{ key: string; outcome: RunEffectOutcome }> {
   const lockMs = input.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
-  const applyMs = input.applyTimeoutMs ?? DEFAULT_APPLY_TIMEOUT_MS;
+  const targetMs = input.targetTimeoutMs ?? DEFAULT_TARGET_TIMEOUT_MS;
   assertPositiveInt("lockTimeoutMs", lockMs);
-  assertPositiveInt("applyTimeoutMs", applyMs);
+  assertPositiveInt("targetTimeoutMs", targetMs);
   const key = effectKey(input);
   await insertIntent(input.db, key, input);
   const outcome = await input.db.transaction(async (tx) => {
@@ -159,13 +171,10 @@ export async function runEffect<P>(
       throw new Error(`control effect ${key} vanished after its intent`);
     if (!sameEffect(row, input)) throw new ControlEffectKeyCollisionError(key);
     if (row.doneAt) return "already_done" as const;
-    const reconciled = await input.target.findByMarker(key);
+    const signal = AbortSignal.timeout(targetMs);
+    const reconciled = await input.target.findByMarker(key, signal);
     if (!reconciled) {
-      await input.target.apply(
-        key,
-        input.payload,
-        AbortSignal.timeout(applyMs),
-      );
+      await input.target.apply(key, input.payload, signal);
     }
     await tx
       .update(controlEffects)

@@ -55,12 +55,12 @@ Decisions (2026-11-16, owner + TL, recorded on the issue body):
    - `effect_intent` = a row with `done_at IS NULL`; `effect_done` = the row with `done_at` set.
 3. **`interface EffectTarget<P>`** — injected, never imported by the ledger:
    `apply(key: string, payload: P, signal: AbortSignal): Promise<void>` carries `key` as the target's marker;
-   `findByMarker(key: string): Promise<boolean>`.
+   `findByMarker(key: string, signal: AbortSignal): Promise<boolean>` (same deadline).
 4. **`runEffect<P>(input: RunEffectInput<P>)`** → `{ key, outcome }` with
    `type RunEffectOutcome = "applied" | "reconciled" | "already_done"`. Input: `db: DB` (never a
    transaction handle: step 1 must commit on its own; `DB` has `$client`, a drizzle tx does not, so
    passing one fails to compile), `target`, `organizationId`, `mission`, `step`, `effect`,
-   `outputDigest`, `payload`, optional `lockTimeoutMs` / `applyTimeoutMs` (bounded
+   `outputDigest`, `payload`, optional `lockTimeoutMs` / `targetTimeoutMs` (bounded
    defaults).
    1. Insert the intent (`ON CONFLICT (key) DO NOTHING RETURNING key`) as its own statement, so it
       is committed **before** the effect.
@@ -138,7 +138,7 @@ Automation run); a restart sweep that lists pending intents without a redelivery
 
 - `runEffect` holds a row lock across the target call and never releases it mid-effect. A hung
   holder only delays waiters, who throw at `lock_timeout` and leave the intent for a later
-  delivery; `apply` gets an `AbortSignal` after `applyTimeoutMs` and the target must honour it. The
+  delivery; `apply` gets an `AbortSignal` after `targetTimeoutMs` and the target must honour it. The
   residual risk is a holder partitioned from the database but still reaching its target: its
   connection may drop while `apply` lands late. Documented on the function.
 - Drive's `files.list` search on `appProperties` may be eventually consistent: a `findByMarker`

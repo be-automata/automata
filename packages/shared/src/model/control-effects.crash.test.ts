@@ -117,6 +117,7 @@ async function readRow(s: Scenario) {
 async function crashAt(s: Scenario, killPoint: KillPoint, markers: number) {
   const d = await deliver(s, { killPoint });
   expect(d.killed, d.stderr).toBe(true);
+  expect(d.stderr).toContain(`killing at ${killPoint}`);
   expect(markerCount(s)).toBe(markers);
 }
 

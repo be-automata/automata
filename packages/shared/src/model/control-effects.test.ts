@@ -27,6 +27,7 @@ function memoryTarget() {
     gate: null as Promise<void> | null,
     signals: [] as AbortSignal[],
     honourSignal: false,
+    hangFind: false,
     async apply(key: string, payload: string, signal: AbortSignal) {
       target.signals.push(signal);
       if (target.gate) await target.gate;
@@ -42,8 +43,13 @@ function memoryTarget() {
       target.applied.push(payload);
       target.markers.add(key);
     },
-    async findByMarker(key: string) {
+    async findByMarker(key: string, signal: AbortSignal) {
       if (target.failFind) throw new Error("find failed");
+      if (target.hangFind) {
+        await new Promise<void>((_, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason)),
+        );
+      }
       return target.markers.has(key);
     },
   };
@@ -51,15 +57,27 @@ function memoryTarget() {
 }
 
 /** A promise with its resolver, for gating a step from the test. */
-function deferred(): { promise: Promise<void>; resolve: () => void } {
+function deferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+} {
   let resolve: () => void = () => {};
-  const promise = new Promise<void>((r) => (resolve = r));
-  return { promise, resolve };
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
+
+/** Thrown by `holdLock` to roll its transaction back on purpose. */
+class Rollback extends Error {}
 
 /**
  * Takes the row lock of `key` in its own transaction, runs `whileHeld`, then
- * holds it until `release()`; the transaction rolls back.
+ * holds it until `release()`; the transaction rolls back. A real error before
+ * the lock is held rejects instead of hanging the test.
  */
 async function holdLock(
   key: string,
@@ -77,9 +95,11 @@ async function holdLock(
       await whileHeld();
       locked.resolve();
       await released.promise;
-      throw new Error("rollback");
+      throw new Rollback();
     })
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+      if (!(error instanceof Rollback)) locked.reject(error);
+    });
   await locked.promise;
   return { release: released.resolve, done };
 }
@@ -245,7 +265,7 @@ describe("runEffect (#652 exactly-once control effects)", () => {
 
   it("rejects non-positive timeouts before touching the database", async () => {
     const e = await newEffect();
-    for (const bad of [{ lockTimeoutMs: 0 }, { applyTimeoutMs: 0 }]) {
+    for (const bad of [{ lockTimeoutMs: 0 }, { targetTimeoutMs: 0 }]) {
       await expect(e.call(memoryTarget(), bad)).rejects.toBeInstanceOf(
         RangeError,
       );
@@ -277,12 +297,21 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     expect(target.applied).toEqual([]);
   });
 
-  it("hands apply a signal that aborts after applyTimeoutMs; the error propagates and the intent stays", async () => {
+  it("hands apply a signal that aborts after targetTimeoutMs; the error propagates and the intent stays", async () => {
     const e = await newEffect();
     const target = memoryTarget();
     target.honourSignal = true;
-    await expect(e.call(target, { applyTimeoutMs: 50 })).rejects.toBeDefined();
+    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toBeDefined();
     expect(target.signals[0]?.aborted).toBe(true);
+    expect((await readRow(e.key))?.doneAt).toBeNull();
+  });
+
+  it("bounds findByMarker by the same deadline; the error propagates and nothing is applied", async () => {
+    const e = await newEffect();
+    const target = memoryTarget();
+    target.hangFind = true;
+    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toBeDefined();
+    expect(target.applied).toEqual([]);
     expect((await readRow(e.key))?.doneAt).toBeNull();
   });
 });
