@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CELL_MIN_TTL_MS } from "@terragon/types/cell";
+import { CELL_MIN_TTL_MS, CELL_RUN_TTL_MS } from "@terragon/types/cell";
 
 import type { CellPolicyProfile } from "../cell-policy/cell-policy";
 
 import {
   buildCellCreatePlan,
+  CELL_DAEMON_TOKEN_PLACEHOLDER,
   CellPlanError,
   type CellCreatePlanDeps,
   type CellCreatePlanInput,
@@ -49,10 +50,10 @@ function input(patch: Partial<CellCreatePlanInput> = {}): CellCreatePlanInput {
     stepKey: "step-1",
     attempt: 2,
     ttlMs: 600_000,
-    egressRefs: ["test/npm@1", "test/wild@1"],
+    egressRefs: ["test/npm@1", "test/pypi@1"],
     egress: { brokerHost: BROKER, catalog: CATALOG },
     profile: profile(),
-    tags: { worker: "w1", epoch: "e1" },
+    tags: { worker: "w1", epoch: "e1", deployment: BROKER },
     resources: { cpu: 2, memoryMiB: 2048 },
     modelToken: MODEL_TOKEN,
     runtime: "runc",
@@ -112,7 +113,7 @@ describe("buildCellCreatePlan", () => {
   it("S1-c: networkPolicy is exactly the rendered policy", async () => {
     const deps = makeDeps();
     const plan = await buildCellCreatePlan(input(), deps);
-    const set = compileCellEgress(["test/npm@1", "test/wild@1"], {
+    const set = compileCellEgress(["test/npm@1", "test/pypi@1"], {
       brokerHost: BROKER,
       catalog: CATALOG,
     });
@@ -151,9 +152,15 @@ describe("buildCellCreatePlan", () => {
     ["resources.memoryMiB", { resources: { cpu: 2, memoryMiB: -1 } }],
     ["resources.cpu", { resources: { cpu: Number.NaN, memoryMiB: 2048 } }],
     ["stepKey", { stepKey: "" }],
-    ["tags.worker", { tags: { worker: " ", epoch: "e1" } }],
-    ["tags.epoch", { tags: { worker: "w1", epoch: "" } }],
+    ["tags.worker", { tags: { worker: " ", epoch: "e1", deployment: BROKER } }],
+    ["tags.epoch", { tags: { worker: "w1", epoch: "", deployment: BROKER } }],
+    [
+      "tags.deployment",
+      { tags: { worker: "w1", epoch: "e1", deployment: " " } },
+    ],
     ["modelToken", { modelToken: "\t" }],
+    ["daemonToken", { daemonToken: " " }],
+    ["daemonToken", { daemonToken: "" }],
   ] as const)(
     "%s out of range throws RangeError before the guard and mint",
     async (_field, patch) => {
@@ -221,12 +228,79 @@ describe("buildCellCreatePlan", () => {
       automata: "cell",
       worker: "w1",
       epoch: "e1",
+      deployment: BROKER,
       stepKey: "step-1",
       attempt: "2",
       expiresAt: String(EXPIRES.getTime()),
     });
     expect(plan.ttlMs).toBe(600_000);
     expect(plan.resources).toEqual({ cpu: 2, memoryMiB: 2048 });
+  });
+
+  describe("daemon entry, run TTL and wildcards (#656 PR-B)", () => {
+    const DAEMON_TOKEN = "daemon-secret-token";
+
+    it("adds the daemon entry with its exact shape and exact path", async () => {
+      const plan = await buildCellCreatePlan(
+        input({ daemonToken: DAEMON_TOKEN }),
+        makeDeps(),
+      );
+      expect(plan.vault.map((v) => v.name)).toEqual([
+        "model",
+        "broker",
+        "daemon",
+      ]);
+      expect(plan.vault[2]).toEqual({
+        name: "daemon",
+        hosts: [BROKER],
+        paths: ["/api/daemon-event"],
+        auth: "apiKey",
+        header: "X-Daemon-Token",
+        credential: DAEMON_TOKEN,
+        placeholder: CELL_DAEMON_TOKEN_PLACEHOLDER,
+      });
+      expect(CELL_DAEMON_TOKEN_PLACEHOLDER).not.toContain(DAEMON_TOKEN);
+      expect(plan.vault[2]?.paths?.some((p) => p.includes("*"))).toBe(false);
+    });
+
+    it("has no daemon entry without a daemonToken", async () => {
+      const plan = await buildCellCreatePlan(input(), makeDeps());
+      expect(plan.vault.map((v) => v.name)).toEqual(["model", "broker"]);
+    });
+
+    it("refuses a wildcard egress set before mintBearer", async () => {
+      const deps = makeDeps();
+      const p = buildCellCreatePlan(
+        input({ egressRefs: ["test/npm@1", "test/wild@1"] }),
+        deps,
+      );
+      await expect(p).rejects.toBeInstanceOf(CellPlanError);
+      await expect(p).rejects.toMatchObject({
+        code: "egress_wildcard",
+        message: "egress_wildcard",
+      });
+      expect(deps.mintBearer).not.toHaveBeenCalled();
+    });
+
+    it("accepts a ttl of exactly CELL_RUN_TTL_MS and refuses one over it before mint", async () => {
+      const ok = await buildCellCreatePlan(
+        input({ ttlMs: CELL_RUN_TTL_MS }),
+        makeDeps(),
+      );
+      expect(ok.ttlMs).toBe(CELL_RUN_TTL_MS);
+      const deps = makeDeps();
+      await expect(
+        buildCellCreatePlan(input({ ttlMs: CELL_RUN_TTL_MS + 1 }), deps),
+      ).rejects.toBeInstanceOf(RangeError);
+      expect(deps.mintBearer).not.toHaveBeenCalled();
+    });
+
+    it("a blank daemonToken is refused before mint without echoing it", async () => {
+      const deps = makeDeps();
+      const p = buildCellCreatePlan(input({ daemonToken: "  " }), deps);
+      await expect(p).rejects.toThrow("daemonToken must not be blank");
+      expect(deps.mintBearer).not.toHaveBeenCalled();
+    });
   });
 
   it("S1-f: a bearer refusal keeps its reason but never puts it in the message", async () => {
@@ -246,11 +320,18 @@ describe("buildCellCreatePlan", () => {
   });
 
   it("tags carry only the named keys, even from a wider tags object", async () => {
-    const wide = { worker: "w1", epoch: "e1", automata: "other", extra: "x" };
+    const wide = {
+      worker: "w1",
+      epoch: "e1",
+      deployment: BROKER,
+      automata: "other",
+      extra: "x",
+    };
     const plan = await buildCellCreatePlan(input({ tags: wide }), makeDeps());
     expect(Object.keys(plan.tags).sort()).toEqual([
       "attempt",
       "automata",
+      "deployment",
       "epoch",
       "expiresAt",
       "stepKey",
@@ -262,7 +343,7 @@ describe("buildCellCreatePlan", () => {
   it("the rendered policy does not depend on the order of egressRefs", async () => {
     const a = await buildCellCreatePlan(input(), makeDeps());
     const b = await buildCellCreatePlan(
-      input({ egressRefs: ["test/wild@1", "test/npm@1"] }),
+      input({ egressRefs: ["test/pypi@1", "test/npm@1"] }),
       makeDeps(),
     );
     expect(b.networkPolicy).toEqual(a.networkPolicy);

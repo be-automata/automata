@@ -24,6 +24,9 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
+import { cellBrokerHost } from "@/server-lib/compute/cell-gate";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
+
 import { POST } from "./route";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
@@ -186,7 +189,9 @@ describe("POST /api/daemon/cell-plan", () => {
         attempt: "1",
         worker: "w1",
         epoch: "7",
+        deployment: cellBrokerHost(),
       });
+      expect(plan.ttlMs).toBe(CELL_RUN_TTL_MS);
       expect(plan.networkPolicy.defaultAction).toBe("deny");
       expect(plan.vault.map((v: { name: string }) => v.name).sort()).toEqual([
         "broker",

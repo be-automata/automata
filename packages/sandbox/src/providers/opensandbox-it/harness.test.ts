@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeIptablesSave, probeArgv } from "./harness";
+import {
+  encodeSecret,
+  normalizeIptablesSave,
+  parseProbeOutput,
+  probeArgv,
+} from "./harness";
 
 describe("normalizeIptablesSave", () => {
   it("keeps rules and user chains, drops headers, policies and counters", () => {
@@ -63,5 +68,61 @@ describe("probeArgv", () => {
       { kind: "https", url: "https://h/", marker: "osbit-canary-y" },
     ]);
     expect(argv.join(" ")).not.toContain("osbit-canary-");
+  });
+});
+
+describe("https_headers probe", () => {
+  const spec = {
+    kind: "https_headers" as const,
+    url: "https://h/anything/daemon-event",
+    headers: { "X-Daemon-Token": "PLACEHOLDER-P" },
+    markers: ["osbit-canary-c", "PLACEHOLDER-P"],
+  };
+
+  it("builds a wire spec with base64 markers and the headers as given", () => {
+    const argv = probeArgv([spec]);
+    expect(JSON.parse(argv[3] ?? "")).toEqual([
+      {
+        kind: "https_headers",
+        url: spec.url,
+        headers: spec.headers,
+        markers_b64: [
+          encodeSecret("osbit-canary-c"),
+          encodeSecret("PLACEHOLDER-P"),
+        ],
+      },
+    ]);
+  });
+
+  it("never puts a marker in the argv in clear and sends a POST", () => {
+    const joined = probeArgv([spec]).join(" ");
+    expect(joined).not.toContain("osbit-canary-c");
+    expect(joined).toContain('method="POST"');
+  });
+
+  it("parses one boolean per marker and nothing else from the body", () => {
+    const out = parseProbeOutput(
+      JSON.stringify([
+        {
+          kind: "https_headers",
+          ok: true,
+          status: 200,
+          markersFound: [true, false],
+          body: "SHOULD-NOT-SURFACE",
+        },
+      ]),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ status: 200, markersFound: [true, false] });
+    expect(JSON.stringify(out)).not.toContain("SHOULD-NOT-SURFACE");
+  });
+
+  it("drops a markersFound that is not all booleans", () => {
+    const [r] = parseProbeOutput(
+      JSON.stringify([
+        { kind: "https_headers", ok: true, markersFound: [true, "x"] },
+      ]),
+    );
+    expect(r?.markersFound).toBeUndefined();
   });
 });

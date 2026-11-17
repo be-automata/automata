@@ -215,6 +215,18 @@ export type ProbeSpec =
       /** Plain marker; encoded into argv, and only `bodyHasMarker` comes back. */
       marker?: string;
     }
+  /**
+   * POST with the given request headers and an empty body. Only a boolean per
+   * marker comes back (computed in the guest), never the body. Markers go into
+   * argv base64-encoded (execd logs the command), so a secret may be one; the
+   * header values are sent as given, so keep secrets out of them.
+   */
+  | {
+      kind: "https_headers";
+      url: string;
+      headers: Record<string, string>;
+      markers: string[];
+    }
   /** Status only, no body. `@gateway` in the host or url is the default gateway. */
   | { kind: "http"; url: string }
   | { kind: "gateway" }
@@ -235,6 +247,8 @@ export interface ProbeResult {
   ms?: number;
   ips?: string[];
   bodyHasMarker?: boolean;
+  /** https_headers: per marker, whether the response body held it. */
+  markersFound?: boolean[];
   gateway?: string | null;
   found?: boolean[];
   envNames?: string[];
@@ -316,6 +330,27 @@ def fetch(url, marker):
     return out
 
 
+def fetch_headers(url, headers, markers_b64):
+    sent = {"user-agent": "osbit-probe"}
+    sent.update(headers)
+    # A public echo rate-limits concurrent probes (429) or briefly 503s; retry
+    # those only, a bounded number of times. Any other status is the result.
+    for attempt in range(4):
+        req = urllib.request.Request(sub(url), data=b"", method="POST", headers=sent)
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
+                body, status = r.read(200000), r.status
+        except urllib.error.HTTPError as e:
+            body, status = e.read(200000), e.code
+        except Exception as e:
+            return {"ok": False, "err": kind_of(e)}
+        if status not in (429, 503) or attempt == 3:
+            break
+        time.sleep(1.5 * (attempt + 1))
+    found = [base64.b64decode(m) in body for m in markers_b64]
+    return {"ok": True, "status": status, "markersFound": found}
+
+
 def canary_scan(canaries_b64, pattern):
     needles = [base64.b64decode(c) for c in canaries_b64]
     found = [False] * len(needles)
@@ -359,6 +394,8 @@ def run(spec):
     if k == "https":
         m = spec.get("marker_b64")
         return fetch(spec["url"], base64.b64decode(m) if m else None)
+    if k == "https_headers":
+        return fetch_headers(spec["url"], spec["headers"], spec["markers_b64"])
     if k == "http":
         return fetch(spec["url"], None)
     if k == "gateway":
@@ -426,6 +463,13 @@ export function probeArgv(probes: readonly ProbeSpec[]): string[] {
           ? rest
           : { ...rest, marker_b64: encodeSecret(marker) };
       }
+      case "https_headers":
+        return {
+          kind: probe.kind,
+          url: probe.url,
+          headers: probe.headers,
+          markers_b64: probe.markers.map(encodeSecret),
+        };
       case "canary_scan":
         return {
           kind: probe.kind,
@@ -489,6 +533,7 @@ export function parseProbeOutput(stdout: string): ProbeResult[] {
       ms: optionalNumber(o.ms),
       ips: stringArray(o.ips),
       bodyHasMarker: optionalBoolean(o.bodyHasMarker),
+      markersFound: booleanArray(o.markersFound),
       gateway:
         typeof o.gateway === "string" || o.gateway === null
           ? o.gateway
