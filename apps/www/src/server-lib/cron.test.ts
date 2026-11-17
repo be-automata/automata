@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   purge: vi.fn(),
   evidenceCheck: vi.fn(),
   reconcile: vi.fn(),
+  busSweep: vi.fn(),
   dueThreads: vi.fn(async (): Promise<unknown[]> => []),
   due: vi.fn(async (): Promise<unknown[]> => []),
   runAutomation: vi.fn(),
@@ -72,6 +73,9 @@ vi.mock("@/server-lib/audit/self-heal-cron", () => ({
 }));
 vi.mock("@/server-lib/knowledge/reconcile-sweep", () => ({
   runKnowledgeReconcileSweep: h.reconcile,
+}));
+vi.mock("@/server-lib/agent-bus/delivery", () => ({
+  runAgentBusSweep: h.busSweep,
 }));
 vi.mock("@/server-lib/knowledge/purge-sweep", () => ({
   runKnowledgePurgeSweep: h.purge,
@@ -467,5 +471,62 @@ describe("runScheduledTasksCron knowledge reconcile sweep", () => {
     const { runScheduledCron } = await import("./cron");
     await runScheduledCron("*/1 * * * *");
     expect(h.reconcile).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** #660 (D1): the agent-bus sweep rides the every-minute tick, after the reconcile sweep, fail-soft. */
+describe("runScheduledTasksCron agent-bus sweep", () => {
+  let runScheduledTasksCron: () => Promise<void>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ runScheduledTasksCron } = await import("./cron"));
+    h.busSweep.mockReset();
+    h.busSweep.mockResolvedValue(undefined);
+    h.reconcile.mockReset();
+    h.reconcile.mockResolvedValue(undefined);
+    h.dueThreads.mockReset();
+    h.dueThreads.mockResolvedValue([]);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("runs the sweep once, after the due-threads step and the reconcile sweep", async () => {
+    h.dueThreads.mockImplementation(async () => {
+      h.order.push("due-threads");
+      return [];
+    });
+    h.reconcile.mockImplementation(async () => {
+      h.order.push("reconcile");
+    });
+    h.busSweep.mockImplementation(async () => {
+      h.order.push("agent-bus");
+    });
+    h.order.length = 0;
+    await runScheduledTasksCron();
+    expect(h.busSweep).toHaveBeenCalledTimes(1);
+    expect(h.order.slice(-3)).toEqual([
+      "due-threads",
+      "reconcile",
+      "agent-bus",
+    ]);
+  });
+
+  it("still runs the sweep when the due-threads step throws", async () => {
+    h.dueThreads.mockRejectedValue(new Error("db down"));
+    await expect(runScheduledTasksCron()).rejects.toThrow("db down");
+    expect(h.busSweep).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing sweep is logged and swallowed", async () => {
+    h.busSweep.mockRejectedValue(new Error("bus down"));
+    await expect(runScheduledTasksCron()).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(
+      "[cron:agent-bus] sweep failed (non-fatal)",
+      expect.any(Error),
+    );
   });
 });
