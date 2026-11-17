@@ -118,6 +118,11 @@ snapshot() {
 
 # shellcheck disable=SC2329 # invoked through `check` or a trap
 teardown_probe() {
+  # Keep the server's log tail for a failed run (lines naming a key dropped).
+  if [ -n "${out_dir:-}" ] && [ -d "$out_dir" ]; then
+    dk logs --tail 300 "$SERVER_NAME" 2>&1 | grep -v -i -E 'api[_-]?key|authorization|token' \
+      >"$out_dir/server.log" || true
+  fi
   dk rm -f -v "$SERVER_NAME" >/dev/null 2>&1 || true
   dk volume rm -f "$DATA_VOLUME" >/dev/null 2>&1 || true
   if [ -d "$P0" ]; then

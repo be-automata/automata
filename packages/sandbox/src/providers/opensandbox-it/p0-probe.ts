@@ -314,8 +314,11 @@ async function enforcedCell(
     rep.add("PASS", "self-check-blocked", "adapter create gated on exit 3");
     return cellId;
   } catch (error) {
-    const code = error instanceof CellProviderError ? error.code : "other";
-    rep.add("FAIL", "self-check-blocked", `create failed: ${code}`);
+    const detail =
+      error instanceof CellProviderError
+        ? `${error.code} op=${error.op}${error.status ? ` status=${error.status}` : ""}`
+        : "other";
+    rep.add("FAIL", "self-check-blocked", `create failed: ${detail}`);
     return null;
   }
 }
@@ -385,10 +388,24 @@ async function negativeControl(
     }),
     signal: AbortSignal.timeout(60_000),
   });
-  const body = (await res.json().catch(() => ({}))) as { id?: unknown };
+  const body = (await res.json().catch(() => ({}))) as {
+    id?: unknown;
+    code?: unknown;
+    message?: unknown;
+  };
   const id = typeof body.id === "string" ? body.id : "";
   if (id === "") {
-    rep.add("FAIL", "negative-control-4of4", `create status ${res.status}`);
+    // The server's error code and message say why; neither holds a secret.
+    const why = [body.code, body.message]
+      .filter((v): v is string => typeof v === "string")
+      .join(": ")
+      .replace(/[^\x20-\x7e]/g, " ")
+      .slice(0, 300);
+    rep.add(
+      "FAIL",
+      "negative-control-4of4",
+      `create status ${res.status}${why ? ` (${why})` : ""}`,
+    );
     return;
   }
   try {
