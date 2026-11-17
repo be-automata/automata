@@ -90,3 +90,18 @@ There were no High findings: 3 Medium and 4 Low.
 - shared: 1732 passed plus 6a, which failed on the stale probe; after the fix, `cell-authority` passed 59/59 three runs in a row;
 - the live `OPENSANDBOX_IT` suite: 10/10;
 - tsc, `tsc-check --force`, `lint --force`.
+
+## Roborev job 1253 (08c1b19..b0eddd5)
+
+Verdict: **Pass**, one Medium, no High, no Low (the log lists no other finding, so there are no new follow-ups from it).
+
+**Medium (fixed):** with `replaceOthers`, a slow request R1 that finishes after its retry R2 (same `requestId`) replays the open and deletes B2, the bearer the worker received, so every broker call from that cell is refused. **Fix: an open sequence fence.** `cell_step.open_seq` (same unapplied migration, `NOT NULL DEFAULT 0`) is incremented by every `openNextAttempt` under the step lock and returned as `openSeq`. `mintBearer({ replaceOthers: { openSeq } })` refuses with `superseded` (no delete, no insert) once a newer open exists. `cell-plan` answers `409 superseded` for it. DB tests cover the reviewer's scenario, the in-order replay and a non-replay advance.
+
+**Gates after the fence**, outside the Claude sandbox, all exit 0:
+
+- migrate: 45
+- shared: 1736
+- www: 4500
+- lint-migrations, tsc, `tsc-check --force`, `lint --force`
+
+The adapter is unchanged, so the live suite from the `/simplify` run (10/10) still stands.

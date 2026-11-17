@@ -251,6 +251,17 @@ The route exports only `dynamic` and `POST`: Next's app-route export check forbi
 - `spec-d.md:192` says PR-C turns the lease rule on; that is being corrected in spec-d. PR-C passes `staleMs: null`; the rule turns on only after PR-D's and PR-E's stamps ship together.
 - **PR-E:** reuse a `requestId` only for an HTTP retry of a plan fetch whose response was lost **and before any create was sent for it**. Once a create has gone out, a new fetch uses a new `requestId` (a new attempt), or two cells would share one attempt. A replay's plan carries a new bearer; the earlier one is revoked.
 
+## Addendum: the open sequence fence (roborev job 1253)
+
+This supersedes the "one live bearer per attempt on a replay" mechanics in Contract 2 and step 12 above (`revokeAttemptBearers` was removed; the nonce is required).
+
+- **Why.** With a replacing mint alone, a slow request R1 that finishes AFTER its retry R2 (same `requestId`) replays the open and deletes B2, the bearer the worker actually received.
+- **Column.** `open_seq integer NOT NULL DEFAULT 0` (metadata-only on PG11+), added in the same unapplied migration `2026-11-20-cell-step-open-nonce.sql` (still `-- migrate:expand`) and `cellStep.openSeq`.
+- **Open.** Every `openNextAttempt` (advance or replay) increments `open_seq` under the step's advisory lock and returns it: `{ ok: true, attempt, openSeq, replayed? }`.
+- **Mint.** `mintBearer({ replaceOthers: { openSeq } })` runs in one transaction under the same lock. If `cell_step.open_seq !== openSeq` it returns `{ ok: false, reason: "superseded" }` with no delete and no insert; otherwise it deletes the attempt's other bearers and inserts the new one.
+- **Route.** `cell-plan` passes `opened.openSeq` to the mint; a superseded mint answers `409 superseded` (the worker already moved on to the newer response).
+- **Tests (shared, DB).** (a) R1 opens (seq 1), R2 replays (seq 2) and mints B2, then R1's mint is `superseded`, B2 verifies and exactly one bearer row remains; (b) in order, R1 mints B1 then R2 replays and mints B2: B1 dead, B2 live; (c) a non-replay advance still fences the old attempt's bearers; concurrent replays leave exactly one live bearer.
+
 ## Premises from the brief that did not hold
 
 - `effectBudget: null` is `route.ts:144`, not `:143` (`:143` is `stepTimeoutMs`).

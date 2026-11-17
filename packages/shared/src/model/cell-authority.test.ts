@@ -704,10 +704,10 @@ async function waitUntilBlocked(): Promise<void> {
 describe("#656 PR-A openNextAttempt", () => {
   it("1 opens 1 with a lease, then 2, and fences attempt 1", async () => {
     const s = await newStep(null, null);
-    expect(await s.next()).toEqual({ ok: true, attempt: 1 });
+    expect(await s.next()).toMatchObject({ ok: true, attempt: 1 });
     expect((await row(s.stepKey)).fresh).toBe(true);
     const b1 = await s.bearer(1);
-    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
+    expect(await s.next()).toMatchObject({ ok: true, attempt: 2 });
     const v = await verifyBearer({ db, token: b1 });
     expect(v).toMatchObject({ ok: false, reason: "fenced" });
     expect(
@@ -734,7 +734,7 @@ describe("#656 PR-A openNextAttempt", () => {
     const s = await newStep(null, null);
     await s.next();
     expect(await finishStep({ db, ...s.owner })).toBe(true);
-    expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
+    expect(await s.next()).toMatchObject({ ok: false, reason: "step_done" });
     expect((await row(s.stepKey)).currentAttempt).toBe(1);
 
     const t = await newStep(null, null);
@@ -742,7 +742,7 @@ describe("#656 PR-A openNextAttempt", () => {
     expect(await markStepDone({ db, token: await t.bearer(1) })).toEqual({
       ok: true,
     });
-    expect(await t.next()).toEqual({ ok: false, reason: "step_done" });
+    expect(await t.next()).toMatchObject({ ok: false, reason: "step_done" });
     expect((await row(t.stepKey)).currentAttempt).toBe(1);
   });
 
@@ -750,7 +750,7 @@ describe("#656 PR-A openNextAttempt", () => {
     const s = await newStep(null, null);
     await s.next();
     await revokeAttempt({ db, stepKey: s.stepKey, attempt: 1 });
-    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
+    expect(await s.next()).toMatchObject({ ok: true, attempt: 2 });
   });
 
   it("5 another org, thread or allowedRef is a conflict and changes nothing", async () => {
@@ -813,8 +813,11 @@ describe("#656 PR-A openNextAttempt", () => {
       .update(cellStep)
       .set({ currentAttempt: 999 })
       .where(eq(cellStep.stepKey, s.stepKey));
-    expect(await s.next()).toEqual({ ok: true, attempt: 1000 });
-    expect(await s.next()).toEqual({ ok: false, reason: "attempt_limit" });
+    expect(await s.next()).toMatchObject({ ok: true, attempt: 1000 });
+    expect(await s.next()).toMatchObject({
+      ok: false,
+      reason: "attempt_limit",
+    });
   });
 
   it("6c a re-open with other effectBudget/stepTimeoutMs keeps the stored values", async () => {
@@ -958,7 +961,7 @@ describe("#656 PR-A finishStep", () => {
     const r = await row(s.stepKey);
     expect(r.currentAttempt).toBe(0);
     expect(r.doneAt).not.toBeNull();
-    expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
+    expect(await s.next()).toMatchObject({ ok: false, reason: "step_done" });
     expect(
       await openNextAttempt({
         db,
@@ -1102,13 +1105,13 @@ describe("#656 PR-C openNextAttempt nonce", () => {
 
   it("1 the same nonce twice gives the same attempt, restamps and fences nothing", async () => {
     const s = await newStep(null, null);
-    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 1 });
+    expect(await open(s, nonceA)).toMatchObject({ ok: true, attempt: 1 });
     await db
       .update(cellStep)
       .set({ lastSeenAt: sql`now() - interval '10 minutes'` })
       .where(eq(cellStep.stepKey, s.stepKey));
     const b1 = await s.bearer(1);
-    expect(await open(s, nonceA)).toEqual({
+    expect(await open(s, nonceA)).toMatchObject({
       ok: true,
       attempt: 1,
       replayed: true,
@@ -1124,13 +1127,13 @@ describe("#656 PR-C openNextAttempt nonce", () => {
     const s = await newStep(null, null);
     await open(s, nonceA);
     const b1 = await s.bearer(1);
-    expect(await open(s, nonceB)).toEqual({ ok: true, attempt: 2 });
+    expect(await open(s, nonceB)).toMatchObject({ ok: true, attempt: 2 });
     expect(await verifyBearer({ db, token: b1 })).toMatchObject({
       ok: false,
       reason: "fenced",
     });
     // a nonce only matches the current attempt: A is no longer current
-    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 3 });
+    expect(await open(s, nonceA)).toMatchObject({ ok: true, attempt: 3 });
   });
 
   it("4 a replay at attempt 1000 succeeds, a new nonce there is attempt_limit", async () => {
@@ -1140,12 +1143,12 @@ describe("#656 PR-C openNextAttempt nonce", () => {
       .update(cellStep)
       .set({ currentAttempt: 1000 })
       .where(eq(cellStep.stepKey, s.stepKey));
-    expect(await open(s, nonceB)).toEqual({
+    expect(await open(s, nonceB)).toMatchObject({
       ok: false,
       reason: "attempt_limit",
     });
     // the failed open must not have changed the stored nonce
-    expect(await open(s, nonceA)).toEqual({
+    expect(await open(s, nonceA)).toMatchObject({
       ok: true,
       attempt: 1000,
       replayed: true,
@@ -1156,7 +1159,10 @@ describe("#656 PR-C openNextAttempt nonce", () => {
     const s = await newStep(null, null);
     await open(s, nonceA);
     expect(await finishStep({ db, ...s.owner })).toBe(true);
-    expect(await open(s, nonceA)).toEqual({ ok: false, reason: "step_done" });
+    expect(await open(s, nonceA)).toMatchObject({
+      ok: false,
+      reason: "step_done",
+    });
   });
 
   it("6 concurrent opens: one nonce is one attempt, two nonces are two", async () => {
@@ -1178,7 +1184,7 @@ describe("#656 PR-C openNextAttempt nonce", () => {
   it("7 a new nonce on an existing step advances the attempt and replaces the stored nonce; a malformed nonce is a RangeError", async () => {
     const s = await newStep(null, null);
     await open(s, nonceA);
-    expect(await open(s, nonceB)).toEqual({ ok: true, attempt: 2 });
+    expect(await open(s, nonceB)).toMatchObject({ ok: true, attempt: 2 });
     const stored = (
       await db
         .select({ nonce: cellStep.openNonce })
@@ -1203,10 +1209,10 @@ describe("#656 PR-C openNextAttempt nonce", () => {
           stepKey: s.stepKey,
           attempt: o.attempt,
           ttlMs: STEP_TIMEOUT,
-          replaceOthers: true,
+          replaceOthers: { openSeq: o.openSeq },
         });
-        if (!m.ok) throw new Error(m.reason);
-        return m.token;
+        // an older open's mint may be superseded; the newest open always mints
+        return m.ok ? m.token : null;
       }),
     );
     const rows = await db
@@ -1215,7 +1221,7 @@ describe("#656 PR-C openNextAttempt nonce", () => {
       .where(and(eq(cellBearer.stepKey, s.stepKey), eq(cellBearer.attempt, 1)));
     expect(rows).toHaveLength(1);
     const live = await Promise.all(
-      minted.map((token) => verifyBearer({ db, token })),
+      minted.flatMap((token) => (token ? [verifyBearer({ db, token })] : [])),
     );
     expect(live.filter((v) => v.ok)).toHaveLength(1);
   });
@@ -1230,5 +1236,70 @@ describe("#656 PR-C openNextAttempt nonce", () => {
       .from(cellBearer)
       .where(eq(cellBearer.stepKey, s.stepKey));
     expect(rows).toHaveLength(2);
+  });
+
+  describe("open sequence fence", () => {
+    const mintReplacing = (
+      s: Awaited<ReturnType<typeof newStep>>,
+      o: { attempt: number; openSeq: number },
+    ) =>
+      mintBearer({
+        db,
+        stepKey: s.stepKey,
+        attempt: o.attempt,
+        ttlMs: STEP_TIMEOUT,
+        replaceOthers: { openSeq: o.openSeq },
+      });
+    const opened = async (s: Awaited<ReturnType<typeof newStep>>) => {
+      const o = await open(s, nonceA);
+      if (!o.ok) throw new Error(o.reason);
+      return o;
+    };
+
+    it("a) a slow R1 that mints after its retry R2 is superseded and B2 survives", async () => {
+      const s = await newStep(null, null);
+      const r1 = await opened(s);
+      expect(r1.openSeq).toBe(1);
+      const r2 = await opened(s);
+      expect(r2).toMatchObject({ attempt: 1, openSeq: 2, replayed: true });
+      const b2 = await mintReplacing(s, r2);
+      if (!b2.ok) throw new Error(b2.reason);
+      expect(await mintReplacing(s, r1)).toEqual({
+        ok: false,
+        reason: "superseded",
+      });
+      expect((await verifyBearer({ db, token: b2.token })).ok).toBe(true);
+      const rows = await db
+        .select({ hash: cellBearer.tokenHash })
+        .from(cellBearer)
+        .where(eq(cellBearer.stepKey, s.stepKey));
+      expect(rows).toHaveLength(1);
+    });
+
+    it("b) in order, R1 mints B1 then R2 replays and mints B2: B1 dead, B2 live", async () => {
+      const s = await newStep(null, null);
+      const r1 = await opened(s);
+      const b1 = await mintReplacing(s, r1);
+      const r2 = await opened(s);
+      const b2 = await mintReplacing(s, r2);
+      if (!b1.ok || !b2.ok) throw new Error("mint refused");
+      expect((await verifyBearer({ db, token: b1.token })).ok).toBe(false);
+      expect((await verifyBearer({ db, token: b2.token })).ok).toBe(true);
+    });
+
+    it("c) a non-replay advance still fences the old attempt's bearers", async () => {
+      const s = await newStep(null, null);
+      const r1 = await opened(s);
+      const b1 = await mintReplacing(s, r1);
+      if (!b1.ok) throw new Error(b1.reason);
+      const next = await open(s, nonceB);
+      expect(next).toMatchObject({ ok: true, attempt: 2, openSeq: 2 });
+      expect(await verifyBearer({ db, token: b1.token })).toMatchObject({
+        ok: false,
+        reason: "fenced",
+      });
+      if (!next.ok) throw new Error(next.reason);
+      expect((await mintReplacing(s, next)).ok).toBe(true);
+    });
   });
 });

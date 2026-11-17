@@ -205,7 +205,12 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       {
         now: () => new Date(),
         // One live bearer per attempt, atomically: a replay's earlier bearer dies.
-        mintBearer: (a) => mintBearer({ db, ...a, replaceOthers: true }),
+        mintBearer: (a) =>
+          mintBearer({
+            db,
+            ...a,
+            replaceOthers: { openSeq: opened.openSeq },
+          }),
       },
     );
     console.log("[daemon cell-plan]", {
@@ -216,7 +221,14 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     });
     return reply({ attempt, plan });
   } catch (error) {
-    if (error instanceof CellPlanError) return refuse(error.code, 409);
+    if (error instanceof CellPlanError) {
+      // A newer open for this requestId holds the live bearer: the worker has
+      // already moved on to that response.
+      return refuse(
+        error.reason === "superseded" ? "superseded" : error.code,
+        409,
+      );
+    }
     if (error instanceof CellEgressNotEnforcedError) {
       return refuseEgress(error);
     }

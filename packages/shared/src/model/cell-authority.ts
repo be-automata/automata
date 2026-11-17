@@ -234,8 +234,9 @@ const OPEN_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
  * does not count toward the cap, and answers `replayed: true` (the field is
  * absent otherwise). A nonce matches only the CURRENT attempt's open; a new
  * nonce advances the attempt and replaces the stored one. The caller mints the
- * replay's bearer with `mintBearer({ replaceOthers: true })`, which kills the
- * earlier bearers of that attempt. The open runs in one transaction under a
+ * replay's bearer with `mintBearer({ replaceOthers: { openSeq } })`, which kills
+ * the earlier bearers of that attempt unless a newer open has happened. Every
+ * open (advance or replay) bumps `open_seq` and returns it as `openSeq`. The open runs in one transaction under a
  * per-step advisory lock.
  */
 export async function openNextAttempt({
@@ -253,7 +254,7 @@ export async function openNextAttempt({
     nonce: string;
   };
 }): Promise<
-  | { ok: true; attempt: number; replayed?: true }
+  | { ok: true; attempt: number; openSeq: number; replayed?: true }
   | { ok: false; reason: "step_done" | "conflict" | "attempt_limit" }
 > {
   assertStepShape(step);
@@ -287,12 +288,14 @@ export async function openNextAttempt({
         allowedRef: step.allowedRef,
         lastSeenAt: sql`now()`,
         openNonce: nonce,
+        openSeq: 1,
       })
       .onConflictDoUpdate({
         target: cellStep.stepKey,
         set: {
           currentAttempt: sql`CASE WHEN ${cellStep.openNonce} = ${nonce} THEN ${cellStep.currentAttempt} ELSE ${cellStep.currentAttempt} + 1 END`,
           openNonce: nonce,
+          openSeq: sql`${cellStep.openSeq} + 1`,
           lastSeenAt: sql`now()`,
         },
         where: and(
@@ -306,16 +309,21 @@ export async function openNextAttempt({
           ),
         ),
       })
-      .returning({ attempt: cellStep.currentAttempt });
+      .returning({
+        attempt: cellStep.currentAttempt,
+        openSeq: cellStep.openSeq,
+      });
     return {
       attempt: rows[0]?.attempt,
+      openSeq: rows[0]?.openSeq,
       replayed: before !== undefined && before.openNonce === nonce,
     };
   });
-  if (opened.attempt !== undefined) {
+  if (opened.attempt !== undefined && opened.openSeq !== undefined) {
+    const { attempt, openSeq } = opened;
     return opened.replayed
-      ? { ok: true, attempt: opened.attempt, replayed: true }
-      : { ok: true, attempt: opened.attempt };
+      ? { ok: true, attempt, openSeq, replayed: true }
+      : { ok: true, attempt, openSeq };
   }
 
   const miss = await classifyMiss(db, step);
@@ -479,21 +487,24 @@ const lockStep = (executor: Pick<DB, "execute">, stepKey: string) =>
  *
  * `replaceOthers` (#656 PR-C) makes one live bearer per attempt atomic: in one
  * transaction, under the step's advisory lock (the open's key), it deletes the
- * attempt's other bearers and inserts the new one. Concurrent replays then end
- * with exactly one live bearer, the last minted.
+ * attempt's other bearers and inserts the new one. It carries the `openSeq` its
+ * own open returned: once a newer open has happened (`open_seq` moved on) the
+ * mint is refused as `superseded`, with no delete and no insert, so a slow
+ * earlier request cannot kill the bearer its retry handed out. Concurrent
+ * replays end with exactly one live bearer, the newest open's.
  */
 export async function mintBearer({
   db,
   stepKey,
   attempt,
   ttlMs,
-  replaceOthers = false,
+  replaceOthers,
 }: {
   db: DB;
   stepKey: string;
   attempt: number;
   ttlMs: number;
-  replaceOthers?: boolean;
+  replaceOthers?: { openSeq: number };
 }): Promise<
   | { ok: true; token: string; expiresAt: Date }
   | {
@@ -503,7 +514,8 @@ export async function mintBearer({
         | "fenced"
         | "unknown_step"
         | "step_done"
-        | "revoked";
+        | "revoked"
+        | "superseded";
     }
 > {
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
@@ -517,6 +529,7 @@ export async function mintBearer({
           stepTimeoutMs: cellStep.stepTimeoutMs,
           revokedThrough: cellStep.revokedThrough,
           doneAt: cellStep.doneAt,
+          openSeq: cellStep.openSeq,
         })
         .from(cellStep)
         .where(eq(cellStep.stepKey, stepKey))
@@ -534,6 +547,9 @@ export async function mintBearer({
       return { ok: false, reason: "ttl_exceeds_step_timeout" } as const;
     }
     if (replaceOthers) {
+      if (step.openSeq !== replaceOthers.openSeq) {
+        return { ok: false, reason: "superseded" } as const;
+      }
       await tx
         .delete(cellBearer)
         .where(
