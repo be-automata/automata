@@ -333,6 +333,30 @@ describe("reconcileExpiredCells", () => {
       );
     });
 
+    it("warns once, with counts only, when the listing was truncated", async () => {
+      const s = setup([{ cellId: "e", tags: tags("cell:e", NOW - 1) }], {
+        truncated: true,
+      });
+      await s.run();
+      const warns = s.logger.warn.mock.calls.filter(([msg]) =>
+        String(msg).includes("truncated"),
+      );
+      expect(warns).toHaveLength(1);
+      expect(Object.keys(warns[0]![1] as object).sort()).toEqual(
+        ["dead", "deferred", "listed", "reaped"].sort(),
+      );
+    });
+
+    it("does not warn when the listing was complete", async () => {
+      const s = setup([], { truncated: false });
+      await s.run();
+      expect(
+        s.logger.warn.mock.calls.some(([msg]) =>
+          String(msg).includes("truncated"),
+        ),
+      ).toBe(false);
+    });
+
     it("counts expired and dead together against the limit", async () => {
       const s = setup(
         [...liveCells(), { cellId: "e", tags: tags("cell:e", NOW - 1) }],

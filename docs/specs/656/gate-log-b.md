@@ -81,3 +81,10 @@ Skipped, with reasons:
 | shared                                   | 1609                            |
 | www                                      | 4458 passed, 9 skipped          |
 | `OPENSANDBOX_IT=1`                       | **10/10**, daemon gate included |
+
+## Roborev
+
+- **Job 1203 on `2b8409e..08a66e1`:** the agent's assessment is **Pass**. No correctness or security bugs. Two operational findings:
+  - **Medium, fixed:** the reconciler's `truncated` result was never surfaced. The reconciler now warns once per truncated run with counts only (`listed`, `reaped`, `deferred`, `dead`), through its injected logger, so every host sees it. Two tests cover it: a warning when truncated, none when the listing completed.
+  - **Low, no code:** cells created before the `deployment` tag existed would no longer be listed. None exist. No cell has run anywhere, because nothing executes a plan until PR-E (#656), and the S4 reconciler had nothing to reap in production. The PR records this.
+- **After the fix, all exit 0:** sandbox 525 passed (145 skipped), `tsc-check --force` 21/21, `lint --force`, and prettier on the changed files. The change is a 10-line log and its tests, and touches neither the guest probe nor the adapter, so the live gate's 10/10 on `08a66e1` still holds.

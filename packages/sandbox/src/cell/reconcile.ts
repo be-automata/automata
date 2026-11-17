@@ -227,5 +227,15 @@ export async function reconcileExpiredCells(
     }
     if (failed) result.failed += 1;
   }
+  // A capped listing leaves the cells past the last page unlisted, so never
+  // revoked or torn down this run: say so, with counts only.
+  if (truncated) {
+    logger.warn("cell reconcile listing truncated at the page cap", {
+      listed: result.listed,
+      reaped: result.reaped,
+      deferred: result.deferred,
+      dead: result.dead,
+    });
+  }
   return result;
 }
