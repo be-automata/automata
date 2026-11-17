@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../../db";
-import { agentApplied, agentMessages, threadChat } from "../../db/schema";
+import {
+  agentApplied,
+  agentMessages,
+  thread,
+  threadChat,
+} from "../../db/schema";
 import {
   createTestOrg,
   createTestThread,
@@ -80,8 +85,12 @@ function expectKilled(d: Delivery) {
   expect(d.stderr).toContain("killing at after-apply");
 }
 
-/** A root (task) sender and a task child target with a primary thread chat. */
-async function scenario() {
+/**
+ * A root (task) sender and a task child target. Legacy by default (no thread_chat
+ * row, production's shape: the queue is thread.queued_messages); `withChat` adds a
+ * primary thread chat (the chat model).
+ */
+async function scenario(withChat = false) {
   const organizationId = await createTestOrg({ db });
   const { user } = await createTestUser({ db });
   const rootId = (
@@ -113,7 +122,9 @@ async function scenario() {
     request: { lane: "task" },
   });
   if (!child.ok) throw new Error("child not created");
-  // The test thread is legacy (no chat rows): give it a primary chat.
+  if (!withChat) {
+    return { organizationId, rootId, targetId, chatId: null };
+  }
   const [chat] = await db
     .insert(threadChat)
     .values({
@@ -140,7 +151,7 @@ async function seed(from: string, to: string, n: number) {
   }
 }
 
-async function state(targetId: string, chatId: string) {
+async function state(targetId: string, chatId: string | null) {
   const messages = await db
     .select({ id: agentMessages.id, consumedAt: agentMessages.consumedAt })
     .from(agentMessages)
@@ -154,20 +165,25 @@ async function state(targetId: string, chatId: string) {
         messages.map((m) => m.id),
       ),
     );
-  const [chat] = await db
-    .select({ queued: threadChat.queuedMessages })
-    .from(threadChat)
-    .where(eq(threadChat.id, chatId));
+  const [holder] = chatId
+    ? await db
+        .select({ queued: threadChat.queuedMessages })
+        .from(threadChat)
+        .where(eq(threadChat.id, chatId))
+    : await db
+        .select({ queued: thread.queuedMessages })
+        .from(thread)
+        .where(eq(thread.id, targetId));
   return {
     messages: messages.length,
     consumed: messages.filter((m) => m.consumedAt !== null).length,
     applied: applied.length,
-    queued: chat?.queued?.length ?? 0,
+    queued: holder?.queued?.length ?? 0,
   };
 }
 
-async function receiveDrill(unsafe: boolean) {
-  const s = await scenario();
+async function receiveDrill(unsafe: boolean, withChat = false) {
+  const s = await scenario(withChat);
   await seed(s.rootId, s.targetId, 3);
   const base = { MODE: "receive", TO_RUN: s.targetId };
 
@@ -189,6 +205,20 @@ describe("agent bus crash drills (#660)", () => {
     "AC1: a receiver killed after the effect, before COMMIT, applies 3 messages exactly once",
     async () => {
       const after = await receiveDrill(false);
+      expect(after).toEqual({
+        messages: 3,
+        consumed: 3,
+        applied: 3,
+        queued: 3,
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "AC1 (chat model): the same drill on a target with a thread chat",
+    async () => {
+      const after = await receiveDrill(false, true);
       expect(after).toEqual({
         messages: 3,
         consumed: 3,
@@ -244,7 +274,9 @@ describe("agent bus crash drills (#660)", () => {
   it(
     "AC3 (negative control): apply outside the transaction queues 4 follow-ups for 3 messages",
     async () => {
-      const after = await receiveDrill(true);
+      // Chat model: the unsafe apply runs outside the receive transaction, which
+      // holds the target thread row, so a legacy apply would block on that lock.
+      const after = await receiveDrill(true, true);
       expect(after.applied).toBe(3);
       expect(after.consumed).toBe(3);
       expect(after.queued).toBe(4);

@@ -1,7 +1,12 @@
-import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { DB } from "../../db";
-import { agentApplied, agentMessages, threadChat } from "../../db/schema";
+import {
+  agentApplied,
+  agentMessages,
+  thread,
+  threadChat,
+} from "../../db/schema";
 import type { DBUserMessage } from "../../db/db-message";
 import { sanitizeForJson } from "../../utils/sanitize-json";
 import { getRunForOrg } from "./agent-run";
@@ -66,9 +71,12 @@ export async function insertMessage({
   key: string;
   body: string;
 }): Promise<{ id: number; duplicate: boolean } | { conflict: true }> {
+  // Store (and compare) the sanitized body: Postgres text refuses NUL, and a
+  // retry must see the same stored value, so the A1 check never flaps.
+  const stored = sanitizeForJson(body);
   const inserted = await db
     .insert(agentMessages)
-    .values({ idemKey: key, fromRun: from, toRun: to, body })
+    .values({ idemKey: key, fromRun: from, toRun: to, body: stored })
     .onConflictDoNothing({
       target: [agentMessages.fromRun, agentMessages.idemKey],
     })
@@ -89,7 +97,7 @@ export async function insertMessage({
   if (!row) {
     throw new Error(`agent_messages (${from}, ${key}): conflict without a row`);
   }
-  if (row.toRun !== to || row.body !== body) return { conflict: true };
+  if (row.toRun !== to || row.body !== stored) return { conflict: true };
   return { id: row.id, duplicate: true };
 }
 
@@ -107,6 +115,7 @@ export async function sendMessage({
   key,
   body,
   apply,
+  logger = DEFAULT_LOGGER,
 }: {
   db: DB;
   organizationId: string;
@@ -115,6 +124,7 @@ export async function sendMessage({
   key: string;
   body: string;
   apply: ApplyMessage;
+  logger?: BusLogger;
 }): Promise<SendResult> {
   const [fromRun, toRun] = await Promise.all([
     getRunForOrg({ db, organizationId, threadId: from }),
@@ -127,14 +137,40 @@ export async function sendMessage({
   const inserted = await insertMessage({ db, from, to, key, body });
   if ("conflict" in inserted) return { ok: false, error: "idem_key_conflict" };
 
-  const { applied } = await receiveFor({ db, toRun: to, apply });
+  // The insert is committed: a delivery failure must not turn into a rejected
+  // send (the caller would retry a message that is already stored). The row
+  // stays unconsumed for the next receive / the sweeper. Log no body or PII.
+  let applied = 0;
+  try {
+    await receiveFor({
+      db,
+      toRun: to,
+      apply,
+      onApplied: (count) => {
+        applied = count;
+      },
+    });
+  } catch (error) {
+    logger.error(
+      "agent-bus send: delivery failed after the message committed",
+      {
+        messageId: inserted.id,
+        toRun: to,
+        errorName: error instanceof Error ? error.name : typeof error,
+      },
+    );
+  }
   return { ok: true, id: inserted.id, duplicate: inserted.duplicate, applied };
 }
 
 /**
  * Delivers every unconsumed message of `toRun`, oldest first, one transaction per
  * message. `apply` that throws rolls its transaction back (the message stays
- * unconsumed for the sweeper) and the error is rethrown.
+ * unconsumed for the sweeper) and the error is rethrown; `onApplied` reports the
+ * running count of committed applies, so a caller still knows the partial count.
+ *
+ * Each transaction locks the target thread row before claiming a message, so
+ * concurrent receivers serialize per target and the queue order is id order.
  *
  * `unsafeApplyOutsideTransaction` is TEST-ONLY: it runs `apply` on the plain `db`
  * instead of the receive transaction, which is the negative control that proves
@@ -145,15 +181,23 @@ export async function receiveFor({
   toRun,
   apply,
   unsafeApplyOutsideTransaction = false,
+  onApplied,
 }: {
   db: DB;
   toRun: string;
   apply: ApplyMessage;
   unsafeApplyOutsideTransaction?: boolean;
+  onApplied?: (applied: number) => void;
 }): Promise<{ applied: number }> {
   let applied = 0;
   for (;;) {
     const outcome = await db.transaction(async (tx) => {
+      // A missing thread has no row to lock: proceed (the apply refuses it).
+      await tx
+        .select({ id: thread.id })
+        .from(thread)
+        .where(eq(thread.id, toRun))
+        .for("update");
       const rows = await tx
         .select()
         .from(agentMessages)
@@ -190,7 +234,10 @@ export async function receiveFor({
       return didApply ? ("applied" as const) : ("skipped" as const);
     });
     if (outcome === "empty") return { applied };
-    if (outcome === "applied") applied += 1;
+    if (outcome === "applied") {
+      applied += 1;
+      onApplied?.(applied);
+    }
   }
 }
 
@@ -198,19 +245,24 @@ export async function receiveFor({
 export async function recentlyDeliveredTargets({
   db,
   withinMs = 300_000,
+  limit = 200,
 }: {
   db: DB;
   withinMs?: number;
+  limit?: number;
 }): Promise<string[]> {
   const rows = await db
-    .selectDistinct({ toRun: agentMessages.toRun })
+    .select({ toRun: agentMessages.toRun })
     .from(agentMessages)
     .where(
       and(
         isNotNull(agentMessages.consumedAt),
         sql`${agentMessages.consumedAt} > now() - (${withinMs}::double precision * interval '1 millisecond')`,
       ),
-    );
+    )
+    .groupBy(agentMessages.toRun)
+    .orderBy(desc(sql`max(${agentMessages.consumedAt})`))
+    .limit(limit);
   return rows.map((r) => r.toRun);
 }
 
@@ -231,15 +283,19 @@ export async function sweepUnconsumed({
   limit?: number;
   logger?: BusLogger;
 }): Promise<{ targets: string[]; applied: number }> {
+  // Inner join: a row whose target thread is gone is inert, not a poison target.
   const rows = await db
-    .selectDistinct({ toRun: agentMessages.toRun })
+    .select({ toRun: agentMessages.toRun })
     .from(agentMessages)
+    .innerJoin(thread, eq(thread.id, agentMessages.toRun))
     .where(
       and(
         isNull(agentMessages.consumedAt),
         sql`${agentMessages.createdAt} < now() - (${olderThanMs}::double precision * interval '1 millisecond')`,
       ),
     )
+    .groupBy(agentMessages.toRun)
+    .orderBy(asc(sql`min(${agentMessages.createdAt})`))
     .limit(limit);
   const targets: string[] = [];
   let applied = 0;
@@ -258,10 +314,19 @@ export async function sweepUnconsumed({
 /**
  * The production apply: appends the message to the target run's primary chat
  * (oldest `thread_chat`) as ONE queued user message, framed with its sender so a
- * body starting with `/` is never taken for a slash command. Runs in the receive
- * transaction; the caller broadcasts and kicks after commit.
+ * body starting with `/` is never taken for a slash command. A legacy thread
+ * (no `thread_chat` row; `enableThreadChatCreation` is off by default) queues on
+ * `thread.queued_messages` instead. Runs in the receive transaction; the caller
+ * broadcasts and kicks after commit. Throws only when the thread is missing.
  */
 export const queuedFollowUpApply: ApplyMessage = async (tx, message) => {
+  const owners = await tx
+    .select({ id: thread.id })
+    .from(thread)
+    .where(eq(thread.id, message.toRun));
+  if (!owners[0]) {
+    throw new Error(`agent bus: thread ${message.toRun} not found`);
+  }
   const chats = await tx
     .select({ id: threadChat.id })
     .from(threadChat)
@@ -270,9 +335,6 @@ export const queuedFollowUpApply: ApplyMessage = async (tx, message) => {
     .limit(1)
     .for("update");
   const primary = chats[0];
-  if (!primary) {
-    throw new Error(`agent bus: thread ${message.toRun} has no thread chat`);
-  }
   const queued: DBUserMessage = {
     type: "user",
     model: null,
@@ -285,10 +347,19 @@ export const queuedFollowUpApply: ApplyMessage = async (tx, message) => {
     timestamp: new Date().toISOString(),
   };
   const json = JSON.stringify(sanitizeForJson([queued]));
+  if (primary) {
+    await tx
+      .update(threadChat)
+      .set({
+        queuedMessages: sql`COALESCE(${threadChat.queuedMessages}, '[]'::jsonb) || ${json}::jsonb`,
+      })
+      .where(eq(threadChat.id, primary.id));
+    return;
+  }
   await tx
-    .update(threadChat)
+    .update(thread)
     .set({
-      queuedMessages: sql`COALESCE(${threadChat.queuedMessages}, '[]'::jsonb) || ${json}::jsonb`,
+      queuedMessages: sql`COALESCE(${thread.queuedMessages}, '[]'::jsonb) || ${json}::jsonb`,
     })
-    .where(eq(threadChat.id, primary.id));
+    .where(eq(thread.id, message.toRun));
 };

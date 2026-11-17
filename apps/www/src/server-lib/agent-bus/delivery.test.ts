@@ -8,6 +8,7 @@ import {
   ensureRootRun,
   markBlocked,
 } from "@terragon/shared/model/agent-bus/agent-run";
+import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import { insertMessage } from "@terragon/shared/model/agent-bus/messages";
 import {
   createTestOrg,
@@ -20,17 +21,21 @@ import { kickTarget, runAgentBusSweep, sendAgentMessage } from "./delivery";
 const h = vi.hoisted(() => ({
   kick: vi.fn(),
   tier: vi.fn(),
+  broadcast: vi.fn(),
 }));
 
 vi.mock("../process-follow-up-queue", () => ({
   maybeProcessFollowUpQueue: h.kick,
+}));
+vi.mock("@terragon/shared/broadcast-server", () => ({
+  publishBroadcastUserMessage: h.broadcast,
 }));
 vi.mock("@/lib/subscription", () => ({
   getAccessInfoForUser: h.tier,
 }));
 
 /** A root run with one review child, both in one org; the child is the target. */
-async function pair() {
+async function pair({ legacy = false }: { legacy?: boolean } = {}) {
   const organizationId = await createTestOrg({ db });
   const { user } = await createTestUser({ db });
   const root = await createTestThread({
@@ -49,7 +54,7 @@ async function pair() {
     db,
     userId: user.id,
     overrides: { organizationId, parentThreadId: root.threadId },
-    enableThreadChatCreation: true,
+    enableThreadChatCreation: !legacy,
   });
   await createChildRun({
     db,
@@ -59,10 +64,17 @@ async function pair() {
     request: { lane: "task" },
   });
   // A fresh chat is "queued" (working); an idle, non-terminal target is a draft.
-  await db
-    .update(threadChat)
-    .set({ status: "draft" })
-    .where(eq(threadChat.id, child.threadChatId));
+  if (legacy) {
+    await db
+      .update(thread)
+      .set({ status: "draft" })
+      .where(eq(thread.id, child.threadId));
+  } else {
+    await db
+      .update(threadChat)
+      .set({ status: "draft" })
+      .where(eq(threadChat.id, child.threadChatId));
+  }
   return { organizationId, userId: user.id, root, child };
 }
 
@@ -72,6 +84,8 @@ describe("agent-bus delivery", () => {
     h.kick.mockResolvedValue(undefined);
     h.tier.mockReset();
     h.tier.mockResolvedValue({ tier: "core" });
+    h.broadcast.mockReset();
+    h.broadcast.mockResolvedValue(undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
 
@@ -85,6 +99,37 @@ describe("agent-bus delivery", () => {
         threadId: child.threadId,
         threadChatId: child.threadChatId,
       });
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
+    });
+
+    it("a legacy target (no thread_chat) is kicked with the legacy chat id and broadcast", async () => {
+      const { userId, child } = await pair({ legacy: true });
+      await kickTarget(child.threadId);
+      expect(h.broadcast).toHaveBeenCalledWith({
+        type: "user",
+        id: userId,
+        data: { threadId: child.threadId, threadChatId: LEGACY_THREAD_CHAT_ID },
+      });
+      expect(h.kick).toHaveBeenCalledWith({
+        userId,
+        threadId: child.threadId,
+        threadChatId: LEGACY_THREAD_CHAT_ID,
+      });
+    });
+
+    it("skips a terminal target but still broadcasts", async () => {
+      const { child } = await pair();
+      await db
+        .update(threadChat)
+        .set({ status: "complete" })
+        .where(eq(threadChat.id, child.threadChatId));
+      await db
+        .update(thread)
+        .set({ status: "complete" })
+        .where(eq(thread.id, child.threadId));
+      await kickTarget(child.threadId);
+      expect(h.kick).not.toHaveBeenCalled();
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
 
     it("skips on tier none", async () => {
@@ -92,6 +137,7 @@ describe("agent-bus delivery", () => {
       h.tier.mockResolvedValue({ tier: "none" });
       await kickTarget(child.threadId);
       expect(h.kick).not.toHaveBeenCalled();
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
 
     it("skips a shadow thread", async () => {
@@ -102,6 +148,7 @@ describe("agent-bus delivery", () => {
         .where(eq(thread.id, child.threadId));
       await kickTarget(child.threadId);
       expect(h.kick).not.toHaveBeenCalled();
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
 
     it("skips while the agent is working", async () => {
@@ -112,6 +159,7 @@ describe("agent-bus delivery", () => {
         .where(eq(threadChat.id, child.threadChatId));
       await kickTarget(child.threadId);
       expect(h.kick).not.toHaveBeenCalled();
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
 
     it("skips a blocked run", async () => {
@@ -124,6 +172,7 @@ describe("agent-bus delivery", () => {
       });
       await kickTarget(child.threadId);
       expect(h.kick).not.toHaveBeenCalled();
+      expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
 
     it("swallows a kick error", async () => {
@@ -159,7 +208,6 @@ describe("agent-bus delivery", () => {
         body: "hello",
       });
       expect(result).toMatchObject({ ok: true, applied: 1 });
-      console.log("R", JSON.stringify(result));
     });
   });
 
@@ -191,6 +239,7 @@ describe("agent-bus delivery", () => {
 
       await runAgentBusSweep();
 
+      // The kick set is recentlyDeliveredTargets (swept targets are a subset).
       // The sweep is global (other tests' targets are recent too): every
       // target is kicked once, and ours, both swept and recent, exactly once.
       const kicked = (h.kick.mock.calls as [{ threadId: string }][]).map(

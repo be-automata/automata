@@ -39,6 +39,9 @@ Other defaults (not owner questions; listed as assumptions in the PR):
   therefore also re-kicks targets that had a message consumed in the last 5 minutes
   (`recentlyDeliveredTargets`); the kick is idempotent (`maybeProcessFollowUpQueue` returns on an
   empty queue). Poison messages (A3) remain a known gap → dead-letter follow-up issue.
+- **A7** Bodies are stored normalized (`sanitizeForJson`): two raw bodies that differ only in stripped
+  characters are the same message under one key (duplicate, not conflict).
+- **A8** The kick never resumes a terminal target; the message stays queued (A2).
 - **A4** Timestamps are `timestamptz` as the ticket's contract says (drizzle
   `timestamp(..., { withTimezone: true, mode: "date" })`).
 
@@ -54,7 +57,8 @@ Other defaults (not owner questions; listed as assumptions in the PR):
 | `agent_messages`, `agent_applied`, any `agent-bus/messages*` | grep `packages/ apps/ deploy/` | **none** |
 | Queued follow-ups: `updateThreadChat` appends with `COALESCE(queued_messages,'[]') \|\| $json` in ITS OWN transaction and publishes a broadcast after its own transaction commits (`threads.ts:1036-1039`) | `packages/shared/src/model/threads.ts:927-1040` (append at 1011-1014) | exists — **not usable inside the receive tx as-is** (it would nest a savepoint and broadcast before OUR commit) |
 | `sanitizeForJson` used on appended messages | `packages/shared/src/model/threads.ts:1012` | exists; reuse |
-| Primary chat = oldest `thread_chat` of the thread | `packages/shared/src/utils/thread-utils.ts:3-11`, ordering `threads.ts:666` `asc(threadChat.createdAt)` | exists |
+| Thread-chat model is OFF by default: `enableThreadChatCreation` `defaultValue: false` (`packages/shared/src/model/feature-flags-definitions.ts:81-82`, read at `apps/www/src/server-lib/new-thread-shared.ts:146-148`), so production threads are legacy (version 0) with NO `thread_chat` row; their queue is `thread.queued_messages` (`threads.ts:950-967`). **Missed in the first spec, found in refinement.** | — | apply + kick handle both models |
+| Primary chat = oldest `thread_chat` of the thread (chat-model threads only) | `packages/shared/src/utils/thread-utils.ts:3-11`, ordering `threads.ts:666` `asc(threadChat.createdAt)` | exists |
 | `queueFollowUpInternal` (shadow-thread skip, kick only if `!isAgentWorking(status)`) | `apps/www/src/server-lib/follow-up.ts:115-176` | exists; production kick mirrors its three checks (tier, shadow, working) + blocked (A5) |
 | `maybeProcessFollowUpQueue({userId, threadId, threadChatId})` | `apps/www/src/server-lib/process-follow-up-queue.ts:9` | exists |
 | `isAgentWorking` | `apps/www/src/agent/thread-status.ts:3` | exists |
@@ -194,3 +198,10 @@ delivered as a user follow-up and treated as data. Rollback = revert; unconsumed
 - Cycle 1 (Opus): BLOCK — D1 wired into a dead switch case; migration id sorted before `agent-run`; FK name;
   undefined `Tx`. All four fixed above; warnings A5 (tier gate), A6 (lost kick), wording fixes taken.
 - Cycle 1 re-grade (Opus): PASS_WITH_WARNINGS — folded: blocked-run kick skip (A5), consumed_at partial index, A5 wording.
+- Refinement (Opus, 2026-11-17): 1 blocker + 3 major + 6 minor, all accepted:
+  legacy-thread delivery (apply appends to `thread.queued_messages`, kick uses `LEGACY_THREAD_CHAT_ID`);
+  `sendMessage` never rejects after its insert committed (receive errors logged, partial count returned);
+  body normalized with `sanitizeForJson` before insert and the A1 comparison (NUL / lone surrogate);
+  kick skips terminal targets; sweep ignores rows to deleted threads, deterministic order; receive locks
+  the target thread row before claiming (per-target id order); sweep kicks `recentlyDeliveredTargets()`
+  only; `recentlyDeliveredTargets` bounded (limit 200, newest first); broadcast asserted in skip cases.
