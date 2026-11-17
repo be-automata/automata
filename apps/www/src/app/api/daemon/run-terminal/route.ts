@@ -50,7 +50,7 @@ const bodySchema = z.object({
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const r = await parseDaemonRequest(request, bodySchema);
   if (r instanceof NextResponse) return r;
-  const { threadId, runExternalId, cause, detail } = r.body;
+  const { threadId, threadChatId, runExternalId, cause, detail } = r.body;
 
   const generation = await checkThreadGeneration({
     db,
@@ -142,6 +142,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // #668: a mention run ended here never reaches the daemon finish, its only
   // other reply writer. Only on the write that moved the thread: a retried
   // terminal (`applied: false`) must not answer twice.
-  if (applied) waitUntil(replyToMentionsAtTerminal([threadId]));
+  if (applied) {
+    waitUntil(replyToMentionsAtTerminal([{ threadId, threadChatId }]));
+  }
   return NextResponse.json({ applied });
 }

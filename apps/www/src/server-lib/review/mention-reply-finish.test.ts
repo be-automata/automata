@@ -788,13 +788,21 @@ describe("typed-terminal mention replies (#668)", () => {
           sourceMetadata: mentionThread("timeout").sourceMetadata,
         },
       ]),
-      threadIds: ["t-task", "t-review", "t-mention"],
+      targets: [
+        { threadId: "t-task" },
+        { threadId: "t-review" },
+        { threadId: "t-mention", threadChatId: "c-9" },
+      ],
     });
     expect(getThreadMinimal).toHaveBeenCalledTimes(1);
     expect(getThreadMinimal).toHaveBeenCalledWith(
       expect.objectContaining({ threadId: "t-mention", userId: "u-1" }),
     );
     expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    // The chat the caller named is the one read.
+    expect(getThreadChat).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "t-mention", threadChatId: "c-9" }),
+    );
 
     // Answered already (the App's marker is there): nothing posts again.
     octokit.paginate.mockResolvedValueOnce([
@@ -808,14 +816,14 @@ describe("typed-terminal mention replies (#668)", () => {
           sourceMetadata: mentionThread("timeout").sourceMetadata,
         },
       ]),
-      threadIds: ["t-mention"],
+      targets: [{ threadId: "t-mention" }],
     });
     expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
   });
 
   it("no ids → no read; a failed read is logged, never thrown", async () => {
     const db = fakeDb([]);
-    await handleMentionRepliesAtTerminal({ db, threadIds: [] });
+    await handleMentionRepliesAtTerminal({ db, targets: [] });
     expect(
       (db as { select: ReturnType<typeof vi.fn> }).select,
     ).not.toHaveBeenCalled();
@@ -826,7 +834,10 @@ describe("typed-terminal mention replies (#668)", () => {
       }),
     } as never;
     await expect(
-      handleMentionRepliesAtTerminal({ db: broken, threadIds: ["t-1"] }),
+      handleMentionRepliesAtTerminal({
+        db: broken,
+        targets: [{ threadId: "t-1" }],
+      }),
     ).resolves.toBeUndefined();
   });
 });

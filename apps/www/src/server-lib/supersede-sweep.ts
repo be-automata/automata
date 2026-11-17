@@ -18,7 +18,10 @@ import { mapLimit } from "@/lib/map-limit";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
-import { replyToMentionsAtTerminal } from "./review/mention-terminal-reply";
+import {
+  isMentionSilentCause,
+  replyToMentionsAtTerminal,
+} from "./review/mention-terminal-reply";
 import {
   getAgentRunStatus,
   listAgentRunsForThread,
@@ -529,6 +532,16 @@ export async function runSupersedeSweep(
       report.errors.push({ externalId: runs[0]?.externalId ?? "", message });
     }
   });
+  // #668: a mention run this tick ended never reaches the daemon finish, its
+  // only other reply writer. Once per tick, after every rule, so GitHub never
+  // holds an engine-read slot; the silent causes cost nothing.
+  await replyToMentionsAtTerminal([
+    ...report.terminals
+      .filter((t) => !isMentionSilentCause(t.cause))
+      .map((t) => ({ threadId: t.threadId })),
+    ...report.orphans.map((threadId) => ({ threadId })),
+    ...report.unreported.map((threadId) => ({ threadId })),
+  ]);
   return report;
 }
 
@@ -577,7 +590,5 @@ async function sweepTerminal({
       error: error instanceof Error ? error.message : String(error),
     });
   }
-  // #668: rule (iii) ends mention runs too; their answer has no other writer.
-  await replyToMentionsAtTerminal([threadId]);
   return true;
 }

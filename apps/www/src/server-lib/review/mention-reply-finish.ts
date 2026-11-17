@@ -1,4 +1,4 @@
-import { asc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
@@ -53,6 +53,10 @@ import {
   reviewReplyTargetId,
 } from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
+import {
+  isMentionSilentCause,
+  type MentionTerminalTarget,
+} from "./mention-terminal-reply";
 
 /**
  * The org-owned mention lane's terminal writer (emit-only, like the review
@@ -91,21 +95,6 @@ export function renderMentionProviderNotice(
 ): string {
   return `Nothing was changed: ${describeProviderUnavailable(provider)} Mention me again ${providerUnavailableRetryWhen(provider)}.`;
 }
-
-/**
- * #668: the typed terminal causes a mention stays silent for. A policy cause
- * cannot reach a mention (no prKey, so the engine never supersedes, discards
- * or stale-skips it) and a person stopped a `user-cancelled` run on purpose.
- * Every other cause — `plane-offline` included, unlike the review lane's
- * `ABANDONED_TERMINAL_CAUSES` — is a run that never answered: no newer run
- * speaks for a mention, so silence here is silence forever.
- */
-const MENTION_SILENT_CAUSES: ReadonlySet<string> = new Set<TerminalCause>([
-  "superseded",
-  "discarded",
-  "stale-skipped",
-  "user-cancelled",
-]);
 
 /**
  * #668: the reply for a mention whose run ended on a typed terminal cause
@@ -403,7 +392,7 @@ export async function handleMentionReplyAtFinish({
     if (!thread || !isMentionLaneStamp(stampMetadata)) return;
     const stamp = stampMetadata.mention;
     const rawCause = thread.terminalCause ?? null;
-    if (rawCause !== null && MENTION_SILENT_CAUSES.has(rawCause)) {
+    if (isMentionSilentCause(rawCause)) {
       logger.info("stopped run — no reply", { threadId, cause: rawCause });
       return;
     }
@@ -478,9 +467,10 @@ export async function handleMentionReplyAtFinish({
 }
 
 /**
- * The chat a typed-terminal path reads: a v0 thread keeps its chat on the
- * thread row; a v1 thread's mention run lives in its first chat (the lane
- * creates one thread per mention). Null when a v1 thread has no chat row.
+ * The chat a typed-terminal path reads when its caller did not name one (the
+ * sweeps know only the thread): a v0 thread keeps its chat on the thread row;
+ * for a v1 thread, the chat written last, which is the one the terminal just
+ * moved. Null when a v1 thread has no chat row.
  */
 async function resolveThreadChatId({
   db,
@@ -496,7 +486,7 @@ async function resolveThreadChatId({
     .select({ id: threadChatTable.id })
     .from(threadChatTable)
     .where(eq(threadChatTable.threadId, threadId))
-    .orderBy(asc(threadChatTable.createdAt))
+    .orderBy(desc(threadChatTable.updatedAt))
     .limit(1);
   return first?.id ?? null;
 }
@@ -510,12 +500,13 @@ async function resolveThreadChatId({
  */
 export async function handleMentionRepliesAtTerminal({
   db,
-  threadIds,
+  targets,
 }: {
   db: DB;
-  threadIds: readonly string[];
+  targets: readonly MentionTerminalTarget[];
 }): Promise<void> {
-  if (threadIds.length === 0) return;
+  if (targets.length === 0) return;
+  const threadIds = targets.map((t) => t.threadId);
   let rows;
   try {
     rows = await db
@@ -525,7 +516,7 @@ export async function handleMentionRepliesAtTerminal({
         sourceMetadata: threadTable.sourceMetadata,
       })
       .from(threadTable)
-      .where(inArray(threadTable.id, [...threadIds]));
+      .where(inArray(threadTable.id, threadIds));
   } catch (error) {
     logger.error("terminal: thread read failed", {
       threadIds,
@@ -539,7 +530,8 @@ export async function handleMentionRepliesAtTerminal({
       db,
       userId: row.userId,
       threadId: row.id,
-      threadChatId: null,
+      threadChatId:
+        targets.find((t) => t.threadId === row.id)?.threadChatId ?? null,
     });
   }
 }

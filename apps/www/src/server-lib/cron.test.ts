@@ -52,9 +52,11 @@ vi.mock("@/server-lib/process-queued-thread", () => ({
   retireStrandedQueuedThreads: h.strandedSweep,
 }));
 vi.mock("@/server-lib/review/mention-terminal-reply", () => ({
-  replyToMentionsAtTerminal: vi.fn(async (threadIds: readonly string[]) => {
-    h.order.push(`mention-reply:${threadIds.join(",")}`);
-  }),
+  replyToMentionsAtTerminal: vi.fn(
+    async (targets: readonly { threadId: string }[]) => {
+      h.order.push(`mention-reply:${targets.map((t) => t.threadId).join(",")}`);
+    },
+  ),
 }));
 vi.mock("@/server-lib/review/review-sweep", () => ({
   runReviewSweep: vi.fn(async () => {

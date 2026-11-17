@@ -147,7 +147,7 @@ export async function runStalledTasksCron(): Promise<void> {
   // #668: the watchdog is also the backstop for a dropped finish event; a
   // mention thread it reaps would otherwise never be answered. After the
   // hibernation above, so freeing slots never waits on GitHub.
-  await replyToMentionsAtTerminal(stoppedIds);
+  await replyToMentionsAtTerminal(stoppedIds.map((threadId) => ({ threadId })));
 }
 
 /**
