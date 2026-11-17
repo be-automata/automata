@@ -14,3 +14,19 @@ Branch `feat/656-a-lease-authority`, off `main` at `c596e47f` (after #652's cont
 | `pnpm turbo tsc-check --force`; `pnpm turbo lint --force`                                               | 0 / 0     | 21/21                                                                                                                                  |
 
 **Fixed while gating:** the `deadCellAttempts` matrix test reported a fifth dead key. The `backdate` helper set `last_seen_at` unconditionally, which turned the NULL-lease row (one opened by the old `openStep`) into a stale one. The function was right: it keeps NULL leases. The helper now ages only a stamped lease.
+
+## Refinement (two Medium, seven Low; all fixed in the next commit)
+
+- **Medium:** `finishStep` on a step that never opened wrote nothing, so a late `openNextAttempt` opened attempt 1 for an already-finished thread.
+  - `finishStep({db, stepKey, organizationId, threadId})` now upserts a **done tombstone**: `current_attempt` 0, `done_at` set, no schema change.
+  - `openNextAttempt` checks an org/thread mismatch first, then done, then a ref mismatch, so a tombstone always gives `step_done`.
+  - Test 12a fails without the fix.
+- **Medium:** `openNextAttempt` is not idempotent: a lost response followed by a retry burns an attempt. The spec now records this as accepted, with an optional PR-C nonce.
+- **Lows:**
+  - `stampSeen` never grants a lease to a NULL row;
+  - a row that vanishes returns `conflict`;
+  - a re-open keeps the stored budget and timeout;
+  - the 1000th and 1001st attempt boundary is tested;
+  - `cellKeyId` replaces a hand-built key;
+  - tests 13 and 14 assert full keys.
+- **After the fixes (outside the Claude sandbox):** `cell-authority` 52, shared 1726, www 4458 (9 skipped), all exit 0.

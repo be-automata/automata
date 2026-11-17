@@ -625,7 +625,8 @@ async function leaseStep(allowedRef: string | null = null) {
     if (!m.ok) throw new Error(m.reason);
     return m.token;
   };
-  return { stepKey, organizationId, threadId, step, next, bearer };
+  const owner = { stepKey, organizationId, threadId };
+  return { stepKey, organizationId, threadId, owner, step, next, bearer };
 }
 
 async function row(stepKey: string) {
@@ -719,7 +720,7 @@ describe("#656 PR-A openNextAttempt", () => {
   it("3 a finished step refuses a new attempt (finishStep and markStepDone)", async () => {
     const s = await leaseStep();
     await s.next();
-    expect(await finishStep({ db, stepKey: s.stepKey })).toBe(true);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
     expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
     expect((await row(s.stepKey)).currentAttempt).toBe(1);
 
@@ -789,6 +790,37 @@ describe("#656 PR-A openNextAttempt", () => {
     expect((await row(s.stepKey)).currentAttempt).toBe(1);
   });
 
+  it("6b the 1000th attempt opens, the 1001st is refused", async () => {
+    const s = await leaseStep();
+    await s.next();
+    await db
+      .update(cellStep)
+      .set({ currentAttempt: 999 })
+      .where(eq(cellStep.stepKey, s.stepKey));
+    expect(await s.next()).toEqual({ ok: true, attempt: 1000 });
+    expect(await s.next()).toEqual({ ok: false, reason: "attempt_limit" });
+  });
+
+  it("6c a re-open with other effectBudget/stepTimeoutMs keeps the stored values", async () => {
+    const s = await leaseStep();
+    await s.next();
+    await openNextAttempt({
+      db,
+      step: { ...s.step, effectBudget: 7, stepTimeoutMs: 999 },
+    });
+    const r = (
+      await db
+        .select({
+          budget: cellStep.effectBudget,
+          timeout: cellStep.stepTimeoutMs,
+          attempt: cellStep.currentAttempt,
+        })
+        .from(cellStep)
+        .where(eq(cellStep.stepKey, s.stepKey))
+    )[0];
+    expect(r).toEqual({ budget: null, timeout: STEP_TIMEOUT, attempt: 2 });
+  });
+
   it("7 validation errors match openStep", async () => {
     const s = await leaseStep();
     await expect(
@@ -835,7 +867,7 @@ describe("#656 PR-A stampSeen", () => {
     expect(await stampSeen({ db, stepKey: r.stepKey, attempt: 1 })).toBe(false);
     const d = await leaseStep();
     await d.next();
-    await finishStep({ db, stepKey: d.stepKey });
+    await finishStep({ db, ...d.owner });
     expect(await stampSeen({ db, stepKey: d.stepKey, attempt: 1 })).toBe(false);
     expect(
       await stampSeen({ db, stepKey: `nope-${randomUUID()}`, attempt: 1 }),
@@ -859,6 +891,13 @@ describe("#656 PR-A stampSeen", () => {
     expect((await row(s.stepKey)).currentAttempt).toBe(2);
   });
 
+  it("10a a NULL lease is never granted by a stamp", async () => {
+    const s = await newStep();
+    await s.open(1);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(false);
+    expect((await row(s.stepKey)).lastSeenAt).toBeNull();
+  });
+
   it("rejects a non-positive attempt", async () => {
     await expect(stampSeen({ db, stepKey: "x", attempt: 0 })).rejects.toThrow(
       RangeError,
@@ -871,16 +910,42 @@ describe("#656 PR-A finishStep", () => {
     const s = await leaseStep();
     await s.next();
     const b = await s.bearer(1);
-    expect(await finishStep({ db, stepKey: s.stepKey })).toBe(true);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
     const first = await row(s.stepKey);
     expect(first.revokedThrough).toBe(1);
     expect(first.doneAt).not.toBeNull();
     expect((await verifyBearer({ db, token: b })).ok).toBe(false);
-    expect(await finishStep({ db, stepKey: s.stepKey })).toBe(true);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
     expect((await row(s.stepKey)).doneAt).toEqual(first.doneAt);
-    expect(await finishStep({ db, stepKey: `nope-${randomUUID()}` })).toBe(
+    // Another org or thread's key is not finished.
+    const other = await leaseStep();
+    expect(
+      await finishStep({
+        db,
+        ...s.owner,
+        organizationId: other.organizationId,
+      }),
+    ).toBe(false);
+    expect(await finishStep({ db, ...s.owner, threadId: other.threadId })).toBe(
       false,
     );
+  });
+
+  it("12a finish-before-open leaves a tombstone, so a late open is step_done", async () => {
+    const s = await leaseStep();
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    const r = await row(s.stepKey);
+    expect(r.currentAttempt).toBe(0);
+    expect(r.doneAt).not.toBeNull();
+    expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
+    expect(
+      await openNextAttempt({
+        db,
+        step: { ...s.step, allowedRef: "refs/heads/feat/x" },
+      }),
+    ).toEqual({ ok: false, reason: "step_done" });
+    expect((await row(s.stepKey)).currentAttempt).toBe(0);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(false);
   });
 });
 
@@ -896,13 +961,12 @@ describe("#656 PR-A deadCellAttempts", () => {
     await revokeAttempt({ db, stepKey: revoked.stepKey, attempt: 1 });
     const done = await leaseStep();
     await done.next();
-    await finishStep({ db, stepKey: done.stepKey });
+    await finishStep({ db, ...done.owner });
     const stale = await leaseStep();
     await stale.next();
     await backdate(stale.stepKey);
     const nul = await newStep();
     await nul.open(1);
-    await backdate(nul.stepKey);
     const unknown = `nope-${randomUUID()}`;
     const k = (stepKey: string, attempt: number) => ({ stepKey, attempt });
     const keys = [
@@ -916,7 +980,7 @@ describe("#656 PR-A deadCellAttempts", () => {
       k(fresh.stepKey, 2),
       k(fenced.stepKey, 1),
     ];
-    return { keys, fenced, revoked, done, stale };
+    return { keys, k, fenced, revoked, done, stale };
   }
 
   it("13 returns exactly the dead set, once each, in input order", async () => {
@@ -926,21 +990,21 @@ describe("#656 PR-A deadCellAttempts", () => {
       keys: m.keys,
       staleMs: STALE_MS,
     });
-    expect(dead.map((d) => d.stepKey)).toEqual([
-      m.fenced.stepKey,
-      m.revoked.stepKey,
-      m.done.stepKey,
-      m.stale.stepKey,
+    expect(dead).toEqual([
+      m.k(m.fenced.stepKey, 1),
+      m.k(m.revoked.stepKey, 1),
+      m.k(m.done.stepKey, 1),
+      m.k(m.stale.stepKey, 1),
     ]);
   });
 
   it("14 staleMs null keeps the backdated current attempt", async () => {
     const m = await matrix();
     const dead = await deadCellAttempts({ db, keys: m.keys, staleMs: null });
-    expect(dead.map((d) => d.stepKey)).toEqual([
-      m.fenced.stepKey,
-      m.revoked.stepKey,
-      m.done.stepKey,
+    expect(dead).toEqual([
+      m.k(m.fenced.stepKey, 1),
+      m.k(m.revoked.stepKey, 1),
+      m.k(m.done.stepKey, 1),
     ]);
   });
 

@@ -303,11 +303,17 @@ export async function deadCellAttempts({
 | PR-D | `stampSeen` on each cell run's `thread-status` read                                                                                                                                                                                     | **`thread-status` has no attempt today** (`route.ts:32-46`). The worker must send it, for example an optional `cellAttempt` that is strictly validated. Stamping "whatever is current" would let a zombie's polls renew its successor's lease            |
 | PR-E | The worker stamps (through PR-D's path) during create, clone and daemon start, at least every `CELL_LEASE_STALE_MS / 2`                                                                                                                 | —                                                                                                                                                                                                                                                        |
 
+### Accepted behaviours
+
+- **`openNextAttempt` is not idempotent.** A lost response plus a retry burns an attempt: N stays current with no owner, its lease goes stale, and the retry (N+1) fences it. Each retry counts toward the 1000 cap. Accepted; PR-C may add an optional request nonce.
+- **`stampSeen` returns `false`** for an unknown, fenced, revoked, done or unleased (NULL `last_seen_at`) step; a stamp never grants a lease to a NULL row. PR-D only logs it.
+- **`finishStep` tombstone:** a step finished before any open is stored with `current_attempt` 0, `revoked_through` 0, `done_at` set and a placeholder timeout. `openNextAttempt` then classifies it `step_done` (org/thread mismatch stays `conflict`). If the row vanishes between upsert and select, `openNextAttempt` returns `conflict`.
+
 ### Ticket changes to record
 
 The orchestrator publishes these to #656:
 
-- **Scope 10 / R1:** the terminal read calls `finishStep({db, stepKey})` (it revokes through the current attempt and sets `done_at`, in one statement). This replaces "`revokeAttempt` and `markStepDone`": `markStepDone` needs the attempt's bearer, which www does not hold.
+- **Scope 10 / R1:** the terminal read calls `finishStep({db, stepKey, organizationId, threadId})` (it revokes through the current attempt and sets `done_at`, in one statement). This replaces "`revokeAttempt` and `markStepDone`": `markStepDone` needs the attempt's bearer, which www does not hold.
 - **Scope 12 / R3:** "opens `currentAttempt + 1` through `openStep`" becomes "through `openNextAttempt`" (server-assigned). `openStep` stays as the caller-chosen fixture primitive.
 - **Scope 11 / R2:** `thread-status` must carry the cell attempt for `stampSeen` (PR-D).
 - **Scope 7:** the read is `deadCellAttempts` (dead keys only), not `liveAttempts`.

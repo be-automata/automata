@@ -1,6 +1,6 @@
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
-import type { CellKey } from "@terragon/types/cell";
+import { cellKeyId, type CellKey } from "@terragon/types/cell";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 
 import { DB } from "../db";
@@ -258,21 +258,26 @@ export async function openNextAttempt({
       .where(eq(cellStep.stepKey, step.stepKey))
       .limit(1)
   )[0];
-  if (!existing) throw new Error("openNextAttempt: step vanished after upsert");
   if (
+    !existing ||
     existing.organizationId !== step.organizationId ||
-    existing.threadId !== step.threadId ||
-    existing.allowedRef !== step.allowedRef
+    existing.threadId !== step.threadId
   ) {
     return { ok: false, reason: "conflict" };
   }
+  // A done tombstone (finishStep before any open) has no allowedRef to compare.
   if (existing.doneAt) return { ok: false, reason: "step_done" };
+  if (existing.allowedRef !== step.allowedRef) {
+    return { ok: false, reason: "conflict" };
+  }
   return { ok: false, reason: "attempt_limit" };
 }
 
 /**
  * Renew the lease of `attempt` (database now()). True only when it is the
- * current attempt and neither revoked nor done: a fenced attempt's poll never
+ * current attempt, neither revoked nor done, and already leased (a NULL lease
+ * is never granted by a stamp: such a row is judged by revocation only). False
+ * covers unknown, fenced, revoked, done and unleased steps: a fenced attempt's poll never
  * renews anything. Run as one autocommit statement, not inside a long transaction.
  */
 export async function stampSeen({
@@ -293,6 +298,7 @@ export async function stampSeen({
         eq(cellStep.stepKey, stepKey),
         eq(cellStep.currentAttempt, attempt),
         isNull(cellStep.doneAt),
+        isNotNull(cellStep.lastSeenAt),
         or(
           isNull(cellStep.revokedThrough),
           lt(cellStep.revokedThrough, attempt),
@@ -303,24 +309,48 @@ export async function stampSeen({
   return rows.length > 0;
 }
 
+/** Placeholder timeout of a done tombstone: it is never minted against. */
+const TOMBSTONE_TIMEOUT_MS = 1;
+
 /**
  * The run is over (the terminal read, #656 R1): every attempt is revoked and
- * the step is done. Idempotent; true when the step exists.
+ * the step is done. Idempotent. A step that was never opened gets a done
+ * tombstone (`current_attempt` 0), so a late `openNextAttempt` returns
+ * `step_done`. False only when the key belongs to another org or thread.
  */
 export async function finishStep({
   db,
   stepKey,
+  organizationId,
+  threadId,
 }: {
   db: DB;
   stepKey: string;
+  organizationId: string;
+  threadId: string;
 }): Promise<boolean> {
   const rows = await db
-    .update(cellStep)
-    .set({
-      revokedThrough: sql`greatest(coalesce(${cellStep.revokedThrough}, 0), ${cellStep.currentAttempt})`,
-      doneAt: sql`coalesce(${cellStep.doneAt}, now())`,
+    .insert(cellStep)
+    .values({
+      stepKey,
+      organizationId,
+      threadId,
+      currentAttempt: 0,
+      stepTimeoutMs: TOMBSTONE_TIMEOUT_MS,
+      revokedThrough: 0,
+      doneAt: sql`now()`,
     })
-    .where(eq(cellStep.stepKey, stepKey))
+    .onConflictDoUpdate({
+      target: cellStep.stepKey,
+      set: {
+        revokedThrough: sql`greatest(coalesce(${cellStep.revokedThrough}, 0), ${cellStep.currentAttempt})`,
+        doneAt: sql`coalesce(${cellStep.doneAt}, now())`,
+      },
+      where: and(
+        eq(cellStep.organizationId, organizationId),
+        eq(cellStep.threadId, threadId),
+      ),
+    })
     .returning({ stepKey: cellStep.stepKey });
   return rows.length > 0;
 }
@@ -366,7 +396,7 @@ export async function deadCellAttempts({
   const seen = new Set<string>();
   const dead: CellKey[] = [];
   for (const key of keys) {
-    const id = `${key.stepKey}#${key.attempt}`;
+    const id = cellKeyId(key);
     const row = byStep.get(key.stepKey);
     if (!row || seen.has(id)) continue;
     const isDead =
