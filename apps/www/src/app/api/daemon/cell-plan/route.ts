@@ -10,6 +10,7 @@ import {
   cellBrokerHost,
   cellsEnabledForUser,
 } from "@/server-lib/compute/cell-gate";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 import { mintBearer, openStep } from "@terragon/shared/model/cell-authority";
 import {
   CellPlanError,
@@ -41,8 +42,6 @@ import { getThreadChat } from "@terragon/shared/model/threads";
  */
 export const dynamic = "force-dynamic";
 
-/** 2 h: the step lease and the bearer/cell TTL. */
-const CELL_STEP_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 const bodySchema = z
@@ -141,7 +140,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       organizationId,
       threadId,
       attempt,
-      stepTimeoutMs: CELL_STEP_TIMEOUT_MS,
+      stepTimeoutMs: CELL_RUN_TTL_MS,
       effectBudget: null,
       // Cell pushes are S5.
       allowedRef: null,
@@ -154,11 +153,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       {
         stepKey,
         attempt,
-        ttlMs: CELL_STEP_TIMEOUT_MS,
+        ttlMs: CELL_RUN_TTL_MS,
         egressRefs: [],
         egress: { brokerHost },
         profile,
-        tags: { worker, epoch },
+        tags: { worker, epoch, deployment: brokerHost },
         resources: { cpu: 2, memoryMiB: 4096 },
         modelToken,
         runtime: "runc",

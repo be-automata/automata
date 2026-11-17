@@ -15,7 +15,7 @@ import { CellEgressNotEnforcedError } from "./cell-egress-guard";
 
 const NOW = new Date("2026-11-15T12:00:00.000Z");
 const EXPIRES = new Date("2026-11-15T12:10:00.000Z");
-const EGRESS_REFS = ["test/npm@1", "test/wild@1"];
+const EGRESS_REFS = ["test/npm@1", "test/pypi@1"];
 
 function profile(patch: Partial<CellPolicyProfile> = {}): CellPolicyProfile {
   return {
@@ -41,7 +41,7 @@ function input(patch: Partial<CellCreatePlanInput> = {}): CellCreatePlanInput {
     egressRefs: EGRESS_REFS,
     egress: { brokerHost: BROKER, catalog: CATALOG },
     profile: profile(),
-    tags: { worker: "w1", epoch: "e1" },
+    tags: { worker: "w1", epoch: "e1", deployment: BROKER },
     resources: { cpu: 2, memoryMiB: 2048 },
     modelToken: "model-token",
     runtime: "runc",

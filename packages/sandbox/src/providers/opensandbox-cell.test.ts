@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CELL_MIN_TTL_MS,
   CELL_SELF_CHECK_BLOCKED_EXIT,
+  CELL_VAULT_HEADER_PATTERN,
   type CellCreatePlan,
+  type CellList,
 } from "@terragon/types/cell";
 
 import {
   CellProviderError,
   createOpenSandboxCellProvider,
+  OPENSANDBOX_HEADER_NAME_PATTERN,
   OPENSANDBOX_MIN_TTL_MS,
   OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT,
   type OpenSandboxCellConfig,
@@ -147,6 +150,7 @@ function plan(patch: Partial<CellCreatePlan> = {}): CellCreatePlan {
       stepKey: "step-1",
       attempt: "2",
       expiresAt: "1795000000000",
+      deployment: "broker.test",
     },
     networkPolicy: {
       defaultAction: "deny",
@@ -249,7 +253,16 @@ describe("create guards (AC-2)", () => {
     ["ttl under 60 s", { ttlMs: 59_000 } as unknown, "ttl_too_short"],
     ["ttl NaN", { ttlMs: Number.NaN } as unknown, "ttl_too_short"],
     ["ttl Infinity", { ttlMs: Infinity } as unknown, "ttl_too_short"],
-    ...(["worker", "epoch", "stepKey", "attempt", "expiresAt"] as const)
+    ...(
+      [
+        "worker",
+        "epoch",
+        "stepKey",
+        "attempt",
+        "expiresAt",
+        "deployment",
+      ] as const
+    )
       .flatMap(
         (k) =>
           [
@@ -292,6 +305,140 @@ describe("create guards (AC-2)", () => {
     );
     expect(err.code).toBe(code);
     expect(server.fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("vault auth shapes", () => {
+  const VAULT_CANARY = "APIKEY-VAULT-CANARY-001";
+  const PLACEHOLDER = "PLACEHOLDER-CANARY-000";
+  const apiKeyEntry = (patch: object = {}) => ({
+    name: "daemon",
+    hosts: ["broker.test"],
+    paths: ["/api/daemon-event"],
+    auth: "apiKey" as const,
+    header: "X-Daemon-Token",
+    credential: VAULT_CANARY,
+    ...patch,
+  });
+
+  it("emits apiKey with the header name, and substitutions for a placeholder", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    await provider.create(
+      plan({
+        vault: [
+          plan().vault[0]!,
+          apiKeyEntry({ placeholder: PLACEHOLDER }),
+        ] as CellCreatePlan["vault"],
+      }),
+    );
+    const body = server.calls.at(-1)!.body as {
+      bindings: { auth: unknown }[];
+    };
+    expect(body.bindings[0]!.auth).toEqual({
+      type: "bearer",
+      credential: "model",
+    });
+    expect(body.bindings[1]!.auth).toEqual({
+      type: "apiKey",
+      name: "X-Daemon-Token",
+      credential: "daemon",
+      substitutions: [
+        { credential: "daemon", placeholder: PLACEHOLDER, in: ["header"] },
+      ],
+    });
+  });
+
+  it("adds substitutions to a bearer entry too, and none without a placeholder", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    const bearer = { ...plan().vault[0]!, placeholder: "P1" };
+    await provider.create(
+      plan({ vault: [bearer, apiKeyEntry()] as CellCreatePlan["vault"] }),
+    );
+    const body = server.calls.at(-1)!.body as {
+      bindings: { auth: Record<string, unknown> }[];
+    };
+    expect(body.bindings[0]!.auth.substitutions).toEqual([
+      { credential: "model", placeholder: "P1", in: ["header"] },
+    ]);
+    expect(body.bindings[1]!.auth).not.toHaveProperty("substitutions");
+  });
+
+  it.each([
+    ["blank header", { header: " " }],
+    ["empty header", { header: "" }],
+    ["header with a space", { header: "X Token" }],
+    ["header with a colon", { header: "X:Token" }],
+    ["missing header", { header: undefined }],
+    ["blank placeholder", { placeholder: "  " }],
+    ["empty placeholder", { placeholder: "" }],
+    ["an auth kind outside bearer and apiKey", { auth: "basic" }],
+    ["passthrough auth", { auth: "passthrough" }],
+    ["an empty paths list", { paths: [] }],
+  ])(
+    "%s: refused invalid_plan with no fetch and no echo",
+    async (_n, patch) => {
+      const { server, provider } = setup();
+      const err = await rejection(
+        provider.create(
+          plan({
+            vault: [apiKeyEntry(patch)] as CellCreatePlan["vault"],
+          }),
+        ),
+      );
+      expect(err.code).toBe("invalid_plan");
+      expect(server.fetchSpy).not.toHaveBeenCalled();
+      const surfaces = [err.message, JSON.stringify(err), err.stack].join("\n");
+      expect(surfaces).not.toContain(VAULT_CANARY);
+      expect(surfaces).not.toContain("X Token");
+    },
+  );
+
+  it("never leaks the credential or placeholder on a vault failure", async () => {
+    const s = setup();
+    happyRoutes(s.server);
+    s.server.on("POST /sandboxes/c1/credential-vault", () =>
+      json(500, { echo: VAULT_CANARY }),
+    );
+    const err = await rejection(
+      s.provider.create(
+        plan({
+          vault: [
+            apiKeyEntry({ placeholder: PLACEHOLDER }),
+          ] as CellCreatePlan["vault"],
+        }),
+      ),
+    );
+    const surfaces = [
+      JSON.stringify(s.logs),
+      err.message,
+      JSON.stringify(err),
+      err.stack,
+    ].join("\n");
+    expect(surfaces).not.toContain(VAULT_CANARY);
+    expect(surfaces).not.toContain(PLACEHOLDER);
+  });
+});
+
+describe("image guard", () => {
+  it.each(["", "   "])(
+    "create refuses image %j with no fetch",
+    async (image) => {
+      const { server, provider } = setup({ image });
+      const err = await rejection(provider.create(plan()));
+      expect(err).toMatchObject({ code: "invalid_config", op: "create" });
+      expect(server.fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it("construction with an empty image succeeds and teardown still works", async () => {
+    const { server, provider } = setup({ image: "" });
+    server.on(
+      "DELETE /sandboxes/c1",
+      () => new Response(null, { status: 204 }),
+    );
+    await expect(provider.delete("c1")).resolves.toBe("deleted");
   });
 });
 
@@ -752,6 +899,12 @@ describe("self-check fails closed (AC-4)", () => {
       CELL_SELF_CHECK_BLOCKED_EXIT,
     );
     expect(OPENSANDBOX_MIN_TTL_MS).toBe(CELL_MIN_TTL_MS);
+    expect(OPENSANDBOX_HEADER_NAME_PATTERN.source).toBe(
+      CELL_VAULT_HEADER_PATTERN.source,
+    );
+    expect(OPENSANDBOX_HEADER_NAME_PATTERN.flags).toBe(
+      CELL_VAULT_HEADER_PATTERN.flags,
+    );
   });
 
   it("a BACKEND_RESPONSE_FAILED 502 is not retried", async () => {
@@ -1415,6 +1568,73 @@ describe("listByTags", () => {
   });
 
   const CELL_A = cellItem("a", { automata: "cell" });
+
+  function pagedServer(pages: number) {
+    const s = setup();
+    s.server.on("GET /sandboxes?metadata", (call) => {
+      const page = Number(
+        new URL(`http://x${call.path}`).searchParams.get("page"),
+      );
+      const items = Array.from({ length: 100 }, (_v, i) =>
+        cellItem(`p${page}-${i}`, { automata: "cell" }),
+      );
+      return json(200, {
+        items,
+        pagination: { hasNextPage: page < pages },
+      });
+    });
+    return s;
+  }
+
+  it("maxPages 2 against 5 pages returns 200 entries, marked truncated", async () => {
+    const { provider, server } = pagedServer(5);
+    const out = await provider.listByTags({}, { maxPages: 2 });
+    expect(out).toHaveLength(200);
+    expect(server.count("GET /sandboxes?metadata")).toBe(2);
+    expect(out.truncated).toBe(true);
+    // A copy drops the non-enumerable flag.
+    expect(([...out] as CellList).truncated).toBeUndefined();
+  });
+
+  it("is not truncated when the pages end within maxPages", async () => {
+    const { provider } = pagedServer(2);
+    const out = await provider.listByTags({}, { maxPages: 2 });
+    expect(out).toHaveLength(200);
+    expect(out.truncated).toBe(false);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 1_001])(
+    "maxPages %s is refused invalid_argv with no HTTP call",
+    async (maxPages) => {
+      const { provider, server } = pagedServer(5);
+      const err = await rejection(provider.listByTags({}, { maxPages }));
+      expect(err).toMatchObject({ code: "invalid_argv", op: "list" });
+      expect(server.count("GET /sandboxes?metadata")).toBe(0);
+    },
+  );
+
+  it("without maxPages a server that never stops paging still fails closed", async () => {
+    const { provider, server } = pagedServer(Number.MAX_SAFE_INTEGER);
+    const err = await rejection(provider.listByTags({}));
+    expect(err).toMatchObject({ code: "http_error", op: "list" });
+    expect(server.count("GET /sandboxes?metadata")).toBe(1_000);
+  });
+
+  it("drops another deployment's cells when the server ignores the filter", async () => {
+    const { provider, server } = setup();
+    server.on("GET /sandboxes?metadata", () =>
+      json(200, {
+        items: [
+          cellItem("mine", { automata: "cell", deployment: "a" }),
+          cellItem("theirs", { automata: "cell", deployment: "b" }),
+          cellItem("untagged", { automata: "cell" }),
+        ],
+        pagination: { hasNextPage: false },
+      }),
+    );
+    const out = await provider.listByTags({ deployment: "a" });
+    expect(out.map((e) => e.cellId)).toEqual(["mine"]);
+  });
 
   it.each([
     ["hasNextPage absent", { items: [CELL_A] }],

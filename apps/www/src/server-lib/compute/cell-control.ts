@@ -6,7 +6,7 @@ import type { ReconcileResult } from "@terragon/sandbox/cell-reconcile";
 import { createOpenSandboxCellProvider } from "@terragon/sandbox/opensandbox-cell";
 import type { ICellProvider } from "@terragon/types/cell";
 
-import { opensandboxConfigured } from "./cell-gate";
+import { cellBrokerHost, opensandboxConfigured } from "./cell-gate";
 
 /**
  * Cell control plane (#634 S4): the provider handle, the revoke-first teardown
@@ -91,6 +91,7 @@ export async function runCellReconciler({
 }): Promise<ReconcileResult> {
   return reconcileExpiredCells({
     provider,
+    deployment: cellBrokerHost(),
     // false for an unknown step is fine: nothing to revoke
     revoke: async (stepKey, attempt) => {
       await revokeAttempt({ db, stepKey, attempt });

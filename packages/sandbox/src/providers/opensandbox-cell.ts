@@ -8,7 +8,9 @@ import type {
   CellCreatePlan,
   CellExecOptions,
   CellExecResult,
+  CellList,
   CellListEntry,
+  CellListOptions,
   CellLogger,
   CellProviderErrorCode,
   CellTags,
@@ -45,6 +47,11 @@ const LIST_PAGE_SIZE = 100;
 const MAX_LIST_PAGES = 1_000;
 const BACKOFF_BASE_MS = 250;
 const BACKOFF_CAP_MS = 2_000;
+/**
+ * Kept equal to `CELL_VAULT_HEADER_PATTERN` in @terragon/types (a test asserts
+ * it): this file imports the contract type-only.
+ */
+export const OPENSANDBOX_HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 const CONNECTION_FAILED = "BACKEND_CONNECTION_FAILED";
 
 /** The message carries the op, code and status only: never a body or header. */
@@ -224,11 +231,40 @@ function assertPlanFields(plan: CellCreatePlan): void {
     : {};
   const tagsOk =
     tags.automata === "cell" &&
-    ["worker", "epoch", "stepKey", "attempt", "expiresAt"].every((k) =>
-      isNonBlank(tags[k]),
+    ["worker", "epoch", "stepKey", "attempt", "expiresAt", "deployment"].every(
+      (k) => isNonBlank(tags[k]),
     );
   if (!tagsOk || !isPositive(res.cpu) || !isPositive(res.memoryMiB)) {
     throw new CellProviderError("invalid_plan", "create");
+  }
+}
+
+/**
+ * An auth kind other than bearer or apiKey, an empty `paths` (upstream could read
+ * it as every path), and a header name or placeholder that is blank or malformed
+ * are refused, never echoed.
+ */
+function assertVault(vault: readonly CellVaultEntry[] | undefined): void {
+  for (const v of vault ?? []) {
+    // Callers can be untyped: read every field as unknown.
+    const { auth, paths, placeholder, header } = v as unknown as Record<
+      string,
+      unknown
+    >;
+    const badAuth = auth !== "bearer" && auth !== "apiKey";
+    const badPaths =
+      paths !== undefined && !(Array.isArray(paths) && paths.length > 0);
+    const badPlaceholder =
+      placeholder !== undefined && !isNonBlank(placeholder);
+    const badHeader =
+      auth === "apiKey" &&
+      !(
+        typeof header === "string" &&
+        OPENSANDBOX_HEADER_NAME_PATTERN.test(header)
+      );
+    if (badAuth || badPaths || badPlaceholder || badHeader) {
+      throw new CellProviderError("invalid_plan", "create");
+    }
   }
 }
 
@@ -249,6 +285,7 @@ function guardPlan(plan: CellCreatePlan): void {
     throw new CellProviderError("policy_required", "create");
   }
   assertPlanFields(plan);
+  assertVault(plan.vault);
   // NaN or Infinity would serialize as `timeout: null`.
   if (
     !Number.isFinite(plan.ttlMs) ||
@@ -256,6 +293,20 @@ function guardPlan(plan: CellCreatePlan): void {
   ) {
     throw new CellProviderError("ttl_too_short", "create");
   }
+}
+
+function bindingAuth(v: CellVaultEntry): Record<string, unknown> {
+  const base =
+    v.auth === "apiKey"
+      ? { type: "apiKey", name: v.header, credential: v.name }
+      : { type: "bearer", credential: v.name };
+  if (v.placeholder === undefined) return base;
+  return {
+    ...base,
+    substitutions: [
+      { credential: v.name, placeholder: v.placeholder, in: ["header"] },
+    ],
+  };
 }
 
 function vaultBody(vault: readonly CellVaultEntry[]): unknown {
@@ -270,7 +321,7 @@ function vaultBody(vault: readonly CellVaultEntry[]): unknown {
         hosts: [...v.hosts],
         ...(v.paths ? { paths: [...v.paths] } : {}),
       },
-      auth: { type: v.auth, credential: v.name },
+      auth: bindingAuth(v),
     })),
   };
 }
@@ -504,7 +555,24 @@ export function createOpenSandboxCellProvider(
     return false;
   }
 
-  async function listByTags(tags: Partial<CellTags>): Promise<CellListEntry[]> {
+  async function listByTags(
+    tags: Partial<CellTags>,
+    opts?: CellListOptions,
+  ): Promise<CellList> {
+    const requested = opts?.maxPages;
+    // A cap outside 1..MAX_LIST_PAGES would silently list nothing (0, NaN) or
+    // page without bound (Infinity): refuse it.
+    if (
+      requested !== undefined &&
+      !(
+        Number.isSafeInteger(requested) &&
+        requested >= 1 &&
+        requested <= MAX_LIST_PAGES
+      )
+    ) {
+      throw new CellProviderError("invalid_argv", "list");
+    }
+    const maxPages = requested ?? MAX_LIST_PAGES;
     const defined = Object.entries(tags).filter(
       (e): e is [string, string] => typeof e[1] === "string",
     );
@@ -518,7 +586,12 @@ export function createOpenSandboxCellProvider(
     const matches = (e: CellListEntry): boolean =>
       Object.entries(wanted).every(([k, v]) => e.tags[k] === v);
     const out: CellListEntry[] = [];
-    for (let page = 1; page <= MAX_LIST_PAGES; page++) {
+    const finish = (truncated: boolean): CellList =>
+      Object.defineProperty(out, "truncated", {
+        value: truncated,
+        enumerable: false,
+      });
+    for (let page = 1; page <= maxPages; page++) {
       const { res } = await send(
         "list",
         "GET",
@@ -529,9 +602,13 @@ export function createOpenSandboxCellProvider(
       const { entries, hasNextPage } = await readListPage(res);
       out.push(...entries.filter(matches));
       // An empty page ends the walk even if the server claims more.
-      if (!hasNextPage || entries.length === 0) return out;
+      if (!hasNextPage || entries.length === 0) return finish(false);
     }
-    throw new CellProviderError("http_error", "list");
+    // Without `maxPages` a server that never stops paging still fails closed.
+    if (requested === undefined) {
+      throw new CellProviderError("http_error", "list");
+    }
+    return finish(true);
   }
 
   /** Fails closed on a malformed page: adoption must never miscount cells. */
@@ -903,6 +980,9 @@ export function createOpenSandboxCellProvider(
   }
 
   async function create(plan: CellCreatePlan): Promise<{ cellId: string }> {
+    if (!isNonBlank(config.image)) {
+      throw new CellProviderError("invalid_config", "create");
+    }
     guardPlan(plan);
     const { cellId, adopted } = await createSandbox(plan);
     if (adopted) {
