@@ -46,3 +46,12 @@ Skipped:
 - Replacing the tombstone: that would be a schema change.
 
 **After the pass (outside the Claude sandbox):** shared 1725, www 4458 (9 skipped). Both exit 0, so `openStep`'s new order breaks none of its existing callers.
+
+## Roborev
+
+- **First flush:** no review ran. The daemon accepted no enqueue (`context deadline exceeded`); the person restarted it.
+- **Job 1235 on `c596e47..0fcff6c` (the final range):** **Pass**, with four Lows.
+  - **Doc-only, fixed now:** the spec's contract is marked superseded where the code moved on. It also states that `openStep` writes the new column, so the migration must be applied before this revision deploys; `migrate.yml` does so on green main.
+  - **Follow-ups:**
+    - the race-test helpers could hang the suite on a bad write: `release()` in `try`/`finally`, reject when `write` throws, and keep the poll deadline below the test timeout;
+    - `attempt_limit` should be returned only when the cap is actually reached, and any other state should throw.

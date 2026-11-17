@@ -70,6 +70,13 @@ PR-A ships library code and one nullable column. Nothing calls the new functions
 
 ## Contract
 
+> **Superseded in part (refinement, `/simplify`, roborev 1235). The code is the source of truth.**
+>
+> - `finishStep({db, stepKey, organizationId, threadId})` is an org/thread-scoped **upsert**. On a step that never opened, it writes a done tombstone (`current_attempt` 0). It returns `false` only for another org's or thread's key.
+> - `deadCellAttempts` returns a `Set<string>` of `cellKeyId`, the shape `isDead` takes.
+> - `openStep` and `openNextAttempt` share `classifyMiss`, which checks org/thread, then done, then ref.
+> - **`openStep` now writes `last_seen_at`** (NULL on an advance), and production `cell-plan` calls it. So this revision needs the migration applied before it is deployed. `migrate.yml` applies it on green `main`, ahead of any manual deploy.
+
 ### 1. Migration `deploy/migrations/2026-11-19-cell-step-last-seen.sql`
 
 ```sql
