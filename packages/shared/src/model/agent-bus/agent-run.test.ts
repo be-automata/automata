@@ -430,6 +430,35 @@ describe("agent run ledger", () => {
     expect(await rowCount(childId)).toBe(0);
   });
 
+  it("binds the child's grant to the child thread's own repo", async () => {
+    const organizationId = await createTestOrg({ db });
+    const rootId = await orgThread(organizationId);
+    await ensureRootRun({ db, threadId: rootId, organizationId, lane: "task" });
+    const elsewhereId = await orgThread(organizationId, {
+      parentThreadId: rootId,
+      githubRepoFullName: "acme/elsewhere",
+    });
+    const spawnElsewhere = (repo?: string) =>
+      createChildRun({
+        db,
+        organizationId,
+        parentThreadId: rootId,
+        childThreadId: elsewhereId,
+        request: { lane: "task", repo },
+      });
+    // Defaulted from the child thread: not in the parent's grant.
+    expect(await spawnElsewhere()).toEqual({
+      ok: false,
+      error: "repo_not_granted",
+    });
+    // Asking for the parent's repo on a thread that runs on another one.
+    expect(await spawnElsewhere("terragon/test-repo")).toEqual({
+      ok: false,
+      error: "repo_not_granted",
+    });
+    expect(await rowCount(elsewhereId)).toBe(0);
+  });
+
   describe("foreign keys on delete", () => {
     async function tree() {
       const { organizationId, rootId, childId } = await rootAndChild();

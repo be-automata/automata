@@ -136,8 +136,9 @@ export async function ensureRootRun({
 /**
  * Registers `childThreadId` as a child of the running `parentThreadId`. Checks,
  * in order: both rows in this organization and the child thread's parent
- * matches (`not_found`), parent terminal, parent blocked, narrowing, then the
- * insert; a child that already has a row is refused with `run_exists`.
+ * matches (`not_found`), parent terminal, parent blocked, the requested repo is
+ * the child thread's own (default) and in the parent's grant
+ * (`repo_not_granted`), narrowing, then the insert; a child that already has a row is refused with `run_exists`.
  *
  * One transaction holding the parent's ledger row (`FOR UPDATE`), so a
  * concurrent `markBlocked` cannot land between the check and the insert. A
@@ -170,7 +171,10 @@ export async function createChildRun({
       threadId: parentThreadId,
     });
     const childRows = await tx
-      .select({ parentThreadId: thread.parentThreadId })
+      .select({
+        parentThreadId: thread.parentThreadId,
+        githubRepoFullName: thread.githubRepoFullName,
+      })
       .from(thread)
       .where(
         and(
@@ -188,7 +192,12 @@ export async function createChildRun({
       return { ok: false, error: "agent_blocked" };
     }
 
-    const narrowed = narrowForChild(parent, request);
+    // The grant names the repo the child thread actually runs on.
+    const repo = request.repo ?? child.githubRepoFullName;
+    if (repo.toLowerCase() !== child.githubRepoFullName.toLowerCase()) {
+      return { ok: false, error: "repo_not_granted" };
+    }
+    const narrowed = narrowForChild(parent, { ...request, repo });
     if (!narrowed.ok) return { ok: false, error: narrowed.error };
 
     const inserted = await tx
