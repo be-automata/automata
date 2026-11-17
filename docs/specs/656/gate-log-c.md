@@ -109,3 +109,26 @@ The adapter is unchanged, so the live suite from the `/simplify` run (10/10) sti
 ## Roborev job 1254 (final range `08c1b19..18ef348`)
 
 **Pass**, with one Low: a test title said 409 for `invalid_run_key`, while the route and the spec answer 403. The title is renamed; no code changed.
+
+## Rebase onto main `85b07e6c`
+
+Main had moved on with three commits:
+
+- #680, PR-A's roborev 1235 follow-ups in `cell-authority.ts` and its test;
+- #681, a dependency patch;
+- #679.
+
+**Resolution:** both sides are kept in the authority.
+
+- From #680: `attempt_limit` only at the cap, any other refused state throws, and the hang-proof `holdAndCommit` and `BLOCK_WAIT_MS` helpers.
+- From PR-C: the nonce, the sequence fence, and the `cell_step` lock probe.
+
+#680's new test 6c compared the open's result with `toEqual`. It now uses `toMatchObject` like its siblings, because the result carries `openSeq`.
+
+**Gates after the rebase** (outside the Claude sandbox), all exit 0:
+
+- frozen install, build, `lint-migrations`, `tsc-check --force` (21/21), `lint --force`;
+- suites: migrate 45, sandbox 589, www 4501, shared 1736 plus 6c fixed, `cell-authority` 63/63;
+- the live `OPENSANDBOX_IT` suite: 10/10.
+
+**`format-check`** fails on this machine for files identical to main (`package.json`, `tsconfig.json`, `src/sandbox.ts`). Prettier is picking up an `.editorconfig` from outside the repo; CI has none. PR-C's own files pass `prettier --no-editorconfig --config .prettierrc --check`, and CI's `format-check` is the gate.

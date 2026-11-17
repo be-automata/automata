@@ -803,7 +803,7 @@ describe("#656 PR-A openNextAttempt", () => {
         throw new Error("write failed");
       }),
     ).rejects.toThrow("write failed");
-    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
+    expect(await s.next()).toMatchObject({ ok: true, attempt: 2 });
   });
 
   it("6b the 1000th attempt opens, the 1001st is refused", async () => {
