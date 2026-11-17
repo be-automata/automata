@@ -62,14 +62,18 @@ Decisions (2026-11-16, owner + TL, recorded on the issue body):
    passing one fails to compile), `target`, `organizationId`, `mission`, `step`, `effect`,
    `outputDigest`, `payload`, optional `lockTimeoutMs` / `targetTimeoutMs` (bounded
    defaults).
-   1. Insert the intent (`ON CONFLICT (key) DO NOTHING RETURNING key`) as its own statement, so it
-      is committed **before** the effect.
-   2. Open a transaction with `SET LOCAL lock_timeout` (pattern of `self-heal-tx.ts`), then
+   1. Insert the intent (`ON CONFLICT (key) DO NOTHING`, no `RETURNING`) as its own statement, so
+      it is committed **before** the effect. Whether this call created the row is never used to
+      skip `findByMarker` (a delivery that created the intent can still find another delivery's
+      effect).
+   2. Open a transaction with `SET LOCAL lock_timeout` and `SET LOCAL
+idle_in_transaction_session_timeout = 0` (pattern of `self-heal-tx.ts`), then
       `SELECT … FOR UPDATE` the row. This serializes concurrent deliveries of one key. The lock is
       held until `apply` returns or throws and is never released mid-effect; a killed holder's lock
       is released when its connection dies. A waiter's lock timeout throws; the intent stays; a
-      later delivery reconciles. There is no idle-in-transaction timeout: exactly-once is preferred
-      over liveness.
+      later delivery reconciles. The idle-in-transaction timeout is pinned to 0 so an inherited
+      server or role value cannot end the session mid-apply: exactly-once is preferred over
+      liveness.
    3. The stored `organization_id` / `mission` / `step` / `effect` / `output_digest` differ from
       the call's → throw `ControlEffectKeyCollisionError` (never apply).
    4. `done_at` set → `already_done` (no target call).
