@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ThreadStatus } from "../../db/types";
 import {
+  AGENT_BUS_LANES,
   authorizeSend,
   busStateOf,
   capabilitiesForLane,
@@ -14,7 +15,7 @@ import {
   type AgentRunView,
 } from "./capabilities";
 
-const LANES: AgentBusLane[] = ["task", "review"];
+const LANES: AgentBusLane[] = [...AGENT_BUS_LANES];
 const REPOS = ["Acme/App", "acme/lib", "acme/docs", "other/x"];
 const SKILLS = ["a", "b", "c", "d"];
 
@@ -464,7 +465,7 @@ describe("busStateOf", () => {
 
   it("throws on a status outside the union", () => {
     expect(() => busStateOf("bogus" as ThreadStatus, null, false)).toThrow(
-      "Unmapped thread status: bogus",
+      "Unexpected value: bogus",
     );
   });
 });

@@ -4,7 +4,7 @@ import { DB } from "../../db";
 import { agentRun, thread } from "../../db/schema";
 import {
   capabilitiesForLane,
-  isAgentCapabilities,
+  agentCapabilitiesSchema,
   narrowForChild,
   type AgentBusError,
   type AgentBusLane,
@@ -27,6 +27,14 @@ type Executor = Pick<DB, "select" | "insert" | "update">;
 export type CreateChildRunResult =
   | { ok: true; run: AgentRunView }
   | { ok: false; error: AgentBusError };
+
+/** The ledger row of `threadId`, only within `organizationId`. */
+function runInOrg(organizationId: string, threadId: string) {
+  return and(
+    eq(agentRun.organizationId, organizationId),
+    eq(agentRun.threadId, threadId),
+  );
+}
 
 /** The run of `threadId` in `organizationId`, with its thread's effective status. */
 export async function getRunForOrg({
@@ -55,24 +63,24 @@ export async function getRunForOrg({
     .innerJoin(thread, eq(thread.id, agentRun.threadId))
     .where(
       and(
-        eq(agentRun.organizationId, organizationId),
+        runInOrg(organizationId, threadId),
         // The thread's own org too: a thread moved by any path other than
         // rehome stops answering to its old org.
         eq(thread.organizationId, organizationId),
-        eq(agentRun.threadId, threadId),
       ),
     )
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  if (!isAgentCapabilities(row.capabilities)) {
+  const capabilities = agentCapabilitiesSchema.safeParse(row.capabilities);
+  if (!capabilities.success) {
     throw new Error(
       `agent_run ${row.threadId}: stored capabilities are malformed`,
     );
   }
   return {
     ...row,
-    capabilities: row.capabilities,
+    capabilities: capabilities.data,
     terminal: Boolean(row.terminal),
   };
 }
@@ -93,6 +101,10 @@ export async function ensureRootRun({
   organizationId: string;
   lane: AgentBusLane;
 }): Promise<AgentRunView | null> {
+  // An existing row (the common case) costs one read.
+  const existing = await getRunForOrg({ db, organizationId, threadId });
+  if (existing) return existing;
+
   const rows = await db
     .select({
       organizationId: thread.organizationId,
@@ -102,22 +114,19 @@ export async function ensureRootRun({
     .where(eq(thread.id, threadId))
     .limit(1);
   const row = rows[0];
-  if (!row || row.organizationId === null) return null;
-  if (row.organizationId !== organizationId) return null;
+  if (row?.organizationId !== organizationId) return null;
 
   await db
     .insert(agentRun)
     .values({
       threadId,
       organizationId,
-      parentThreadId: null,
       rootThreadId: threadId,
       lane,
       capabilities: capabilitiesForLane(lane, {
         repoGrant: [{ repo: row.githubRepoFullName, access: "write" }],
         skills: null,
       }),
-      depth: 0,
     })
     .onConflictDoNothing({ target: agentRun.threadId });
 
@@ -205,12 +214,7 @@ export async function markBlocked({
   await db
     .update(agentRun)
     .set({ blockedAt: new Date(), blockedReason: reason })
-    .where(
-      and(
-        eq(agentRun.organizationId, organizationId),
-        eq(agentRun.threadId, threadId),
-      ),
-    );
+    .where(runInOrg(organizationId, threadId));
 }
 
 /** Clears the blocked mark. A no-op for an absent run or one in another organization. */
@@ -226,10 +230,5 @@ export async function clearBlocked({
   await db
     .update(agentRun)
     .set({ blockedAt: null, blockedReason: null })
-    .where(
-      and(
-        eq(agentRun.organizationId, organizationId),
-        eq(agentRun.threadId, threadId),
-      ),
-    );
+    .where(runInOrg(organizationId, threadId));
 }

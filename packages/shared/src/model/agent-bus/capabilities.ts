@@ -1,4 +1,7 @@
+import { z } from "zod";
+
 import type { ThreadStatus } from "../../db/types";
+import { assertNever } from "../../utils";
 
 /**
  * Pure policy for the agent bus (#659, S1): what a run may spawn, message and
@@ -7,59 +10,34 @@ import type { ThreadStatus } from "../../db/types";
  * and no runtime import of the schema.
  */
 
-export type AgentBusLane = "task" | "review";
+export const AGENT_BUS_LANES = ["task", "review"] as const;
+export type AgentBusLane = (typeof AGENT_BUS_LANES)[number];
 
-export interface AgentRepoGrant {
-  repo: string;
-  access: "read" | "write";
-}
-
-export interface AgentCapabilities {
-  spawn: AgentBusLane[];
-  sendTo: AgentBusLane[];
-  repoGrant: AgentRepoGrant[];
-  /** null = unrestricted. */
-  skills: string[] | null;
-  maxDepth: number;
-}
-
-const AGENT_BUS_LANES: readonly string[] = ["task", "review"];
-
-function isLaneList(value: unknown): value is AgentBusLane[] {
-  return (
-    Array.isArray(value) && value.every((l) => AGENT_BUS_LANES.includes(l))
-  );
-}
+const laneSchema = z.enum(AGENT_BUS_LANES);
 
 /**
- * Narrows a stored `capabilities` value. The jsonb column is typed, not checked,
- * so a row is validated on read: a malformed set must fail closed, never lift a
- * limit (a missing `maxDepth` would otherwise compare as NaN and allow any depth).
+ * The one definition of a capability set: the type and the read-time check.
+ * The jsonb column is typed, not checked, so a stored set is validated when it
+ * is read; a malformed set fails closed and never lifts a limit.
  */
+export const agentCapabilitiesSchema = z.object({
+  spawn: z.array(laneSchema),
+  sendTo: z.array(laneSchema),
+  repoGrant: z.array(
+    z.object({ repo: z.string(), access: z.enum(["read", "write"]) }),
+  ),
+  /** null = unrestricted. */
+  skills: z.array(z.string()).nullable(),
+  maxDepth: z.number().int().nonnegative(),
+});
+
+export type AgentCapabilities = z.infer<typeof agentCapabilitiesSchema>;
+export type AgentRepoGrant = AgentCapabilities["repoGrant"][number];
+
 export function isAgentCapabilities(
   value: unknown,
 ): value is AgentCapabilities {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    isLaneList(v.spawn) &&
-    isLaneList(v.sendTo) &&
-    Array.isArray(v.repoGrant) &&
-    v.repoGrant.every(
-      (g: unknown) =>
-        typeof g === "object" &&
-        g !== null &&
-        typeof (g as Record<string, unknown>).repo === "string" &&
-        ["read", "write"].includes(
-          (g as Record<string, unknown>).access as string,
-        ),
-    ) &&
-    (v.skills === null ||
-      (Array.isArray(v.skills) &&
-        v.skills.every((s: unknown) => typeof s === "string"))) &&
-    Number.isInteger(v.maxDepth) &&
-    (v.maxDepth as number) >= 0
-  );
+  return agentCapabilitiesSchema.safeParse(value).success;
 }
 
 /** A run as the bus sees it: the ledger row plus its thread's effective status. */
@@ -149,29 +127,28 @@ export function narrowForChild(
   }
 
   const wanted = (request.repo ?? parentCaps.repoGrant[0]?.repo)?.toLowerCase();
-  const granted =
-    wanted === undefined
-      ? undefined
-      : parentCaps.repoGrant.find((g) => g.repo.toLowerCase() === wanted);
+  const granted = parentCaps.repoGrant.find(
+    (g) => g.repo.toLowerCase() === wanted,
+  );
   if (!granted) {
     return { ok: false, error: "repo_not_granted" };
   }
 
-  let skills: string[] | null;
-  if (request.skills === undefined) {
-    skills = parentCaps.skills === null ? null : [...parentCaps.skills];
-  } else {
-    const allowed = parentCaps.skills;
-    if (allowed !== null && !request.skills.every((s) => allowed.includes(s))) {
-      return { ok: false, error: "skill_not_granted" };
-    }
-    skills = [...request.skills];
+  const allowed = parentCaps.skills;
+  if (
+    request.skills !== undefined &&
+    allowed !== null &&
+    !request.skills.every((skill) => allowed.includes(skill))
+  ) {
+    return { ok: false, error: "skill_not_granted" };
   }
+  // capabilitiesForLane copies the list.
+  const skills = request.skills ?? allowed;
 
   const maxDepth = Math.min(LANE_DEFAULT_MAX_DEPTH, parentCaps.maxDepth);
   const depth = parent.depth + 1;
-  // Fails closed: a non-integer limit (NaN from a malformed set) refuses.
-  if (!Number.isInteger(maxDepth) || depth > maxDepth) {
+  // Written so it fails closed by itself: any comparison with NaN is false.
+  if (!(depth <= maxDepth)) {
     return { ok: false, error: "depth_exceeded" };
   }
 
@@ -245,10 +222,8 @@ function stateOfStatus(status: ThreadStatus): AgentBusState {
     case "stopped":
     case "working-stopped":
       return "cancelled";
-    default: {
-      const unreachable: never = status;
-      throw new Error(`Unmapped thread status: ${String(unreachable)}`);
-    }
+    default:
+      return assertNever(status);
   }
 }
 

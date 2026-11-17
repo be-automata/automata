@@ -28,12 +28,8 @@ async function orgThread(
   const { threadId } = await createTestThread({
     db,
     userId: user.id,
-    overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+    overrides: { organizationId, ...overrides },
   });
-  await db
-    .update(thread)
-    .set({ organizationId })
-    .where(eq(thread.id, threadId));
   return threadId;
 }
 
