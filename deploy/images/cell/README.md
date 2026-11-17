@@ -3,7 +3,7 @@
 `ghcr.io/be-automata/automata-cell` is the guest image of an OpenSandbox cell (ADR-014, #656). It is
 the ADR-013 batteries image, pinned by digest in the `FROM`, plus three baked files:
 
-- `/opt/automata-daemon/index.js`: the daemon bundle (`pnpm --filter @terragon/daemon build`).
+- `/opt/automata/daemon.js`: the daemon bundle (not the box's `/opt/automata-daemon/index.js` mount path: a COPY into a new directory leaves it unsearchable for uid 10001) (`pnpm --filter @terragon/daemon build`).
   A cell cannot bind-mount, and the cell contract has no copy-in, so the bundle is in the image.
 - `/opt/automata/cell-entry.sh`: the cell's command. It starts the daemon.
 - `/opt/automata/cell-send.sh`: writes one daemon message. An exec has no stdin, and the daemon's

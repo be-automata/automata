@@ -164,6 +164,7 @@ Out of this PR:
 > - An invalid HOME exits 66; the send cap exits 65.
 > - The workflow is split: `build-verify` runs read-only on PRs, `publish` on `main`.
 > - `scan-layers.sh` scans the image's own layers, taking the base's layer count from the registry.
+> - The bundle is at `/opt/automata/daemon.js` (`CELL_DAEMON_BUNDLE`), not `/opt/automata-daemon/index.js`. A `COPY --chmod` into a new directory left it unsearchable for uid 10001: `statx … Permission denied`, cell-image run 44141111069.
 
 ### 1. `deploy/images/cell/Dockerfile` (new)
 

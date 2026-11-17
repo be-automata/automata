@@ -49,4 +49,4 @@ run="$HOME/.automata-run"
 (umask 0077; mkdir -p "$run/flutter-pin")
 # env -i: the daemon (and every agent child, which inherits its env) starts
 # with only the names kept above, never a name this script did not vet.
-exec /usr/bin/env -i "${keep[@]}" /usr/local/bin/node /opt/automata-daemon/index.js --url "$url" --socket-path "$run/daemon.sock"
+exec /usr/bin/env -i "${keep[@]}" /usr/local/bin/node /opt/automata/daemon.js --url "$url" --socket-path "$run/daemon.sock"

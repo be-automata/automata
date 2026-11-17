@@ -17,6 +17,7 @@ import {
   CELL_CA_BUNDLE,
   CELL_DAEMON_ENV,
   CELL_DAEMON_SOCKET,
+  CELL_DAEMON_BUNDLE,
   CELL_ENTRY,
   CELL_ENTRY_EXIT,
   CELL_ENV_ALLOWLIST,
@@ -145,7 +146,10 @@ describe("the cell Dockerfile", () => {
     const dests = ins
       .filter((i) => i.op === "COPY")
       .map((i) => i.args.split(/\s+/).pop());
-    expect(dests).toEqual([CONTAINER_DAEMON_BUNDLE, CELL_ENTRY, CELL_SEND]);
+    expect(dests).toEqual([CELL_DAEMON_BUNDLE, CELL_ENTRY, CELL_SEND]);
+    // Negative control: the box's mount path is a new directory, unsearchable when COPY creates it.
+    expect(dests).not.toContain(CONTAINER_DAEMON_BUNDLE);
+    expect(CELL_DAEMON_BUNDLE.startsWith("/opt/automata/")).toBe(true);
   });
 
   // card: protects=the CA env and the shim-first PATH; fails_when=the CA paths differ from CELL_CA_BUNDLE or PATH does not start with the shim dir; no_claim=bootstrap behaviour in a live cell
@@ -364,7 +368,7 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     const r = run(sb, sb.entry, ["--url", GOOD_URL]);
     expect(r.status).toBe(0);
     expect(parseFake(r.stdout).argv).toEqual([
-      CONTAINER_DAEMON_BUNDLE,
+      CELL_DAEMON_BUNDLE,
       "--url",
       GOOD_URL,
       "--socket-path",
@@ -581,7 +585,7 @@ describeRun("cell-send.sh behaviour (fake node)", () => {
     expect(r.status).toBe(0);
     const out = parseFake(r.stdout);
     expect(out.argv).toEqual([
-      CONTAINER_DAEMON_BUNDLE,
+      CELL_DAEMON_BUNDLE,
       "--write",
       "--socket-path",
       `${sb.home}/.automata-run/daemon.sock`,

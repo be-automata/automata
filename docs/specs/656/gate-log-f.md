@@ -48,3 +48,11 @@ finishes:
   - **Medium:** the send-cap test used 131071 `A`s, which is not valid base64; GNU `base64 -d` rejects it. The accepted case is now the largest valid length under the cap. Checked on the box with GNU coreutils: 131068 decodes (exit 0), 131071 fails (exit 1).
   - **Low:** the README now describes the split workflow as shipped.
   - **Low:** `spec-f.md`'s Contract carries a "superseded in part" note naming the shipped differences and the source of truth.
+
+## First `cell-image` CI run (44141111069, at `57f545e`)
+
+- **Image built:** the 8.3 GB batteries base was pulled by digest and `--ignore-scripts` held for the daemon build.
+- **`verify.sh` passed every check except the bundle and daemon checks.** Those included uid and HOME, root-owned node, scripts 0555, the PATH reset, no credential env or dotfiles, `/root` empty, the CA paths, git linking libcurl-gnutls, entry exit codes 64 and 66, and the env refusal (exit 78, canary not echoed) for both identifier and non-identifier names.
+- **FAIL `bundle-mode`, `bundle-version`, `daemon-socket` and `send-roundtrip`.** `statx '/opt/automata-daemon/index.js': Permission denied`: `COPY --chmod=0444` into a new directory created that directory without search permission for uid 10001.
+  - `verify.sh` failed closed as designed.
+  - **Fix:** the bundle moves into the base's existing `/opt/automata` as `daemon.js` (`CELL_DAEMON_BUNDLE`), with no `RUN` added. The tests pin it, with a negative control against the box's mount path.

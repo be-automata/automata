@@ -18,7 +18,10 @@ FROM --platform=linux/amd64 ghcr.io/be-automata/automata-batteries@sha256:da029c
 
 ARG REVISION=unknown
 # Root only for COPY ownership; nothing upstream runs here.
-COPY --chown=root:root --chmod=0444 daemon/index.js /opt/automata-daemon/index.js
+# The bundle goes into /opt/automata, which the base already has (0755). A COPY
+# --chmod into a NEW directory creates that directory without search permission
+# for uid 10001 (measured: `statx … Permission denied` in the cell-image run).
+COPY --chown=root:root --chmod=0444 daemon/index.js /opt/automata/daemon.js
 COPY --chown=root:root --chmod=0555 cell-entry.sh /opt/automata/cell-entry.sh
 COPY --chown=root:root --chmod=0555 cell-send.sh  /opt/automata/cell-send.sh
 

@@ -31,7 +31,7 @@ docker run --rm -i --platform linux/amd64 --network none \
 set -uo pipefail
 fail=0
 NODE=/usr/local/bin/node
-BUNDLE=/opt/automata-daemon/index.js
+BUNDLE=/opt/automata/daemon.js
 ENTRY=/opt/automata/cell-entry.sh
 SEND=/opt/automata/cell-send.sh
 CA=/home/agent/.opensandbox/merged-ca-certificates.pem

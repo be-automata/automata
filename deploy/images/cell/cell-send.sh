@@ -10,5 +10,5 @@ max=131071
 [ "$#" -eq 1 ] || { echo "usage: cell-send.sh <base64>" >&2; exit 64; }
 case "$1" in ""|*[!A-Za-z0-9+/=]*) echo "cell-send: argument is not base64" >&2; exit 64 ;; esac
 [ "${#1}" -le "$max" ] || { echo "cell-send: argument is over $max characters" >&2; exit 65; }
-printf '%s' "$1" | base64 -d | /usr/local/bin/node /opt/automata-daemon/index.js --write \
+printf '%s' "$1" | base64 -d | /usr/local/bin/node /opt/automata/daemon.js --write \
   --socket-path "$HOME/.automata-run/daemon.sock" --timeout 10000

@@ -7,6 +7,13 @@ import { CONTAINER_HOME } from "./container-argv";
 
 export const CELL_ENTRY = "/opt/automata/cell-entry.sh";
 export const CELL_SEND = "/opt/automata/cell-send.sh";
+/**
+ * The daemon bundle baked into the cell image. Not the box's mount path
+ * (`CONTAINER_DAEMON_BUNDLE`, `/opt/automata-daemon/index.js`): a COPY into a new
+ * directory leaves it unsearchable for uid 10001, so it lives in the base's
+ * existing `/opt/automata`.
+ */
+export const CELL_DAEMON_BUNDLE = "/opt/automata/daemon.js";
 export const CELL_NODE = "/usr/local/bin/node";
 export const CELL_DAEMON_SOCKET = `${CONTAINER_HOME}/.automata-run/daemon.sock`;
 export const CELL_CA_BUNDLE = `${CONTAINER_HOME}/.opensandbox/merged-ca-certificates.pem`;
