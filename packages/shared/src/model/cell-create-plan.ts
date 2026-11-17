@@ -7,7 +7,13 @@ import type {
   CellVaultEntry,
 } from "@terragon/types/cell";
 
-import { CELL_MIN_TTL_MS } from "@terragon/types/cell";
+import {
+  CELL_DAEMON_EVENT_PATH,
+  CELL_DAEMON_TOKEN_HEADER,
+  CELL_DAEMON_TOKEN_PLACEHOLDER,
+  CELL_MIN_TTL_MS,
+  CELL_RUN_TTL_MS,
+} from "@terragon/types/cell";
 
 import {
   CELL_EGRESS_MODEL_HOST,
@@ -18,7 +24,14 @@ import {
 } from "./cell-egress";
 import { assertCellEgressEnforced } from "./cell-egress-guard";
 
-export type CellPlanErrorCode = "runtime_not_runc" | "bearer_refused";
+export type CellPlanErrorCode =
+  | "runtime_not_runc"
+  | "bearer_refused"
+  | "egress_wildcard";
+
+// The daemon binding's path, header and placeholder live in @terragon/types so
+// the sandbox live gate binds the same values (sandbox cannot import shared).
+export { CELL_DAEMON_EVENT_PATH, CELL_DAEMON_TOKEN_PLACEHOLDER };
 
 /**
  * A refused plan. The message is the fixed code only: `reason` comes from the
@@ -57,10 +70,15 @@ export interface CellCreatePlanInput {
   egressRefs: readonly string[];
   egress: CompileCellEgressDeps;
   profile: CellPolicyProfile;
-  tags: Pick<CellTags, "worker" | "epoch">;
+  tags: Pick<CellTags, "worker" | "epoch" | "deployment">;
   resources: CellResources;
   /** A Claude OAuth token (`bearer`); never logged. */
   modelToken: string;
+  /**
+   * The daemon's `X-Daemon-Token` value; never logged. When present, the vault
+   * gets a daemon entry for exactly `CELL_DAEMON_EVENT_PATH`.
+   */
+  daemonToken?: string;
   runtime: string;
 }
 
@@ -71,11 +89,35 @@ const BROKER_PATHS: readonly string[] = [
   "/api/graphql",
 ];
 
+/**
+ * The vault entry that lets the daemon call `POST /api/daemon-event` and nothing
+ * else. The path is fixed on purpose: a wider binding would hand the guest the
+ * daemon token for `cell-plan` and `thread-status` (#656 Scope 9).
+ */
+export function buildDaemonVaultEntry(
+  brokerHost: string,
+  daemonToken: string,
+): CellVaultEntry {
+  return {
+    name: "daemon",
+    hosts: [brokerHost],
+    paths: [CELL_DAEMON_EVENT_PATH],
+    auth: "apiKey",
+    header: CELL_DAEMON_TOKEN_HEADER,
+    credential: daemonToken,
+    placeholder: CELL_DAEMON_TOKEN_PLACEHOLDER,
+  };
+}
+
 function buildVault(
   input: CellCreatePlanInput,
   brokerHost: string,
   brokerToken: string,
 ): CellVaultEntry[] {
+  const daemon =
+    input.daemonToken === undefined
+      ? []
+      : [buildDaemonVaultEntry(brokerHost, input.daemonToken)];
   return [
     {
       name: "model",
@@ -91,6 +133,7 @@ function buildVault(
       auth: "bearer",
       credential: brokerToken,
     },
+    ...daemon,
   ];
 }
 
@@ -118,6 +161,9 @@ export async function buildCellCreatePlan(
   if (ttlMs < CELL_MIN_TTL_MS) {
     throw new RangeError(`ttlMs must be at least ${CELL_MIN_TTL_MS}`);
   }
+  if (ttlMs > CELL_RUN_TTL_MS) {
+    throw new RangeError(`ttlMs must be at most ${CELL_RUN_TTL_MS}`);
+  }
   if (!Number.isSafeInteger(attempt) || attempt < 1) {
     throw new RangeError("attempt must be a positive integer");
   }
@@ -126,10 +172,20 @@ export async function buildCellCreatePlan(
   assertNonBlank("stepKey", stepKey);
   assertNonBlank("tags.worker", input.tags.worker);
   assertNonBlank("tags.epoch", input.tags.epoch);
+  assertNonBlank("tags.deployment", input.tags.deployment);
   assertNonBlank("modelToken", input.modelToken);
+  if (input.daemonToken !== undefined) {
+    assertNonBlank("daemonToken", input.daemonToken);
+    if (input.daemonToken !== input.daemonToken.trim()) {
+      throw new RangeError("daemonToken must not have surrounding whitespace");
+    }
+  }
   if (input.runtime !== "runc") throw new CellPlanError("runtime_not_runc");
   const brokerHost = normalizeCellBrokerHost(input.egress.brokerHost);
   const set = compileCellEgress(input.egressRefs, input.egress);
+  if (set.entries.some((e) => e.wildcard)) {
+    throw new CellPlanError("egress_wildcard");
+  }
   const networkPolicy = toOpenSandboxNetworkPolicy(set);
   assertCellEgressEnforced({ profile: input.profile, now: deps.now() });
   const bearer = await deps.mintBearer({ stepKey, attempt, ttlMs });
@@ -142,6 +198,7 @@ export async function buildCellCreatePlan(
       // Named, not spread: a wider object passed as `tags` must not add metadata keys.
       worker: input.tags.worker,
       epoch: input.tags.epoch,
+      deployment: input.tags.deployment,
       stepKey,
       attempt: String(attempt),
       expiresAt: String(bearer.expiresAt.getTime()),

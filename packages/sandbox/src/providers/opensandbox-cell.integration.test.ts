@@ -14,11 +14,13 @@ import {
   vi,
 } from "vitest";
 
-import type {
-  CellVaultEntry,
-  OpenSandboxCellCreatePlan,
-  OpenSandboxNetworkPolicy,
-  OpenSandboxNetworkRule,
+import {
+  CELL_DAEMON_TOKEN_HEADER,
+  CELL_DAEMON_TOKEN_PLACEHOLDER,
+  type CellVaultEntry,
+  type OpenSandboxCellCreatePlan,
+  type OpenSandboxNetworkPolicy,
+  type OpenSandboxNetworkRule,
 } from "@terragon/types/cell";
 
 import { reconcileExpiredCells } from "../cell/reconcile";
@@ -72,6 +74,9 @@ const TIMEOUT_MS = 10 * 60 * 1000;
 const EXEC_TIMEOUT_MS = 120_000;
 const IT_DIR = join(__dirname, "..", "..", "opensandbox-it");
 
+/** The deployment tag every IT cell carries; the reconciler lists with it. */
+const IT_DEPLOYMENT = "osbit.test";
+
 const ALLOWED = "httpbin.org";
 const MODEL_HOST = "api.anthropic.com";
 /**
@@ -116,6 +121,26 @@ const P_101 = policy(
 /** Stand-ins: A for the broker bearer, B for the model token. */
 const CANARY_A = `osbit-canary-${randomBytes(8).toString("hex")}`;
 const CANARY_B = `osbit-canary-${randomBytes(8).toString("hex")}`;
+const CANARY_C = `osbit-canary-${randomBytes(8).toString("hex")}`;
+const DAEMON_HEADER = CELL_DAEMON_TOKEN_HEADER;
+/**
+ * The production daemon binding (`buildDaemonVaultEntry` in
+ * `packages/shared/src/model/cell-create-plan.ts`), with this test's host and
+ * path. The header and placeholder are the production constants from
+ * @terragon/types; the entry's other fields are pinned by the plan builder's
+ * exact-shape test (sandbox cannot import shared, which dev-depends on it).
+ */
+const DAEMON_PLACEHOLDER = CELL_DAEMON_TOKEN_PLACEHOLDER;
+const DAEMON_PATH = "/anything/daemon-event";
+const DAEMON_ENTRY: CellVaultEntry = {
+  name: "daemon",
+  hosts: [ALLOWED],
+  paths: [DAEMON_PATH],
+  auth: "apiKey",
+  header: DAEMON_HEADER,
+  credential: CANARY_C,
+  placeholder: DAEMON_PLACEHOLDER,
+};
 const VAULT: CellVaultEntry[] = [
   {
     name: "probe",
@@ -141,6 +166,7 @@ function plan(
       automata: "cell",
       worker: "osbit",
       epoch: "1",
+      deployment: IT_DEPLOYMENT,
       stepKey: newStepKey(scenario),
       attempt: "1",
       expiresAt: String(expiresAt ?? Date.now() + ttlMs),
@@ -202,8 +228,8 @@ const KNOWN_GUEST_PROVIDER_ENV = new Set([
   "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT",
 ]);
 
-function brief(r: ProbeResult | undefined): unknown {
-  return r && { ok: r.ok, err: r.err, status: r.status, ms: r.ms };
+function brief(r: ProbeResult | undefined): Record<string, unknown> {
+  return r ? { ok: r.ok, err: r.err, status: r.status, ms: r.ms } : {};
 }
 
 describe(
@@ -664,6 +690,7 @@ describe(
         now: () => Date.now(),
         logger: SILENT_LOGGER,
         limit: 1000,
+        deployment: IT_DEPLOYMENT,
       });
       NOTES.reconcile_leftovers_before_ac7 = clearing;
 
@@ -707,6 +734,7 @@ describe(
           },
           now: () => Date.now(),
           logger: SILENT_LOGGER,
+          deployment: IT_DEPLOYMENT,
         });
         live.delete(x);
         NOTES.reconcile_result_ac7 = result;
@@ -749,6 +777,71 @@ describe(
         );
       } finally {
         await destroy(y);
+      }
+    });
+
+    it("daemon apiKey: the proxy replaces the placeholder, only on the exact path", async () => {
+      const id = await create(plan("daemon-apikey", P_CRED, [DAEMON_ENTRY]));
+      try {
+        const markers = [CANARY_C, DAEMON_PLACEHOLDER];
+        const post = (path: string, withHeader: boolean): ProbeSpec => ({
+          kind: "https_headers",
+          url: `https://${ALLOWED}${path}`,
+          headers: withHeader ? { [DAEMON_HEADER]: DAEMON_PLACEHOLDER } : {},
+          markers,
+        });
+        const r = await probe(id, [
+          post(DAEMON_PATH, true),
+          post(DAEMON_PATH, false),
+          post("/anything/daemon/cell-plan", true),
+          post(`${DAEMON_PATH}/x`, true),
+          post(`${DAEMON_PATH}x`, true),
+        ]);
+        // Both markers are tested: httpbin joins a repeated header, so an
+        // append (`P,CANARY_C`) would still contain CANARY_C.
+        const [canary, placeholder] = r[0]?.markersFound ?? [];
+        NOTES.daemon_apikey_replaced = { ...brief(r[0]), canary, placeholder };
+        NOTES.daemon_apikey_header_absent = {
+          ...brief(r[1]),
+          markersFound: r[1]?.markersFound,
+        };
+        const nearMiss = r.slice(2).map((x) => ({
+          ...brief(x),
+          markersFound: x.markersFound,
+        }));
+        NOTES.daemon_apikey_near_miss = nearMiss;
+        expect(
+          r[0]?.status === 200 && canary === true && placeholder === false,
+          `replaced, not appended ${JSON.stringify(NOTES.daemon_apikey_replaced)}`,
+        ).toBe(true);
+        expect(
+          r.slice(2).every((x) => {
+            const [c, p] = x.markersFound ?? [];
+            return x.ok && x.status === 200 && c === false && p === true;
+          }),
+          `exact path ${JSON.stringify(nearMiss)}`,
+        ).toBe(true);
+
+        const scan = (
+          await probe(id, [
+            { kind: "canary_scan", canaries: [CANARY_C], namePattern: "X" },
+          ])
+        )[0];
+        expect(scan?.pid1, "scan read pid 1").toBe(true);
+        expect(scan?.found, "guest procfs").toEqual([false]);
+        const names = await containersOf(id);
+        const host = await scanHostSide(names, [encodeSecret(CANARY_C)]);
+        NOTES.daemon_apikey_canary_scan = { found: scan?.found, host };
+        expect(
+          host.inspect.every((f) => !f),
+          "docker inspect",
+        ).toBe(true);
+        expect(
+          host.logs.every((f) => !f),
+          "logs",
+        ).toBe(true);
+      } finally {
+        await destroy(id);
       }
     });
 

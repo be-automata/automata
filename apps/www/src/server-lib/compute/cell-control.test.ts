@@ -25,6 +25,11 @@ vi.mock("@terragon/env/apps-www", () => ({
   },
 }));
 
+vi.mock("./cell-gate", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./cell-gate")>()),
+  cellBrokerHost: () => "broker.test",
+}));
+
 import { opensandboxConfigured } from "./cell-gate";
 import { cellProvider, runCellReconciler, teardownCell } from "./cell-control";
 
@@ -106,6 +111,7 @@ describe("runCellReconciler", () => {
             expiresAt: "10",
             worker: "w",
             epoch: "1",
+            deployment: "broker.test",
           },
         },
       ]),
@@ -121,5 +127,9 @@ describe("runCellReconciler", () => {
       attempt: 3,
     });
     expect(r).toMatchObject({ expired: 1, reaped: 1, failed: 0 });
+    expect(provider.listByTags).toHaveBeenCalledWith(
+      { deployment: "broker.test" },
+      { maxPages: 5 },
+    );
   });
 });
