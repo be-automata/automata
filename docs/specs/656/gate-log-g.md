@@ -156,3 +156,14 @@ The pass moved the server config to `/var/lib/automata-opensandbox/run`, which i
 - The config on disk is removed on `systemctl stop`, and health is 200 again after `start`.
 - **P0 probe (`/root/p0-out11`): `P0 VERDICT: rootless`, 34 PASS / 0 FAIL.**
 - Limit: this box has no rendered worker unit (full provisioning never ran on it), so the drop-in is verified as a file, and its effect on the unit is pinned by unit tests.
+
+## Roborev
+
+- **Job 1219 on `446caab..14832d0`:** Pass, with one Medium and nine Lows.
+  - **Medium, fixed:** the drop-in's `LoadCredential=` has no fallback, so removing the key file would stop the worker from restarting, and the rollback never removed the drop-in. The rollback now removes the drop-in, runs `daemon-reload` and safe-restarts first, and the installer refuses to keep a drop-in it cannot back with a valid key.
+  - **Lows:** seven fixed; two are spec follow-ups (the `%2F` path-fence test, and daemon restart on re-install).
+- **Live re-run at `6928f54c`:**
+  - install exits 0 with 18 `ok` lines, and `--check` exits 0;
+  - `--check --pull-cell-image` exits 2 (usage);
+  - **a bad key file is refused with exit 2**, with the "remove the drop-in and daemon-reload BEFORE replacing the key file" message; restoring the key reinstalls (exit 0);
+  - **the P0 probe gives `rootless`, 34/34**, and `sidecar-policy-refuses-guest` now passes on a real 401.
