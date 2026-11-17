@@ -129,6 +129,9 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "self_heal_admin_log",
   "knowledge_usage_window",
   "knowledge_admin_log",
+  // The exactly-once effect ledger (#652) records effects the org already
+  // performed; keys derive from the run, so a moved repo's next run gets new ones.
+  "control_effects",
 ];
 
 /**

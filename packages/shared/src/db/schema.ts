@@ -3386,3 +3386,32 @@ export const cellEffect = pgTable(
     }),
   ],
 );
+
+/**
+ * The control-plane effect ledger (#652): one row per effect key, written as an
+ * intent (`done_at` null) before the effect runs and completed after it.
+ * Unlike `cell_effect` it has no cell step: the control plane has no bearer.
+ * The key is derived from (mission, step, effect, output digest); the row never
+ * holds the payload or the output.
+ */
+export const controlEffects = pgTable(
+  "control_effects",
+  {
+    key: text("key").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    mission: text("mission").notNull(),
+    step: text("step").notNull(),
+    effect: text("effect").notNull(),
+    outputDigest: text("output_digest").notNull(),
+    intentAt: timestamp("intent_at", { mode: "date" }).defaultNow().notNull(),
+    /** Null = intent only: the effect may or may not have happened. */
+    doneAt: timestamp("done_at", { mode: "date" }),
+    /** True when `done_at` was set by finding the effect's marker, not by applying it. */
+    reconciled: boolean("reconciled").notNull().default(false),
+  },
+  (table) => [
+    index("control_effects_organization_id_index").on(table.organizationId),
+  ],
+);
