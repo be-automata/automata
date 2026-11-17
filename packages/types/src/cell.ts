@@ -1,8 +1,8 @@
 /**
  * Cell contract (#634 S1): the shapes a cell create plan and the cell provider
  * speak. The plan is pre-rendered for its provider (OD-1), so the policy and
- * vault are OpenSandbox-shaped. Mostly types; it also exports constants and one
- * runtime helper (`wasTruncated`). The OpenSandbox adapter is S2.
+ * vault are OpenSandbox-shaped. Types and constants only; the OpenSandbox
+ * adapter is S2.
  */
 
 export interface OpenSandboxNetworkRule {
@@ -35,6 +35,13 @@ export interface CellTags {
  * `name` pattern, RFC 7230 token characters).
  */
 export const CELL_VAULT_HEADER_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+
+/** The one www path the cell's daemon calls (#656 Scope 9); the daemon vault binds exactly this. */
+export const CELL_DAEMON_EVENT_PATH = "/api/daemon-event";
+/** The header the daemon sends its token in. */
+export const CELL_DAEMON_TOKEN_HEADER = "X-Daemon-Token";
+/** The fixed, non-secret value the guest sends in that header; the sidecar swaps in the real token. */
+export const CELL_DAEMON_TOKEN_PLACEHOLDER = "automata-cell-daemon-token";
 
 interface CellVaultEntryBase {
   name: string;
@@ -148,13 +155,11 @@ export interface CellListOptions {
 }
 
 /**
- * True when `listByTags` stopped at `maxPages` with more pages available. The
- * adapter sets a non-enumerable `truncated` boolean on the array it returns, so
- * a copy (spread, `.map`) drops the flag: read it on the original.
+ * A `listByTags` result. `truncated` is true when the listing stopped at
+ * `maxPages` with more pages available. The adapter sets it non-enumerable, so a
+ * copy (spread, `.map`) drops it: read it on the array that was returned.
  */
-export function wasTruncated(entries: readonly unknown[]): boolean {
-  return (entries as { truncated?: unknown }).truncated === true;
-}
+export type CellList = CellListEntry[] & { readonly truncated?: boolean };
 
 export interface ICellProvider {
   create(plan: CellCreatePlan): Promise<{ cellId: string }>;
@@ -178,5 +183,5 @@ export interface ICellProvider {
   listByTags(
     tags: Partial<CellTags>,
     opts?: CellListOptions,
-  ): Promise<CellListEntry[]>;
+  ): Promise<CellList>;
 }

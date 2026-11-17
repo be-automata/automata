@@ -14,11 +14,13 @@ import {
   vi,
 } from "vitest";
 
-import type {
-  CellVaultEntry,
-  OpenSandboxCellCreatePlan,
-  OpenSandboxNetworkPolicy,
-  OpenSandboxNetworkRule,
+import {
+  CELL_DAEMON_TOKEN_HEADER,
+  CELL_DAEMON_TOKEN_PLACEHOLDER,
+  type CellVaultEntry,
+  type OpenSandboxCellCreatePlan,
+  type OpenSandboxNetworkPolicy,
+  type OpenSandboxNetworkRule,
 } from "@terragon/types/cell";
 
 import { reconcileExpiredCells } from "../cell/reconcile";
@@ -120,14 +122,15 @@ const P_101 = policy(
 const CANARY_A = `osbit-canary-${randomBytes(8).toString("hex")}`;
 const CANARY_B = `osbit-canary-${randomBytes(8).toString("hex")}`;
 const CANARY_C = `osbit-canary-${randomBytes(8).toString("hex")}`;
-const DAEMON_HEADER = "X-Daemon-Token";
+const DAEMON_HEADER = CELL_DAEMON_TOKEN_HEADER;
 /**
  * The production daemon binding (`buildDaemonVaultEntry` in
  * `packages/shared/src/model/cell-create-plan.ts`), with this test's host and
- * path. Kept in step by hand: @terragon/sandbox does not depend on
- * @terragon/shared (which dev-depends on it), so the builder cannot be imported here.
+ * path. The header and placeholder are the production constants from
+ * @terragon/types; the entry's other fields are pinned by the plan builder's
+ * exact-shape test (sandbox cannot import shared, which dev-depends on it).
  */
-const DAEMON_PLACEHOLDER = "automata-cell-daemon-token";
+const DAEMON_PLACEHOLDER = CELL_DAEMON_TOKEN_PLACEHOLDER;
 const DAEMON_PATH = "/anything/daemon-event";
 const DAEMON_ENTRY: CellVaultEntry = {
   name: "daemon",

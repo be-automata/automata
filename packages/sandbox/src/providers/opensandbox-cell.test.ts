@@ -3,13 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CELL_MIN_TTL_MS,
   CELL_SELF_CHECK_BLOCKED_EXIT,
+  CELL_VAULT_HEADER_PATTERN,
   type CellCreatePlan,
-  wasTruncated,
+  type CellList,
 } from "@terragon/types/cell";
 
 import {
   CellProviderError,
   createOpenSandboxCellProvider,
+  OPENSANDBOX_HEADER_NAME_PATTERN,
   OPENSANDBOX_MIN_TTL_MS,
   OPENSANDBOX_SELF_CHECK_BLOCKED_EXIT,
   type OpenSandboxCellConfig,
@@ -897,6 +899,12 @@ describe("self-check fails closed (AC-4)", () => {
       CELL_SELF_CHECK_BLOCKED_EXIT,
     );
     expect(OPENSANDBOX_MIN_TTL_MS).toBe(CELL_MIN_TTL_MS);
+    expect(OPENSANDBOX_HEADER_NAME_PATTERN.source).toBe(
+      CELL_VAULT_HEADER_PATTERN.source,
+    );
+    expect(OPENSANDBOX_HEADER_NAME_PATTERN.flags).toBe(
+      CELL_VAULT_HEADER_PATTERN.flags,
+    );
   });
 
   it("a BACKEND_RESPONSE_FAILED 502 is not retried", async () => {
@@ -1583,16 +1591,16 @@ describe("listByTags", () => {
     const out = await provider.listByTags({}, { maxPages: 2 });
     expect(out).toHaveLength(200);
     expect(server.count("GET /sandboxes?metadata")).toBe(2);
-    expect(wasTruncated(out)).toBe(true);
+    expect(out.truncated).toBe(true);
     // A copy drops the non-enumerable flag.
-    expect(wasTruncated([...out])).toBe(false);
+    expect(([...out] as CellList).truncated).toBeUndefined();
   });
 
   it("is not truncated when the pages end within maxPages", async () => {
     const { provider } = pagedServer(2);
     const out = await provider.listByTags({}, { maxPages: 2 });
     expect(out).toHaveLength(200);
-    expect(wasTruncated(out)).toBe(false);
+    expect(out.truncated).toBe(false);
   });
 
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 1_001])(

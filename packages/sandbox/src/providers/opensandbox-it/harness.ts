@@ -258,7 +258,7 @@ export interface ProbeResult {
 }
 
 /** Python run inside the guest: reads one JSON arg, prints one JSON line of results. */
-const PROBE_PY = String.raw`import base64, concurrent.futures, errno, json, os, re, socket, ssl, struct, sys, time, urllib.request, urllib.error
+const PROBE_PY = String.raw`import base64, concurrent.futures, errno, json, os, random, re, socket, ssl, struct, sys, time, urllib.request, urllib.error
 
 T = 4.0
 
@@ -315,15 +315,27 @@ def tls_ip(ip, sni):
         return {"ok": False, "err": kind_of(e)}
 
 
-def fetch(url, marker):
-    req = urllib.request.Request(sub(url), headers={"user-agent": "osbit-probe"})
+def request(url, method="GET", headers=None):
+    # One request path for every HTTP probe: same read cap, TLS context and
+    # error mapping. Returns (body, status) or an error result dict.
+    sent = {"user-agent": "osbit-probe"}
+    sent.update(headers or {})
+    data = b"" if method == "POST" else None
+    req = urllib.request.Request(sub(url), data=data, method=method, headers=sent)
     try:
         with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
-            body, status = r.read(200000), r.status
+            return r.read(200000), r.status
     except urllib.error.HTTPError as e:
-        body, status = e.read(200000), e.code
+        return e.read(200000), e.code
     except Exception as e:
         return {"ok": False, "err": kind_of(e)}
+
+
+def fetch(url, marker):
+    got = request(url)
+    if isinstance(got, dict):
+        return got
+    body, status = got
     out = {"ok": True, "status": status}
     if marker is not None:
         out["bodyHasMarker"] = marker in body
@@ -331,22 +343,17 @@ def fetch(url, marker):
 
 
 def fetch_headers(url, headers, markers_b64):
-    sent = {"user-agent": "osbit-probe"}
-    sent.update(headers)
     # A public echo rate-limits concurrent probes (429) or briefly 503s; retry
-    # those only, a bounded number of times. Any other status is the result.
+    # those only, a bounded number of times, with jitter so parallel probes do
+    # not come back together. Any other status is the result.
     for attempt in range(4):
-        req = urllib.request.Request(sub(url), data=b"", method="POST", headers=sent)
-        try:
-            with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
-                body, status = r.read(200000), r.status
-        except urllib.error.HTTPError as e:
-            body, status = e.read(200000), e.code
-        except Exception as e:
-            return {"ok": False, "err": kind_of(e)}
+        got = request(url, "POST", headers)
+        if isinstance(got, dict):
+            return got
+        body, status = got
         if status not in (429, 503) or attempt == 3:
             break
-        time.sleep(1.5 * (attempt + 1))
+        time.sleep(1.5 * (attempt + 1) * (0.5 + random.random()))
     found = [base64.b64decode(m) in body for m in markers_b64]
     return {"ok": True, "status": status, "markersFound": found}
 

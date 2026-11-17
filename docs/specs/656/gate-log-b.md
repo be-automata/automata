@@ -50,3 +50,34 @@ Two Mediums and four Lows; all fixed in the follow-up commit, each with a negati
 | Low      | The gate log overstated the header-absent row and the canary scan                                                                                    | Reworded (above)                                                                         |
 
 After the fixes: sandbox 523 passed (145 skipped, exit 0), the plan-builder tests 40 passed, and tsc exit 0 on shared and sandbox.
+
+## `/simplify` (4 reviewers: reuse, simplification, efficiency, altitude)
+
+Applied:
+
+- **Runtime import of a dev-only dependency** (altitude). `reconcile.ts` imported the runtime helper `wasTruncated` from `@terragon/types`, which `@terragon/sandbox` has only as a devDependency.
+  - The flag is now part of the return type: `CellList = CellListEntry[] & { readonly truncated?: boolean }`. The reconciler imports types only, and `wasTruncated` is removed.
+- **Daemon binding constants** moved to `@terragon/types` (`CELL_DAEMON_EVENT_PATH`, `CELL_DAEMON_TOKEN_HEADER`, `CELL_DAEMON_TOKEN_PLACEHOLDER`). The plan builder re-exports them, and the live gate now imports the production values instead of copying them.
+- **The adapter's header-name regex** stays a local copy, because the adapter imports the contract type-only. A sync test now asserts it equals `CELL_VAULT_HEADER_PATTERN`, following the precedent of `OPENSANDBOX_MIN_TTL_MS`.
+- **Reconciler:** each cell is classified as expired once, not three times, and a `visited` counter enforces the limit.
+- **Adapter:** one cast in `assertVault`; the duplicate `maxPages` check is gone.
+- **Guest probe:** `fetch` and `fetch_headers` share one request path. The 429/503 retry has jitter, so parallel probes don't come back together.
+
+Skipped, with reasons:
+
+- Skipping `isDead` when expired cells already fill the limit: that would turn `dead` and `deferred` into estimates.
+- Caching `cellBrokerHost()`: negligible.
+- Un-exporting `cellKeyId`, `buildDaemonVaultEntry` and `CELL_DAEMON_EVENT_PATH`, and cutting the `isDead` and `daemonToken` options: they are the contract PR-C and PR-E consume.
+
+**Final run on this tree, all exit 0:**
+
+| Gate                                     | Result                          |
+| :--------------------------------------- | :------------------------------ |
+| fumadocs-mdx                             | pass                            |
+| `pnpm turbo tsc-check --force`           | 21/21                           |
+| `pnpm turbo lint --force`                | pass                            |
+| prettier `--check` on every changed file | pass                            |
+| sandbox                                  | 523 passed, 145 skipped         |
+| shared                                   | 1609                            |
+| www                                      | 4458 passed, 9 skipped          |
+| `OPENSANDBOX_IT=1`                       | **10/10**, daemon gate included |

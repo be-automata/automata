@@ -5,11 +5,7 @@
  * tags (there is no cell table). Pure over injected dependencies: the caller
  * supplies the provider, the control plane's revoke, the clock and a logger.
  */
-import {
-  type CellLogger,
-  type ICellProvider,
-  wasTruncated,
-} from "@terragon/types/cell";
+import type { CellLogger, ICellProvider } from "@terragon/types/cell";
 
 /**
  * Cells reaped per run. Each reap is a few provider requests and the run sits
@@ -38,8 +34,8 @@ interface ReconcileExpiredCellsInput {
   maxPages?: number;
   /**
    * Returns, as `stepKey#attempt` ids, only the keys it positively knows are
-   * dead (a finished run). An unknown or unread key is kept: a short, partial
-   * or empty answer never reaps a live cell.
+   * dead (a finished run), each built with `cellKeyId`. An unknown or unread
+   * key is kept: a short, partial or empty answer never reaps a live cell.
    */
   isDead?: (keys: CellKey[]) => Promise<Set<string>>;
   /** In [0, 1); injected so tests are deterministic. Default Math.random. */
@@ -151,8 +147,8 @@ export async function reconcileExpiredCells(
     { deployment: input.deployment },
     { maxPages: input.maxPages ?? DEFAULT_RECONCILE_MAX_PAGES },
   );
-  // Read before any `.map`: a copy of the array drops the flag.
-  const truncated = wasTruncated(entries);
+  // Read on the returned array, before any `.map`: a copy drops the flag.
+  const truncated = entries.truncated === true;
   const nowMs = now();
   const result: ReconcileResult = {
     listed: entries.length,
@@ -164,30 +160,32 @@ export async function reconcileExpiredCells(
     truncated,
   };
 
-  const keyed = entries.map((entry) => ({ entry, key: parseKey(entry.tags) }));
-  const live = keyed.filter(
-    ({ entry, key }) => !isExpired(entry.tags, key, nowMs),
-  );
+  // Each cell is classified once: expired (or unreadable), else a live key.
+  const keyed = entries.map((entry) => {
+    const key = parseKey(entry.tags);
+    return { entry, key, expired: isExpired(entry.tags, key, nowMs) };
+  });
   const deadIds = await deadKeyIds(
     input.isDead,
-    live.flatMap(({ key }) => (key ? [key] : [])),
+    keyed.flatMap(({ key, expired }) => (!expired && key ? [key] : [])),
     logger,
   );
-  const isDeadCell = (key: CellKey | null): boolean =>
-    key !== null && deadIds.has(cellKeyId(key));
   const reapable = keyed.filter(
-    ({ entry, key }) => isExpired(entry.tags, key, nowMs) || isDeadCell(key),
+    ({ key, expired }) =>
+      expired || (key !== null && deadIds.has(cellKeyId(key))),
   );
 
-  for (const { entry, key } of shuffled(
+  let visited = 0;
+  for (const { entry, key, expired } of shuffled(
     reapable,
     input.random ?? Math.random,
   )) {
-    if (result.expired + result.dead >= limit) {
+    if (visited >= limit) {
       result.deferred += 1;
       continue;
     }
-    if (isExpired(entry.tags, key, nowMs)) result.expired += 1;
+    visited += 1;
+    if (expired) result.expired += 1;
     else result.dead += 1;
 
     const cellId = entry.cellId;

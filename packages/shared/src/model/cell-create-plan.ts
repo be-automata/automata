@@ -7,7 +7,13 @@ import type {
   CellVaultEntry,
 } from "@terragon/types/cell";
 
-import { CELL_MIN_TTL_MS, CELL_RUN_TTL_MS } from "@terragon/types/cell";
+import {
+  CELL_DAEMON_EVENT_PATH,
+  CELL_DAEMON_TOKEN_HEADER,
+  CELL_DAEMON_TOKEN_PLACEHOLDER,
+  CELL_MIN_TTL_MS,
+  CELL_RUN_TTL_MS,
+} from "@terragon/types/cell";
 
 import {
   CELL_EGRESS_MODEL_HOST,
@@ -23,12 +29,9 @@ export type CellPlanErrorCode =
   | "bearer_refused"
   | "egress_wildcard";
 
-/** The fixed, non-secret string the guest sends as the daemon token; the proxy swaps in the real one. */
-export const CELL_DAEMON_TOKEN_PLACEHOLDER = "automata-cell-daemon-token";
-
-/** The one www path the daemon calls, and the header it carries the token in. */
-export const CELL_DAEMON_EVENT_PATH = "/api/daemon-event";
-const DAEMON_TOKEN_HEADER = "X-Daemon-Token";
+// The daemon binding's path, header and placeholder live in @terragon/types so
+// the sandbox live gate binds the same values (sandbox cannot import shared).
+export { CELL_DAEMON_EVENT_PATH, CELL_DAEMON_TOKEN_PLACEHOLDER };
 
 /**
  * A refused plan. The message is the fixed code only: `reason` comes from the
@@ -100,7 +103,7 @@ export function buildDaemonVaultEntry(
     hosts: [brokerHost],
     paths: [CELL_DAEMON_EVENT_PATH],
     auth: "apiKey",
-    header: DAEMON_TOKEN_HEADER,
+    header: CELL_DAEMON_TOKEN_HEADER,
     credential: daemonToken,
     placeholder: CELL_DAEMON_TOKEN_PLACEHOLDER,
   };

@@ -97,7 +97,7 @@ describe("https_headers probe", () => {
   it("never puts a marker in the argv in clear and sends a POST", () => {
     const joined = probeArgv([spec]).join(" ");
     expect(joined).not.toContain("osbit-canary-c");
-    expect(joined).toContain('method="POST"');
+    expect(joined).toContain('request(url, "POST", headers)');
   });
 
   it("parses one boolean per marker and nothing else from the body", () => {
