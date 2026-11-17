@@ -19,6 +19,7 @@ import type { AgentRunStatus } from "@/agent/hatchet/transport";
 import { auth } from "@/lib/auth";
 import { daemonRunKey, hasActiveDaemonToken } from "@/lib/daemon-token";
 import { vi } from "vitest";
+import { getOctokitForApp } from "@/lib/github";
 
 /**
  * #125 C4 sweep rules against the real DB with an injected engine status
@@ -841,6 +842,76 @@ describe("runSupersedeSweep rule (iii) — failed-unreported runs (#380)", () =>
     });
     expect(raced.unreported).not.toContain(racing.threadId);
     expect((await chatRow(racing.threadId)).status).toBe("booting");
+  });
+
+  // Card: protects=#668 AC-2, a mention run rule (iii) reconciles gets its
+  // answer (no daemon finish will ever write it); fails_when=sweepTerminal
+  // stops calling the mention writer or calls it for a thread it left alone;
+  // no_claim=GitHub's API (fake).
+  it("a mention thread terminalised by rule (iii) gets one reply on its mention; a younger one gets none", async () => {
+    const posted: { issue_number: number; body: string }[] = [];
+    vi.mocked(getOctokitForApp).mockResolvedValue({
+      paginate: vi.fn(async () => []),
+      rest: {
+        issues: {
+          listComments: vi.fn(),
+          createComment: vi.fn(
+            async (args: { issue_number: number; body: string }) => {
+              posted.push(args);
+              return { data: {} };
+            },
+          ),
+        },
+      },
+    } as never);
+    const mentionStamp = {
+      type: "automation-skill",
+      skillName: "github-mention",
+      contentSha: "x",
+      source: "db-version",
+      mention: {
+        repoFullName: "be-automata/automata",
+        issueOrPrNumber: 664,
+        isPullRequest: true,
+        commentId: 6954684380,
+        commentKind: "issue",
+        commenterLogin: "alice",
+      },
+    };
+    const dead = await bootingTaskThread(N + 60_000);
+    const young = await bootingTaskThread(N - 60_000);
+    // Stamp the mention without moving the dispatch-time write rule (iii)
+    // ages the thread by.
+    for (const [t, ageMs] of [
+      [dead, N + 60_000],
+      [young, N - 60_000],
+    ] as const) {
+      await db
+        .update(threadTable)
+        .set({
+          sourceMetadata: mentionStamp as never,
+          updatedAt: new Date(Date.now() - ageMs),
+        })
+        .where(eq(threadTable.id, t.threadId));
+    }
+    const report = await runSupersedeSweep({
+      cancelledAfterMs: T,
+      orphanAfterMs: N,
+      readStatus: reader({}),
+      listRuns: async (hint: { threadId: string }) =>
+        hint.threadId === dead.threadId || hint.threadId === young.threadId
+          ? [{ externalId: "r-x", status: "FAILED" as const }]
+          : [],
+    });
+    expect(report.unreported).toEqual([dead.threadId]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.issue_number).toBe(664);
+    expect(posted[0]!.body).toContain(
+      "I couldn't finish this: the run failed before it could report back. Mention me again to retry.",
+    );
+    expect(posted[0]!.body).toContain(
+      "<!-- automata:mention-reply comment=6954684380 -->",
+    );
   });
 
   it("a listing failure leaves the thread for the next tick (no terminal, token kept)", async () => {
