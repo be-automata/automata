@@ -35,6 +35,7 @@ export interface EffectTarget<P> {
 }
 
 export interface EffectKeyParts {
+  organizationId: string;
   mission: string;
   step: string;
   effect: string;
@@ -45,7 +46,6 @@ export interface RunEffectInput<P> extends EffectKeyParts {
   /** The root handle, never a transaction: the intent must commit on its own. */
   db: DB;
   target: EffectTarget<P>;
-  organizationId: string;
   payload: P;
   /** How long a delivery waits behind the key's lock. Default 10 s. */
   lockTimeoutMs?: number;
@@ -65,18 +65,22 @@ export class ControlEffectKeyCollisionError extends Error {
 
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_TARGET_TIMEOUT_MS = 60_000;
-const KEY_LENGTH = 16;
+const KEY_LENGTH = 32;
 
 /**
- * `sha256(mission|step|effect|outputDigest)` as hex, first 16 chars. Each part
- * must be non-empty and free of `|`, so two different tuples never join alike.
- * `organizationId` is not part of the key, so `mission` must be a
- * server-generated, globally unique id (today the parent run id), never tenant
- * input: two organizations with an identical tuple would collide
- * (`ControlEffectKeyCollisionError`).
+ * `sha256(organizationId|mission|step|effect|outputDigest)` as hex, first 32
+ * chars (128 bits). Each part must be non-empty and free of `|`, so two
+ * different tuples never join alike. The organization is part of the key, so
+ * one org's effects cannot pre-claim another's, whatever the mission id is.
  */
 export function effectKey(parts: EffectKeyParts): string {
-  const values = [parts.mission, parts.step, parts.effect, parts.outputDigest];
+  const values = [
+    parts.organizationId,
+    parts.mission,
+    parts.step,
+    parts.effect,
+    parts.outputDigest,
+  ];
   for (const value of values) {
     if (value === "" || value.includes("|")) {
       throw new RangeError(

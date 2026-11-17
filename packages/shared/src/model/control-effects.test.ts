@@ -127,7 +127,7 @@ async function newEffect(digest = "d1") {
     effect: "post",
     outputDigest: digest,
   };
-  const key = effectKey(parts);
+  const key = effectKey({ organizationId, ...parts });
   const call = (target: EffectTarget<string>, extra = {}) =>
     runEffect({
       db,
@@ -144,7 +144,7 @@ async function newEffect(digest = "d1") {
       ...parts,
     });
   };
-  return { organizationId, parts, call, seedIntent, key };
+  return { organizationId, call, seedIntent, key };
 }
 
 /** Backends waiting on a lock (the delivery blocked behind a holder). */
@@ -164,11 +164,20 @@ async function readRow(key: string) {
 }
 
 describe("effectKey", () => {
-  const parts = { mission: "m", step: "s", effect: "e", outputDigest: "d" };
+  const parts = {
+    organizationId: "o",
+    mission: "m",
+    step: "s",
+    effect: "e",
+    outputDigest: "d",
+  };
 
-  it("is stable, 16 hex chars and sensitive to the digest", () => {
+  it("is stable, 32 hex chars and sensitive to the organization and the digest", () => {
     expect(effectKey(parts)).toBe(effectKey({ ...parts }));
-    expect(effectKey(parts)).toMatch(/^[0-9a-f]{16}$/);
+    expect(effectKey(parts)).toMatch(/^[0-9a-f]{32}$/);
+    expect(effectKey({ ...parts, organizationId: "o2" })).not.toBe(
+      effectKey(parts),
+    );
     expect(effectKey({ ...parts, outputDigest: "d2" })).not.toBe(
       effectKey(parts),
     );
@@ -241,15 +250,15 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     expect(target.applied).toEqual(["body", "body2"]);
   });
 
-  it("refuses another organization's identical tuple instead of reporting its effect", async () => {
+  it("keeps another organization's identical tuple a separate effect", async () => {
     const e = await newEffect();
     const target = memoryTarget();
     expect((await e.call(target)).outcome).toBe("applied");
     const otherOrg = await createTestOrg({ db });
-    await expect(
-      e.call(target, { organizationId: otherOrg }),
-    ).rejects.toBeInstanceOf(ControlEffectKeyCollisionError);
-    expect(target.applied).toEqual(["body"]);
+    const other = await e.call(target, { organizationId: otherOrg });
+    expect(other.outcome).toBe("applied");
+    expect(other.key).not.toBe(e.key);
+    expect(target.applied).toEqual(["body", "body"]);
   });
 
   it("throws on a key collision before any target call", async () => {
@@ -285,6 +294,7 @@ describe("runEffect (#652 exactly-once control effects)", () => {
       .call(target, { lockTimeoutMs: 200 })
       .catch((err: unknown) => err);
     expect(pgCode(error), String(error)).toBe("55P03"); // lock_not_available
+    // gstack-timing-ok: 15x the 200 ms lockTimeoutMs; 55P03 above proves the cause.
     expect(Date.now() - started).toBeLessThan(3000);
     holder.release();
     await holder.done;
@@ -310,16 +320,7 @@ describe("runEffect (#652 exactly-once control effects)", () => {
           await target.apply(key, payload, signal);
         },
       };
-      const result = await runEffect({
-        db: strictDb,
-        target: slow,
-        organizationId: e.organizationId,
-        payload: "body",
-        mission: e.parts.mission,
-        step: e.parts.step,
-        effect: e.parts.effect,
-        outputDigest: e.parts.outputDigest,
-      });
+      const result = await e.call(slow, { db: strictDb });
       expect(result.outcome).toBe("applied");
       expect((await readRow(e.key))?.doneAt).toBeInstanceOf(Date);
     } finally {
@@ -337,9 +338,10 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     expect(await readRow(e.key)).toBeUndefined();
   });
 
-  // Exercises the reconcile path behind a holder that applied and rolled back.
-  // The removed `created` shortcut's race needs a seam inside runEffect, so this
-  // is not its regression test: dropping the shortcut is what closes it.
+  // runEffect never uses whether its own insert created the row to skip
+  // findByMarker: a delivery that created the intent can still find a marker
+  // left by a holder that applied and rolled back. This covers that reconcile
+  // path from outside runEffect.
   it("reconciles when a lock holder applied and rolled back while the delivery waited", async () => {
     const e = await newEffect();
     const target = memoryTarget();

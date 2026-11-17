@@ -39,9 +39,13 @@ Decisions (2026-11-16, owner + TL, recorded on the issue body):
 
 ## Contract
 
-1. **Effect key.** `effectKey({ mission, step, effect, outputDigest })` =
-   `sha256(mission + "|" + step + "|" + effect + "|" + outputDigest)` as hex, first 16 chars. Each
-   part must be non-empty and must not contain `|` (rejects ambiguous joins). Pure function.
+1. **Effect key.** `effectKey({ organizationId, mission, step, effect, outputDigest })` =
+   `sha256(organizationId | mission | step | effect | outputDigest)` as hex, first 32 chars (128
+   bits). Each part must be non-empty and must not contain `|` (rejects ambiguous joins). Pure
+   function. **Amended 2026-11-17 (ship review, owner's decision):** the ticket's key was
+   `sha256(mission | step | effect | output digest)` cut to 16 hex. With the organization outside
+   the key and 64 bits, one org able to predict another's mission id could pre-claim a colliding
+   key and block that effect permanently; the org is now hashed in and the key is 128 bits.
 2. **Table `control_effects`** (decided column list; `org` follows the repo's `organization_id`
    naming), names exact for the schema-drift job:
    - `key text PRIMARY KEY` (constraint `control_effects_pkey`), `organization_id text NOT NULL`,
@@ -102,7 +106,7 @@ idle_in_transaction_session_timeout = 0` (pattern of `self-heal-tx.ts`), then
 ## Tests
 
 - **Unit** (`control-effects.test.ts`, DB-backed like `cell-authority.test.ts`): key derivation
-  (stable, 16 hex, digest-sensitive, rejects empty and `|`); state machine with an in-memory
+  (stable, 32 hex, organization- and digest-sensitive, rejects empty and `|`); state machine with an in-memory
   target: applied → already_done; pre-existing intent + marker found → reconciled (row:
   `reconciled = true`, `done_at` set); pre-existing intent + no marker → applied once (covers the
   window between insert and lock); concurrent `Promise.all` of two deliveries → one apply (AC 3);

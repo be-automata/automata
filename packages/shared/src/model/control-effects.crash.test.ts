@@ -105,6 +105,7 @@ const markerCount = (s: Scenario) => readdirSync(s.dir).length;
 
 async function readRow(s: Scenario) {
   const key = effectKey({
+    organizationId: s.organizationId,
     mission: s.mission,
     step: "summary",
     effect: "post",
