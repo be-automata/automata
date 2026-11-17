@@ -1078,6 +1078,9 @@ importers:
       '@terragon/sandbox-image':
         specifier: workspace:*
         version: link:../sandbox-image
+      '@terragon/types':
+        specifier: workspace:*
+        version: link:../types
       '@terragon/utils':
         specifier: workspace:*
         version: link:../utils
@@ -1091,9 +1094,6 @@ importers:
       '@terragon/tsconfig':
         specifier: workspace:*
         version: link:../tsconfig
-      '@terragon/types':
-        specifier: workspace:*
-        version: link:../types
       '@types/node':
         specifier: 24.0.1
         version: 24.0.1

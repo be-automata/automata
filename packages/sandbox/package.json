@@ -37,13 +37,13 @@
     "@terragon/bundled": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/sandbox-image": "workspace:*",
+    "@terragon/types": "workspace:*",
     "@terragon/utils": "workspace:*",
     "nanoid": "^3.3.8",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
-    "@terragon/types": "workspace:*",
     "@types/node": "^22.5.5",
     "typescript": "^5.8.2",
     "vitest": "^3.1.4"

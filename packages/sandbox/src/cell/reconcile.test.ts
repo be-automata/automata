@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CellKey } from "./reconcile";
+import type { CellKey } from "@terragon/types/cell";
 import { reconcileExpiredCells } from "./reconcile";
 
 const NOW = 1_000_000;

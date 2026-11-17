@@ -3333,6 +3333,12 @@ export const cellStep = pgTable(
     /** Every attempt up to and including this one is revoked (the sweep's verdict). */
     revokedThrough: integer("revoked_through"),
     doneAt: timestamp("done_at", { mode: "date" }),
+    /**
+     * The lease of the current attempt (#656 R2): database now() when the attempt was
+     * opened by openNextAttempt or last seen by thread-status. NULL = no lease (opened
+     * by openStep or before the column existed): judged by revocation, fence and done only.
+     */
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
