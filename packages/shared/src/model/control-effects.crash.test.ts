@@ -94,7 +94,11 @@ function deliver(
 
 function outcomeOf(d: Delivery): string {
   if (d.code !== 0) throw new Error(`child failed: ${d.stderr}`);
-  return (JSON.parse(d.stdout) as { outcome: string }).outcome;
+  // Only the RESULT line: anything else the child prints is not the outcome.
+  const line = d.stdout.split("\n").find((l) => l.startsWith("RESULT "));
+  if (!line) throw new Error(`no RESULT line: ${d.stdout}`);
+  return (JSON.parse(line.slice("RESULT ".length)) as { outcome: string })
+    .outcome;
 }
 
 const markerCount = (s: Scenario) => readdirSync(s.dir).length;

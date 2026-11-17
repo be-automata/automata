@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     outputDigest: requireEnv("OUTPUT_DIGEST"),
     payload: "body",
   });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.stdout.write(`RESULT ${JSON.stringify(result)}\n`);
   await db.$client.end();
 }
 

@@ -159,8 +159,10 @@ export async function runEffect<P>(
   await insertIntent(input.db, key, input);
   const outcome = await input.db.transaction(async (tx) => {
     // set_config(..., true) is SET LOCAL: scoped to this transaction only.
+    // idle_in_transaction_session_timeout is pinned to 0 so an inherited server
+    // or role value cannot end the session (and free the lock) mid-apply.
     await tx.execute(
-      sql`select set_config('lock_timeout', ${`${lockMs}ms`}, true)`,
+      sql`select set_config('lock_timeout', ${`${lockMs}ms`}, true), set_config('idle_in_transaction_session_timeout', '0', true)`,
     );
     const [row] = await tx
       .select()

@@ -144,7 +144,7 @@ async function newEffect(digest = "d1") {
       ...parts,
     });
   };
-  return { organizationId, call, seedIntent, key };
+  return { organizationId, parts, call, seedIntent, key };
 }
 
 /** Backends waiting on a lock (the delivery blocked behind a holder). */
@@ -290,6 +290,41 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     await holder.done;
     expect(target.applied).toEqual([]);
     expect((await readRow(e.key))?.doneAt).toBeNull();
+  });
+
+  it("keeps the lock through an apply longer than an inherited idle-in-transaction timeout", async () => {
+    // A pool whose sessions inherit a 200 ms idle_in_transaction_session_timeout.
+    const url = new URL(env.DATABASE_URL!); // Non-null: set by the shared globalSetup.
+    url.searchParams.set(
+      "options",
+      "-c idle_in_transaction_session_timeout=200",
+    );
+    const strictDb = createDb(url.toString());
+    try {
+      const e = await newEffect();
+      const target = memoryTarget();
+      const slow: EffectTarget<string> = {
+        findByMarker: (key, signal) => target.findByMarker(key, signal),
+        async apply(key, payload, signal) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await target.apply(key, payload, signal);
+        },
+      };
+      const result = await runEffect({
+        db: strictDb,
+        target: slow,
+        organizationId: e.organizationId,
+        payload: "body",
+        mission: e.parts.mission,
+        step: e.parts.step,
+        effect: e.parts.effect,
+        outputDigest: e.parts.outputDigest,
+      });
+      expect(result.outcome).toBe("applied");
+      expect((await readRow(e.key))?.doneAt).toBeInstanceOf(Date);
+    } finally {
+      await strictDb.$client.end();
+    }
   });
 
   it("rejects non-positive timeouts before touching the database", async () => {
