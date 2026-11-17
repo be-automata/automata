@@ -124,30 +124,36 @@ export async function runStalledTasksCron(): Promise<void> {
     db,
     threadIds: stalledThreads.map((t) => t.id),
   });
-  for (let i = 0; i < stalledThreads.length; i += 10) {
-    const batch = stalledThreads.slice(i, i + 10);
-    await Promise.all(
-      batch.map(async (thread) => {
-        if (thread.codesandboxId) {
-          try {
-            await maybeHibernateSandboxById({
-              threadId: thread.id,
-              userId: thread.userId,
-              sandboxId: thread.codesandboxId,
-              sandboxProvider: thread.sandboxProvider,
-            });
-          } catch {
-            // best-effort
+  try {
+    for (let i = 0; i < stalledThreads.length; i += 10) {
+      const batch = stalledThreads.slice(i, i + 10);
+      await Promise.all(
+        batch.map(async (thread) => {
+          if (thread.codesandboxId) {
+            try {
+              await maybeHibernateSandboxById({
+                threadId: thread.id,
+                userId: thread.userId,
+                sandboxId: thread.codesandboxId,
+                sandboxProvider: thread.sandboxProvider,
+              });
+            } catch {
+              // best-effort
+            }
           }
-        }
-      }),
+        }),
+      );
+      await sleep();
+    }
+  } finally {
+    // #668: the watchdog is also the backstop for a dropped finish event; a
+    // mention thread it reaped would otherwise never be answered. After the
+    // hibernation, so freeing slots never waits on GitHub, and in `finally`,
+    // so a hibernation failure cannot strand threads already terminal.
+    await replyToMentionsAtTerminal(
+      stoppedIds.map((threadId) => ({ threadId })),
     );
-    await sleep();
   }
-  // #668: the watchdog is also the backstop for a dropped finish event; a
-  // mention thread it reaps would otherwise never be answered. After the
-  // hibernation above, so freeing slots never waits on GitHub.
-  await replyToMentionsAtTerminal(stoppedIds.map((threadId) => ({ threadId })));
 }
 
 /**

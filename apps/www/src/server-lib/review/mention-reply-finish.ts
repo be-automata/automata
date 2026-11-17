@@ -1,4 +1,4 @@
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
@@ -467,8 +467,9 @@ export async function handleMentionReplyAtFinish({
 /**
  * The chat a typed-terminal path reads when its caller did not name one (the
  * sweeps know only the thread): a v0 thread keeps its chat on the thread row;
- * for a v1 thread, the chat written last, which is the one the terminal just
- * moved. Null when a v1 thread has no chat row.
+ * for a v1 thread, the chat the terminal moved — markThreadsTerminal stamps
+ * its `terminalCause` mirror (#153) — and, failing that, the chat written
+ * last. Null when a v1 thread has no chat row.
  */
 async function resolveThreadChatId({
   db,
@@ -484,7 +485,10 @@ async function resolveThreadChatId({
     .select({ id: threadChatTable.id })
     .from(threadChatTable)
     .where(eq(threadChatTable.threadId, threadId))
-    .orderBy(desc(threadChatTable.updatedAt))
+    .orderBy(
+      sql`${threadChatTable.terminalCause} IS NULL`,
+      desc(threadChatTable.updatedAt),
+    )
     .limit(1);
   return first?.id ?? null;
 }

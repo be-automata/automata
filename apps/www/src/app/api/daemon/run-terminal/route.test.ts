@@ -23,6 +23,8 @@ import { User } from "@terragon/shared";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
 import { getOctokitForApp } from "@/lib/github";
 import { mentionReplyMarker } from "@/server-lib/review/mention-reply-finish";
+import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
+import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
@@ -512,6 +514,65 @@ describe("POST /api/daemon/run-terminal — mention reply (#668)", () => {
     await vi.waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]!.body).toBe(
       `Re-reviewed at 183c8a6.\n\n${mentionReplyMarker(STAMP.commentId)}`,
+    );
+  });
+
+  // The sweeps name no chat: the writer must find the one the terminal moved
+  // (its terminalCause mirror), not merely the newest.
+  it("no chat named (sweep/watchdog): the reply comes from the chat the terminal moved", async () => {
+    user = (await createTestUser({ db })).user;
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      enableThreadChatCreation: true,
+      chatOverrides: { status: "working" },
+    });
+    threadId = t.threadId;
+    await db
+      .update(threadChatTable)
+      .set({
+        messages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [
+              {
+                type: "text",
+                text: '```json mention-reply\n{"kind":"mention-reply","reply":"From the run chat."}\n```',
+              },
+            ],
+          },
+        ] as never,
+      })
+      .where(eq(threadChatTable.id, t.threadChatId));
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "x",
+          source: "db-version",
+          mention: STAMP,
+        } as never,
+      })
+      .where(eq(threadTable.id, threadId));
+    // A newer chat the terminal does not move (already complete, empty).
+    await db.insert(threadChatTable).values({
+      userId: user.id,
+      threadId,
+      status: "complete",
+      messages: [],
+      updatedAt: new Date(Date.now() + 60 * 60_000),
+    } as never);
+
+    expect(await markThreadTerminal({ db, threadId, cause: "timeout" })).toBe(
+      true,
+    );
+    await replyToMentionsAtTerminal([{ threadId }]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.body).toBe(
+      `From the run chat.\n\n${mentionReplyMarker(STAMP.commentId)}`,
     );
   });
 
