@@ -11,12 +11,18 @@ import { parsePinnedImage } from "./container-image";
 import {
   CELL_BROKER_HOST_PATTERN,
   CELL_CA_BUNDLE,
+  CELL_DAEMON_ENV,
   CELL_DAEMON_SOCKET,
   CELL_ENTRY,
   CELL_ENTRY_EXIT,
   CELL_ENV_ALLOWLIST,
+  CELL_FORBIDDEN_ENV_PATTERN,
+  CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
   CELL_NODE,
+  CELL_RUN_ENV,
   CELL_SEND,
+  CELL_SEND_EXIT,
+  CELL_SEND_MAX_BYTES,
   cellEntrypoint,
   isForbiddenCellEnvName,
 } from "./cell-image";
@@ -41,7 +47,9 @@ const DOCKERFILE = `${CELL_DIR}/Dockerfile`;
 const ENTRY = `${CELL_DIR}/cell-entry.sh`;
 const SEND = `${CELL_DIR}/cell-send.sh`;
 const VERIFY = `${CELL_DIR}/verify.sh`;
+const SCAN = `${CELL_DIR}/scan-layers.sh`;
 const WORKFLOW = ".github/workflows/cell-image.yml";
+const ACTION = ".github/actions/cell-image-build/action.yml";
 const BATTERIES_REPOSITORY = "ghcr.io/be-automata/automata-batteries";
 const FORBIDDEN_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|AUTH/i;
 const PLACEHOLDER = "automata-cell-daemon-token";
@@ -170,7 +178,23 @@ describe("the cell Dockerfile", () => {
   });
 });
 
-describe.each([ENTRY, SEND, VERIFY])("%s: bash script hygiene", (rel) => {
+// card: protects=the BuildKit syntax frontend is pinned by digest, not a movable tag; fails_when=line 1 lacks @sha256:<64 hex>; no_claim=that the digest is the newest 1.7
+describe("the Dockerfile syntax frontend", () => {
+  const SYNTAX = /^# syntax=docker\/dockerfile:1\.7@sha256:[0-9a-f]{64}$/;
+
+  it("is pinned by digest", () => {
+    expect(read(DOCKERFILE).split("\n")[0]).toMatch(SYNTAX);
+  });
+
+  it("negative control: a bare tag does not match the pin pattern", () => {
+    expect(SYNTAX.test("# syntax=docker/dockerfile:1.7")).toBe(false);
+    expect(SYNTAX.test("# syntax=docker/dockerfile:1.7@sha256:abc")).toBe(
+      false,
+    );
+  });
+});
+
+describe.each([ENTRY, SEND, VERIFY, SCAN])("%s: bash script hygiene", (rel) => {
   // card: protects=the script is executable, bash in strict mode, parses and is shellcheck clean; fails_when=it loses +x, strict mode, parses wrong or regresses shellcheck; no_claim=its behaviour in a cell
   it("is executable, strict, parses and is shellcheck clean", (ctx) => {
     const abs = path.join(repoRoot, rel);
@@ -190,11 +214,31 @@ describe.each([ENTRY, SEND, VERIFY])("%s: bash script hygiene", (rel) => {
     expect(r.stdout + r.stderr).toBe("");
     expect(r.status).toBe(0);
   });
+});
 
+/** Code lines before the first `PATH=/usr/bin:/bin` assignment, or null. */
+function codeBeforePathReset(script: string): string[] | null {
+  const code = codeOf(script)
+    .split("\n")
+    .filter((l) => l.trim() !== "");
+  const at = code.indexOf("PATH=/usr/bin:/bin");
+  return at < 0 ? null : code.slice(0, at);
+}
+
+describe.each([ENTRY, SEND])("%s: command resolution", (rel) => {
   // card: protects=the script execs node by absolute path, never through the agent-writable PATH head; fails_when=it names CELL_NODE no more or has a bare node command word; no_claim=runtime resolution
   it("calls node only by its absolute path", () => {
     expect(codeOf(read(rel))).toContain(CELL_NODE);
     expect(bareNodeCalls(read(rel))).toBe(0);
+  });
+
+  // card: protects=every external command resolves through root-owned dirs; fails_when=PATH is not reset before the first command, or anything but set/orig_path comes first; no_claim=the shim dir's contents
+  it("resets PATH to /usr/bin:/bin before any other command", () => {
+    const before = codeBeforePathReset(read(rel));
+    expect(before).not.toBeNull();
+    for (const line of before ?? []) {
+      expect(line).toMatch(/^(set -euo pipefail|orig_path=.*)$/);
+    }
   });
 });
 
@@ -204,6 +248,14 @@ it("negative control: bareNodeCalls flags a bare node, not an absolute one", () 
   expect(bareNodeCalls("x | node a.js\n")).toBe(1);
   expect(bareNodeCalls("exec /usr/local/bin/node a.js\n")).toBe(0);
   expect(bareNodeCalls("# exec node a.js\n")).toBe(0);
+});
+
+// card: protects=the PATH-reset detector fires; fails_when=a script that runs a command before resetting PATH, or never resets it, passes; no_claim=the real scripts
+it("negative control: codeBeforePathReset sees a command ahead of the reset", () => {
+  expect(
+    codeBeforePathReset("set -euo pipefail\nmkdir x\nPATH=/usr/bin:/bin\n"),
+  ).toEqual(["set -euo pipefail", "mkdir x"]);
+  expect(codeBeforePathReset("set -euo pipefail\nmkdir x\n")).toBeNull();
 });
 
 /** Runs need bash 4+ (`${name^^}`); the image has it, a stock macOS may not. */
@@ -219,6 +271,9 @@ const BASH = probe[0] ?? "bash";
 const bashMajor = Number(probe[1]);
 const describeRun = bashMajor >= 4 ? describe : describe.skip;
 
+/** Commands the scripts run that a planted copy must never replace. */
+const PLANTED_COMMANDS = ["node", "mkdir", "base64", "cat"];
+
 interface Sandbox {
   dir: string;
   home: string;
@@ -227,6 +282,37 @@ interface Sandbox {
   marker: string;
   entry: string;
   send: string;
+}
+
+/** Fake node: prints umask, argv, its env and stdin, in that order. */
+const FAKE_NODE = [
+  "#!/bin/bash",
+  "umask",
+  'printf "%s\\n" "$@"',
+  "echo ---ENV---",
+  "/usr/bin/env",
+  "echo ---STDIN---",
+  "/bin/cat",
+  "",
+].join("\n");
+
+interface FakeOut {
+  umask: string;
+  argv: string[];
+  env: Map<string, string>;
+  stdin: string;
+}
+
+function parseFake(stdout: string): FakeOut {
+  const [head = "", rest = ""] = stdout.split("---ENV---\n");
+  const [envPart = "", stdin = ""] = rest.split("---STDIN---\n");
+  const [umask = "", ...argv] = head.trimEnd().split("\n");
+  const env = new Map<string, string>();
+  for (const line of envPart.split("\n")) {
+    const at = line.indexOf("=");
+    if (at > 0) env.set(line.slice(0, at), line.slice(at + 1));
+  }
+  return { umask, argv, env, stdin };
 }
 
 /** Copies of the scripts with CELL_NODE rewritten to a fake that prints argv. */
@@ -238,17 +324,17 @@ function makeSandbox(): Sandbox {
   fs.mkdirSync(home);
   fs.mkdirSync(planted);
   const fakeNode = path.join(dir, "fake-node");
-  fs.writeFileSync(fakeNode, '#!/bin/bash\numask\nprintf "%s\\n" "$@"\ncat\n', {
-    mode: 0o755,
-  });
-  fs.writeFileSync(
-    path.join(planted, "node"),
-    `#!/bin/bash\ntouch ${marker}\n`,
-    { mode: 0o755 },
-  );
-  const copy = (rel: string) => {
+  fs.writeFileSync(fakeNode, FAKE_NODE, { mode: 0o755 });
+  for (const cmd of PLANTED_COMMANDS) {
+    fs.writeFileSync(
+      path.join(planted, cmd),
+      `#!/bin/bash\ntouch ${marker}\n`,
+      { mode: 0o755 },
+    );
+  }
+  const copy = (rel: string, edit = (s: string) => s) => {
     const out = path.join(dir, path.basename(rel));
-    fs.writeFileSync(out, read(rel).split(CELL_NODE).join(fakeNode));
+    fs.writeFileSync(out, edit(read(rel).split(CELL_NODE).join(fakeNode)));
     return out;
   };
   return {
@@ -262,34 +348,40 @@ function makeSandbox(): Sandbox {
   };
 }
 
+/** `undefined` in extraEnv removes the name. */
 const run = (
   sb: Sandbox,
   script: string,
   args: string[],
-  extraEnv: Record<string, string> = {},
-) =>
-  spawnSync(BASH, [script, ...args], {
+  extraEnv: Record<string, string | undefined> = {},
+) => {
+  const env: Record<string, string | undefined> = {
+    PATH: `${sb.planted}:/usr/bin:/bin`,
+    HOME: sb.home,
+    ...extraEnv,
+  };
+  for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
+  return spawnSync(BASH, [script, ...args], {
     encoding: "utf8",
     input: "",
-    env: {
-      PATH: `${sb.planted}:/usr/bin:/bin`,
-      HOME: sb.home,
-      ...extraEnv,
-    },
+    env: env as Record<string, string>,
   });
+};
 
 const GOOD_URL = "https://broker.example.org";
 const outputOf = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
 
+/** Names bash hands to children although they are not shell identifiers. */
+const NON_IDENTIFIER_NAMES = ["npm_config_//r.org/:_authToken", "X.Y_TOKEN"];
+
 describeRun("cell-entry.sh behaviour (fake node)", () => {
   const sb = makeSandbox();
 
-  // card: protects=the entry execs the daemon with exactly the contract argv, by absolute path, and ignores a planted node first on PATH; fails_when=the argv differs or the planted node runs; no_claim=the real daemon
-  it("execs the fake node with the contract argv and never the planted node", () => {
+  // card: protects=the entry execs the daemon with exactly the contract argv, by absolute path, and ignores planted commands first on PATH; fails_when=the argv differs or a planted command runs; no_claim=the real daemon
+  it("execs the fake node with the contract argv and never a planted command", () => {
     const r = run(sb, sb.entry, ["--url", GOOD_URL]);
     expect(r.status).toBe(0);
-    const [, ...argv] = r.stdout.trim().split("\n");
-    expect(argv).toEqual([
+    expect(parseFake(r.stdout).argv).toEqual([
       CONTAINER_DAEMON_BUNDLE,
       "--url",
       GOOD_URL,
@@ -300,21 +392,23 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     expect(fs.existsSync(sb.marker)).toBe(false);
   });
 
-  // card: protects=the planted-node trap is real; fails_when=a bare node call under the same PATH does not reach the planted node; no_claim=the real scripts
-  it("negative control: a bare node call WOULD reach the planted node", () => {
-    const bare = path.join(sb.dir, "bare.sh");
-    fs.writeFileSync(bare, "#!/bin/bash\nnode x\n", { mode: 0o755 });
-    run(sb, bare, []);
-    expect(fs.existsSync(sb.marker)).toBe(true);
-    fs.rmSync(sb.marker);
-  });
+  // card: protects=the planted-command trap is real; fails_when=a bare node, mkdir or base64 call under the same PATH does not reach the planted copy; no_claim=the real scripts
+  it.each(["node x", "mkdir x", "base64 x"])(
+    "negative control: a bare `%s` WOULD reach the planted command",
+    (cmd) => {
+      const bare = path.join(sb.dir, "bare.sh");
+      fs.writeFileSync(bare, `#!/bin/bash\n${cmd}\n`, { mode: 0o755 });
+      run(sb, bare, []);
+      expect(fs.existsSync(sb.marker)).toBe(true);
+      fs.rmSync(sb.marker);
+    },
+  );
 
   // card: protects=the run and shim dirs are private and the process umask is untouched; fails_when=the dirs are not 0700 or the daemon inherits a changed umask; no_claim=ownership in a cell
   it("creates 0700 run and shim dirs and leaves the umask unchanged", () => {
     const r = run(sb, sb.entry, ["--url", GOOD_URL]);
-    const mask = Number.parseInt(r.stdout.split("\n")[0] ?? "", 8);
-    const mine = process.umask();
-    expect(mask).toBe(mine);
+    const mask = Number.parseInt(parseFake(r.stdout).umask, 8);
+    expect(mask).toBe(process.umask());
     for (const d of [".automata-run", ".automata-run/flutter-pin"]) {
       expect(fs.statSync(path.join(sb.home, d)).mode & 0o777).toBe(0o700);
     }
@@ -336,6 +430,18 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     expect(r.stdout).toBe("");
   });
 
+  // card: protects=a HOME that is unset, empty, relative or missing stops the entry with its own code; fails_when=it starts or exits other than 66; no_claim=HOME contents
+  it.each([
+    ["unset", undefined],
+    ["empty", ""],
+    ["relative", "relative/dir"],
+    ["missing dir", "/nonexistent-cell-home"],
+  ])("refuses HOME %s with 66", (_label, home) => {
+    const r = run(sb, sb.entry, ["--url", GOOD_URL], { HOME: home });
+    expect(r.status).toBe(CELL_ENTRY_EXIT.noHome);
+    expect(r.stdout).toBe("");
+  });
+
   // card: protects=a credential-shaped env name stops the cell and its value is never echoed; fails_when=the entry starts, exits other than 78, or prints the canary; no_claim=the operator's docker.sandbox_env wiring
   it.each([
     "DAEMON_TOKEN",
@@ -345,7 +451,17 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     "my_secret",
     "DB_PASSWORD",
     "AWS_REGION",
+    "aws_region",
     "X_CREDENTIAL_FILE",
+    "STRIPEAPIKEY",
+    "SIGNING_KEY",
+    "PRIVATE_DATA",
+    "SSH_PASSPHRASE",
+    "GH_AUTH",
+    "OAUTH_CODE",
+    "GITHUB_PAT",
+    "SESSION_COOKIE",
+    "DATABASE_URL",
   ])("refuses env %s with 78 and never echoes its value", (name) => {
     const canary = `canary-${Math.random().toString(36).slice(2)}`;
     const r = run(sb, sb.entry, ["--url", GOOD_URL], { [name]: canary });
@@ -355,7 +471,56 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     expect(isForbiddenCellEnvName(name)).toBe(true);
   });
 
-  // card: protects=the allowlist lets the platform's own names through and ordinary names start; fails_when=an allowlisted name or FORCE_COLOR is refused; no_claim=what the platform really sets
+  // card: protects=a credential name that is not a shell identifier is refused too; fails_when=the entry starts, exits other than 78 or echoes the canary; no_claim=names beyond these two
+  it.each(NON_IDENTIFIER_NAMES)(
+    "refuses non-identifier env %s with 78 and never echoes its value",
+    (name) => {
+      const canary = `canary-${Math.random().toString(36).slice(2)}`;
+      const r = run(sb, sb.entry, ["--url", GOOD_URL], { [name]: canary });
+      expect(r.status).toBe(CELL_ENTRY_EXIT.forbiddenEnv);
+      expect(outputOf(r)).not.toContain(canary);
+    },
+  );
+
+  // card: protects=the non-identifier test is not vacuous; fails_when=compgen -e lists such a name, or env does not; no_claim=the entry
+  it("negative control: compgen -e misses what the child env carries", () => {
+    for (const name of NON_IDENTIFIER_NAMES) {
+      const env = { PATH: "/usr/bin:/bin", [name]: "v" };
+      const probe = (cmd: string) =>
+        spawnSync(BASH, ["-c", cmd], { encoding: "utf8", env }).stdout;
+      expect(probe("compgen -e").split("\n")).not.toContain(name);
+      expect(probe("/usr/bin/env")).toContain(`${name}=v`);
+    }
+  });
+
+  // card: protects=the daemon starts under env -i with only vetted names; fails_when=an unlisted, non-credential name (SOME_PLAIN) reaches the daemon, FORCE_COLOR is dropped, or PATH/HOME change; no_claim=what the agent adds itself
+  it("starts the daemon with only allowlisted and run-env names", () => {
+    const plain = { SOME_PLAIN: "leak", FORCE_COLOR: "0" };
+    const r = run(sb, sb.entry, ["--url", GOOD_URL], plain);
+    expect(r.status).toBe(0);
+    const { env } = parseFake(r.stdout);
+    expect(env.has("SOME_PLAIN")).toBe(false);
+    expect(env.get("FORCE_COLOR")).toBe("0");
+    expect(env.get("HOME")).toBe(sb.home);
+    expect(env.get("PATH")).toBe(`${sb.planted}:/usr/bin:/bin`);
+    const shellAdded = new Set(["PWD", "SHLVL", "_", "OLDPWD"]);
+    for (const name of env.keys()) {
+      expect(CELL_DAEMON_ENV.includes(name) || shellAdded.has(name)).toBe(true);
+    }
+  });
+
+  // card: protects=the env -i scrub is what drops the name; fails_when=the same run without env -i also hides SOME_PLAIN (so the test above proves nothing); no_claim=the real entry
+  it("negative control: without env -i the unlisted name reaches the daemon", () => {
+    const entry = path.join(sb.dir, "no-scrub.sh");
+    const real = read(ENTRY).split(CELL_NODE).join(sb.fakeNode);
+    const edited = real.replace('/usr/bin/env -i "${keep[@]}" ', "");
+    expect(edited).not.toBe(real);
+    fs.writeFileSync(entry, edited, { mode: 0o755 });
+    const r = run(sb, entry, ["--url", GOOD_URL], { SOME_PLAIN: "leak" });
+    expect(parseFake(r.stdout).env.get("SOME_PLAIN")).toBe("leak");
+  });
+
+  // card: protects=the allowlist lets the platform's own names through and ordinary names start; fails_when=an allowlisted name or a run-env name is refused; no_claim=what the platform really sets
   it("starts with every allowlisted name set at once", () => {
     const all = Object.fromEntries(CELL_ENV_ALLOWLIST.map((n) => [n, "x"]));
     const r = run(sb, sb.entry, ["--url", GOOD_URL], {
@@ -371,27 +536,67 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     expect(plain.status).toBe(0);
   });
 
-  // card: protects=the TS allowlist and the script's allow list cannot drift apart; fails_when=they differ or an allowlisted name is judged forbidden; no_claim=the batteries ENV names themselves
-  it("keeps the script allow list equal to CELL_ENV_ALLOWLIST", () => {
-    const line = /^allow="([^"]*)"$/m.exec(read(ENTRY));
-    const names = (line?.[1] ?? "").split(/\s+/).filter(Boolean);
-    expect([...names].sort()).toEqual([...CELL_ENV_ALLOWLIST].sort());
+  // card: protects=an allowlist name cannot be smuggled by a name that spans two list entries; fails_when=a name made of adjacent allowlist names is kept or accepted; no_claim=other spacing tricks
+  it("does not treat a name spanning two allowlist entries as allowed", () => {
+    const name = "NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE";
+    const r = run(sb, sb.entry, ["--url", GOOD_URL], { [name]: "v" });
+    expect(r.status).toBe(0);
+    expect(parseFake(r.stdout).env.has(name)).toBe(false);
+  });
+
+  // card: protects=the TS lists and the script's lists cannot drift apart; fails_when=allow, run_env or the pattern differ from their constants; no_claim=the batteries ENV names themselves
+  it("keeps the script lists and pattern equal to the constants", () => {
+    const text = read(ENTRY);
+    const list = (key: string) =>
+      (new RegExp(`^${key}="([^"]*)"$`, "m").exec(text)?.[1] ?? "")
+        .split(/\s+/)
+        .filter(Boolean);
+    expect([...list("allow")].sort()).toEqual([...CELL_ENV_ALLOWLIST].sort());
+    expect([...list("run_env")].sort()).toEqual([...CELL_RUN_ENV].sort());
+    expect(new RegExp("^forbidden='(.*)'$", "m").exec(text)?.[1]).toBe(
+      CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
+    );
     for (const n of CELL_ENV_ALLOWLIST) {
       expect(isForbiddenCellEnvName(n)).toBe(false);
     }
   });
 });
 
+describe("the forbidden env pattern", () => {
+  // card: protects=no allowlisted or run-env name is itself credential-shaped; fails_when=the pattern matches an exempt or run-env name (it would be refused or hide a rename); no_claim=names the platform adds later
+  it("matches nothing in the allowlist or the run env", () => {
+    for (const n of [...CELL_ENV_ALLOWLIST, ...CELL_RUN_ENV]) {
+      expect(CELL_FORBIDDEN_ENV_PATTERN.test(n)).toBe(false);
+    }
+  });
+
+  // card: protects=the allowlist check can fail; fails_when=a credential-shaped name added to a fixture list is not caught; no_claim=the real list
+  it("negative control: a credential-shaped fixture name is caught", () => {
+    const fixture = [...CELL_ENV_ALLOWLIST, "GIT_AUTH_TOKEN"];
+    expect(fixture.filter((n) => CELL_FORBIDDEN_ENV_PATTERN.test(n))).toEqual([
+      "GIT_AUTH_TOKEN",
+    ]);
+  });
+
+  // card: protects=the pattern is case-insensitive and anchored where it says; fails_when=a lowercase name is missed or _KEY matches mid-name; no_claim=every name
+  it("matches case-insensitively and anchors _KEY$ and ^AWS_", () => {
+    expect(CELL_FORBIDDEN_ENV_PATTERN.test("my_secret")).toBe(true);
+    expect(CELL_FORBIDDEN_ENV_PATTERN.test("aws_region")).toBe(true);
+    expect(CELL_FORBIDDEN_ENV_PATTERN.test("KEY_COUNT")).toBe(false);
+    expect(CELL_FORBIDDEN_ENV_PATTERN.test("MY_AWS_REGION")).toBe(false);
+  });
+});
+
 describeRun("cell-send.sh behaviour (fake node)", () => {
   const sb = makeSandbox();
 
-  // card: protects=a valid base64 argument reaches the daemon as decoded stdin with the contract argv; fails_when=the bytes or the argv differ; no_claim=the real daemon write
+  // card: protects=a valid base64 argument reaches the daemon as decoded stdin with the contract argv; fails_when=the bytes or the argv differ or a planted command runs; no_claim=the real daemon write
   it("pipes the decoded message to node --write", () => {
     const msg = '{"type":"ping"}';
     const r = run(sb, sb.send, [Buffer.from(msg).toString("base64")]);
     expect(r.status).toBe(0);
-    const [, ...rest] = r.stdout.split("\n");
-    expect(rest.slice(0, 6)).toEqual([
+    const out = parseFake(r.stdout);
+    expect(out.argv).toEqual([
       CONTAINER_DAEMON_BUNDLE,
       "--write",
       "--socket-path",
@@ -399,7 +604,7 @@ describeRun("cell-send.sh behaviour (fake node)", () => {
       "--timeout",
       "10000",
     ]);
-    expect(rest.slice(6).join("\n")).toBe(msg);
+    expect(out.stdin).toBe(msg);
     expect(fs.existsSync(sb.marker)).toBe(false);
   });
 
@@ -412,8 +617,22 @@ describeRun("cell-send.sh behaviour (fake node)", () => {
     ["extra", ["YQ==", "YQ=="]],
   ])("refuses %s with 64", (_label, args) => {
     const r = run(sb, sb.send, args);
-    expect(r.status).toBe(CELL_ENTRY_EXIT.usage);
+    expect(r.status).toBe(CELL_SEND_EXIT.usage);
     expect(r.stdout).toBe("");
+  });
+
+  // card: protects=the 128 KiB single-argument cap is enforced with its own code and equals the constant; fails_when=the script's max differs, an argument at the cap is refused, or one over it is accepted; no_claim=the kernel's own E2BIG
+  it("enforces CELL_SEND_MAX_BYTES with exit 65", () => {
+    expect(read(SEND)).toContain(`max=${CELL_SEND_MAX_BYTES}`);
+    const atCap = run(sb, sb.send, ["A".repeat(CELL_SEND_MAX_BYTES)]);
+    expect(atCap.status).toBe(0);
+    const over = run(sb, sb.send, ["A".repeat(CELL_SEND_MAX_BYTES + 1)]);
+    // Linux refuses a 128 KiB argument itself (E2BIG) before the script runs.
+    const refused =
+      over.status === CELL_SEND_EXIT.tooLarge ||
+      (over.error as NodeJS.ErrnoException | undefined)?.code === "E2BIG";
+    expect(refused).toBe(true);
+    expect(over.stdout).toBe("");
   });
 });
 
@@ -446,33 +665,50 @@ describe("cellEntrypoint", () => {
     ["a.org:12345678", false],
   ];
 
-  // card: protects=the TS host regex and the script's agree; fails_when=a host is accepted by one and refused by the other; no_claim=hosts beyond this table
-  it.each(HOSTS)("agrees with the script on %j", (host, ok) => {
-    expect(CELL_BROKER_HOST_PATTERN.test(host)).toBe(ok);
-    expect(() => cellEntrypoint(host)).toSatisfy((fn: () => void) => {
-      try {
-        fn();
-        return ok;
-      } catch {
-        return !ok;
-      }
-    });
-    if (bashMajor < 4) return;
-    const sb = makeSandbox();
-    const r = run(sb, sb.entry, ["--url", `https://${host}`]);
-    expect(r.status).toBe(ok ? 0 : CELL_ENTRY_EXIT.usage);
-  });
+  // card: protects=the TS host regex and cellEntrypoint agree; fails_when=a host is accepted by the regex and refused by cellEntrypoint or the reverse; no_claim=hosts beyond this table
+  it.each(HOSTS)(
+    "agrees between regex and cellEntrypoint on %j",
+    (host, ok) => {
+      expect(CELL_BROKER_HOST_PATTERN.test(host)).toBe(ok);
+      expect(() => cellEntrypoint(host)).toSatisfy((fn: () => void) => {
+        try {
+          fn();
+          return ok;
+        } catch {
+          return !ok;
+        }
+      });
+    },
+  );
+
+  // card: protects=the script's host check agrees with the TS one; fails_when=the script accepts what the regex refuses or the reverse; no_claim=hosts beyond this table
+  it.skipIf(bashMajor < 4).each(HOSTS)(
+    "agrees with the script on %j",
+    (host, ok) => {
+      const sb = makeSandbox();
+      const r = run(sb, sb.entry, ["--url", `https://${host}`]);
+      expect(r.status).toBe(ok ? 0 : CELL_ENTRY_EXIT.usage);
+    },
+  );
 });
 
+/** Text of one top-level job under `jobs:`. */
+function jobBlock(workflow: string, name: string): string {
+  const after = workflow.split(new RegExp(`^ {2}${name}:\\n`, "m"))[1] ?? "";
+  return after.split(/^ {2}[\w-]+:\n/m)[0] ?? "";
+}
+
 /**
- * Steps of the single job, as raw text blocks. The worker package carries no
- * YAML parser, and the workflow is regular (one job, `      - ` steps), so the
- * checks read the blocks directly.
+ * Steps of a job or composite action, as raw text blocks. The worker package
+ * carries no YAML parser, and both files are regular (`      - ` or `    - `
+ * steps), so the checks read the blocks directly.
  */
-function stepsOf(workflow: string): string[] {
-  const body = workflow.split(/^ {4}steps:\n/m)[1] ?? "";
-  return body
-    .split(/^ {6}- /m)
+function stepsOf(text: string, indent: number): string[] {
+  const dash = new RegExp(`^ {${indent}}- `, "m");
+  const start = text.search(new RegExp(`^ {${indent - 2}}steps:\\n`, "m"));
+  return text
+    .slice(start)
+    .split(dash)
     .slice(1)
     .map((s) => s.trimEnd());
 }
@@ -480,61 +716,120 @@ function stepsOf(workflow: string): string[] {
 const stepIndex = (steps: string[], needle: string) =>
   steps.findIndex((s) => s.includes(needle));
 
-describe("cell-image.yml", () => {
+const PIN = /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/;
+const LOCAL_ACTION = "./.github/actions/cell-image-build";
+
+describe("cell-image.yml and its build action", () => {
   const workflow = read(WORKFLOW);
-  const steps = stepsOf(workflow);
+  const action = read(ACTION);
+  const buildVerify = jobBlock(workflow, "build-verify");
+  const publish = jobBlock(workflow, "publish");
+  const actionSteps = stepsOf(action, 4);
+  const publishSteps = stepsOf(publish, 6);
 
-  // card: protects=every third-party action is pinned by full commit sha; fails_when=a uses: carries a tag or branch; no_claim=that the sha exists upstream
+  // card: protects=every third-party action is pinned by full commit sha; fails_when=a uses: carries a tag or branch (only the repo's own cell-image-build action is local); no_claim=that the sha exists upstream
   it("pins every action by a 40-hex sha", () => {
-    const uses = [...workflow.matchAll(/^\s*(?:- )?uses:\s*(\S+)/gm)].map(
-      (m) => m[1] ?? "",
-    );
+    const uses = [...(workflow + action).matchAll(/^\s*(?:- )?uses:\s*(\S+)/gm)]
+      .map((m) => m[1] ?? "")
+      .filter((u) => u !== LOCAL_ACTION);
     expect(uses.length).toBeGreaterThanOrEqual(5);
-    for (const u of uses) {
-      expect(u).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
-    }
+    for (const u of uses) expect(u).toMatch(PIN);
   });
 
-  // card: protects=the pin check refuses a floating tag; fails_when=@v4 or @main is accepted; no_claim=the real workflow
+  // card: protects=the pin check refuses a floating tag or another local action; fails_when=@v4, @main or ./other is accepted; no_claim=the real workflow
   it("negative control: a floating tag does not pass the pin pattern", () => {
-    const pinned = /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/;
-    expect(pinned.test("actions/checkout@v4")).toBe(false);
-    expect(pinned.test("actions/checkout@main")).toBe(false);
+    expect(PIN.test("actions/checkout@v4")).toBe(false);
+    expect(PIN.test("actions/checkout@main")).toBe(false);
     expect(
-      pinned.test("actions/checkout@11d5960a326750d5838078e36cf38b85af677262"),
+      PIN.test("actions/checkout@11d5960a326750d5838078e36cf38b85af677262"),
     ).toBe(true);
+    expect("./.github/actions/other").not.toBe(LOCAL_ACTION);
   });
 
-  // card: protects=the build cannot hang a runner for more than the batteries budget; fails_when=timeout-minutes is not 90; no_claim=a measured build time
-  it("has timeout-minutes 90", () => {
-    expect(workflow).toMatch(/^ {4}timeout-minutes: 90$/m);
-  });
-
-  // card: protects=the secret scan and verify.sh gate the push; fails_when=either comes after the first push, login or attest step; no_claim=gitleaks findings
-  it("scans and verifies before any push", () => {
-    const scan = stepIndex(steps, 'gitleaks" dir');
-    const verify = stepIndex(steps, "cell/verify.sh");
-    const firstPublish = Math.min(
-      stepIndex(steps, "docker/login-action"),
-      stepIndex(steps, 'docker push "$tag"'),
-      stepIndex(steps, "attest-build-provenance"),
-    );
-    expect(scan).toBeGreaterThan(-1);
-    expect(verify).toBeGreaterThan(scan);
-    expect(firstPublish).toBeGreaterThan(verify);
-    expect(steps[scan]).toContain('"$RUNNER_TEMP/cell-ctx"');
-    expect(steps[scan]).toContain("--redact");
-  });
-
-  // card: protects=publishing happens on main only; fails_when=login or push lacks the main guard, or attest is not tied to the push; no_claim=branch protection
-  it("guards login and push by refs/heads/main and attest by the push", () => {
-    for (const needle of ["docker/login-action", 'docker push "$tag"']) {
-      const step = steps[stepIndex(steps, needle)] ?? "";
-      expect(step).toContain("if: github.ref == 'refs/heads/main'");
+  // card: protects=neither job can hang a runner for more than the batteries budget; fails_when=timeout-minutes is not 90 in both jobs; no_claim=a measured build time
+  it("has timeout-minutes 90 in both jobs", () => {
+    for (const job of [buildVerify, publish]) {
+      expect(job).toMatch(/^ {4}timeout-minutes: 90$/m);
     }
-    const attest = steps[stepIndex(steps, "attest-build-provenance")] ?? "";
-    expect(attest).toContain("if: steps.push.outcome == 'success'");
-    expect(attest).toContain(
+  });
+
+  // card: protects=the job every PR runs holds no registry or signing permission; fails_when=build-verify gains packages, id-token or attestations write, or any push/login/attest step; no_claim=repo-level token defaults
+  it("gives build-verify read-only permissions and no publishing step", () => {
+    const perms = /^ {4}permissions:\n((?: {6}.+\n)+)/m.exec(buildVerify)?.[1];
+    expect(perms?.trim()).toBe("contents: read");
+    expect(
+      workflow.match(/^permissions:\n {2}contents: read$/m),
+    ).not.toBeNull();
+    expect(buildVerify).not.toMatch(/login-action|docker push|attest-build/);
+    expect(buildVerify).not.toContain("secrets.");
+  });
+
+  // card: protects=the permission check can fail; fails_when=a build-verify fixture with packages: write is not flagged; no_claim=the real workflow
+  it("negative control: the read-only check flags a write permission", () => {
+    const bad =
+      "  build-verify:\n    permissions:\n      contents: read\n      packages: write\n";
+    const perms = /^ {4}permissions:\n((?: {6}.+\n)+)/m.exec(bad)?.[1];
+    expect(perms?.trim()).not.toBe("contents: read");
+  });
+
+  // card: protects=publishing waits for build-verify, runs only off a PR on main, and is the only holder of the write permissions; fails_when=needs or if differ, or a write permission is missing or elsewhere; no_claim=branch protection
+  it("gates publish on build-verify, main and a non-PR event", () => {
+    expect(publish).toMatch(/^ {4}needs: build-verify$/m);
+    expect(publish).toContain(
+      "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
+    );
+    for (const p of [
+      "packages: write",
+      "id-token: write",
+      "attestations: write",
+    ]) {
+      expect(publish).toContain(p);
+      expect(buildVerify).not.toContain(p);
+    }
+  });
+
+  // card: protects=both jobs run the same shared build action and the checkout leaves no token; fails_when=a job lacks the local action, or a checkout lacks persist-credentials: false; no_claim=other credential paths
+  it("uses the shared action in both jobs with persist-credentials false", () => {
+    for (const job of [buildVerify, publish]) {
+      expect(job).toContain(`uses: ${LOCAL_ACTION}`);
+      expect(job).toMatch(
+        /actions\/checkout@[0-9a-f]{40}.*\n\s+with:\n\s+persist-credentials: false/,
+      );
+    }
+  });
+
+  // card: protects=the context scan, build, verify and layer scan run in that order inside the shared action; fails_when=any is missing or out of order, or the layer scan does not use the sha256-checked gitleaks; no_claim=gitleaks findings
+  it("scans the context, builds, verifies, then scans the layers", () => {
+    const download = stepIndex(actionSteps, "sha256sum -c");
+    const ctxScan = stepIndex(actionSteps, 'gitleaks" dir');
+    const build = stepIndex(actionSteps, "docker buildx build");
+    const verify = stepIndex(actionSteps, "cell/verify.sh");
+    const layers = stepIndex(actionSteps, "cell/scan-layers.sh");
+    expect(download).toBeGreaterThan(-1);
+    expect(ctxScan).toBe(download);
+    expect(build).toBeGreaterThan(ctxScan);
+    expect(verify).toBeGreaterThan(build);
+    expect(layers).toBeGreaterThan(verify);
+    expect(actionSteps[ctxScan]).toContain('"$RUNNER_TEMP/cell-ctx"');
+    expect(actionSteps[ctxScan]).toContain("--redact");
+    expect(actionSteps[layers]).toContain(
+      'scan-layers.sh automata-cell:ci "$RUNNER_TEMP/gitleaks"',
+    );
+  });
+
+  // card: protects=publish only logs in, pushes and attests after the verified build; fails_when=login, push or attest comes before the shared action, or attest is not tied to the push; no_claim=registry state
+  it("publishes only after the shared build, and attests the pushed digest", () => {
+    const build = stepIndex(publishSteps, LOCAL_ACTION);
+    const login = stepIndex(publishSteps, "docker/login-action");
+    const push = stepIndex(publishSteps, 'docker push "$tag"');
+    const attest = stepIndex(publishSteps, "attest-build-provenance");
+    expect(build).toBeGreaterThan(-1);
+    expect(login).toBeGreaterThan(build);
+    expect(push).toBeGreaterThan(login);
+    expect(attest).toBeGreaterThan(push);
+    const attestStep = publishSteps[attest] ?? "";
+    expect(attestStep).toContain("if: steps.push.outcome == 'success'");
+    expect(attestStep).toContain(
       "subject-digest: ${{ steps.push.outputs.digest }}",
     );
   });
@@ -547,30 +842,37 @@ describe("cell-image.yml", () => {
     expect(workflow).toContain("IMAGE: ghcr.io/be-automata/automata-cell");
   });
 
-  // card: protects=the checkout leaves no token in .git/config; fails_when=persist-credentials is not false; no_claim=other credential paths
-  it("sets persist-credentials: false on checkout", () => {
-    const checkout = steps[stepIndex(steps, "actions/checkout")] ?? "";
-    expect(checkout).toContain("persist-credentials: false");
-  });
-
-  // card: protects=a daemon, agent-dependency or image change triggers the build on push and PR; fails_when=packages/daemon or deploy/images/cell is missing from either trigger; no_claim=transitive dependencies beyond packages/agent
-  it("filters paths on the daemon and the cell directory", () => {
+  // card: protects=a change to anything the bundle is built from triggers the build on push and PR; fails_when=a listed path is missing from either trigger; no_claim=transitive dependencies beyond these
+  it("filters paths on everything the image is built from", () => {
     const on = workflow.split(/^permissions:/m)[0] ?? "";
     const triggers = on.split(/^ {2}pull_request:/m);
     expect(triggers).toHaveLength(2);
     for (const block of triggers) {
-      expect(block).toContain('"packages/daemon/**"');
-      expect(block).toContain('"deploy/images/cell/**"');
+      for (const p of [
+        "deploy/images/cell/**",
+        ".github/actions/cell-image-build/**",
+        "packages/daemon/**",
+        "packages/agent/**",
+        "packages/tsconfig/**",
+        "package.json",
+        "pnpm-workspace.yaml",
+        ".npmrc",
+        "pnpm-lock.yaml",
+        ".github/workflows/cell-image.yml",
+      ]) {
+        expect(block).toContain(`"${p}"`);
+      }
     }
     expect(on).toContain("workflow_dispatch:");
   });
 
-  // card: protects=no secret or credential-shaped name in the workflow env; fails_when=an env/build-arg name matches the credential pattern outside GITHUB_TOKEN use; no_claim=repo secrets config
+  // card: protects=no secret or credential-shaped name in the build args; fails_when=the build passes any build-arg but REVISION or reads secrets.*; no_claim=repo secrets config
   it("passes no credential-shaped build arg", () => {
-    const buildStep = steps[stepIndex(steps, "docker buildx build")] ?? "";
+    const buildStep =
+      actionSteps[stepIndex(actionSteps, "docker buildx build")] ?? "";
     expect(buildStep.match(/--build-arg\s+"?(\w+)/g)).toEqual([
       '--build-arg "REVISION',
     ]);
-    expect(buildStep).not.toContain("secrets.");
+    expect(action).not.toContain("secrets.");
   });
 });

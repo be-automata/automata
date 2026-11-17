@@ -17,16 +17,40 @@ export const CELL_DAEMON_BUNDLE = CONTAINER_DAEMON_BUNDLE;
 /** The PATH-first dir PR-E writes pin shims into: the box's own constant. */
 export const CELL_FLUTTER_SHIM_DIR = CONTAINER_FLUTTER_SHIM_DIR;
 
-export const CELL_ENTRY_EXIT = { usage: 64, forbiddenEnv: 78 } as const;
-
-/** Env names the entry refuses (case-insensitive), besides the AWS_ prefix. */
-export const CELL_FORBIDDEN_ENV_PATTERN =
-  /TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL/i;
-const CELL_FORBIDDEN_ENV_PREFIX = "AWS_";
+/**
+ * Exit codes of cell-entry.sh (sysexits): 64 bad arguments, 66 HOME missing or
+ * not an absolute directory, 78 a forbidden env name. cell-send.sh exits 64
+ * for a bad argument and 65 for one over CELL_SEND_MAX_BYTES.
+ */
+export const CELL_ENTRY_EXIT = {
+  usage: 64,
+  noHome: 66,
+  forbiddenEnv: 78,
+} as const;
+export const CELL_SEND_EXIT = { usage: 64, tooLarge: 65 } as const;
 
 /**
- * Names the cell may start with. Must equal the `allow` list in
- * cell-entry.sh (a test keeps them equal).
+ * Longest single argv string cell-send.sh accepts: Linux caps one argument at
+ * MAX_ARG_STRLEN (128 KiB including the NUL). PR-E caps or splits a message
+ * whose base64 is longer.
+ */
+export const CELL_SEND_MAX_BYTES = 128 * 1024 - 1;
+
+/**
+ * Env names the entry refuses (case-insensitive), the AWS_ prefix included.
+ * The script holds the same text in its `forbidden=` line (a test keeps them
+ * equal).
+ */
+export const CELL_FORBIDDEN_ENV_PATTERN_SOURCE =
+  "TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|APIKEY|_KEY$|PRIVATE|PASS|AUTH|_PAT$|COOKIE|DATABASE_URL|^AWS_";
+export const CELL_FORBIDDEN_ENV_PATTERN = new RegExp(
+  CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
+  "i",
+);
+
+/**
+ * Names exempt from the refusal. Must equal the `allow` list in
+ * cell-entry.sh (a test keeps them equal), and none may match the pattern.
  */
 export const CELL_ENV_ALLOWLIST: readonly string[] = [
   // set by OpenSandbox
@@ -60,13 +84,29 @@ export const CELL_ENV_ALLOWLIST: readonly string[] = [
   "MCP_TIMEOUT",
 ];
 
+/**
+ * Static, non-secret run env the operator may set (docker.sandbox_env). Not
+ * exempt from the refusal; they simply do not match it.
+ */
+export const CELL_RUN_ENV: readonly string[] = [
+  "FORCE_COLOR",
+  "TOOL_FAILURE_STREAK_LIMIT",
+];
+
+/**
+ * The only names the daemon starts with: the entry runs it under `env -i`
+ * with these and nothing else (a test keeps the script's two lists equal to
+ * the two constants above).
+ */
+export const CELL_DAEMON_ENV: readonly string[] = [
+  ...CELL_ENV_ALLOWLIST,
+  ...CELL_RUN_ENV,
+];
+
 /** The entry's rule: a credential-shaped name, unless it is allowlisted. */
 export function isForbiddenCellEnvName(name: string): boolean {
   if (CELL_ENV_ALLOWLIST.includes(name)) return false;
-  return (
-    CELL_FORBIDDEN_ENV_PATTERN.test(name) ||
-    name.startsWith(CELL_FORBIDDEN_ENV_PREFIX)
-  );
+  return CELL_FORBIDDEN_ENV_PATTERN.test(name);
 }
 
 /** The same shape cell-entry.sh accepts after `https://`. */

@@ -20,23 +20,37 @@ the request `entrypoint` as the command. It runs as `agent` (uid 10001), never r
 
 - **`--url` only.** It accepts `https://` plus a lowercase host and an optional port, so a stray
   value can never become a daemon flag. Anything else exits **64**.
+- **HOME.** It must be an absolute, existing directory, else the entry exits **66**.
 - **Env refusal.** The daemon hands all of its env to the agent, so a credential in the cell's env
-  would reach Claude and its tools. The entry refuses to start (exit **78**) when any env name
-  matches `TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL` (case-insensitive) or starts with `AWS_`,
+  would reach Claude and its tools. The entry reads the raw environment (NUL-separated, from
+  `/proc/<pid>/environ`; `compgen -e` would miss names that are not shell identifiers, such as
+  `npm_config_//registry.example/:_authToken`) and refuses to start (exit **78**) when any name
+  matches, case-insensitively,
+  `TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|APIKEY|_KEY$|PRIVATE|PASS|AUTH|_PAT$|COOKIE|DATABASE_URL|^AWS_`,
   unless the name is on its allowlist (`CELL_ENV_ALLOWLIST` in
   `packages/worker/src/agent-run/cell-image.ts`, equal to the `allow` list in the script). It prints
-  the variable **name**, never the value.
+  the variable **name**, never the value. The pattern is broad on purpose: a name such as
+  `GIT_AUTHOR_NAME` matches `AUTH`, so identity must travel another way (repo-local git config).
+- **Env scrub.** The daemon is started under `/usr/bin/env -i` with only the allowlisted names and
+  the static run env (`CELL_DAEMON_ENV`: the allowlist plus `FORCE_COLOR` and
+  `TOOL_FAILURE_STREAK_LIMIT`). Any other name is dropped, so the agent never inherits one the entry
+  did not vet.
 - **Both env channels are covered.** A request `env` (the adapter sends none) and the operator's
   `docker.sandbox_env` in the OpenSandbox server config (upstream `config.py:1411-1415`). A box
   config that puts a credential in `sandbox_env` makes every cell fail closed at start. Static,
   non-secret run env (`FORCE_COLOR=0`, `TOOL_FAILURE_STREAK_LIMIT`) may go there.
+- **Exit codes.** Entry: 64 bad arguments, 66 HOME, 78 forbidden env name (`CELL_ENTRY_EXIT`). Send:
+  64 bad argument, 65 argument over the cap (`CELL_SEND_EXIT`).
 - **Socket.** The daemon listens on `/home/agent/.automata-run/daemon.sock`. The run dir is 0700.
 - **PATH.** `PATH` starts with `/home/agent/.automata-run/flutter-pin` (the box's shim dir), so PR-E
   can write Flutter pin shims after the clone without restarting the daemon. That dir is
-  agent-writable and first on `PATH`, so both scripts call node by `/usr/local/bin/node`, never
-  through `PATH`.
+  agent-writable and first on `PATH`, so both scripts reset `PATH` to `/usr/bin:/bin` before any
+  other command and call node by `/usr/local/bin/node`, never through the inherited `PATH`.
 - **Not here.** Somnio rules, Flutter pin shims and git setup need the checkout, which is cloned
   after the cell is up. PR-E runs them by exec.
+
+`cell-send.sh <base64>` takes one argument of at most `CELL_SEND_MAX_BYTES` (131071) characters: Linux
+caps one argv string at 128 KiB. PR-E caps or splits a larger message.
 
 The URL is an entry argument because the adapter sends no create env and exec has none. The
 provider's `entrypoint` is fixed when the provider is built, but the broker host
@@ -82,10 +96,25 @@ One argv string is capped at 128 KiB on Linux, so a larger message needs splitti
 
 ## Build, verify, publish
 
-`.github/workflows/cell-image.yml` builds the daemon with pnpm, stages the context in
+`.github/workflows/cell-image.yml` has two jobs, both running the shared action
+`.github/actions/cell-image-build`: it builds the daemon with pnpm, stages the context in
 `$RUNNER_TEMP/cell-ctx` (`Dockerfile`, both scripts, `daemon/index.js`; no source map), scans it with
-gitleaks, builds `linux/amd64`, and runs `verify.sh` on the result. On `main` it pushes
-`:sha-<commit>`, prints the digest to the job summary and attests provenance. To do the same by hand:
+gitleaks, builds `linux/amd64`, runs `verify.sh`, then `scan-layers.sh`. `verify.sh` sees a running
+container; `scan-layers.sh` runs the same sha256-checked gitleaks over the image config and every
+layer above the batteries base, so a token baked into a layer (even one deleted again) fails the job.
+
+- **`build-verify`** (PRs and `main`): `contents: read` only, nothing is pushed.
+- **`publish`** (`main` only, after `build-verify`): holds `packages: write`, `id-token: write` and
+  `attestations: write`. It rebuilds rather than loading the `build-verify` image, because a runner's
+  image store does not cross jobs and an ~8.3 GB image is far over the artifact budget. The rebuild
+  runs the same scans and `verify.sh` on the image it then pushes (`:sha-<commit>`), prints the digest
+  to the job summary and attests provenance.
+
+The path filters cover everything the bundle is built from: `deploy/images/cell`, the shared build
+action, `packages/daemon`, `packages/agent` (a daemon dependency), `packages/tsconfig`, the root
+`package.json`, `pnpm-workspace.yaml`, `.npmrc` and `pnpm-lock.yaml`. `packages/bundled` is not a
+filter: it depends on the daemon, not the other way round, and the image never consumes it. To do the
+same by hand:
 
 ```bash
 pnpm --filter @terragon/daemon build

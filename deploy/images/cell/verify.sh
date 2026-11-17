@@ -78,20 +78,36 @@ bare=0
 for s in "$ENTRY" "$SEND"; do
   grep -qF "$NODE" "$s" || bare=1
   grep -vE '^[[:space:]]*#' "$s" | grep -qE '(^|[[:space:];|&(])node([[:space:]]|$)' && bare=1
+  # Every other external command (base64, mkdir, cat, env) must resolve
+  # through root-owned dirs: PATH is reset before the first of them.
+  pathline="$(grep -nE '^PATH=/usr/bin:/bin$' "$s" | head -n 1 | cut -d: -f1)"
+  if [ -z "$pathline" ]; then bare=1; else
+    head -n "$pathline" "$s" | grep -vE '^[[:space:]]*#' \
+      | grep -vE '^(set -euo pipefail|orig_path=.*|PATH=/usr/bin:/bin)$' | grep -q . && bare=1
+  fi
 done
-assert node-absolute "scripts name only $NODE" test "$bare" -eq 0
+assert node-absolute "scripts name only $NODE, PATH is reset first" test "$bare" -eq 0
 
 # ── no credential in the image ──────────────────────────────────────────────
 allow=" $(sed -n 's/^allow="\(.*\)"$/\1/p' "$ENTRY") "
+forbidden="$(sed -n "s/^forbidden='\(.*\)'\$/\1/p" "$ENTRY")"
+# The raw environment, NUL-separated: `compgen -e` misses names that are not
+# shell identifiers (npm_config_//r.org/:_authToken).
 leaks=""
-while IFS= read -r name; do
+while IFS= read -r -d '' entry; do
+  name="${entry%%=*}"
   case "$allow" in *" $name "*) continue ;; esac
-  name_uc="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
-  if printf '%s' "$name_uc" | grep -qE 'TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL'; then leaks="$leaks $name"; fi
-  case "$name" in AWS_*) leaks="$leaks $name" ;; esac
-done < <(compgen -e)
+  if printf '%s' "$name" | grep -qiE -- "$forbidden"; then leaks="$leaks $name"; fi
+done < "/proc/$$/environ"
 assert no-credential-env "no credential-shaped env name${leaks:+ (found:$leaks)}" test -z "$leaks"
-assert allow-list-read "the entry's allow list is non-empty" test "${#allow}" -gt 10
+assert allow-list-read "the entry's allow list and pattern are read" \
+  test "${#allow}" -gt 10 -a "${#forbidden}" -gt 10
+# Nothing a layer could hold that the agent would read at start.
+for f in .npmrc .git-credentials .config/gh/hosts.yml; do
+  assert "no-$(basename "$f")" "no ~/$f" test ! -e "$HOME/$f"
+done
+assert root-dir-empty "/root is unreadable or empty" \
+  bash -c 'test ! -r /root || test -z "$(ls -A /root 2>/dev/null)"'
 assert no-settings "no ~/.claude/settings.json" test ! -e "$HOME/.claude/settings.json"
 assert no-claude-json "no ~/.claude.json" test ! -e "$HOME/.claude.json"
 assert no-credentials-file "no ~/.claude/.credentials.json" test ! -e "$HOME/.claude/.credentials.json"
@@ -118,7 +134,18 @@ esac
 expect_exit entry-no-args 64 "$ENTRY"
 expect_exit entry-http 64 "$ENTRY" --url http://x
 expect_exit entry-bad-host 64 "$ENTRY" --url 'https://a;b'
+expect_exit entry-no-home 66 env -u HOME "$ENTRY" --url https://example.org
 canary="canary-$$-$RANDOM"
+# A name that is not a shell identifier still reaches children of bash.
+out="$(env "npm_config_//r.org/:_authToken=$canary" "$ENTRY" --url https://example.org 2>&1)"
+status=$?
+if [ "$status" -ne 78 ]; then
+  bad entry-nonident-refusal "want exit 78, got $status"
+elif printf '%s' "$out" | grep -qF "$canary"; then
+  bad entry-nonident-refusal "the canary value was echoed"
+else
+  ok entry-nonident-refusal "exit 78, canary not echoed"
+fi
 out="$(DAEMON_TOKEN="$canary" "$ENTRY" --url https://example.org 2>&1)"
 status=$?
 if [ "$status" -ne 78 ]; then

@@ -22,8 +22,17 @@ finishes:
 
 - Run URL: PENDING (the PR's `cell-image` workflow run)
 - `verify.sh` output: PENDING
+- `scan-layers.sh` output (gitleaks over the image config and the layers above the base): PENDING
 - Image size (`docker image inspect … size`): PENDING
 - Pushed digest (main only, after merge): PENDING
+
+## What the image half of AC-13 rests on
+
+- Static: `cell-image-assets.test.ts` (no credential-shaped ARG/ENV, no RUN/ADD, the entry refuses
+  credential-shaped names including non-identifier ones, and starts the daemon under `env -i`).
+- In the `cell-image` run: `verify.sh` (running container) and `scan-layers.sh` (config and layers
+  above the base), both before anything is pushed. `verify.sh` alone cannot see a token baked into
+  a layer; the layer scan can.
 
 ## Not proven here
 
