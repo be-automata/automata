@@ -338,8 +338,8 @@ importers:
   apps/www:
     dependencies:
       '@ai-sdk/openai':
-        specifier: ^2.0.42
-        version: 2.0.42(zod@4.6.7)
+        specifier: ^4.0.118
+        version: 4.0.118(zod@4.6.7)
       '@anthropic-ai/sdk':
         specifier: ^0.52.0
         version: 0.52.0
@@ -1357,9 +1357,9 @@ packages:
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/openai@2.0.42':
-    resolution: {integrity: sha512-9mM6QS8k0ooH9qMC27nlrYLQmNDnO6Rk0JTmFo/yUxpABEWOcvQhMWNHbp9lFL6Ty5vkdINrujhsAQfWuEleOg==}
-    engines: {node: '>=18'}
+  '@ai-sdk/openai@4.0.118':
+    resolution: {integrity: sha512-pBsFeB+IudrX96P0ic9AO/1NPnfB6IyoS2B2pnhBJ/Ovt4bsvAmBOPeUxwEfYbQyfetJdVFep9sfYX42uVX3SQ==}
+    engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
@@ -1369,9 +1369,19 @@ packages:
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
+  '@ai-sdk/provider-utils@5.0.81':
+    resolution: {integrity: sha512-pfvvdQ3d1WxdBuug/mnGEP6E48cPokwD8dMBnsFeeAUp0/rb/H2aj0f3mwOiY62gu/Cu5GO44e+SE5nDHyBWMA==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
+
   '@ai-sdk/provider@2.0.0':
     resolution: {integrity: sha512-6o7Y2SeO9vFKB8lArHXehNuusnpddKPk7xqL7T2/b+OvXMRIXUO1rR4wcv1hAFUAT9avGZshty3Wlua/XA7TvA==}
     engines: {node: '>=18'}
+
+  '@ai-sdk/provider@4.0.38':
+    resolution: {integrity: sha512-GElz70UUCuDFFyD6m6aQJFgRY0HEABQzB5otzgkrisYaF5mnss7o0upAmbBTSD6KWiM9h7lZm1ls2c7xzHR8CA==}
+    engines: {node: '>=22'}
 
   '@alcalzone/ansi-tokenize@0.1.3':
     resolution: {integrity: sha512-3yWxPTq3UQ/FY9p1ErPxIyfT64elWaMvM9lIHnaqpyft63tkxodF5aUElYHrdisWve5cETkh1+KBw1yJuW0aRw==}
@@ -2082,7 +2092,7 @@ packages:
 
   '@daytonaio/sdk@0.205.1':
     resolution: {integrity: sha512-yxSTxpWgJ0gRtlE7HVVRwny3pz1Qb2+GEyur3Hgu4GPWIjodO0xWKFMwgwjHDaBSBLjDCni0G2sV9tIeJi9XIQ==}
-    deprecated: 'Moved to @daytona/sdk, same API, no breaking changes. Please update: npm uninstall @daytonaio/sdk && npm i @daytona/sdk'
+    deprecated: 'Moved to @daytona/sdk, same API, no breaking changes. Please update: npm uninstall @daytonaio/sdk && npm i @daytona/sdk@0'
 
   '@dotenvx/dotenvx@2.38.2':
     resolution: {integrity: sha512-+tjy8o//H+ZkRfRWLh08UkLHCw/e74uIV27QOZ3RxKwXvGrxjEcQMfUvQJzkvK/qNTk/OsE1MlGiDB6iL+1X0g==}
@@ -5079,12 +5089,16 @@ packages:
   '@smithy/core@3.29.4':
     resolution: {integrity: sha512-G1GRglAabzEhqghJMBAd54FkRS7SAFGHEwbhcI9r+O+LIMuFsLyXkLZkCoFSgAglRu8s/URVXJB0hglq3ZipIg==}
     engines: {node: '>=18.0.0'}
-    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
+    deprecated: |-
+      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
+        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/core@3.33.3':
     resolution: {integrity: sha512-CsOeKq/9kA3y6VJHt+/+VTCtBaxJ4OTFpgrjIUhPpDIKxBci1k2bJaQASF2h/ELWrulGp+t97DZ0mevfAD8idg==}
     engines: {node: '>=18.0.0'}
-    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
+    deprecated: |-
+      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
+        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.4.9':
     resolution: {integrity: sha512-2nfV4qRKiYeXU4zD2vvSCfg5dfp/BuhrM73vt7q9gzBhxs4rbPxXY21wo+kyI3bRmXcEGRnCLTaW8O437jzHIg==}
@@ -6083,6 +6097,9 @@ packages:
   '@vue/shared@3.5.22':
     resolution: {integrity: sha512-F4yc6palwq3TT0u+FYf0Ns4Tfl9GRFURDN2gWG7L1ecIaS/4fCIuFOjMTnCyjsu/OK6vaDKLCrGAa+KvvH+h4w==}
 
+  '@workflow/serde@4.1.0':
+    resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
+
   '@xterm/addon-fit@0.10.0':
     resolution: {integrity: sha512-UFYkDm4HUahf2lnEyHvio51TNGiLK66mqP2JoATy7hRZeXaGMRDr00JiSF7m63vR5WKATF605yEggJKsw0JpMQ==}
     peerDependencies:
@@ -6385,7 +6402,7 @@ packages:
       react-dom: 19.1.2
       solid-js: ^1.0.0
       svelte: ^4.0.0 || ^5.0.0
-      vitest: 3.1.4
+      vitest: '>=3.2.6 <4'
       vue: ^3.0.0
     peerDependenciesMeta:
       '@lynx-js/react':
@@ -7506,6 +7523,10 @@ packages:
 
   eventsource-parser@3.0.6:
     resolution: {integrity: sha512-Vo1ab+QXPzZ4tCa8SwIHJFaSzy4R6SHf7BY79rFBDf0idraZWAkYrDjDj8uWaSm3S2TK+hJ7/t1CEmZ7jXw+pg==}
+    engines: {node: '>=18.0.0'}
+
+  eventsource-parser@3.1.1:
+    resolution: {integrity: sha512-EKN1vKAMcZ8MlYMpaNuxN6R9yakzH6uajHcHVTqWJzvu5pWw9DyhbP35HH8MVBQ+dZjAfDxk+A8NiR9KWaXiyQ==}
     engines: {node: '>=18.0.0'}
 
   eventsource@3.0.7:
@@ -11789,10 +11810,10 @@ snapshots:
       '@ai-sdk/provider-utils': 3.0.10(zod@4.6.7)
       zod: 4.6.7
 
-  '@ai-sdk/openai@2.0.42(zod@4.6.7)':
+  '@ai-sdk/openai@4.0.118(zod@4.6.7)':
     dependencies:
-      '@ai-sdk/provider': 2.0.0
-      '@ai-sdk/provider-utils': 3.0.10(zod@4.6.7)
+      '@ai-sdk/provider': 4.0.38
+      '@ai-sdk/provider-utils': 5.0.81(zod@4.6.7)
       zod: 4.6.7
 
   '@ai-sdk/provider-utils@3.0.10(zod@4.6.7)':
@@ -11802,7 +11823,19 @@ snapshots:
       eventsource-parser: 3.0.6
       zod: 4.6.7
 
+  '@ai-sdk/provider-utils@5.0.81(zod@4.6.7)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.38
+      '@standard-schema/spec': 1.1.0
+      '@workflow/serde': 4.1.0
+      eventsource-parser: 3.1.1
+      zod: 4.6.7
+
   '@ai-sdk/provider@2.0.0':
+    dependencies:
+      json-schema: 0.4.0
+
+  '@ai-sdk/provider@4.0.38':
     dependencies:
       json-schema: 0.4.0
 
@@ -17098,6 +17131,8 @@ snapshots:
 
   '@vue/shared@3.5.22': {}
 
+  '@workflow/serde@4.1.0': {}
+
   '@xterm/addon-fit@0.10.0(@xterm/xterm@5.5.0)':
     dependencies:
       '@xterm/xterm': 5.5.0
@@ -18723,6 +18758,8 @@ snapshots:
   events@3.3.0: {}
 
   eventsource-parser@3.0.6: {}
+
+  eventsource-parser@3.1.1: {}
 
   eventsource@3.0.7:
     dependencies:
