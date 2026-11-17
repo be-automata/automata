@@ -140,16 +140,14 @@ async function classifyMiss(
 }
 
 /**
- * Take the lease for `attempt` with a CALLER-CHOSEN attempt number. After #656
- * PR-C this is the fixture and spike primitive; production opens through
- * `openNextAttempt`. It does not lease: advancing clears `last_seen_at`, so a
- * stale stamp never condemns the new attempt.
- *
- * Take the lease for `attempt`. Creates the step on the first attempt; a newer
- * attempt replaces the current one. Re-opening with the attempt that already
- * holds the lease is a no-op success (a restarted worker re-opening its own
- * attempt). A stale or revoked attempt, a finished step, or a step that belongs
- * to another organization or thread is refused.
+ * Take the lease for a CALLER-CHOSEN `attempt`. Creates the step on the first
+ * attempt; a newer attempt replaces the current one. Re-opening with the attempt
+ * that already holds the lease is a no-op success (a restarted worker re-opening
+ * its own attempt). A stale or revoked attempt, a finished step, or a step that
+ * belongs to another organization or thread is refused. It does not stamp the
+ * lease: advancing clears `last_seen_at`, so a stale stamp never condemns the new
+ * attempt. After #656 PR-C this is the fixture and spike primitive; production
+ * opens through `openNextAttempt`, which chooses the attempt itself.
  *
  * `allowedRef` is the one ref (`refs/heads/<name>`) the step may push, or null
  * when it does not push. It is fixed for the life of the step: re-opening with a
