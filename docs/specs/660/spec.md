@@ -117,7 +117,8 @@ sendMessage({ db, organizationId, from, to, key, body, apply, logger? })
 
 receiveFor({ db, toRun, apply, onApplied? }) → Promise<{ applied: number }>
   // loop, one db.transaction per message:
-  //  (0) select … from thread where id = toRun FOR UPDATE   (serializes receivers per target: id order)
+  //  (0) select … from thread where id = toRun FOR NO KEY UPDATE   (serializes receivers per target: id order;
+  //      does not block inserts that reference the thread)
   //  (1) select … from agent_messages where to_run=$1 and consumed_at is null order by id
   //      for update skip locked limit 1 — none → stop
   //  (2) insert into agent_applied(msg_id, run) … on conflict do nothing returning msg_id
@@ -128,6 +129,7 @@ recentlyDeliveredTargets({ db, withinMs = 120_000, limit = 200 }) → Promise<st
   // to_run with consumed_at > now() - withinMs, grouped, newest max(consumed_at) first (A6).
 
 sweepUnconsumed({ db, apply, olderThanMs = 10_000, limit = 100, logger? }) → Promise<{ targets: string[]; applied: number }>
+  // targets = only the targets this pass applied at least one message to.
   // to_run with an unconsumed message older than olderThanMs, INNER JOIN thread (rows to deleted threads are
   // inert), grouped, ordered by min(created_at); receiveFor each; one target's failure is logged and does not
   // stop the others.
@@ -148,19 +150,25 @@ thread row lock the receive holds.
 
 - `sendAgentMessage(args)` = `sendMessage({ ...args, db, apply: queuedFollowUpApply })`, then when
   `applied > 0` → `kickTarget(to)`; a kick error never rejects the send.
-- `runAgentBusSweep()` = `sweepUnconsumed({ db, apply: queuedFollowUpApply })`, then `kickTarget` for each target
-  of `recentlyDeliveredTargets()` (swept targets are always among them; A6; the kick is idempotent).
-- `kickTarget(threadId)`: one query for the thread (userId, shadow, status, terminal), its oldest `thread_chat`
-  (left join; none → `LEGACY_THREAD_CHAT_ID` and the thread's status) and `agent_run.blocked_at`. Missing thread →
-  return. Broadcast the queued message (`publishBroadcastUserMessage`, as `updateThreadChat` does) in every
-  case; skip the drain when shadow, blocked, terminal (A8), `isAgentWorking(status)`, or tier `none`
-  (the tier lookup runs only when the other checks pass, concurrently with the broadcast); else
-  `await maybeProcessFollowUpQueue({ userId, threadId, threadChatId })`. Errors logged, never thrown.
+- `runAgentBusSweep()` = `sweepUnconsumed({ db, apply: queuedFollowUpApply })`, then `kickTarget` once for each
+  target in (swept targets ∪ `recentlyDeliveredTargets()`): `broadcast: true` only for the targets this sweep applied
+  to; a re-kick of an earlier delivery (A6, a kick lost after commit) is silent (`broadcast: false`). The kick is
+  idempotent.
+- `kickTarget(threadId, { broadcast = true })`: one query for the thread (userId, shadow, status, terminal), its
+  oldest `thread_chat` (left join; none → `LEGACY_THREAD_CHAT_ID` and the thread's status) and
+  `agent_run.blocked_at`. Missing thread → return. When `broadcast`, publish the queued message
+  (`publishBroadcastUserMessage`, as `updateThreadChat` does) in every case, with its failure caught on its own so it
+  never stops the drain. Skip the drain when shadow, blocked, terminal (A8), `isAgentWorking(status)`, or tier
+  `none` (the tier lookup runs only when the other checks pass, concurrently with the broadcast). Otherwise the
+  drain `maybeProcessFollowUpQueue({ userId, threadId, threadChatId })` is handed to `waitUntil` and NOT awaited:
+  it can boot a sandbox, so neither a send nor the cron tick waits on it (as `queueFollowUpInternal` does).
+  Errors logged, never thrown. Known limit for S5: on a request path Cloudflare keeps `waitUntil` work ~30 s.
 - `cron.ts`: `runAgentBusSweepSafe()` (dynamic import like the other Safe runners, logs + swallows), in
   `runScheduledTasksCron`'s `finally` after `runKnowledgeReconcileSweepSafe()` (D1).
 - `delivery.test.ts`: skip on tier none / shadow / working / blocked / terminal (broadcast still sent), kick when
-  idle (chat-model and legacy), a kick error is swallowed and does not reject `sendAgentMessage`, the sweep kicks
-  recently delivered targets once each.
+  idle (chat-model and legacy), a kick or broadcast error is swallowed and the drain still runs, neither a kick
+  nor a send waits for the drain (handed to `waitUntil`), the sweep kicks each target once and broadcasts only
+  where it applied.
 
 No caller of `sendAgentMessage` exists yet — S5 adds the MCP tool. That is expected.
 
