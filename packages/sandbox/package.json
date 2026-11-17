@@ -11,7 +11,9 @@
     "./utils": "./src/utils.ts",
     "./env": "./src/env.ts",
     "./constants": "./src/constants.ts",
-    "./opensandbox-cell": "./src/providers/opensandbox-cell.ts"
+    "./opensandbox-cell": "./src/providers/opensandbox-cell.ts",
+    "./cell-reconcile": "./src/cell/reconcile.ts",
+    "./conformance-evidence": "./src/cell/conformance-evidence.ts"
   },
   "scripts": {
     "tsc-watch": "tsc --watch --noEmit --preserveWatchOutput",

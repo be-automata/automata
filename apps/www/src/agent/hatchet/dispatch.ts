@@ -458,6 +458,13 @@ export interface AgentRunInput {
    * (byte-identical payload).
    */
   workBranch?: string;
+  /**
+   * #634 S4: plain org task runs only, when OpenSandbox is configured and the
+   * `opensandboxCells` flag is on for the user. A reference, never a secret:
+   * the worker would fetch its create plan from /api/daemon/cell-plan. Absent
+   * otherwise (byte-identical payload); the worker ignores it until S5.
+   */
+  cell?: "opensandbox";
 }
 
 /** A self-heal plan on the wire: the audit/fix shape minus its secret token. */
@@ -793,6 +800,25 @@ function resolvePlaneKey(): PlanePublicKey {
   const planeKeyText = env.HATCHET_PAYLOAD_SEAL_KEY.trim();
   if (planeKeyText === "") throw new PlaneKeyMissingError();
   return parsePlanePublicKey(planeKeyText);
+}
+
+/**
+ * OpenSandbox is configured and the `opensandboxCells` flag is on for the user.
+ * A lookup failure means "not eligible" (logged without values): the cell
+ * marker must never fail a dispatch.
+ */
+async function cellEligibleForUser(userId: string): Promise<boolean> {
+  try {
+    const { cellsEnabledForUser } = await import(
+      "@/server-lib/compute/cell-gate"
+    );
+    return await cellsEnabledForUser({ db, userId });
+  } catch (error) {
+    console.warn("[hatchet] cell eligibility lookup failed (not eligible)", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return false;
+  }
 }
 
 /**
@@ -1179,12 +1205,22 @@ export async function dispatchAgentRun({
       selfHealPlan.selfHeal !== undefined
         ? splitSelfHealToken(selfHealPlan.selfHeal)
         : undefined;
+    // #634 S4: the cell marker. Plain task runs on an org thread only (the
+    // cell step's organization is a foreign key), set BEFORE the seal because
+    // its binding covers the whole input. A reference; no secret is added.
+    const cellMarker =
+      isPlainTaskRun &&
+      thread?.organizationId &&
+      (await cellEligibleForUser(userId))
+        ? ({ cell: "opensandbox" } as const)
+        : {};
     const input: AgentRunInput = {
       ...baseInput,
       ...plan?.inputExtension,
       ...taskPlan?.extension,
       ...(selfHealSplit !== undefined ? { selfHeal: selfHealSplit.wire } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
+      ...cellMarker,
     };
     // #380: everything secret goes into the envelope and never into the
     // reference-only input: the read-only task token (the plan split it out

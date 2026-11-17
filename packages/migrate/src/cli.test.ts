@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { EXPECTED_MIGRATION_IDS } from "./expected-migrations";
 import { readLedger } from "./ledger";
 import {
   advisoryLockHeld,
@@ -94,21 +95,25 @@ describe("deploy/migrate.ts", () => {
 
     const dry = runCli([], db.url);
     expect(dry.status).toBe(0);
-    expect(dry.stdout).toContain("23 pending");
+    expect(dry.stdout).toContain(`${EXPECTED_MIGRATION_IDS.length} pending`);
     expect(dry.stdout).toContain("pending  0000-baseline [baseline]");
 
     const apply = runCli(["--apply"], db.url);
     expect(apply.status).toBe(0);
-    expect(apply.stdout).toContain("applied 23 migration(s)");
+    expect(apply.stdout).toContain(
+      `applied ${EXPECTED_MIGRATION_IDS.length} migration(s)`,
+    );
 
     const again = runCli(["--apply"], db.url);
     expect(again.status).toBe(0);
-    expect(again.stdout).toContain("23 applied, 0 pending");
+    expect(again.stdout).toContain(
+      `${EXPECTED_MIGRATION_IDS.length} applied, 0 pending`,
+    );
     expect(again.stdout).toContain("applied 0 migration(s)");
 
     const c = await db.connect();
     const ledger = await readLedger(c);
-    expect(ledger).toHaveLength(23);
+    expect(ledger).toHaveLength(EXPECTED_MIGRATION_IDS.length);
     expect(ledger[0]?.appliedBy).toMatch(/^ci-bot@/);
   });
 

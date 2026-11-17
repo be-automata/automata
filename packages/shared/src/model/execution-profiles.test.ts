@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 import { env } from "@terragon/env/pkg-shared";
 import { nanoid } from "nanoid";
@@ -43,6 +46,36 @@ describe("executionProfileConfigHash", () => {
     expect(await executionProfileConfigHash({ egress_mode: "observe" })).toBe(
       "262c29647b320dfafd7123ad48e14e7a95801b82af7aca92d4c0df8d6f80014b",
     );
+    expect(await executionProfileConfigHash({ egress_mode: "enforce" })).toBe(
+      "8f1617ada06e676744be2382972193ac790bd93ab193eb253e42ac5ffb9e5bff",
+    );
+  });
+
+  it("the opensandbox/runc seed hashes exactly the pinned configuration literal", async () => {
+    const sql = readFileSync(
+      join(
+        __dirname,
+        "../../../../deploy/migrations/2026-11-17-execution-profile-seed-opensandbox-runc.sql",
+      ),
+      "utf8",
+    );
+    const literal = '{"egress_mode":"enforce"}';
+    // The jsonb value and the hashed text are the same literal, and it is the
+    // canonical JSON the TypeScript side hashes.
+    expect(sql).toContain(`'${literal}'::jsonb`);
+    expect(sql).toContain(
+      `encode(sha256(convert_to('${literal}', 'UTF8')), 'hex')`,
+    );
+    expect(canonicalJson({ egress_mode: "enforce" })).toBe(literal);
+    expect(sql).toContain("'opensandbox/runc', 'opensandbox', 'customer_box'");
+    expect(sql).toContain('ON CONFLICT ("id") DO NOTHING');
+    expect(sql).not.toContain("profile_evidence");
+  });
+
+  it("matches the hash the opensandbox/runc seed computes in SQL", async () => {
+    // deploy/migrations/2026-11-17-execution-profile-seed-opensandbox-runc.sql:
+    // same configuration as automata-box/enforce, so the same hash (the
+    // unique index is per provider)
     expect(await executionProfileConfigHash({ egress_mode: "enforce" })).toBe(
       "8f1617ada06e676744be2382972193ac790bd93ab193eb253e42ac5ffb9e5bff",
     );

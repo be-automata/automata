@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   strandedSweep: vi.fn(),
   stuckUsers: vi.fn(async (): Promise<string[]> => []),
   drain: vi.fn(),
+  cellProvider: vi.fn(),
+  cellReconcile: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -74,6 +76,10 @@ vi.mock("@/server-lib/knowledge/reconcile-sweep", () => ({
 vi.mock("@/server-lib/knowledge/purge-sweep", () => ({
   runKnowledgePurgeSweep: h.purge,
 }));
+vi.mock("@/server-lib/compute/cell-control", () => ({
+  cellProvider: h.cellProvider,
+  runCellReconciler: h.cellReconcile,
+}));
 vi.mock("@/server-lib/compute/profile-evidence-expiry", () => ({
   runProfileEvidenceExpiryCheck: h.evidenceCheck,
 }));
@@ -116,6 +122,12 @@ describe("runScheduledCron self-heal bulkhead", () => {
     h.evidenceCheck.mockImplementation(async () => {
       h.order.push("profile-evidence");
       return { ran: false, expiring: [], alerted: false };
+    });
+    h.cellProvider.mockReset();
+    h.cellProvider.mockReturnValue(null);
+    h.cellReconcile.mockReset();
+    h.cellReconcile.mockImplementation(async () => {
+      h.order.push("cell-reconcile");
     });
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -215,6 +227,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
     });
     await runScheduledCron("*/10 * * * *");
     expect(h.order).toEqual(["stranded-sweep", "drain", "self-heal:tick"]);
+    expect(h.cellReconcile).not.toHaveBeenCalled();
   });
 
   it("*/10: a throwing stranded-queued sweep does not skip the drain", async () => {
@@ -226,6 +239,31 @@ describe("runScheduledCron self-heal bulkhead", () => {
     });
     await expect(runScheduledCron("*/10 * * * *")).resolves.toBeUndefined();
     expect(h.order).toEqual(["drain", "self-heal:tick"]);
+  });
+
+  it("*/10: the cell reconciler runs last when OpenSandbox is configured", async () => {
+    h.cellProvider.mockReturnValue({});
+    await runScheduledCron("*/10 * * * *");
+    expect(h.order.at(-2)).toBe("self-heal:tick");
+    expect(h.order.at(-1)).toBe("cell-reconcile");
+  });
+
+  it("*/10: the cell reconciler is a no-op when OpenSandbox is not configured", async () => {
+    await runScheduledCron("*/10 * * * *");
+    expect(h.cellReconcile).not.toHaveBeenCalled();
+  });
+
+  it("*/10: a throwing cell reconciler is swallowed", async () => {
+    h.cellProvider.mockReturnValue({});
+    h.cellReconcile.mockRejectedValue(new Error("server down"));
+    await expect(runScheduledCron("*/10 * * * *")).resolves.toBeUndefined();
+  });
+
+  it("other patterns never run the cell reconciler", async () => {
+    h.cellProvider.mockReturnValue({});
+    await runScheduledCron("*/1 * * * *");
+    await runScheduledCron("*/30 * * * *");
+    expect(h.cellReconcile).not.toHaveBeenCalled();
   });
 
   it("other patterns never run self-heal", async () => {

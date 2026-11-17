@@ -1786,3 +1786,24 @@ describe("JSON replies are byte-capped", () => {
     expect(server.count("GET /sandboxes?metadata")).toBeGreaterThan(0);
   });
 });
+
+describe("fetch binding (workerd)", () => {
+  it("never calls fetch with `this` bound to its deps", async () => {
+    // workerd's global fetch throws "Illegal invocation" unless `this` is the
+    // global scope; Node does not, so this guard stands in for workerd here.
+    const empty = { items: [], pagination: { hasNextPage: false } };
+    const workerdLikeFetch = function (this: unknown): Promise<Response> {
+      if (this !== undefined && this !== globalThis) {
+        throw new TypeError("Illegal invocation");
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(empty), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    } as unknown as typeof fetch;
+    const { provider } = setup({}, { fetch: workerdLikeFetch });
+    await expect(provider.listByTags({})).resolves.toEqual([]);
+  });
+});

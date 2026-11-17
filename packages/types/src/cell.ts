@@ -101,6 +101,12 @@ export interface CellExecResult {
   stderr: string;
 }
 
+/** Structured logger a cell component takes by injection; field values are never secrets. */
+export interface CellLogger {
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+}
+
 export interface CellListEntry {
   cellId: string;
   tags: Record<string, string>;

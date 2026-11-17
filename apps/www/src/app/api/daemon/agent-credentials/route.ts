@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { getDaemonTokenContext } from "@/lib/auth-server";
+import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
-import {
-  getThreadMinimal,
-  getThreadChat,
-} from "@terragon/shared/model/threads";
+import { getThreadChat } from "@terragon/shared/model/threads";
 import { getAndVerifyCredentials } from "@/agent/credentials";
 import { ensureAgent } from "@terragon/agent/utils";
 import { ThreadError } from "@/agent/error";
@@ -37,73 +34,13 @@ import { ThreadError } from "@/agent/error";
 export const POST = withDaemonAuthUnavailable(async function POST(
   request: NextRequest,
 ): Promise<NextResponse> {
-  const ctx = await getDaemonTokenContext(request);
-  if (!ctx) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  // F1: daemon-purpose tokens only.
-  if (ctx.tokenType !== "daemon") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  let body: { threadId?: unknown; threadChatId?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
-  const threadId = typeof body.threadId === "string" ? body.threadId : null;
-  const threadChatId =
-    typeof body.threadChatId === "string" ? body.threadChatId : null;
-  if (!threadId || !threadChatId) {
-    return NextResponse.json(
-      { error: "Missing threadId or threadChatId" },
-      { status: 400 },
-    );
-  }
-
-  // F2: the token is bound to ONE threadChat; reject a request for any other.
-  if (ctx.threadChatId !== threadChatId) {
-    console.log(
-      "[daemon agent-credentials] forbidden: token↔threadChat mismatch",
-      {
-        threadId,
-        tokenThreadChatId: ctx.threadChatId,
-        org: ctx.organizationId,
-      },
-    );
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  // F2 anchor: bind on threadId too (see the next-message route for why the
-  // null clause is temporary).
-  if (ctx.threadId !== null && ctx.threadId !== threadId) {
-    console.log(
-      "[daemon agent-credentials] forbidden: token↔thread mismatch",
-      {
-        requestedThreadId: threadId,
-        tokenThreadId: ctx.threadId,
-        org: ctx.organizationId,
-      },
-    );
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  // Defense in depth: the token's user must own the thread, and its org must match.
-  const thread = await getThreadMinimal({ db, userId: ctx.userId, threadId });
-  if (!thread) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  if ((thread.organizationId ?? null) !== (ctx.organizationId ?? null)) {
-    console.log(
-      "[daemon agent-credentials] forbidden: token org != thread org",
-      {
-        threadId,
-        tokenOrg: ctx.organizationId,
-        threadOrg: thread.organizationId,
-      },
-    );
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const auth = await authorizeDaemonThreadRequest({
+    request,
+    strictThreadId: false,
+    logLabel: "daemon agent-credentials",
+  });
+  if (!auth.ok) return auth.response;
+  const { ctx, threadId, threadChatId, thread } = auth;
 
   const threadChat = await getThreadChat({
     db,
