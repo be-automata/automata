@@ -362,15 +362,18 @@ async function quarantineRefusal(
       signal: AbortSignal.timeout(30_000),
     },
   );
-  const body = (await res.json().catch(() => ({}))) as {
-    code?: unknown;
-    message?: unknown;
-  };
-  const why = [body.code, body.message]
-    .filter((v): v is string => typeof v === "string")
-    .join(": ")
-    .replace(/[^\x20-\x7e]/g, " ")
-    .slice(0, 300);
+  // The body may be JSON ({code, message}) or plain text; keep printable ASCII only.
+  const text = await res.text().catch(() => "");
+  let why = text;
+  try {
+    const body = JSON.parse(text) as { code?: unknown; message?: unknown };
+    why = [body.code, body.message]
+      .filter((v): v is string => typeof v === "string")
+      .join(": ");
+  } catch {
+    // not JSON: keep the text
+  }
+  why = why.replace(/[^\x20-\x7e]/g, " ").slice(0, 300);
   return `status ${res.status}${why ? ` (${why})` : ""}`;
 }
 
