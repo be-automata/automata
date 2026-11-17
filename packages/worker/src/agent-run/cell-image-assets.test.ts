@@ -623,7 +623,8 @@ describeRun("cell-send.sh behaviour (fake node)", () => {
       over.status === CELL_SEND_EXIT.tooLarge ||
       (over.error as NodeJS.ErrnoException | undefined)?.code === "E2BIG";
     expect(refused).toBe(true);
-    expect(over.stdout).toBe("");
+    // On Linux the kernel refuses the spawn itself (E2BIG), so there is no stdout at all.
+    expect(over.stdout ?? "").toBe("");
   });
 });
 

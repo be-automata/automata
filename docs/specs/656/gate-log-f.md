@@ -56,3 +56,8 @@ finishes:
 - **FAIL `bundle-mode`, `bundle-version`, `daemon-socket` and `send-roundtrip`.** `statx '/opt/automata-daemon/index.js': Permission denied`: `COPY --chmod=0444` into a new directory created that directory without search permission for uid 10001.
   - `verify.sh` failed closed as designed.
   - **Fix:** the bundle moves into the base's existing `/opt/automata` as `daemon.js` (`CELL_DAEMON_BUNDLE`), with no `RUN` added. The tests pin it, with a negative control against the box's mount path.
+
+## Second CI round (at `f7a154b`)
+
+- **`cell-image` run 44145100433, `build-verify`: pass.** The image builds, and `verify.sh` passes every check, including `bundle-mode`, `bundle-version`, `daemon-socket` and the `send-roundtrip` through `cell-send.sh`. The layer scan is clean.
+- **CI `test` (run 44145100345): one Linux-only failure.** The cap test's over-cap case is refused by the kernel (E2BIG) before the script runs, so `spawnSync` gives no stdout (`undefined`, not `''`). The test now compares `stdout ?? ""`.
