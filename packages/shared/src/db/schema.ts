@@ -3362,10 +3362,13 @@ export const agentRun = pgTable(
     parentThreadId: text("parent_thread_id").references(() => thread.id, {
       onDelete: "set null",
     }),
-    /** The root of this run's tree (= threadId for a root). Sends stay inside one tree. */
-    rootThreadId: text("root_thread_id")
-      .notNull()
-      .references(() => thread.id, { onDelete: "cascade" }),
+    /**
+     * The root of this run's tree (= threadId for a root). Sends stay inside one
+     * tree. Deliberately no foreign key: deleting the root's thread must not
+     * delete its descendants' rows, which keep them narrowed (a former child
+     * can never re-register as a root).
+     */
+    rootThreadId: text("root_thread_id").notNull(),
     lane: text("lane").$type<AgentBusLane>().notNull(),
     capabilities: jsonb("capabilities").$type<AgentCapabilities>().notNull(),
     depth: integer("depth").notNull().default(0),
@@ -3378,6 +3381,7 @@ export const agentRun = pgTable(
   (table) => [
     index("agent_run_parent_thread_id_index").on(table.parentThreadId),
     index("agent_run_root_thread_id_index").on(table.rootThreadId),
+    index("agent_run_organization_id_index").on(table.organizationId),
   ],
 );
 

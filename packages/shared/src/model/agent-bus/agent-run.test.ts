@@ -16,7 +16,11 @@ import {
   getRunForOrg,
   markBlocked,
 } from "./agent-run";
-import { authorizeSend, type AgentCapabilities } from "./capabilities";
+import {
+  authorizeSend,
+  capabilitiesForLane,
+  type AgentCapabilities,
+} from "./capabilities";
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -520,6 +524,55 @@ describe("agent run ledger", () => {
     expect(await rowCount(elsewhereId)).toBe(0);
   });
 
+  it("a child's root registration waits for its parent's registration in flight, then refuses", async () => {
+    const organizationId = await createTestOrg({ db });
+    const parentId = await orgThread(organizationId);
+    const childId = await orgThread(organizationId, {
+      parentThreadId: parentId,
+    });
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let registered: () => void = () => undefined;
+    const inFlight = new Promise<void>((resolve) => (registered = resolve));
+    // The parent's registration, paused after its insert and before commit.
+    const parent = db.transaction(async (tx) => {
+      await tx
+        .select({ id: thread.id })
+        .from(thread)
+        .where(eq(thread.id, parentId))
+        .for("no key update");
+      await tx.insert(agentRun).values({
+        threadId: parentId,
+        organizationId,
+        rootThreadId: parentId,
+        lane: "task",
+        capabilities: capabilitiesForLane("task", {
+          repoGrant: [{ repo: "terragon/test-repo", access: "write" }],
+          skills: null,
+        }),
+      });
+      registered();
+      await held;
+    });
+    await inFlight;
+    let settled = false;
+    const childRoot = ensureRootRun({
+      db,
+      threadId: childId,
+      organizationId,
+      lane: "task",
+    }).then((res) => {
+      settled = true;
+      return res;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(settled).toBe(false);
+    release();
+    await parent;
+    expect(await childRoot).toBeNull();
+    expect(await rowCount(childId)).toBe(0);
+  });
+
   describe("foreign keys on delete", () => {
     async function tree() {
       const { organizationId, rootId, childId } = await rootAndChild();
@@ -560,12 +613,27 @@ describe("agent run ledger", () => {
       expect(run?.rootThreadId).not.toBe(run?.threadId);
     });
 
-    it("deleting the root removes every run in its tree (root_thread_id cascade)", async () => {
-      const { rootId, childId, grandchildId } = await tree();
+    it("deleting the root keeps its descendants' narrowed rows; a former child cannot become a root", async () => {
+      const { organizationId, rootId, childId, grandchildId } = await tree();
+      const before = await getRunForOrg({
+        db,
+        organizationId,
+        threadId: childId,
+      });
       await db.delete(thread).where(eq(thread.id, rootId));
       expect(await rowCount(rootId)).toBe(0);
-      expect(await rowCount(childId)).toBe(0);
-      expect(await rowCount(grandchildId)).toBe(0);
+      expect(await rowCount(childId)).toBe(1);
+      expect(await rowCount(grandchildId)).toBe(1);
+      // ensureRootRun returns the existing narrowed row, never a fresh root.
+      const after = await ensureRootRun({
+        db,
+        threadId: childId,
+        organizationId,
+        lane: "task",
+      });
+      expect(after?.rootThreadId).toBe(rootId);
+      expect(after?.capabilities).toEqual(before?.capabilities);
+      expect(after?.capabilities.repoGrant[0]?.access).toBe("read");
     });
   });
 });

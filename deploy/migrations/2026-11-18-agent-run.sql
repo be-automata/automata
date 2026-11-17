@@ -35,10 +35,9 @@ DO $$ BEGIN
     FOREIGN KEY ("parent_thread_id") REFERENCES "public"."thread"("id") ON DELETE set null ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-DO $$ BEGIN
-  ALTER TABLE "agent_run" ADD CONSTRAINT "agent_run_root_thread_id_thread_id_fk"
-    FOREIGN KEY ("root_thread_id") REFERENCES "public"."thread"("id") ON DELETE cascade ON UPDATE no action;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- root_thread_id has no foreign key on purpose: deleting a root's thread must not delete its
+-- descendants' rows (they stay narrowed; a former child never re-registers as a root).
 
 CREATE INDEX IF NOT EXISTS "agent_run_parent_thread_id_index" ON "agent_run" USING btree ("parent_thread_id");
 CREATE INDEX IF NOT EXISTS "agent_run_root_thread_id_index" ON "agent_run" USING btree ("root_thread_id");
+CREATE INDEX IF NOT EXISTS "agent_run_organization_id_index" ON "agent_run" USING btree ("organization_id");

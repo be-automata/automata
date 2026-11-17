@@ -101,56 +101,68 @@ export async function ensureRootRun({
   organizationId,
   lane,
 }: {
-  db: Executor;
+  db: Pick<DB, "transaction">;
   threadId: string;
   organizationId: string;
   lane: AgentBusLane;
 }): Promise<AgentRunView | null> {
-  // An existing row (the common case) costs one read.
-  const existing = await getRunForOrg({ db, organizationId, threadId });
-  if (existing) return existing;
+  return db.transaction(async (tx) => {
+    // An existing row (the common case) costs one read.
+    const existing = await getRunForOrg({ db: tx, organizationId, threadId });
+    if (existing) return existing;
 
-  const rows = await db
-    .select({
-      organizationId: thread.organizationId,
-      githubRepoFullName: thread.githubRepoFullName,
-      parentThreadId: thread.parentThreadId,
-    })
-    .from(thread)
-    .where(eq(thread.id, threadId))
-    .limit(1);
-  const row = rows[0];
-  if (row?.organizationId !== organizationId) return null;
-  if (row.parentThreadId !== null) {
-    const parentRun = await db
-      .select({ threadId: agentRun.threadId })
-      .from(agentRun)
-      .where(eq(agentRun.threadId, row.parentThreadId))
-      .limit(1);
-    if (parentRun.length > 0) return null;
-  }
+    // This thread's row FOR NO KEY UPDATE, then its parent's FOR SHARE: a
+    // parent registering itself holds its own row, so a child's check of the
+    // parent below waits for it. Locks are always taken child before parent,
+    // so two registrations cannot deadlock.
+    const rows = await tx
+      .select({
+        organizationId: thread.organizationId,
+        githubRepoFullName: thread.githubRepoFullName,
+        parentThreadId: thread.parentThreadId,
+      })
+      .from(thread)
+      .where(eq(thread.id, threadId))
+      .limit(1)
+      .for("no key update");
+    const row = rows[0];
+    if (row?.organizationId !== organizationId) return null;
+    if (row.parentThreadId !== null) {
+      await tx
+        .select({ id: thread.id })
+        .from(thread)
+        .where(eq(thread.id, row.parentThreadId))
+        .for("share");
+      const parentRun = await tx
+        .select({ threadId: agentRun.threadId })
+        .from(agentRun)
+        .where(eq(agentRun.threadId, row.parentThreadId))
+        .limit(1);
+      if (parentRun.length > 0) return null;
+    }
 
-  await db
-    .insert(agentRun)
-    .values({
-      threadId,
-      organizationId,
-      rootThreadId: threadId,
-      lane,
-      capabilities: capabilitiesForLane(lane, {
-        // Review is emit-only: it reads its repo and never pushes.
-        repoGrant: [
-          {
-            repo: row.githubRepoFullName,
-            access: lane === "review" ? "read" : "write",
-          },
-        ],
-        skills: null,
-      }),
-    })
-    .onConflictDoNothing({ target: agentRun.threadId });
+    await tx
+      .insert(agentRun)
+      .values({
+        threadId,
+        organizationId,
+        rootThreadId: threadId,
+        lane,
+        capabilities: capabilitiesForLane(lane, {
+          // Review is emit-only: it reads its repo and never pushes.
+          repoGrant: [
+            {
+              repo: row.githubRepoFullName,
+              access: lane === "review" ? "read" : "write",
+            },
+          ],
+          skills: null,
+        }),
+      })
+      .onConflictDoNothing({ target: agentRun.threadId });
 
-  return getRunForOrg({ db, organizationId, threadId });
+    return getRunForOrg({ db: tx, organizationId, threadId });
+  });
 }
 
 /**
