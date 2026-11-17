@@ -44,7 +44,8 @@ export function cellProvider(): ICellProvider | null {
       selfCheck: { argv: SELF_CHECK_ARGV },
     },
     {
-      fetch,
+      // Never `this`-bound to deps (workerd: "Illegal invocation").
+      fetch: (input, init) => fetch(input, init),
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       logger: prefixedLogger("cell", false),

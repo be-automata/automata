@@ -75,3 +75,7 @@ The route's own tests cover how the database side judges a report.
   - **Low #2, fixed: a regression from `/simplify`.** `getClaudeOauthAccessToken` throws when the lookup itself fails, so the route answers 5xx, not 422 `no_model_credential`. It returns null only when there is no OAuth credential.
   - **Low #3, follow-up:** run the profile and egress refusals before the credential lookup, which can refresh the token.
 - **After the fixes, all exit 0:** live IT 9/9, sandbox 475 passed, www full suite, `tsc-check`, lint.
+- **Job 1179 on `8930365d`:** Pass, with one Medium, fixed. On workerd the global `fetch` throws "Illegal invocation" when it is called with `this` bound to anything but the global scope, and the adapter called it as `deps.fetch(...)`. Once enabled, the www reconciler would have failed on every tick, and `runCellReconcilerSafe` would have swallowed the error. Node, the unit tests and the IT never enforce this rule.
+  - **Fix:** the adapter detaches `deps.fetch` once, so no caller can hit this, and www passes an arrow function.
+  - **Test:** a fetch that refuses any bound `this`, as workerd's does. Negative control: the test fails against the old call and passes with the fix.
+  - **Re-run, all exit 0:** `tsc`, lint, sandbox 476 passed, www cell-control and cron 32 passed, live IT 9/9.

@@ -378,6 +378,11 @@ export function createOpenSandboxCellProvider(
   const requestTimeoutMs =
     config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
+  // Detached from `deps`: workerd's global fetch throws "Illegal invocation"
+  // when called with any `this` but the global scope, so `deps.fetch(...)`
+  // would fail on Cloudflare Workers (www's reconciler) and nowhere else.
+  const doFetch = deps.fetch;
+
   const maxCopyOutBytes = config.maxCopyOutBytes ?? DEFAULT_MAX_COPY_OUT_BYTES;
   const copyOutTimeoutMs =
     config.copyOutTimeoutMs ?? DEFAULT_COPY_OUT_TIMEOUT_MS;
@@ -393,7 +398,7 @@ export function createOpenSandboxCellProvider(
     o: { body?: unknown; timeoutMs: number },
   ): Promise<Response> {
     const hasBody = o.body !== undefined;
-    return deps.fetch(`${base}${path}`, {
+    return doFetch(`${base}${path}`, {
       method,
       headers: {
         "OPEN-SANDBOX-API-KEY": config.apiKey,
