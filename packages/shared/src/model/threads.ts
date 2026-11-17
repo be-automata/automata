@@ -43,6 +43,7 @@ import {
 import { BroadcastMessageThreadData } from "@terragon/types/broadcast";
 import type { SandboxProvider } from "@terragon/types/sandbox";
 import { sanitizeForJson } from "../utils/sanitize-json";
+import { appendQueuedMessagesSql } from "./queued-messages-sql";
 import { toUTC, validateTimezone } from "../utils/timezone";
 import {
   threadEffectiveStatusIn,
@@ -966,9 +967,11 @@ export async function updateThreadChat({
         // @ts-expect-error
         updateObject.queuedMessages = sql`${JSON.stringify(sanitizedQueuedMessages)}::jsonb`;
       } else if (appendQueuedMessages && appendQueuedMessages.length > 0) {
-        const sanitizedQueuedMessages = sanitizeForJson(appendQueuedMessages);
         // @ts-expect-error
-        updateObject.queuedMessages = sql`COALESCE(${schema.thread.queuedMessages}, '[]'::jsonb) || ${JSON.stringify(sanitizedQueuedMessages)}::jsonb`;
+        updateObject.queuedMessages = appendQueuedMessagesSql(
+          schema.thread.queuedMessages,
+          appendQueuedMessages,
+        );
       }
       for (const stringKey in updateObject) {
         const key = stringKey as keyof ThreadInsertRaw;
@@ -1009,9 +1012,11 @@ export async function updateThreadChat({
         // @ts-expect-error
         updateObject.queuedMessages = sql`${JSON.stringify(sanitizedQueuedMessages)}::jsonb`;
       } else if (appendQueuedMessages && appendQueuedMessages.length > 0) {
-        const sanitizedQueuedMessages = sanitizeForJson(appendQueuedMessages);
         // @ts-expect-error
-        updateObject.queuedMessages = sql`COALESCE(${schema.threadChat.queuedMessages}, '[]'::jsonb) || ${JSON.stringify(sanitizedQueuedMessages)}::jsonb`;
+        updateObject.queuedMessages = appendQueuedMessagesSql(
+          schema.threadChat.queuedMessages,
+          appendQueuedMessages,
+        );
       }
       for (const stringKey in updateObject) {
         const key = stringKey as keyof ThreadChatInsertRaw;

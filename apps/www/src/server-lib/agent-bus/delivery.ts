@@ -54,22 +54,22 @@ export async function kickTarget(threadId: string): Promise<void> {
     const threadChatId = target.threadChatId ?? LEGACY_THREAD_CHAT_ID;
     const status = target.chatStatus ?? target.threadStatus;
 
-    await publishBroadcastUserMessage({
+    const broadcast = publishBroadcastUserMessage({
       type: "user",
       id: target.userId,
       data: { threadId, threadChatId },
     });
-
-    if (
+    const mustSkip =
       target.shadow ||
       target.blockedAt ||
       target.terminal ||
-      isAgentWorking(status)
-    ) {
-      return;
-    }
-    const { tier } = await getAccessInfoForUser(target.userId);
-    if (tier === "none") return;
+      isAgentWorking(status);
+    // The tier lookup only matters when no other skip applies; it runs beside the broadcast.
+    const [, access] = await Promise.all([
+      broadcast,
+      mustSkip ? null : getAccessInfoForUser(target.userId),
+    ]);
+    if (!access || access.tier === "none") return;
 
     await maybeProcessFollowUpQueue({
       userId: target.userId,

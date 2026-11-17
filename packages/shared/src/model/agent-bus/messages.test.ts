@@ -72,6 +72,21 @@ async function tree() {
   return { organizationId, rootId, reviewId, taskId };
 }
 
+/** Moves `created_at` / `consumed_at` of the given messages `ms` into the past (negative: the future). */
+async function backdateCreated(ids: number[], ms: number): Promise<void> {
+  await db
+    .update(agentMessages)
+    .set({ createdAt: new Date(Date.now() - ms) })
+    .where(inArray(agentMessages.id, ids));
+}
+
+async function backdateConsumed(ids: number[], ms: number): Promise<void> {
+  await db
+    .update(agentMessages)
+    .set({ consumedAt: new Date(Date.now() - ms) })
+    .where(inArray(agentMessages.id, ids));
+}
+
 function recorder() {
   const seen: AgentMessage[] = [];
   const apply: ApplyMessage = async (_tx, message) => {
@@ -512,21 +527,6 @@ describe("receiveFor", () => {
       .where(eq(agentMessages.id, id as number));
     expect(row?.consumedAt).not.toBeNull();
   });
-
-  it("unsafeApplyOutsideTransaction passes the plain db, not the transaction", async () => {
-    const { rootId, taskId } = await tree();
-    await seed(rootId, taskId, 1);
-    const targets: unknown[] = [];
-    await receiveFor({
-      db,
-      toRun: taskId,
-      unsafeApplyOutsideTransaction: true,
-      apply: async (executor) => {
-        targets.push(executor);
-      },
-    });
-    expect(targets).toEqual([db]);
-  });
 });
 
 describe("recentlyDeliveredTargets", () => {
@@ -537,10 +537,7 @@ describe("recentlyDeliveredTargets", () => {
     await receiveFor({ db, toRun: taskId, apply });
     expect(await recentlyDeliveredTargets({ db })).toContain(taskId);
 
-    await db
-      .update(agentMessages)
-      .set({ consumedAt: new Date(Date.now() - 10 * 60_000) })
-      .where(eq(agentMessages.id, id as number));
+    await backdateConsumed([id as number], 10 * 60_000);
     expect(await recentlyDeliveredTargets({ db })).not.toContain(taskId);
     expect(
       await recentlyDeliveredTargets({ db, withinMs: 60 * 60_000 }),
@@ -564,14 +561,8 @@ describe("recentlyDeliveredTargets limit", () => {
     await receiveFor({ db, toRun: t.taskId, apply });
     await receiveFor({ db, toRun: t.reviewId, apply });
     // Future stamps make both newer than anything other tests consumed.
-    await db
-      .update(agentMessages)
-      .set({ consumedAt: new Date(Date.now() + 30 * 60_000) })
-      .where(eq(agentMessages.id, a as number));
-    await db
-      .update(agentMessages)
-      .set({ consumedAt: new Date(Date.now() + 60 * 60_000) })
-      .where(eq(agentMessages.id, b.id));
+    await backdateConsumed([a as number], -30 * 60_000);
+    await backdateConsumed([b.id], -60 * 60_000);
     expect(await recentlyDeliveredTargets({ db, limit: 1 })).toEqual([
       t.reviewId,
     ]);
@@ -593,10 +584,7 @@ describe("sweepUnconsumed", () => {
       body: "to nobody",
     });
     if ("conflict" in res) throw new Error("unexpected conflict");
-    await db
-      .update(agentMessages)
-      .set({ createdAt: new Date(Date.now() - 60_000) })
-      .where(eq(agentMessages.id, res.id));
+    await backdateCreated([res.id], 60_000);
     const logger = { error: vi.fn() };
     const result = await sweepUnconsumed({
       db,
@@ -619,10 +607,7 @@ describe("sweepUnconsumed", () => {
       body: "fresh",
     });
     if ("conflict" in fresh) throw new Error("unexpected conflict");
-    await db
-      .update(agentMessages)
-      .set({ createdAt: new Date(Date.now() - 60_000) })
-      .where(eq(agentMessages.id, oldId as number));
+    await backdateCreated([oldId as number], 60_000);
 
     const { seen, apply } = recorder();
     const result = await sweepUnconsumed({ db, apply });
@@ -649,10 +634,7 @@ describe("sweepUnconsumed", () => {
       body: "good",
     });
     if ("conflict" in good) throw new Error("unexpected conflict");
-    await db
-      .update(agentMessages)
-      .set({ createdAt: new Date(Date.now() - 60_000) })
-      .where(inArray(agentMessages.id, [badId as number, good.id]));
+    await backdateCreated([badId as number, good.id], 60_000);
 
     const logger = { error: vi.fn() };
     const applied: number[] = [];
@@ -683,10 +665,7 @@ describe("sweepUnconsumed", () => {
       body: "limit",
     });
     if ("conflict" in b) throw new Error("unexpected conflict");
-    await db
-      .update(agentMessages)
-      .set({ createdAt: new Date(Date.now() - 60_000) })
-      .where(inArray(agentMessages.id, [a as number, b.id]));
+    await backdateCreated([a as number, b.id], 60_000);
     const { apply } = recorder();
     const result = await sweepUnconsumed({ db, apply, limit: 1 });
     expect(result.targets).toHaveLength(1);

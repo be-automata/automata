@@ -1,4 +1,4 @@
-import { createDb } from "../../../db";
+import { createDb, type DB } from "../../../db";
 import {
   queuedFollowUpApply,
   receiveFor,
@@ -34,11 +34,17 @@ function killSelf(point: string): never {
 }
 
 /** The production apply, killing the process after the Nth call when asked. */
-function killingApply(): ApplyMessage {
+function killingApply(db: DB): ApplyMessage {
   const killAt = Number(process.env.KILL_AT_APPLY ?? "1");
   let calls = 0;
+  const outsideTransaction = process.env.UNSAFE === "1";
   return async (tx, message) => {
-    await queuedFollowUpApply(tx, message);
+    // UNSAFE=1 (negative control): the effect runs on the plain db, not the
+    // receive transaction, which proves the transaction is what makes it exactly-once.
+    await queuedFollowUpApply(
+      outsideTransaction ? (db as unknown as typeof tx) : tx,
+      message,
+    );
     calls += 1;
     if (process.env.KILL_POINT === "after-apply" && calls === killAt) {
       killSelf("after-apply");
@@ -48,7 +54,7 @@ function killingApply(): ApplyMessage {
 
 async function main(): Promise<void> {
   const db = createDb(requireEnv("DATABASE_URL"));
-  const apply = killingApply();
+  const apply = killingApply(db);
   const mode = requireEnv("MODE");
   let result: unknown;
   if (mode === "receive") {
@@ -56,7 +62,6 @@ async function main(): Promise<void> {
       db,
       toRun: requireEnv("TO_RUN"),
       apply,
-      unsafeApplyOutsideTransaction: process.env.UNSAFE === "1",
     });
   } else if (mode === "send") {
     result = await sendMessage({

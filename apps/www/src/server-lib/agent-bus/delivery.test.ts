@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
@@ -78,6 +78,13 @@ async function pair({ legacy = false }: { legacy?: boolean } = {}) {
   return { organizationId, userId: user.id, root, child };
 }
 
+async function backdateCreated(ids: number[], ms: number): Promise<void> {
+  await db
+    .update(agentMessages)
+    .set({ createdAt: new Date(Date.now() - ms) })
+    .where(inArray(agentMessages.id, ids));
+}
+
 describe("agent-bus delivery", () => {
   beforeEach(() => {
     h.kick.mockReset();
@@ -117,60 +124,60 @@ describe("agent-bus delivery", () => {
       });
     });
 
-    it("skips a terminal target but still broadcasts", async () => {
-      const { child } = await pair();
-      await db
-        .update(threadChat)
-        .set({ status: "complete" })
-        .where(eq(threadChat.id, child.threadChatId));
-      await db
-        .update(thread)
-        .set({ status: "complete" })
-        .where(eq(thread.id, child.threadId));
-      await kickTarget(child.threadId);
-      expect(h.kick).not.toHaveBeenCalled();
-      expect(h.broadcast).toHaveBeenCalledTimes(1);
-    });
-
-    it("skips on tier none", async () => {
-      const { child } = await pair();
-      h.tier.mockResolvedValue({ tier: "none" });
-      await kickTarget(child.threadId);
-      expect(h.kick).not.toHaveBeenCalled();
-      expect(h.broadcast).toHaveBeenCalledTimes(1);
-    });
-
-    it("skips a shadow thread", async () => {
-      const { child } = await pair();
-      await db
-        .update(thread)
-        .set({ shadow: true })
-        .where(eq(thread.id, child.threadId));
-      await kickTarget(child.threadId);
-      expect(h.kick).not.toHaveBeenCalled();
-      expect(h.broadcast).toHaveBeenCalledTimes(1);
-    });
-
-    it("skips while the agent is working", async () => {
-      const { child } = await pair();
-      await db
-        .update(threadChat)
-        .set({ status: "working" })
-        .where(eq(threadChat.id, child.threadChatId));
-      await kickTarget(child.threadId);
-      expect(h.kick).not.toHaveBeenCalled();
-      expect(h.broadcast).toHaveBeenCalledTimes(1);
-    });
-
-    it("skips a blocked run", async () => {
-      const { organizationId, child } = await pair();
-      await markBlocked({
-        db,
-        organizationId,
-        threadId: child.threadId,
-        reason: "test",
-      });
-      await kickTarget(child.threadId);
+    type Pair = Awaited<ReturnType<typeof pair>>;
+    it.each<[string, (p: Pair) => Promise<void>]>([
+      [
+        "a terminal target",
+        async ({ child }) => {
+          await db
+            .update(threadChat)
+            .set({ status: "complete" })
+            .where(eq(threadChat.id, child.threadChatId));
+          await db
+            .update(thread)
+            .set({ status: "complete" })
+            .where(eq(thread.id, child.threadId));
+        },
+      ],
+      [
+        "tier none",
+        async () => {
+          h.tier.mockResolvedValue({ tier: "none" });
+        },
+      ],
+      [
+        "a shadow thread",
+        async ({ child }) => {
+          await db
+            .update(thread)
+            .set({ shadow: true })
+            .where(eq(thread.id, child.threadId));
+        },
+      ],
+      [
+        "a working agent",
+        async ({ child }) => {
+          await db
+            .update(threadChat)
+            .set({ status: "working" })
+            .where(eq(threadChat.id, child.threadChatId));
+        },
+      ],
+      [
+        "a blocked run",
+        async ({ organizationId, child }) => {
+          await markBlocked({
+            db,
+            organizationId,
+            threadId: child.threadId,
+            reason: "test",
+          });
+        },
+      ],
+    ])("skips %s but still broadcasts", async (_name, arrange) => {
+      const fixture = await pair();
+      await arrange(fixture);
+      await kickTarget(fixture.child.threadId);
       expect(h.kick).not.toHaveBeenCalled();
       expect(h.broadcast).toHaveBeenCalledTimes(1);
     });
@@ -231,10 +238,7 @@ describe("agent-bus delivery", () => {
         body: "two",
       });
       if ("conflict" in inserted) throw new Error("unexpected conflict");
-      await db
-        .update(agentMessages)
-        .set({ createdAt: new Date(Date.now() - 60_000) })
-        .where(eq(agentMessages.id, inserted.id));
+      await backdateCreated([inserted.id], 60_000);
       h.kick.mockClear();
 
       await runAgentBusSweep();

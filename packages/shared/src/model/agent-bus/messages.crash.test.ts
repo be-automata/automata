@@ -107,13 +107,13 @@ async function scenario(withChat = false) {
     lane: "task",
   });
   if (!root) throw new Error("root not created");
-  const targetId = (
-    await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { organizationId, parentThreadId: rootId },
-    })
-  ).threadId;
+  const target = await createTestThread({
+    db,
+    userId: user.id,
+    overrides: { organizationId, parentThreadId: rootId },
+    enableThreadChatCreation: withChat,
+  });
+  const targetId = target.threadId;
   const child = await createChildRun({
     db,
     organizationId,
@@ -122,20 +122,12 @@ async function scenario(withChat = false) {
     request: { lane: "task" },
   });
   if (!child.ok) throw new Error("child not created");
-  if (!withChat) {
-    return { organizationId, rootId, targetId, chatId: null };
-  }
-  const [chat] = await db
-    .insert(threadChat)
-    .values({
-      userId: user.id,
-      threadId: targetId,
-      organizationId,
-      agent: "claudeCode" as const,
-    })
-    .returning({ id: threadChat.id });
-  if (!chat) throw new Error("chat not created");
-  return { organizationId, rootId, targetId, chatId: chat.id };
+  return {
+    organizationId,
+    rootId,
+    targetId,
+    chatId: withChat ? target.threadChatId : null,
+  };
 }
 
 async function seed(from: string, to: string, n: number) {
