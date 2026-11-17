@@ -103,8 +103,9 @@ gitleaks, builds `linux/amd64`, runs `verify.sh`, then `scan-layers.sh`. `verify
 container; `scan-layers.sh` runs the same sha256-checked gitleaks over the image config and every
 layer above the batteries base, so a token baked into a layer (even one deleted again) fails the job.
 
-- **`build-verify`** (PRs and `main`): `contents: read` only, nothing is pushed.
-- **`publish`** (`main` only, after `build-verify`): holds `packages: write`, `id-token: write` and
+- **`build-verify`** (pull requests and refs other than `main`): `contents: read` only, nothing is
+  pushed.
+- **`publish`** (`main` only, independent of `build-verify`, which does not run there): holds `packages: write`, `id-token: write` and
   `attestations: write`. It rebuilds rather than loading the `build-verify` image, because a runner's
   image store does not cross jobs and an ~8.3 GB image is far over the artifact budget. The rebuild
   runs the same scans and `verify.sh` on the image it then pushes (`:sha-<commit>`), prints the digest

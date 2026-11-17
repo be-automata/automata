@@ -608,7 +608,10 @@ describeRun("cell-send.sh behaviour (fake node)", () => {
   // card: protects=the 128 KiB single-argument cap is enforced with its own code and equals the constant; fails_when=the script's max differs, an argument at the cap is refused, or one over it is accepted; no_claim=the kernel's own E2BIG
   it("enforces CELL_SEND_MAX_BYTES with exit 65", () => {
     expect(read(SEND)).toContain(`max=${CELL_SEND_MAX_BYTES}`);
-    const atCap = run(sb, sb.send, ["A".repeat(CELL_SEND_MAX_BYTES)]);
+    // A real message is base64, so its length is a multiple of 4: the largest
+    // valid one under the cap. GNU base64 -d rejects an incomplete final group.
+    const largestValid = CELL_SEND_MAX_BYTES - (CELL_SEND_MAX_BYTES % 4);
+    const atCap = run(sb, sb.send, ["A".repeat(largestValid)]);
     expect(atCap.status).toBe(0);
     const over = run(sb, sb.send, ["A".repeat(CELL_SEND_MAX_BYTES + 1)]);
     // Linux refuses a 128 KiB argument itself (E2BIG) before the script runs.

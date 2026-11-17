@@ -17,7 +17,22 @@ work="$(mktemp -d)"
 trap 'chmod -R u+rwX "$work" 2>/dev/null; rm -r "$work"' EXIT
 
 base="$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.base.name"}}')"
-base_layers="$(docker image inspect "$base" --format '{{len .RootFS.Layers}}')"
+# The base's layer count comes from the registry: BuildKit does not register
+# the FROM image in the local store, and nothing is downloaded here.
+base_layer_count() {
+  local ref="$1" raw digest
+  raw="$(docker buildx imagetools inspect --raw "$ref")"
+  if jq -e '.manifests' <<<"$raw" >/dev/null; then
+    digest="$(jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")][0].digest // empty' <<<"$raw")"
+    if [ -z "$digest" ]; then
+      echo "scan-layers: no linux/amd64 manifest for the base" >&2
+      return 1
+    fi
+    raw="$(docker buildx imagetools inspect --raw "${ref%@*}@$digest")"
+  fi
+  jq -e '.layers | length' <<<"$raw"
+}
+base_layers="$(base_layer_count "$base")"
 docker save "$image" | tar -xf - -C "$work" manifest.json
 total="$(jq '.[0].Layers | length' "$work/manifest.json")"
 added=$((total - base_layers))

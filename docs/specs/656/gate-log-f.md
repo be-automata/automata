@@ -40,3 +40,11 @@ finishes:
 - gitleaks on the minified bundle (a path-scoped allowlist entry is the documented fallback).
 - TLS as uid 10001 for `node`, `git` and `claude` through the sidecar: PR-E's live canary gate
   (AC-13 stays DEFERRED until then).
+
+## Roborev
+
+- **Job 1216 on `446caab..7b4cb55`:** **Fail**, with one High, one Medium and two Lows. All are fixed:
+  - **High:** `scan-layers.sh` inspected the base image in the local store. BuildKit does not register the FROM image there, and the action prunes first, so the scan would exit before scanning and nothing would ever be pushed. It now reads the base's layer count from the registry (`docker buildx imagetools inspect --raw`, picking the linux/amd64 manifest from an index). Checked live on the throwaway Linux box against `ghcr.io/be-automata/automata-batteries@sha256:da029c44…`: 24 layers, exit 0. This also shows the base digest exists and is public.
+  - **Medium:** the send-cap test used 131071 `A`s, which is not valid base64; GNU `base64 -d` rejects it. The accepted case is now the largest valid length under the cap. Checked on the box with GNU coreutils: 131068 decodes (exit 0), 131071 fails (exit 1).
+  - **Low:** the README now describes the split workflow as shipped.
+  - **Low:** `spec-f.md`'s Contract carries a "superseded in part" note naming the shipped differences and the source of truth.
