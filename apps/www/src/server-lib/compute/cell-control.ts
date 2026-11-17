@@ -1,6 +1,9 @@
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
-import { revokeAttempt } from "@terragon/shared/model/cell-authority";
+import {
+  deadCellAttempts,
+  revokeAttempt,
+} from "@terragon/shared/model/cell-authority";
 import { reconcileExpiredCells } from "@terragon/sandbox/cell-reconcile";
 import type { ReconcileResult } from "@terragon/sandbox/cell-reconcile";
 import { createOpenSandboxCellProvider } from "@terragon/sandbox/opensandbox-cell";
@@ -9,9 +12,66 @@ import type { ICellProvider } from "@terragon/types/cell";
 import { cellBrokerHost, opensandboxConfigured } from "./cell-gate";
 
 /**
- * Cell control plane (#634 S4): the provider handle, the revoke-first teardown
- * and the reconciler wiring. www never calls `create`; the worker does (S5).
+ * Cell control plane (#634 S4): the provider handle and the reconciler wiring.
+ * www lists, revokes and tears down for the reconciler only; the worker creates
+ * cells and tears them down at run end (OD-3). The box answers only behind a
+ * Cloudflare Access service token (#656 PR-C).
  */
+
+/**
+ * `null` until PR-D's and PR-E's stamps ship in the same deploy; then
+ * `CELL_LEASE_STALE_MS` (PR-A constraint). With `null` the lease rule is off:
+ * only revoked, fenced or done attempts count as dead.
+ */
+const CELL_RECONCILE_STALE_MS: number | null = null;
+
+const ACCESS_HEADER_ID = "CF-Access-Client-Id";
+const ACCESS_HEADER_SECRET = "CF-Access-Client-Secret";
+
+let warnedAccessMisconfig = false;
+
+/**
+ * A fetch that sends the Access service token to `origin` only. A request for
+ * any other origin is refused (the message names no URL), and redirects are not
+ * followed: an Access 302 becomes a non-ok response instead of carrying the
+ * headers to the login page. Calls the global `fetch` unbound (workerd).
+ */
+/** Exported for the origin-fence test only; callers use `cellProvider`. */
+export function accessFetch({
+  origin,
+  clientId,
+  clientSecret,
+}: {
+  origin: string;
+  clientId: string;
+  clientSecret: string;
+}): typeof fetch {
+  return (input, init) => {
+    const href =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    if (new URL(href).origin !== origin) {
+      throw new Error("cell fetch refused: origin not allowed");
+    }
+    const headers = new Headers(init?.headers);
+    headers.set(ACCESS_HEADER_ID, clientId);
+    headers.set(ACCESS_HEADER_SECRET, clientSecret);
+    return fetch(input, { ...init, headers, redirect: "manual" });
+  };
+}
+
+/** The origin when `OPENSANDBOX_URL` is an https URL, else null. */
+function httpsOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Used only by `create`, which www never calls. */
 const GUEST_ENTRYPOINT: readonly string[] = ["sleep", "infinity"];
@@ -35,6 +95,23 @@ function prefixedLogger(prefix: string, withFields: boolean) {
 
 export function cellProvider(): ICellProvider | null {
   if (!opensandboxConfigured()) return null;
+  const clientId = env.OPENSANDBOX_ACCESS_CLIENT_ID;
+  const clientSecret = env.OPENSANDBOX_ACCESS_CLIENT_SECRET;
+  let doFetch: typeof fetch = (input, init) => fetch(input, init);
+  if (clientId !== "" || clientSecret !== "") {
+    const origin = httpsOrigin(env.OPENSANDBOX_URL);
+    if (clientId === "" || clientSecret === "" || origin === null) {
+      // Half-set, or Access headers over a non-https URL: stay off.
+      if (!warnedAccessMisconfig) {
+        warnedAccessMisconfig = true;
+        console.warn(
+          "[cell] OpenSandbox Access config is incomplete or the URL is not https; the cell control plane is off",
+        );
+      }
+      return null;
+    }
+    doFetch = accessFetch({ origin, clientId, clientSecret });
+  }
   return createOpenSandboxCellProvider(
     {
       baseUrl: env.OPENSANDBOX_URL,
@@ -44,40 +121,12 @@ export function cellProvider(): ICellProvider | null {
       selfCheck: { argv: SELF_CHECK_ARGV },
     },
     {
-      // Never `this`-bound to deps (workerd: "Illegal invocation").
-      fetch: (input, init) => fetch(input, init),
+      fetch: doFetch,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       logger: prefixedLogger("cell", false),
     },
   );
-}
-
-/**
- * Contract teardown order (#634): revokeAttempt first (the bearer dies before
- * anything else), then the provider's vault clear, deny-all and delete. A
- * throwing revokeAttempt still tears the cell down, and its error is rethrown
- * after (a teardown error takes precedence).
- */
-export async function teardownCell({
-  db,
-  provider,
-  cellId,
-  stepKey,
-  attempt,
-}: {
-  db: DB;
-  provider: Pick<ICellProvider, "teardown">;
-  cellId: string;
-  stepKey: string;
-  attempt: number;
-}): Promise<void> {
-  try {
-    await revokeAttempt({ db, stepKey, attempt });
-  } finally {
-    // Teardown always runs; its own error wins, else the revoke error is rethrown.
-    await provider.teardown(cellId);
-  }
 }
 
 export async function runCellReconciler({
@@ -96,6 +145,8 @@ export async function runCellReconciler({
     revoke: async (stepKey, attempt) => {
       await revokeAttempt({ db, stepKey, attempt });
     },
+    isDead: (keys) =>
+      deadCellAttempts({ db, keys, staleMs: CELL_RECONCILE_STALE_MS }),
     now,
     logger: prefixedLogger("cell:reconcile", true),
   });

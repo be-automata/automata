@@ -52,6 +52,14 @@ const BACKOFF_CAP_MS = 2_000;
  * it): this file imports the contract type-only.
  */
 export const OPENSANDBOX_HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+/**
+ * Kept equal to `CELL_LABEL_VALUE_PATTERN` in @terragon/types (a test asserts
+ * it): this file imports the contract type-only.
+ */
+export const OPENSANDBOX_LABEL_VALUE_PATTERN =
+  /^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$/;
+const LABEL_MAX_LENGTH = 63;
+const SANDBOX_NOT_FOUND_SUFFIX = "::SANDBOX_NOT_FOUND";
 const CONNECTION_FAILED = "BACKEND_CONNECTION_FAILED";
 
 /** The message carries the op, code and status only: never a body or header. */
@@ -234,7 +242,23 @@ function assertPlanFields(plan: CellCreatePlan): void {
     ["worker", "epoch", "stepKey", "attempt", "expiresAt", "deployment"].every(
       (k) => isNonBlank(tags[k]),
     );
-  if (!tagsOk || !isPositive(res.cpu) || !isPositive(res.memoryMiB)) {
+  const labelsOk = Object.entries(tags).every(
+    ([k, v]) =>
+      !k.includes("/") &&
+      OPENSANDBOX_LABEL_VALUE_PATTERN.test(k) &&
+      k.length > 0 &&
+      k.length <= LABEL_MAX_LENGTH &&
+      typeof v === "string" &&
+      v.length > 0 &&
+      v.length <= LABEL_MAX_LENGTH &&
+      OPENSANDBOX_LABEL_VALUE_PATTERN.test(v),
+  );
+  if (
+    !tagsOk ||
+    !labelsOk ||
+    !isPositive(res.cpu) ||
+    !isPositive(res.memoryMiB)
+  ) {
     throw new CellProviderError("invalid_plan", "create");
   }
 }
@@ -645,6 +669,10 @@ export function createOpenSandboxCellProvider(
     return gone ? "gone" : "deleted";
   }
 
+  /**
+   * Deny-all is refused while the vault holds a binding, so callers revoke first;
+   * `teardown` already does (gate-log-g run 3).
+   */
   async function quarantine(cellId: string): Promise<void> {
     await send404AsDone(
       "quarantine",
@@ -652,6 +680,35 @@ export function createOpenSandboxCellProvider(
       cellPath(cellId, "/networkpolicy?dropEstablished=true"),
       { defaultAction: "deny", egress: [] },
     );
+  }
+
+  /** Upstream's not-found code only: a bare 404 is the tunnel catch-all, not proof. */
+  async function isSandboxNotFound(res: Response): Promise<boolean> {
+    try {
+      const text = await readCappedText("exists", res, MAX_ERROR_BODY_BYTES);
+      const parsed: unknown = JSON.parse(text);
+      if (!isRecord(parsed)) return false;
+      const detail = isRecord(parsed.detail) ? parsed.detail.code : undefined;
+      return [parsed.code, detail].some(
+        (c) => typeof c === "string" && c.endsWith(SANDBOX_NOT_FOUND_SUFFIX),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** True while the cell is there; false only for upstream's SANDBOX_NOT_FOUND 404. */
+  async function exists(cellId: string): Promise<boolean> {
+    const { res } = await send("exists", "GET", cellPath(cellId), {
+      retry: "idempotent",
+    });
+    if (res.status === 404) {
+      if (await isSandboxNotFound(res)) return false;
+      throw new CellProviderError("http_error", "exists", 404);
+    }
+    await requireOk("exists", res);
+    await discard(res);
+    return true;
   }
 
   async function revoke(cellId: string): Promise<void> {
@@ -746,11 +803,32 @@ export function createOpenSandboxCellProvider(
     }
   }
 
-  /** Public teardown: every step runs, then one error or an AggregateError. */
+  /**
+   * Public teardown: every step runs. If any failed, the cell may be gone anyway
+   * (a no-policy cell has no sidecar, so revoke and quarantine answer 502): poll
+   * `exists` within the retry budget and resolve once it is false. Otherwise one
+   * error or an AggregateError, unchanged.
+   */
   async function teardownStrict(cellId: string): Promise<void> {
     const failures = await runTeardown(cellId, [revoke, quarantine, del]);
     const [first] = failures;
     if (!first) return;
+    const gone = await withinBudget<boolean, undefined>(
+      retryBudgetMs,
+      async () => {
+        let present: boolean;
+        try {
+          present = await exists(cellId);
+        } catch {
+          return { done: false };
+        }
+        return present
+          ? { retryInMs: BACKOFF_BASE_MS, last: undefined }
+          : { done: true };
+      },
+      () => false,
+    );
+    if (gone) return;
     if (failures.length === 1) throw first;
     throw new AggregateError(failures, "teardown");
   }

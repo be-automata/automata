@@ -18,6 +18,7 @@ import {
   openStep,
   releaseEffect,
   revokeAttempt,
+  revokeAttemptBearers,
   stampSeen,
   verifyBearer,
 } from "./cell-authority";
@@ -1084,5 +1085,116 @@ describe("#656 PR-A openStep lease", () => {
         staleMs: STALE_MS,
       }),
     ).toEqual(new Set());
+  });
+});
+
+describe("#656 PR-C openNextAttempt nonce", () => {
+  const nonceA = "nonce-aaaaaaaaaaaaaaaa";
+  const nonceB = "nonce-bbbbbbbbbbbbbbbb";
+  const open = (s: Awaited<ReturnType<typeof newStep>>, nonce?: string) =>
+    openNextAttempt({ db, step: { ...s.step, nonce } });
+
+  it("1 the same nonce twice gives the same attempt, restamps and fences nothing", async () => {
+    const s = await newStep(null, null);
+    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 1 });
+    await db
+      .update(cellStep)
+      .set({ lastSeenAt: sql`now() - interval '10 minutes'` })
+      .where(eq(cellStep.stepKey, s.stepKey));
+    const b1 = await s.bearer(1);
+    expect(await open(s, nonceA)).toEqual({
+      ok: true,
+      attempt: 1,
+      replayed: true,
+    });
+    const r = await row(s.stepKey);
+    expect(r.currentAttempt).toBe(1);
+    expect(r.fresh).toBe(true);
+    expect(r.revokedThrough).toBeNull();
+    expect((await verifyBearer({ db, token: b1 })).ok).toBe(true);
+  });
+
+  it("2 revokeAttemptBearers leaves exactly one live bearer for the replayed attempt", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    const first = await s.bearer(1);
+    const replay = await open(s, nonceA);
+    expect(replay).toMatchObject({ replayed: true });
+    // negative control: without the revoke both verify
+    const second = await s.bearer(1);
+    expect((await verifyBearer({ db, token: first })).ok).toBe(true);
+    expect((await verifyBearer({ db, token: second })).ok).toBe(true);
+    expect(
+      await revokeAttemptBearers({ db, stepKey: s.stepKey, attempt: 1 }),
+    ).toBe(2);
+    const third = await s.bearer(1);
+    expect((await verifyBearer({ db, token: first })).ok).toBe(false);
+    expect((await verifyBearer({ db, token: second })).ok).toBe(false);
+    expect((await verifyBearer({ db, token: third })).ok).toBe(true);
+  });
+
+  it("3 a new nonce opens current + 1 and fences the old bearer", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    const b1 = await s.bearer(1);
+    expect(await open(s, nonceB)).toEqual({ ok: true, attempt: 2 });
+    expect(await verifyBearer({ db, token: b1 })).toMatchObject({
+      ok: false,
+      reason: "fenced",
+    });
+    // a nonce only matches the current attempt: A is no longer current
+    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 3 });
+  });
+
+  it("4 a replay at attempt 1000 succeeds, a new nonce there is attempt_limit", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    await db
+      .update(cellStep)
+      .set({ currentAttempt: 1000 })
+      .where(eq(cellStep.stepKey, s.stepKey));
+    expect(await open(s, nonceB)).toEqual({
+      ok: false,
+      reason: "attempt_limit",
+    });
+    // the failed open must not have changed the stored nonce
+    expect(await open(s, nonceA)).toEqual({
+      ok: true,
+      attempt: 1000,
+      replayed: true,
+    });
+  });
+
+  it("5 a replay after finishStep is step_done", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    expect(await open(s, nonceA)).toEqual({ ok: false, reason: "step_done" });
+  });
+
+  it("6 concurrent opens: one nonce is one attempt, two nonces are two", async () => {
+    const one = await newStep(null, null);
+    const same = await Promise.all(
+      Array.from({ length: 6 }, () => open(one, nonceA)),
+    );
+    expect(same.map((r) => (r.ok ? r.attempt : -1))).toEqual(Array(6).fill(1));
+    expect(same.filter((r) => r.ok && r.replayed).length).toBe(5);
+    expect((await row(one.stepKey)).currentAttempt).toBe(1);
+
+    const two = await newStep(null, null);
+    const rs = await Promise.all([open(two, nonceA), open(two, nonceB)]);
+    expect(
+      rs.map((r) => (r.ok ? r.attempt : -1)).sort((a, b) => a - b),
+    ).toEqual([1, 2]);
+  });
+
+  it("7 no nonce keeps PR-A behaviour and clears a stored nonce; a malformed nonce is a RangeError", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    expect(await open(s)).toEqual({ ok: true, attempt: 2 });
+    expect(await open(s, nonceA)).toEqual({ ok: true, attempt: 3 });
+    for (const bad of ["short", "has space aaaaaaaaaaaaaaaa", "x".repeat(65)]) {
+      await expect(open(s, bad)).rejects.toThrow(RangeError);
+    }
   });
 });

@@ -214,6 +214,8 @@ export async function openStep({
   return { ok: false, reason: "stale_attempt" };
 }
 
+const OPEN_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+
 /**
  * Open the next attempt of a step, numbered by the database (#656 R3): attempt 1
  * on first open, `current + 1` after. Stamps the lease (`last_seen_at = now()`).
@@ -221,6 +223,14 @@ export async function openStep({
  * step (`step_done`), another org/thread/`allowedRef` (`conflict`) and past
  * 1000 attempts (`attempt_limit`). Revocation does not block it: `finishStep`
  * is what ends a run. `stepTimeoutMs` and `effectBudget` are fixed at first open.
+ *
+ * Idempotent per `nonce` (#656 PR-C): a call whose `nonce` equals the nonce of
+ * the open that made the current attempt returns that attempt, fences nothing,
+ * does not count toward the cap, and answers `replayed: true` (the field is
+ * absent otherwise). A nonce matches only the CURRENT attempt's open. The caller
+ * revokes the earlier bearers of a replayed attempt (`revokeAttemptBearers`)
+ * before minting a new one. With a nonce the open runs in one transaction under a
+ * per-step advisory lock; without one it is a single statement.
  */
 export async function openNextAttempt({
   db,
@@ -234,40 +244,91 @@ export async function openNextAttempt({
     stepTimeoutMs: number;
     effectBudget: number | null;
     allowedRef: string | null;
+    nonce?: string;
   };
 }): Promise<
-  | { ok: true; attempt: number }
+  | { ok: true; attempt: number; replayed?: true }
   | { ok: false; reason: "step_done" | "conflict" | "attempt_limit" }
 > {
   assertStepShape(step);
-  const rows = await db
-    .insert(cellStep)
-    .values({
-      stepKey: step.stepKey,
-      organizationId: step.organizationId,
-      threadId: step.threadId,
-      currentAttempt: 1,
-      stepTimeoutMs: step.stepTimeoutMs,
-      effectBudget: step.effectBudget,
-      allowedRef: step.allowedRef,
-      lastSeenAt: sql`now()`,
-    })
-    .onConflictDoUpdate({
-      target: cellStep.stepKey,
-      set: {
-        currentAttempt: sql`${cellStep.currentAttempt} + 1`,
+  const nonce = step.nonce;
+  if (nonce !== undefined && !OPEN_NONCE_PATTERN.test(nonce)) {
+    throw new RangeError("nonce must match ^[A-Za-z0-9_-]{16,64}$");
+  }
+
+  const upsert = (executor: Pick<DB, "insert">, nonceValue: string | null) =>
+    executor
+      .insert(cellStep)
+      .values({
+        stepKey: step.stepKey,
+        organizationId: step.organizationId,
+        threadId: step.threadId,
+        currentAttempt: 1,
+        stepTimeoutMs: step.stepTimeoutMs,
+        effectBudget: step.effectBudget,
+        allowedRef: step.allowedRef,
         lastSeenAt: sql`now()`,
-      },
-      where: and(
-        isNull(cellStep.doneAt),
-        eq(cellStep.organizationId, step.organizationId),
-        eq(cellStep.threadId, step.threadId),
-        sql`${cellStep.allowedRef} IS NOT DISTINCT FROM ${step.allowedRef}`,
-        lt(cellStep.currentAttempt, CELL_MAX_ATTEMPTS),
-      ),
-    })
-    .returning({ attempt: cellStep.currentAttempt });
-  if (rows[0]) return { ok: true, attempt: rows[0].attempt };
+        openNonce: nonceValue,
+      })
+      .onConflictDoUpdate({
+        target: cellStep.stepKey,
+        set: {
+          currentAttempt:
+            nonceValue === null
+              ? sql`${cellStep.currentAttempt} + 1`
+              : sql`CASE WHEN ${cellStep.openNonce} IS NOT NULL AND ${cellStep.openNonce} = ${nonceValue} THEN ${cellStep.currentAttempt} ELSE ${cellStep.currentAttempt} + 1 END`,
+          openNonce: nonceValue,
+          lastSeenAt: sql`now()`,
+        },
+        where: and(
+          isNull(cellStep.doneAt),
+          eq(cellStep.organizationId, step.organizationId),
+          eq(cellStep.threadId, step.threadId),
+          sql`${cellStep.allowedRef} IS NOT DISTINCT FROM ${step.allowedRef}`,
+          nonceValue === null
+            ? lt(cellStep.currentAttempt, CELL_MAX_ATTEMPTS)
+            : or(
+                lt(cellStep.currentAttempt, CELL_MAX_ATTEMPTS),
+                sql`${cellStep.openNonce} = ${nonceValue}`,
+              ),
+        ),
+      })
+      .returning({ attempt: cellStep.currentAttempt });
+
+  let attempt: number | undefined;
+  let replayed = false;
+  if (nonce === undefined) {
+    attempt = (await upsert(db, null))[0]?.attempt;
+  } else {
+    // RETURNING shows only the new row before Postgres 18, so the replay is read
+    // first. The advisory lock serializes opens of one step, including the first
+    // insert, which has no row to lock yet.
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${step.stepKey}))`,
+      );
+      const before = (
+        await tx
+          .select({ openNonce: cellStep.openNonce })
+          .from(cellStep)
+          .where(eq(cellStep.stepKey, step.stepKey))
+          .for("update")
+          .limit(1)
+      )[0];
+      const rows = await upsert(tx, nonce);
+      return {
+        attempt: rows[0]?.attempt,
+        replayed: before !== undefined && before.openNonce === nonce,
+      };
+    });
+    attempt = result.attempt;
+    replayed = result.replayed;
+  }
+  if (attempt !== undefined) {
+    return replayed
+      ? { ok: true, attempt, replayed: true }
+      : { ok: true, attempt };
+  }
 
   const miss = await classifyMiss(db, step);
   if ("reason" in miss) return { ok: false, reason: miss.reason };
@@ -280,6 +341,30 @@ export async function openNextAttempt({
   throw new Error(
     `openNextAttempt: step ${step.stepKey} was refused below the attempt cap (attempt ${miss.currentAttempt})`,
   );
+}
+
+/**
+ * Drop every bearer of one attempt of a step (#656 PR-C). Called on a replayed
+ * open before a new bearer is minted, so one bearer per attempt is live: the
+ * bearer whose response was lost dies. The step and the attempt stay as they are.
+ */
+export async function revokeAttemptBearers({
+  db,
+  stepKey,
+  attempt,
+}: {
+  db: DB;
+  stepKey: string;
+  attempt: number;
+}): Promise<number> {
+  assertPositiveInt("attempt", attempt);
+  const rows = await db
+    .delete(cellBearer)
+    .where(
+      and(eq(cellBearer.stepKey, stepKey), eq(cellBearer.attempt, attempt)),
+    )
+    .returning({ tokenHash: cellBearer.tokenHash });
+  return rows.length;
 }
 
 /**
