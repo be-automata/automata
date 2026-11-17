@@ -533,7 +533,9 @@ export function createOpenSandboxCellProvider(
         body: o.body,
         timeoutMs: o.timeoutMs ?? requestTimeoutMs,
       });
-    } catch {
+    } catch (error) {
+      // A refusal the injected fetch raised itself (a fenced origin) keeps its code.
+      if (error instanceof CellProviderError) throw error;
       throw new CellProviderError("http_error", op); // no cause: it may echo a request
     }
     if (res.status !== 502) return { done: { res } };
@@ -562,7 +564,11 @@ export function createOpenSandboxCellProvider(
     );
   }
 
-  /** For an idempotent call where 404 means the work is already done; true when it was 404. */
+  /**
+   * For an idempotent call where a SANDBOX_NOT_FOUND 404 means the work is already
+   * done; true when it was. A bare 404 (the tunnel catch-all) is not proof: it
+   * fails, and teardown then asks `exists`.
+   */
   async function send404AsDone(
     op: string,
     method: string,
@@ -571,8 +577,8 @@ export function createOpenSandboxCellProvider(
   ): Promise<boolean> {
     const { res } = await send(op, method, path, { body, retry: "idempotent" });
     if (res.status === 404) {
-      await discard(res);
-      return true;
+      if (await isSandboxNotFound(res, op)) return true;
+      throw new CellProviderError("http_error", op, 404);
     }
     await requireOk(op, res);
     await discard(res);
@@ -683,9 +689,12 @@ export function createOpenSandboxCellProvider(
   }
 
   /** Upstream's not-found code only: a bare 404 is the tunnel catch-all, not proof. */
-  async function isSandboxNotFound(res: Response): Promise<boolean> {
+  async function isSandboxNotFound(
+    res: Response,
+    op: string,
+  ): Promise<boolean> {
     try {
-      const text = await readCappedText("exists", res, MAX_ERROR_BODY_BYTES);
+      const text = await readCappedText(op, res, MAX_ERROR_BODY_BYTES);
       const parsed: unknown = JSON.parse(text);
       if (!isRecord(parsed)) return false;
       const detail = isRecord(parsed.detail) ? parsed.detail.code : undefined;
@@ -703,7 +712,7 @@ export function createOpenSandboxCellProvider(
       retry: "idempotent",
     });
     if (res.status === 404) {
-      if (await isSandboxNotFound(res)) return false;
+      if (await isSandboxNotFound(res, "exists")) return false;
       throw new CellProviderError("http_error", "exists", 404);
     }
     await requireOk("exists", res);
@@ -820,7 +829,8 @@ export function createOpenSandboxCellProvider(
         try {
           present = await exists(cellId);
         } catch {
-          return { done: false };
+          // Transient (or a bare 404): ask again until the budget is spent.
+          return { retryInMs: BACKOFF_BASE_MS, last: undefined };
         }
         return present
           ? { retryInMs: BACKOFF_BASE_MS, last: undefined }

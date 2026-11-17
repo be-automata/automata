@@ -67,7 +67,14 @@ const NONCE_A = "request-aaaaaaaaaaaaaaaa";
 const NONCE_B = "request-bbbbbbbbbbbbbbbb";
 
 function setCellsEnv(on: boolean): void {
-  const e = env as { OPENSANDBOX_URL: string; OPENSANDBOX_API_KEY: string };
+  const e = env as {
+    OPENSANDBOX_URL: string;
+    OPENSANDBOX_API_KEY: string;
+    OPENSANDBOX_ACCESS_CLIENT_ID: string;
+    OPENSANDBOX_ACCESS_CLIENT_SECRET: string;
+  };
+  e.OPENSANDBOX_ACCESS_CLIENT_ID = "";
+  e.OPENSANDBOX_ACCESS_CLIENT_SECRET = "";
   e.OPENSANDBOX_URL = on ? "http://127.0.0.1:18090" : "";
   e.OPENSANDBOX_API_KEY = on ? "test-key" : "";
 }
@@ -400,6 +407,26 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: "cells_disabled" });
       expect(await steps()).toEqual([]);
+    });
+
+    it("404 cells_disabled when only one Access value is set, or Access is set over http", async () => {
+      const e = env as unknown as Record<string, string>;
+      e.OPENSANDBOX_ACCESS_CLIENT_ID = "id";
+      for (const [url, secret] of [
+        ["https://box.example.test", ""],
+        ["http://box.example.test", "secret"],
+      ] as const) {
+        e.OPENSANDBOX_URL = url;
+        e.OPENSANDBOX_ACCESS_CLIENT_SECRET = secret;
+        const res = await POST(req(body()));
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: "cells_disabled" });
+      }
+      // negative control: both set over https plans
+      e.OPENSANDBOX_URL = "https://box.example.test";
+      e.OPENSANDBOX_ACCESS_CLIENT_SECRET = "secret";
+      expect((await POST(req(body()))).status).toBe(200);
+      expect(await steps()).toHaveLength(1);
     });
 
     it("401 without a token; 403 for a non-daemon token, a mismatch or a null apiKeyId", async () => {

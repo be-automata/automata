@@ -6,10 +6,19 @@ import {
 } from "@terragon/shared/model/cell-authority";
 import { reconcileExpiredCells } from "@terragon/sandbox/cell-reconcile";
 import type { ReconcileResult } from "@terragon/sandbox/cell-reconcile";
-import { createOpenSandboxCellProvider } from "@terragon/sandbox/opensandbox-cell";
+import {
+  CellProviderError,
+  createOpenSandboxCellProvider,
+} from "@terragon/sandbox/opensandbox-cell";
 import type { ICellProvider } from "@terragon/types/cell";
 
-import { cellBrokerHost, opensandboxConfigured } from "./cell-gate";
+import {
+  cellBrokerHost,
+  httpsOrigin,
+  opensandboxAccessState,
+  opensandboxConfigured,
+  opensandboxUrlAndKeySet,
+} from "./cell-gate";
 
 /**
  * Cell control plane (#634 S4): the provider handle and the reconciler wiring.
@@ -54,23 +63,13 @@ export function accessFetch({
           ? input.href
           : input.url;
     if (new URL(href).origin !== origin) {
-      throw new Error("cell fetch refused: origin not allowed");
+      throw new CellProviderError("origin_refused", "fetch");
     }
     const headers = new Headers(init?.headers);
     headers.set(ACCESS_HEADER_ID, clientId);
     headers.set(ACCESS_HEADER_SECRET, clientSecret);
     return fetch(input, { ...init, headers, redirect: "manual" });
   };
-}
-
-/** The origin when `OPENSANDBOX_URL` is an https URL, else null. */
-function httpsOrigin(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" ? parsed.origin : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Used only by `create`, which www never calls. */
@@ -94,23 +93,29 @@ function prefixedLogger(prefix: string, withFields: boolean) {
 }
 
 export function cellProvider(): ICellProvider | null {
-  if (!opensandboxConfigured()) return null;
-  const clientId = env.OPENSANDBOX_ACCESS_CLIENT_ID;
-  const clientSecret = env.OPENSANDBOX_ACCESS_CLIENT_SECRET;
-  let doFetch: typeof fetch = (input, init) => fetch(input, init);
-  if (clientId !== "" || clientSecret !== "") {
-    const origin = httpsOrigin(env.OPENSANDBOX_URL);
-    if (clientId === "" || clientSecret === "" || origin === null) {
-      // Half-set, or Access headers over a non-https URL: stay off.
-      if (!warnedAccessMisconfig) {
-        warnedAccessMisconfig = true;
-        console.warn(
-          "[cell] OpenSandbox Access config is incomplete or the URL is not https; the cell control plane is off",
-        );
-      }
-      return null;
+  if (!opensandboxConfigured()) {
+    // Half-set, or Access headers over a non-https URL: stay off, say so once.
+    if (
+      opensandboxUrlAndKeySet() &&
+      opensandboxAccessState() === "invalid" &&
+      !warnedAccessMisconfig
+    ) {
+      warnedAccessMisconfig = true;
+      console.warn(
+        "[cell] OpenSandbox Access config is incomplete or the URL is not https; the cell control plane is off",
+      );
     }
-    doFetch = accessFetch({ origin, clientId, clientSecret });
+    return null;
+  }
+  let doFetch: typeof fetch = (input, init) => fetch(input, init);
+  if (opensandboxAccessState() === "ok") {
+    const origin = httpsOrigin(env.OPENSANDBOX_URL);
+    if (origin === null) return null;
+    doFetch = accessFetch({
+      origin,
+      clientId: env.OPENSANDBOX_ACCESS_CLIENT_ID.trim(),
+      clientSecret: env.OPENSANDBOX_ACCESS_CLIENT_SECRET.trim(),
+    });
   }
   return createOpenSandboxCellProvider(
     {

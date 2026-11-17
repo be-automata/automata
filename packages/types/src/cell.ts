@@ -159,6 +159,7 @@ export type CellProviderErrorCode =
   | "invalid_config"
   | "not_ready"
   | "egress_not_enforced"
+  | "origin_refused"
   | "http_error";
 
 /**

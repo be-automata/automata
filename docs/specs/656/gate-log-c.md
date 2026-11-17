@@ -39,3 +39,26 @@ Results: pending.
 | `OPENSANDBOX_IT=1` live suite (OpenSandbox 1.2.1 in a throwaway dind) |        0        | 10/10, 284 s; runc conformance evidence written |
 
 **The www fix:** `cell-plan/route.test.ts` still listed the vault names as `broker` and `model`. The new daemon entry made that list stale. The same test already checks the daemon entry itself.
+
+## Refinement
+
+There were no High findings: 3 Medium and 4 Low.
+
+**Fixed:**
+
+- **M1:** One live bearer per attempt is now atomic. The mint replaces the attempt's other bearers in one transaction, under the open's lock.
+- **M2:** A half-set Access config turns cells off everywhere (`opensandboxConfigured`).
+- **M3:** A teardown 404 counts as done only with a `SANDBOX_NOT_FOUND` body. A bare 404 falls through to the `exists` check.
+- **L4:** A transient error in the `exists` poll is retried within the remaining budget.
+- **L5:** `openStep` now has a doc note that it is test-only and does not clear `open_nonce`.
+- **L6:** A refused origin raises a distinct `origin_refused` code, which is not retried.
+
+**Skipped:** L7. When the branch and the base branch are both empty, dispatch now returns `undefined` instead of the task branch. That is cosmetic.
+
+**Gates after the fixes** (outside the Claude sandbox), all exit 0:
+
+- sandbox: 590 passed;
+- shared: 1734 passed;
+- www: 4500 passed;
+- the live `OPENSANDBOX_IT` suite: 10/10;
+- tsc, `tsc-check --force`, `lint --force`, `lint-migrations`.

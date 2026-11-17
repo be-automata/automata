@@ -20,7 +20,6 @@ import {
 import {
   mintBearer,
   openNextAttempt,
-  revokeAttemptBearers,
 } from "@terragon/shared/model/cell-authority";
 import {
   CellPlanError,
@@ -188,11 +187,6 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   });
   if (!opened.ok) return refuse(opened.reason, 409);
   attempt = opened.attempt;
-  // The bearer whose response was lost dies; the step and attempt stay.
-  if (opened.replayed) {
-    await revokeAttemptBearers({ db, stepKey, attempt });
-  }
-
   try {
     const plan = await buildCellCreatePlan(
       {
@@ -208,7 +202,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         daemonToken,
         runtime: "runc",
       },
-      { now: () => new Date(), mintBearer: (a) => mintBearer({ db, ...a }) },
+      {
+        now: () => new Date(),
+        // One live bearer per attempt, atomically: a replay's earlier bearer dies.
+        mintBearer: (a) => mintBearer({ db, ...a, replaceOthers: true }),
+      },
     );
     console.log("[daemon cell-plan]", {
       threadId,

@@ -107,6 +107,8 @@ describe("opensandboxConfigured / cellProvider", () => {
     h.envState.accessSecret = ACCESS_SECRET;
     h.envState.url = "http://box.example.test";
     expect(fresh.cellProvider()).toBeNull();
+    // the shared gate agrees: cell-plan and the reconciler are off together
+    expect(opensandboxConfigured()).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
     const logged = JSON.stringify(warn.mock.calls);
     expect(logged).not.toContain(ACCESS_ID);
@@ -300,11 +302,14 @@ describe("Access headers (AC-12 client half)", () => {
       clientSecret: ACCESS_SECRET,
     });
     let message = "";
+    let code = "";
     try {
       void f("https://evil.example.test/steal");
     } catch (e) {
       message = e instanceof Error ? e.message : String(e);
+      code = (e as { code?: string }).code ?? "";
     }
+    expect(code).toBe("origin_refused");
     expect(message).not.toBe("");
     expect(message).not.toContain("evil.example.test");
     expect(spy).not.toHaveBeenCalled();

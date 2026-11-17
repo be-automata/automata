@@ -1197,4 +1197,45 @@ describe("#656 PR-C openNextAttempt nonce", () => {
       await expect(open(s, bad)).rejects.toThrow(RangeError);
     }
   });
+
+  it("8 concurrent replays (open then replacing mint) leave exactly one live bearer", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    const minted = await Promise.all(
+      Array.from({ length: 6 }, async () => {
+        const o = await open(s, nonceA);
+        if (!o.ok) throw new Error(o.reason);
+        const m = await mintBearer({
+          db,
+          stepKey: s.stepKey,
+          attempt: o.attempt,
+          ttlMs: STEP_TIMEOUT,
+          replaceOthers: true,
+        });
+        if (!m.ok) throw new Error(m.reason);
+        return m.token;
+      }),
+    );
+    const rows = await db
+      .select({ hash: cellBearer.tokenHash })
+      .from(cellBearer)
+      .where(and(eq(cellBearer.stepKey, s.stepKey), eq(cellBearer.attempt, 1)));
+    expect(rows).toHaveLength(1);
+    const live = await Promise.all(
+      minted.map((token) => verifyBearer({ db, token })),
+    );
+    expect(live.filter((v) => v.ok)).toHaveLength(1);
+  });
+
+  it("9 without replaceOthers bearers accumulate (negative control)", async () => {
+    const s = await newStep(null, null);
+    await open(s, nonceA);
+    await s.bearer(1);
+    await s.bearer(1);
+    const rows = await db
+      .select({ hash: cellBearer.tokenHash })
+      .from(cellBearer)
+      .where(eq(cellBearer.stepKey, s.stepKey));
+    expect(rows).toHaveLength(2);
+  });
 });

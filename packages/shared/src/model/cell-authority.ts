@@ -149,6 +149,10 @@ async function classifyMiss(
  * attempt. After #656 PR-C this is the fixture and spike primitive; production
  * opens through `openNextAttempt`, which chooses the attempt itself.
  *
+ * Test-only: it does not clear `open_nonce`, so a nonce set by `openNextAttempt`
+ * can still match after an `openStep` advance. Production opens through
+ * `openNextAttempt`.
+ *
  * `allowedRef` is the one ref (`refs/heads/<name>`) the step may push, or null
  * when it does not push. It is fixed for the life of the step: re-opening with a
  * different value (including null against a ref) is a `conflict`.
@@ -304,9 +308,7 @@ export async function openNextAttempt({
     // first. The advisory lock serializes opens of one step, including the first
     // insert, which has no row to lock yet.
     const result = await db.transaction(async (tx) => {
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtext(${step.stepKey}))`,
-      );
+      await lockStep(tx, step.stepKey);
       const before = (
         await tx
           .select({ openNonce: cellStep.openNonce })
@@ -504,21 +506,32 @@ export async function deadCellAttempts({
   return dead;
 }
 
+/** The per-step lock `openNextAttempt` (with a nonce) and `mintBearer` (replacing) share. */
+const lockStep = (executor: Pick<DB, "execute">, stepKey: string) =>
+  executor.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${stepKey}))`);
+
 /**
  * Mint a bearer for the CURRENT attempt. The token is returned once; only its
  * hash is kept. Refused for a TTL above the step timeout, a fenced or revoked
  * attempt, and a finished step.
+ *
+ * `replaceOthers` (#656 PR-C) makes one live bearer per attempt atomic: in one
+ * transaction, under the step's advisory lock (the open's key), it deletes the
+ * attempt's other bearers and inserts the new one. Concurrent replays then end
+ * with exactly one live bearer, the last minted.
  */
 export async function mintBearer({
   db,
   stepKey,
   attempt,
   ttlMs,
+  replaceOthers = false,
 }: {
   db: DB;
   stepKey: string;
   attempt: number;
   ttlMs: number;
+  replaceOthers?: boolean;
 }): Promise<
   | { ok: true; token: string; expiresAt: Date }
   | {
@@ -534,40 +547,58 @@ export async function mintBearer({
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
     throw new RangeError("ttlMs must be a positive finite number");
   }
-  const step = (
-    await db
-      .select({
-        currentAttempt: cellStep.currentAttempt,
-        stepTimeoutMs: cellStep.stepTimeoutMs,
-        revokedThrough: cellStep.revokedThrough,
-        doneAt: cellStep.doneAt,
+  const mint = async (
+    tx: DB | Parameters<Parameters<DB["transaction"]>[0]>[0],
+  ) => {
+    const step = (
+      await tx
+        .select({
+          currentAttempt: cellStep.currentAttempt,
+          stepTimeoutMs: cellStep.stepTimeoutMs,
+          revokedThrough: cellStep.revokedThrough,
+          doneAt: cellStep.doneAt,
+        })
+        .from(cellStep)
+        .where(eq(cellStep.stepKey, stepKey))
+        .limit(1)
+    )[0];
+    if (!step) return { ok: false, reason: "unknown_step" } as const;
+    if (step.doneAt) return { ok: false, reason: "step_done" } as const;
+    if (isRevoked(attempt, step.revokedThrough)) {
+      return { ok: false, reason: "revoked" } as const;
+    }
+    if (step.currentAttempt !== attempt) {
+      return { ok: false, reason: "fenced" } as const;
+    }
+    if (ttlMs > step.stepTimeoutMs) {
+      return { ok: false, reason: "ttl_exceeds_step_timeout" } as const;
+    }
+    if (replaceOthers) {
+      await tx
+        .delete(cellBearer)
+        .where(
+          and(eq(cellBearer.stepKey, stepKey), eq(cellBearer.attempt, attempt)),
+        );
+    }
+    const token = mintOpaqueToken();
+    const inserted = await tx
+      .insert(cellBearer)
+      .values({
+        tokenHash: hashOpaqueToken(token),
+        stepKey,
+        attempt,
+        expiresAt: sql`now() + make_interval(secs => ${ttlMs / 1000})`,
       })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, stepKey))
-      .limit(1)
-  )[0];
-  if (!step) return { ok: false, reason: "unknown_step" };
-  if (step.doneAt) return { ok: false, reason: "step_done" };
-  if (isRevoked(attempt, step.revokedThrough)) {
-    return { ok: false, reason: "revoked" };
-  }
-  if (step.currentAttempt !== attempt) return { ok: false, reason: "fenced" };
-  if (ttlMs > step.stepTimeoutMs) {
-    return { ok: false, reason: "ttl_exceeds_step_timeout" };
-  }
-  const token = mintOpaqueToken();
-  const inserted = await db
-    .insert(cellBearer)
-    .values({
-      tokenHash: hashOpaqueToken(token),
-      stepKey,
-      attempt,
-      expiresAt: sql`now() + make_interval(secs => ${ttlMs / 1000})`,
-    })
-    .returning({ expiresAt: cellBearer.expiresAt });
-  const expiresAt = inserted[0]?.expiresAt;
-  if (!expiresAt) throw new Error("bearer insert returned no row");
-  return { ok: true, token, expiresAt };
+      .returning({ expiresAt: cellBearer.expiresAt });
+    const expiresAt = inserted[0]?.expiresAt;
+    if (!expiresAt) throw new Error("bearer insert returned no row");
+    return { ok: true, token, expiresAt } as const;
+  };
+  if (!replaceOthers) return mint(db);
+  return db.transaction(async (tx) => {
+    await lockStep(tx, stepKey);
+    return mint(tx);
+  });
 }
 
 /**
