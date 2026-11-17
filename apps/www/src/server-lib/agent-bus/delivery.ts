@@ -3,6 +3,7 @@ import { asc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { isAgentWorking } from "@/agent/thread-status";
 import { getAccessInfoForUser } from "@/lib/subscription";
+import { waitUntil } from "@/lib/wait-until";
 import { publishBroadcastUserMessage } from "@terragon/shared/broadcast-server";
 import { agentRun, thread, threadChat } from "@terragon/shared/db/schema";
 import { threadIsTerminal } from "@terragon/shared/model/thread-effective-status";
@@ -24,7 +25,7 @@ import { maybeProcessFollowUpQueue } from "../process-follow-up-queue";
  */
 
 /**
- * Broadcasts the queued message, then drains the target's follow-up queue unless
+ * Broadcasts the queued message, then schedules the drain of the target's follow-up queue unless
  * the target must not start now: tier `none`, a shadow or terminal thread, a chat
  * that is already working, or a run blocked after the send (A5). The message stays
  * queued and visible in every skip case. Never throws: delivery is committed.
@@ -54,10 +55,16 @@ export async function kickTarget(threadId: string): Promise<void> {
     const threadChatId = target.threadChatId ?? LEGACY_THREAD_CHAT_ID;
     const status = target.chatStatus ?? target.threadStatus;
 
+    // A UI refresh only: its failure must never keep the queue from draining.
     const broadcast = publishBroadcastUserMessage({
       type: "user",
       id: target.userId,
       data: { threadId, threadChatId },
+    }).catch((error: unknown) => {
+      console.error("[agent-bus] broadcast failed (non-fatal)", {
+        threadId,
+        error,
+      });
     });
     const mustSkip =
       target.shadow ||
@@ -71,11 +78,21 @@ export async function kickTarget(threadId: string): Promise<void> {
     ]);
     if (!access || access.tier === "none") return;
 
-    await maybeProcessFollowUpQueue({
-      userId: target.userId,
-      threadId,
-      threadChatId,
-    });
+    // The drain can boot a sandbox: like queueFollowUpInternal (follow-up.ts), it
+    // starts now and outlives the response via waitUntil, so neither a send nor
+    // the cron tick waits on it (sweep drains run concurrently, one per thread).
+    waitUntil(
+      maybeProcessFollowUpQueue({
+        userId: target.userId,
+        threadId,
+        threadChatId,
+      }).catch((error: unknown) => {
+        console.error("[agent-bus] drain failed (non-fatal)", {
+          threadId,
+          error,
+        });
+      }),
+    );
   } catch (error) {
     console.error("[agent-bus] kick failed (non-fatal)", { threadId, error });
   }

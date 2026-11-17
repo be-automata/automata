@@ -2,6 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
+import { waitUntil } from "@/lib/wait-until";
 import { agentMessages, thread, threadChat } from "@terragon/shared/db/schema";
 import {
   createChildRun,
@@ -186,7 +187,31 @@ describe("agent-bus delivery", () => {
       const { child } = await pair();
       h.kick.mockRejectedValue(new Error("boom"));
       await expect(kickTarget(child.threadId)).resolves.toBeUndefined();
-      expect(console.error).toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(console.error).toHaveBeenCalledWith(
+          "[agent-bus] drain failed (non-fatal)",
+          expect.anything(),
+        ),
+      );
+    });
+
+    it("still drains when the broadcast fails", async () => {
+      const { child } = await pair();
+      h.broadcast.mockRejectedValue(new Error("broadcast down"));
+      await expect(kickTarget(child.threadId)).resolves.toBeUndefined();
+      expect(h.kick).toHaveBeenCalledTimes(1);
+      expect(console.error).toHaveBeenCalledWith(
+        "[agent-bus] broadcast failed (non-fatal)",
+        expect.anything(),
+      );
+    });
+
+    it("does not wait for the drain (it can boot a sandbox)", async () => {
+      const { child } = await pair();
+      h.kick.mockReturnValue(new Promise(() => undefined));
+      await expect(kickTarget(child.threadId)).resolves.toBeUndefined();
+      expect(h.kick).toHaveBeenCalledTimes(1);
+      expect(waitUntil).toHaveBeenCalledWith(expect.any(Promise));
     });
   });
 
@@ -215,6 +240,21 @@ describe("agent-bus delivery", () => {
         body: "hello",
       });
       expect(result).toMatchObject({ ok: true, applied: 1 });
+    });
+
+    it("resolves before the target's agent has started", async () => {
+      const { organizationId, root, child } = await pair();
+      h.kick.mockReturnValue(new Promise(() => undefined));
+      const result = await sendAgentMessage({
+        organizationId,
+        from: root.threadId,
+        to: child.threadId,
+        key: "k3",
+        body: "hello",
+      });
+      expect(result).toMatchObject({ ok: true, applied: 1 });
+      expect(h.kick).toHaveBeenCalledTimes(1);
+      expect(waitUntil).toHaveBeenCalledWith(expect.any(Promise));
     });
   });
 

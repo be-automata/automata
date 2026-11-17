@@ -20,7 +20,7 @@ otherwise.
 | www touched tests | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism src/server-lib/agent-bus src/server-lib/cron.test.ts src/server-lib/cron-routes.static.test.ts` | 0 | 3 files, 45 tests (42 after the it.each collapse) |
 | www tests (full) | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` | 1 | 2 failed / 4470 passed / 9 skipped: `admin.test.ts` 5000 ms timeouts; that file re-run alone: 30/30, rc 0. See below. |
 | schema drift (AC: migration ≡ drizzle) | postgres:18 throwaway container; `DATABASE_URL=$PG/a pnpm exec tsx deploy/migrate.ts --apply` (×2); `DATABASE_URL=$PG/b pnpm -C packages/shared exec drizzle-kit push --force`; `pnpm exec tsx deploy/schema-drift.ts --a $PG/a --b $PG/b` | see note | `applied 26 migration(s)` then `applied 0 migration(s)`; `compared 1531 objects in a (a) with 1531 in b (b)`, `schema drift: none (0 allowlisted difference(s))`. These commands were piped through `tail`, so the recorded codes are `tail`'s; the verdict rests on the printed drift line. Also run on Postgres 16 in phase 1 (same result). |
-| roborev (via roborev-guard) | `roborev-guard review --branch --wait` | see below | job 1239 (`e3d74ab..cbee19e`): assessment Pass, one Low finding (spec contract stale) → fixed in `4133f00e`; final flush recorded under "Roborev". |
+| roborev (via roborev-guard) | `roborev-guard review --branch --wait` | 1 → fix rounds | job 1239 (`e3d74ab..cbee19e`): Pass + 1 Low (spec contract stale) → fixed `4133f00e`. Job 1240 (`..72aed2a`): Pass + 1 Medium (the kick awaited the drain, which can boot a sandbox: a send and the serial cron sweep blocked) + 1 Low (a failed broadcast skipped the drain) → fixed: the drain goes through `waitUntil` like `queueFollowUpInternal`, the broadcast is caught on its own; refinement re-review of the delta: clean (3 low/nit items applied). Final job: see the PR. |
 
 ## Load-sensitive tests (not touched by this branch)
 
@@ -56,3 +56,11 @@ None of these files imports the code this branch adds. The PR's CI is the clean 
   all fixed in `7270121b`.
 - /simplify (4 reviewers): queued-append helper shared with `updateThreadChat`, test flag out of `receiveFor`,
   re-kick window 2 min, test dedupe — `cbee19e0`.
+
+## Roborev fix round 2 (delivery.ts)
+
+`pnpm --filter @terragon/www exec vitest run --no-file-parallelism src/server-lib/agent-bus src/server-lib/cron.test.ts src/server-lib/cron-routes.static.test.ts` 0 (48 tests) ·
+`pnpm turbo tsc-check lint format-check` 0. New tests: a rejected broadcast still drains; `kickTarget` and
+`sendAgentMessage` resolve while the drain never settles, and the drain is handed to `waitUntil`.
+Known limit (for S5): on a request path Cloudflare keeps `waitUntil` work ~30 s after the response, the same
+exposure `queueFollowUpInternal` already accepts; the cron path is unaffected.
