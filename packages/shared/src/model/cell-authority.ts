@@ -271,7 +271,15 @@ export async function openNextAttempt({
 
   const miss = await classifyMiss(db, step);
   if ("reason" in miss) return { ok: false, reason: miss.reason };
-  return { ok: false, reason: "attempt_limit" };
+  if (miss.currentAttempt >= CELL_MAX_ATTEMPTS) {
+    return { ok: false, reason: "attempt_limit" };
+  }
+  // The upsert refused a row that classifyMiss reads as open, matching and
+  // under the cap: a concurrent change between the two statements. Never
+  // report it as attempt_limit.
+  throw new Error(
+    `openNextAttempt: step ${step.stepKey} was refused below the attempt cap (attempt ${miss.currentAttempt})`,
+  );
 }
 
 /**
