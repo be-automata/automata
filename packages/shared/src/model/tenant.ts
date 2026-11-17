@@ -35,7 +35,7 @@ import {
 } from "./automations";
 import { AccessTier, Automation, AutomationInsert } from "../db/types";
 import {
-  AgentProviderCredentialsDecrypted,
+  AgentProviderCredentialsInput,
   getAllAgentProviderCredentialRecords,
   getAgentProviderCredentialsRecord,
   getAgentProviderCredentialsForAgent,
@@ -333,10 +333,7 @@ export function forTenant({ db, organizationId, userId }: TenantContext) {
     },
 
     insertCredential(
-      credentialData: Omit<
-        AgentProviderCredentialsDecrypted,
-        "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
-      >,
+      credentialData: AgentProviderCredentialsInput,
       encryptionKey: string,
     ) {
       return insertAgentProviderCredentials({

@@ -38,6 +38,23 @@ export type AgentProviderCredentialsDecrypted = Omit<
   idToken?: string;
 };
 
+/**
+ * What a caller supplies to store a credential. The #442 availability columns
+ * are excluded: only markAgentProviderCredentialUnavailable (and an admin
+ * clear) writes them, so a connect always starts available.
+ */
+export type AgentProviderCredentialsInput = Omit<
+  AgentProviderCredentialsDecrypted,
+  | "id"
+  | "userId"
+  | "organizationId"
+  | "createdAt"
+  | "updatedAt"
+  | "unavailableUntil"
+  | "unavailableReason"
+  | "unavailableMarkedAt"
+>;
+
 export async function insertAgentProviderCredentials({
   db,
   userId,
@@ -47,10 +64,7 @@ export async function insertAgentProviderCredentials({
 }: {
   db: DB;
   userId: string;
-  credentialData: Omit<
-    AgentProviderCredentialsDecrypted,
-    "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
-  >;
+  credentialData: AgentProviderCredentialsInput;
   encryptionKey: string;
   // Tenant to stamp on the new credential (WI-5).
   organizationId?: string | null;

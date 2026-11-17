@@ -809,6 +809,7 @@ type ThreadForThreadChatInfoFull = Pick<
   | "activeRunExternalId"
   | "terminalCause"
   | "queuedAt"
+  | "deliveredCredentialId"
 > & {
   isUnread: boolean;
 };
@@ -852,6 +853,7 @@ function createLegacyThreadChatFull(
     activeRunExternalId: thread.activeRunExternalId,
     terminalCause: thread.terminalCause,
     queuedAt: thread.queuedAt,
+    deliveredCredentialId: thread.deliveredCredentialId,
   };
 }
 

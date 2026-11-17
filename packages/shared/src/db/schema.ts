@@ -18,6 +18,7 @@ import {
 import { sql } from "drizzle-orm";
 import { DBMessage, DBUserMessage } from "./db-message";
 import type { CredentialKind } from "../model/credential-kind";
+import type { CredentialUnavailableReason } from "../model/credential-unavailable-reason";
 import type {
   AgentBusLane,
   AgentCapabilities,
@@ -367,6 +368,14 @@ const threadChatShared = {
    * on the thread row, so its queue entry lives there too.
    */
   queuedAt: timestamp("queued_at", { withTimezone: true }),
+  /**
+   * #442: the agent_provider_credentials row /api/daemon/agent-credentials
+   * delivered to this chat's current run (NULL = built-in credits or none),
+   * overwritten at every delivery. A classified provider refusal marks THIS
+   * row, never one an operator switched to mid-run. On BOTH tables, like
+   * queuedAt. No FK: a deleted credential only makes the mark a no-op.
+   */
+  deliveredCredentialId: text("delivered_credential_id"),
   contextLength: integer("context_length"),
   permissionMode: text("permission_mode")
     .$type<"allowAll" | "plan">()
@@ -1491,6 +1500,24 @@ export const agentProviderCredentials = pgTable(
     expiresAt: timestamp("expires_at", { mode: "date" }),
     lastRefreshedAt: timestamp("last_refreshed_at", { mode: "date" }),
     metadata: jsonb("metadata").$type<AgentProviderMetadata>(),
+    /**
+     * #442 (epic #440 C2): set by markAgentProviderCredentialUnavailable on a
+     * classified provider refusal. Unavailable while reason is set and until
+     * is NULL (indefinite) or in the future. Monotonic: a timed mark only
+     * extends, never shortens, and never touches an indefinite one. Admin
+     * clear = null both until and reason.
+     */
+    unavailableUntil: timestamp("unavailable_until", {
+      mode: "date",
+      withTimezone: true,
+    }),
+    unavailableReason: text(
+      "unavailable_reason",
+    ).$type<CredentialUnavailableReason>(),
+    unavailableMarkedAt: timestamp("unavailable_marked_at", {
+      mode: "date",
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
