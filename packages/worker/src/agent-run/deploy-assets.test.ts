@@ -1108,6 +1108,75 @@ describe("packages/worker/deploy/linux — OpenSandbox server (#656 G1)", () => 
   });
 });
 
+describe("install-opensandbox.sh key file and restarts (#656 PR-G review)", () => {
+  const installer = deployFile("linux", "install-opensandbox.sh");
+  const code = installer
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+  const fn = (name: string) =>
+    code.slice(
+      code.indexOf(`${name}() {`),
+      code.indexOf("\n}\n", code.indexOf(`${name}() {`)),
+    );
+
+  // card: protects=a stale KEY_FILE.new (an old mode) is removed before the key is written, and an existing /etc/automata keeps its mode while a new one is 0700; fails_when=the rm is dropped, the dir is re-moded unconditionally or created 0755; no_claim=the umask under which the key is written
+  it("removes a stale .new and never re-modes an existing /etc/automata", () => {
+    const body = fn("ensure_key_file");
+    expect(body.indexOf('rm -f "$KEY_FILE.new"')).toBeGreaterThan(0);
+    expect(body.indexOf('rm -f "$KEY_FILE.new"')).toBeLessThan(
+      body.indexOf('>"$KEY_FILE.new"'),
+    );
+    expect(body).toContain(
+      '[ -d "$(dirname "$KEY_FILE")" ] || install -d -o root -g root -m 0700',
+    );
+    expect(body).not.toMatch(/install -d[^\n]*-m 0755/);
+    // negative control: the unconditional form is what this rejects
+    expect(body).not.toMatch(/^\s*install -d [^\n]*dirname/m);
+  });
+
+  // card: protects=the unit restarts when the key is regenerated or a pinned image's local tag moves to another image; fails_when=either path stops setting changed=1 before the start/restart decision; no_claim=systemd behaviour
+  it("restarts the unit when the key or a pinned image changes", () => {
+    expect(code).toContain('[ "${key_new:-0}" -eq 0 ] || changed=1');
+    expect(code).toContain("key_new=1");
+    expect(code).toContain(
+      `[ "$before" = "$(dk image inspect -f '{{.Id}}' "\${pair#* }")" ] || changed=1`,
+    );
+    const set = code.indexOf("changed=0");
+    expect(set).toBeGreaterThan(0);
+    expect(set).toBeLessThan(code.indexOf("key_new:-0"));
+    expect(code.indexOf("key_new:-0")).toBeLessThan(
+      code.indexOf('if [ "$changed" -eq 1 ]'),
+    );
+  });
+});
+
+describe("OpenSandbox fallback docs match the unit (#656 PR-G review)", () => {
+  const readme = deployFile("README.md");
+  const launcher = deployFile("linux", "run-worker.sh.template");
+  const spec = read(path.join(repoRoot, "docs/specs/656/spec-g.md"));
+
+  // card: protects=the README and the launcher say what the unit does: the fallback is SetCredential=opensandbox.env:none (empty fails on systemd 255), so both names are always exported and fail-closed rests on PR-E reading a file with no OPENSANDBOX_API_KEY= line as not configured; fails_when=either text goes back to "nothing is exported" or an "empty SetCredential"; no_claim=systemd behaviour
+  it("describes the real `none` fallback", () => {
+    for (const text of [readme, launcher]) {
+      expect(text).toContain("opensandbox.env:none");
+      expect(text).toMatch(/ALWAYS exported|ALWAYS exports/);
+      expect(text).toContain("OPENSANDBOX_API_KEY=");
+      // negative control
+      expect(text).not.toMatch(/nothing is exported/);
+      expect(text).not.toMatch(/empty `?SetCredential=/);
+    }
+  });
+
+  // card: protects=spec-g records the PR-E test the `none` file needs; fails_when=the section or its negative control is dropped; no_claim=PR-E's code
+  it("spec-g lists the required PR-E test for the `none` file", () => {
+    const section = spec.slice(spec.indexOf("## Left to PR-E"));
+    expect(section).toContain("literal `none` file");
+    expect(section).toContain("negative control");
+    expect(spec).toContain("SetCredential=opensandbox.env:none");
+  });
+});
+
 describe("packages/worker/deploy/linux — worker OpenSandbox wiring (#656 G2)", () => {
   const launcher = deployFile("linux", "run-worker.sh.template");
   const unit = deployFile("linux", "automata-worker.service");

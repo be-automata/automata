@@ -267,6 +267,8 @@ export interface ProbeResult {
   /** udpdns: the reply's rcode (header byte 3, low nibble) and ANCOUNT. */
   rcode?: number;
   answers?: number;
+  /** udpdns: the reply's transaction id equals the query's. */
+  idMatch?: boolean;
   /** ipv6_route: a default route exists. */
   default?: boolean;
   found?: boolean[];
@@ -324,29 +326,34 @@ def udpdns(server, query_b64):
     s = socket.socket(fam, socket.SOCK_DGRAM)
     s.settimeout(T)
     try:
-        s.sendto(base64.b64decode(query_b64), (server, 53))
+        query = base64.b64decode(query_b64)
+        s.sendto(query, (server, 53))
         data = s.recv(4096)
         if len(data) < 12:
             return {"ok": False, "err": "short_reply"}
-        return {"ok": True, "rcode": data[3] & 15, "answers": struct.unpack(">H", data[6:8])[0]}
+        return {"ok": True, "idMatch": data[0:2] == query[0:2], "rcode": data[3] & 15, "answers": struct.unpack(">H", data[6:8])[0]}
     except Exception as e:
         return {"ok": False, "err": kind_of(e)}
     finally:
         s.close()
 
 
+def ipv6_default(lines):
+    for line in lines:
+        f = line.split()
+        if len(f) < 10 or f[0] != "0" * 32 or f[1] != "00":
+            continue
+        if f[9] != "lo" and not (int(f[8], 16) & 0x200):
+            return True
+    return False
+
+
 def ipv6_route():
     try:
         with open("/proc/net/ipv6_route") as fh:
-            for line in fh:
-                f = line.split()
-                if len(f) < 10 or f[0] != "0" * 32 or f[1] != "00":
-                    continue
-                if f[9] != "lo" and not (int(f[8], 16) & 0x200):
-                    return {"ok": True, "default": True}
+            return {"ok": True, "default": ipv6_default(fh)}
     except Exception:
-        pass
-    return {"ok": True, "default": False}
+        return {"ok": True, "default": False}
 
 
 def tcp(host, port):
@@ -658,6 +665,7 @@ export function parseProbeOutput(stdout: string): ProbeResult[] {
           : undefined,
       rcode: optionalNumber(o.rcode),
       answers: optionalNumber(o.answers),
+      idMatch: optionalBoolean(o.idMatch),
       default: optionalBoolean(o.default),
       found: booleanArray(o.found),
       envNames: stringArray(o.envNames),

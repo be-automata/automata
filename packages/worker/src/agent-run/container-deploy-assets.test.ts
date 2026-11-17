@@ -266,9 +266,42 @@ describe("install-rootless-docker.sh --profile opensandbox + automata-opensandbo
     expect(start).toBeGreaterThan(create);
     expect(code).toContain('for d in "$SOCK_DIR" "$RUN_DIR"; do');
     expect(code).toContain(
-      '[ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ]',
+      '[ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ] || [ "$run_dir_stale" -eq 1 ]',
     );
     expect(code).toMatch(/^run_dir_new=0$/m);
+  });
+
+  // card: protects=the dedicated daemon restart does not rest on "the dirs were new" alone: a re-run after a mid-run failure repairs a stale /run copy-up, decided by whether a container reads a marker under the run dir (or, with no image, the daemon's start vs the dirs' ctime), and verify_opensandbox runs the same visibility check; fails_when=run_dir_stale or the marker read-back is dropped, or verify stops checking visibility; no_claim=the copy-up itself (P0 probe run-dir-visible)
+  it("restarts a stale daemon from marker visibility and verifies it", () => {
+    expect(code).toContain("run_dir_visibility() {");
+    expect(code).toContain('-v "$RUN_DIR:/x:ro"');
+    expect(code).toContain('"$vis" = invisible');
+    expect(code).toContain("ActiveEnterTimestamp");
+    expect(code).toContain('stat -c %Z "$d"');
+    const v = script.slice(
+      script.indexOf("verify_opensandbox() {"),
+      script.indexOf("\n}\n", script.indexOf("verify_opensandbox() {")),
+    );
+    expect(v).toContain("run_dir_visibility");
+    expect(v).toContain('echo "FAIL run-dir-visible ');
+    // negative control: without the visibility call, verify has no such check
+    expect(v.replace(/run_dir_visibility/g, "")).not.toContain(
+      "run_dir_visibility",
+    );
+  });
+
+  // card: protects=the profile selector is assigned only while the arguments are parsed (a later `profile=` once clobbered it with an AppArmor path, so every [ "$profile" = runner|opensandbox ] was false on a host with userns restricted); fails_when=any assignment to profile (not aa_profile) appears after the case that reads it; no_claim=other variables
+  it("assigns the profile selector only in argument parsing", () => {
+    const assignsAfterParse = (text: string) => {
+      const at = text.indexOf('case "$profile" in');
+      return /(^|[\s;])profile=/m.test(text.slice(at));
+    };
+    expect(code).toContain('case "$profile" in');
+    expect(assignsAfterParse(code)).toBe(false);
+    expect(code).toContain('aa_profile="/etc/apparmor.d/automata-rootlesskit"');
+    // negative control: the old AppArmor block trips the check
+    const old = code.replace(/aa_profile=/g, "profile=");
+    expect(assignsAfterParse(old)).toBe(true);
   });
 
   // card: protects=the unit tightens the socket to 0600 from the host side and never chgrps it, passes an empty --group, keeps Type=notify and the cgroup delegation, and does not override the rootless host-loopback default; fails_when=a chgrp, a wider chmod, a named --group or a loopback override appears; no_claim=runtime behaviour of slirp4netns
@@ -299,8 +332,11 @@ describe("install-rootless-docker.sh --profile opensandbox + automata-opensandbo
     expect(v).toContain('[ "$got" = "$RUNNER:$RUNNER 700" ]');
     expect(v).toContain('[ "$got" = "$RUNNER:$RUNNER 600" ]');
     expect(v).toMatch(
-      /if runuser -u "\$worker_user" -- env -u DOCKER_HOST docker -H "unix:\/\/\$SOCK" info >\/dev\/null 2>&1; then\n\s+echo "FAIL worker-denied /,
+      /if wd="\$\(runuser -u "\$worker_user" -- env -u DOCKER_HOST docker -H "unix:\/\/\$SOCK" info 2>&1\)"; then\n\s+echo "FAIL worker-denied /,
     );
+    // refused is not enough: it must be "permission denied" (another error proves nothing)
+    expect(v).toContain("grep -qi 'permission denied'");
+    expect(v).toContain("was refused for another reason");
     expect(v).toContain('runuser -u "$RUNNER" -- env -u DOCKER_HOST docker');
     expect(v).toMatch(/2\\ \*rootless\*\)/);
     expect(code).toContain(
@@ -1021,6 +1057,22 @@ describe("opensandbox-p0-probe.sh (#656 G0b)", () => {
 
   // card: protects=the copy-up marker check and the throwaway guard exist, the guard refuses a live worker or the seal key, and automata-exec-1 is refused even with the flag; fails_when=any is dropped; no_claim=behaviour on a box
   it("has the copy-up marker check and the throwaway guard", () => {
+    // the flag is required AND a live worker / seal key refuses even with it
+    const guardCode = code.slice(
+      code.indexOf('[ "$throwaway" -eq 1 ] || die'),
+      code.indexOf('id -u "$RUNNER" >/dev/null'),
+    );
+    expect(guardCode).toContain(
+      '[ "$throwaway" -eq 1 ] || die "pass --i-know-this-is-throwaway',
+    );
+    expect(guardCode).toContain("refused even with --i-know-this-is-throwaway");
+    expect(guardCode).not.toMatch(/\[ "\$throwaway" -ne 1 \]/);
+    // negative control: the old shape (the live check inside the flag test) is what this rejects
+    const old = 'if [ "$throwaway" -ne 1 ]; then\n  if systemctl is-active';
+    expect(guardCode).not.toContain(old);
+    expect(guardCode.indexOf("systemctl is-active")).toBeGreaterThan(
+      guardCode.indexOf('"$throwaway" -eq 1'),
+    );
     expect(code).toContain('-v "$P0:/x:ro"');
     expect(code).toContain("cat /x/marker");
     expect(code).toContain("run_dir_visible");

@@ -10,7 +10,7 @@
  *     --base-url http://127.0.0.1:18092 --key-file <path> --allow-host httpbin.org \
  *     --example-v4 <ip> --example-v6 <ip|none> --box-ip <ip> [--out <json>]
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 
@@ -145,10 +145,23 @@ function policyFor(allowHost: string): OpenSandboxNetworkPolicy {
   };
 }
 
+const LABEL_MAX = 63;
+
+/** `p0-<host>` as a label value: [A-Za-z0-9._-], alphanumeric ends, at most 63 chars (a long host is cut and hashed). */
+export function deploymentTag(host: string): string {
+  const safe = host.replace(/[^A-Za-z0-9._-]/g, "-");
+  const whole = `p0-${safe}`;
+  if (whole.length <= LABEL_MAX && /[A-Za-z0-9]$/.test(whole)) return whole;
+  const hash = createHash("sha256").update(host).digest("hex").slice(0, 8);
+  const head = whole.slice(0, LABEL_MAX - hash.length - 1);
+  return `${head.replace(/[^A-Za-z0-9]+$/, "")}-${hash}`;
+}
+
 /** Mirrors the IT's `plan()`, so `create` never refuses it as invalid_plan. */
 export function buildPlan(
   allowHost: string,
   canary: string,
+  host: string = hostname(),
 ): OpenSandboxCellCreatePlan {
   const ttlMs = 15 * 60 * 1000;
   const vault: CellVaultEntry[] = [
@@ -167,7 +180,7 @@ export function buildPlan(
       automata: "cell",
       worker: "p0",
       epoch: "1",
-      deployment: `p0-${hostname()}`,
+      deployment: deploymentTag(host),
       stepKey: `p0-${randomBytes(4).toString("hex")}`,
       attempt: "1",
       expiresAt: String(Date.now() + ttlMs),
@@ -233,7 +246,7 @@ function ipv4Probes(a: P0Args, canary: string): ProbeSpec[] {
   ];
 }
 
-function reportIpv4(rep: Reporter, r: ProbeResult[]): void {
+export function reportIpv4(rep: Reporter, r: ProbeResult[]): void {
   const at = (i: number): ProbeResult | undefined => r[i];
   const blocked = (name: string, i: number): void =>
     rep.check(name, isBlocked(at(i)), brief(at(i)));
@@ -250,7 +263,10 @@ function reportIpv4(rep: Reporter, r: ProbeResult[]): void {
   blocked("dot-853-blocked", 6);
   rep.check(
     "udp-dns-sidecar-nxdomain",
-    at(7)?.ok === true && at(7)?.rcode === 3 && at(7)?.answers === 0,
+    at(7)?.ok === true &&
+      at(7)?.idMatch === true &&
+      at(7)?.rcode === 3 &&
+      at(7)?.answers === 0,
     brief(at(7)),
   );
   blocked("metadata-blocked", 8);
@@ -280,7 +296,7 @@ async function ipv6Checks(
     { kind: "dns6", host: "example.org" },
     { kind: "ipv6_route" },
   ]);
-  rep.check("dns6-no-answer", dns6?.ok === false, brief(dns6));
+  reportDns6(rep, dns6);
   if (route?.default !== true || a.exampleV6 === null) {
     const why =
       route?.default === true
@@ -293,10 +309,23 @@ async function ipv6Checks(
     { kind: "tls_ip", ip: a.exampleV6, sni: "example.org" },
     { kind: "udpdns", server: "2001:4860:4860::8888", host: "example.org" },
   ]);
+  reportIpv6Bypass(rep, tls, udp);
+}
+
+export function reportDns6(rep: Reporter, dns6: ProbeResult | undefined): void {
+  rep.check("dns6-no-answer", isBlocked(dns6), brief(dns6));
+}
+
+export function reportIpv6Bypass(
+  rep: Reporter,
+  tls: ProbeResult | undefined,
+  udp: ProbeResult | undefined,
+): void {
   rep.check("ipv6-tls-blocked", isBlocked(tls), brief(tls));
   rep.check(
     "ipv6-udp-dns-no-answer",
-    udp?.ok === false || udp?.answers === 0,
+    isBlocked(udp) ||
+      (udp?.ok === true && udp.idMatch === true && udp.answers === 0),
     brief(udp),
   );
 }
@@ -397,7 +426,8 @@ async function denyAllThenDelete(
       "deny-all-accepted",
       await quarantineRefusal(a, apiKey, id),
     );
-    await provider.teardown(id);
+    // Not teardown(): it re-runs the refused quarantine and would mask the cause.
+    await provider.delete(id);
     gone.add(id);
     return;
   }

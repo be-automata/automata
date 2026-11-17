@@ -1256,10 +1256,13 @@ The per-user flag `opensandboxCells` still gates `cell-plan`.
 The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
 `WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_GUEST_IMAGE`.
 
-- The launcher exports the first two **only when** `$CREDENTIALS_DIRECTORY/opensandbox.env`
-  is non-empty: the file path, and `http://127.0.0.1:8090` unless `worker-box.env` overrides
-  it. On a box without the key file the unit still boots (an empty `SetCredential=` fallback)
-  and nothing is exported, so a marked run fails closed.
+- The launcher exports the first two whenever `$CREDENTIALS_DIRECTORY/opensandbox.env` is
+  non-empty: the file path, and `http://127.0.0.1:8090` unless `worker-box.env` overrides
+  it. On a box without the key file the unit still boots, because the fallback is
+  `SetCredential=opensandbox.env:none` (an empty value fails on systemd 255). The credential
+  is then the literal `none`, so under systemd both names are ALWAYS exported. Fail-closed
+  rests on PR-E treating a credential with no `OPENSANDBOX_API_KEY=` line as "not
+  configured"; the launcher does not decide it.
 - Set `WORKER_OPENSANDBOX_GUEST_IMAGE` (digest-pinned; a tag is refused) in `worker-box.env`.
 - Re-render the worker unit and launcher, `systemctl daemon-reload`, then restart with
   `automata-worker-safe-restart`. The worker picks the change up only on that restart.

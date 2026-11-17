@@ -194,6 +194,15 @@ describe("dns6, udpdns and ipv6_route probes", () => {
     expect(py).toContain("/proc/net/ipv6_route");
   });
 
+  it("udpdns reports whether the reply id matches the query", () => {
+    const py = probeArgv([{ kind: "ipv6_route" }])[2] ?? "";
+    expect(py).toContain('"idMatch": data[0:2] == query[0:2]');
+    const [r] = parseProbeOutput(
+      JSON.stringify([{ kind: "udpdns", ok: true, idMatch: false }]),
+    );
+    expect(r?.idMatch).toBe(false);
+  });
+
   it("parseProbeOutput keeps the new fields", () => {
     const out = parseProbeOutput(
       JSON.stringify([

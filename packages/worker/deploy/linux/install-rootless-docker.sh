@@ -58,7 +58,8 @@ umask 022
 #     and the P0 probe's state. Both dirs come from one tmpfiles.d file and
 #     exist BEFORE the daemon starts (rootlesskit copies /run up at start; a
 #     directory made later is invisible to it), and a daemon already running
-#     when either is new is restarted once;
+#     is restarted once when a container cannot read a marker under the run dir
+#     (or, with no image to test with, when the daemon is older than the dirs);
 #   - the user unit automata-opensandbox-docker.service (this dir);
 #   - verify also proves the worker account can NOT reach the socket.
 #
@@ -228,10 +229,33 @@ verify() {
   return "$fail"
 }
 
+# run_dir_visibility: can a container on the dedicated daemon read a marker
+# written under $RUN_DIR? Prints visible | invisible | unknown (no socket, no
+# local image to run, or the marker could not be written). The dedicated
+# daemon copies /run up when it starts, so a daemon that started before the
+# directory was made (or remade) cannot see it.
+run_dir_visibility() {
+  local want got img marker
+  [ -S "$SOCK" ] || { echo unknown; return 0; }
+  img="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
+    image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' | head -n 1 || true)"
+  [ -n "$img" ] || { echo unknown; return 0; }
+  want="marker-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  marker="$RUN_DIR/.visible-$$"
+  if ! printf '%s' "$want" | runuser -u "$RUNNER" -- tee "$marker" >/dev/null 2>&1; then
+    echo unknown
+    return 0
+  fi
+  got="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
+    run --rm --network none --entrypoint cat -v "$RUN_DIR:/x:ro" "$img" "/x/.visible-$$" 2>/dev/null || true)"
+  rm -f "$marker"
+  if [ "$got" = "$want" ]; then echo visible; else echo invisible; fi
+}
+
 # The opensandbox profile's checks: the account owns a 0700 dir and a 0600
 # socket, reaches the daemon (rootless, cgroup v2), and the worker does NOT.
 verify_opensandbox() {
-  local fail=0 uid info got
+  local fail=0 uid info got wd
   uid="$(id -u "$RUNNER" 2>/dev/null)" || {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
@@ -266,12 +290,24 @@ verify_opensandbox() {
     echo "FAIL rootless-socket     $SOCK does not answer $RUNNER: $info"
     fail=1
   fi
-  # The negative check: no group grant exists, so the worker must be refused.
-  if runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info >/dev/null 2>&1; then
+  case "$(run_dir_visibility)" in
+    visible) echo "ok   run-dir-visible     a container reads a marker under $RUN_DIR" ;;
+    unknown) echo "ok   run-dir-visible     not checked (no local image to run yet)" ;;
+    *)
+      echo "FAIL run-dir-visible     a container cannot read a marker under $RUN_DIR (stale /run copy: restart the daemon)"
+      fail=1
+      ;;
+  esac
+  # The negative check: no group grant exists, so the worker must be refused,
+  # and refused for permission (any other failure would not prove the denial).
+  if wd="$(runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info 2>&1)"; then
     echo "FAIL worker-denied       $worker_user reaches $SOCK (it must not)"
     fail=1
+  elif printf '%s' "$wd" | grep -qi 'permission denied'; then
+    echo "ok   worker-denied       $worker_user cannot reach $SOCK (permission denied)"
   else
-    echo "ok   worker-denied       $worker_user cannot reach $SOCK"
+    echo "FAIL worker-denied       $worker_user was refused for another reason: $(printf '%s' "$wd" | tr -cd 'A-Za-z0-9._ :/-' | cut -c1-120)"
+    fail=1
   fi
   return "$fail"
 }
@@ -308,12 +344,12 @@ command -v dockerd-rootless.sh >/dev/null || die "dockerd-rootless.sh missing af
 if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ] &&
   [ ! -f /etc/apparmor.d/rootlesskit ]; then
   rk="$(command -v rootlesskit)" || die "rootlesskit missing"
-  profile="/etc/apparmor.d/automata-rootlesskit"
+  aa_profile="/etc/apparmor.d/automata-rootlesskit"
   want="$(printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\n%s flags=(unconfined) {\n  userns,\n}\n' "$rk")"
-  if [ ! -f "$profile" ] || [ "$(cat "$profile")" != "$want" ]; then
+  if [ ! -f "$aa_profile" ] || [ "$(cat "$aa_profile")" != "$want" ]; then
     log "AppArmor: allowing userns for $rk"
-    printf '%s\n' "$want" >"$profile"
-    apparmor_parser -r "$profile"
+    printf '%s\n' "$want" >"$aa_profile"
+    apparmor_parser -r "$aa_profile"
   fi
 fi
 
@@ -360,8 +396,10 @@ done
 runner_uid="$(id -u "$RUNNER")"
 
 # ── socket dir, delegation, linger ───────────────────────────────────────────
-# opensandbox: a daemon that is already running holds a stale /run copy-up, so
-# it is restarted once when either directory below is new.
+# opensandbox: a daemon that is already running holds a stale /run copy-up when
+# a directory below was made after it started. Whether it is stale is decided
+# below from what a container can see, not from "the dirs were new" (a re-run
+# after a mid-run failure finds them already made).
 run_dir_new=0
 if [ "$profile" = opensandbox ]; then
   for d in "$SOCK_DIR" "$RUN_DIR"; do
@@ -416,7 +454,20 @@ as_runner() {
 }
 as_runner systemctl --user daemon-reload
 as_runner systemctl --user enable "$UNIT" >/dev/null
-if [ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ]; then
+run_dir_stale=0
+if [ "$profile" = opensandbox ] && [ "$run_dir_new" -eq 0 ] && as_runner systemctl --user is-active --quiet "$UNIT"; then
+  vis="$(run_dir_visibility)"
+  if [ "$vis" = invisible ]; then
+    run_dir_stale=1
+  elif [ "$vis" = unknown ]; then
+    # No image to probe with: compare the daemon's start with the dirs' ctime.
+    started="$(date -d "$(as_runner systemctl --user show -p ActiveEnterTimestamp --value "$UNIT")" +%s 2>/dev/null || echo 0)"
+    for d in "$SOCK_DIR" "$RUN_DIR"; do
+      [ "$(stat -c %Z "$d" 2>/dev/null || echo 0)" -le "$started" ] || run_dir_stale=1
+    done
+  fi
+fi
+if [ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ] || [ "$run_dir_stale" -eq 1 ]; then
   as_runner systemctl --user restart "$UNIT"
 else
   as_runner systemctl --user start "$UNIT"

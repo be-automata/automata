@@ -78,11 +78,11 @@ die() {
 [ "$(uname -s)" = Linux ] || die "Linux only"
 # Never the production box, flag or no flag.
 [ "$(hostname)" != automata-exec-1 ] || die "refusing to run on automata-exec-1"
-# The throwaway guard: a live worker or its seal key means a real box.
-if [ "$throwaway" -ne 1 ]; then
-  if systemctl is-active --quiet automata-worker.service || [ -e /etc/automata/payload-seal.key ]; then
-    die "this looks like a real box (worker active or payload-seal.key present); pass --i-know-this-is-throwaway on a throwaway box only"
-  fi
+# The throwaway guard: the flag is required AND a live worker or its seal key
+# refuses the run flag or no flag (a throwaway box has neither).
+[ "$throwaway" -eq 1 ] || die "pass --i-know-this-is-throwaway: this probe is for throwaway boxes only"
+if systemctl is-active --quiet automata-worker.service || [ -e /etc/automata/payload-seal.key ]; then
+  die "this looks like a real box (worker active or payload-seal.key present); refused even with --i-know-this-is-throwaway"
 fi
 id -u "$RUNNER" >/dev/null 2>&1 || die "$RUNNER is missing: run install-rootless-docker.sh --profile opensandbox first"
 runner_uid="$(id -u "$RUNNER")"
@@ -154,7 +154,12 @@ rootless_cgroup2() {
 
 # shellcheck disable=SC2329 # invoked through `check` or a trap
 worker_cannot_reach() {
-  ! runuser -u "$WORKER_USER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info >/dev/null 2>&1
+  local out
+  # Refused AND for permission: another failure proves nothing about the denial.
+  if out="$(runuser -u "$WORKER_USER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info 2>&1)"; then
+    return 1
+  fi
+  printf '%s' "$out" | grep -qi 'permission denied'
 }
 
 # shellcheck disable=SC2329 # invoked through `check` or a trap
@@ -325,7 +330,8 @@ survivors() {
 save_server_log() {
   # The server's log tail for a failed run (lines naming a key dropped).
   if [ -n "${out_dir:-}" ] && [ -d "$out_dir" ] && [ ! -s "$out_dir/server.log" ]; then
-    dk logs --tail 300 "$SERVER_NAME" 2>&1 | grep -v -i -E 'api[_-]?key|authorization|token' \
+    dk logs --tail 300 "$SERVER_NAME" 2>&1 | grep -v -i -E 'api[_-]?key|authorization|token' |
+      { if [ -s "$P0/key" ]; then grep -vF -f "$P0/key"; else cat; fi; } \
       >"$out_dir/server.log" || true
   fi
 }

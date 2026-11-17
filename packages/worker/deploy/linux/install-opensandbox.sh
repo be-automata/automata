@@ -137,19 +137,24 @@ verify_key_file() {
   echo "ok   key-file            $KEY_FILE is root:root 600, one OPENSANDBOX_API_KEY line"
 }
 
+# ensure_key_file: sets key_new=1 when it generated the key (the unit must restart).
 ensure_key_file() {
+  key_new=0
   if [ -e "$KEY_FILE" ]; then
     verify_key_file >/dev/null || die "$KEY_FILE exists but is wrong (owner, mode or shape); fix or remove it by hand"
     return 0
   fi
   log "generating $KEY_FILE"
-  install -d -o root -g root -m 0755 "$(dirname "$KEY_FILE")"
+  # An existing /etc/automata keeps its mode; a new one is 0700 (README: root only).
+  [ -d "$(dirname "$KEY_FILE")" ] || install -d -o root -g root -m 0700 "$(dirname "$KEY_FILE")"
+  rm -f "$KEY_FILE.new"
   (
     umask 077
     { printf 'OPENSANDBOX_API_KEY='; openssl rand -hex 32; } >"$KEY_FILE.new"
   )
   chown root:root "$KEY_FILE.new"
   mv "$KEY_FILE.new" "$KEY_FILE"
+  key_new=1
 }
 
 # ── verification (also the tail of every install run) ────────────────────────
@@ -217,18 +222,22 @@ fi
 prepare_client_config
 
 # ── 2. the images, by digest ─────────────────────────────────────────────────
+changed=0
 for pair in "$SERVER automata-osb/server:1.2.1" "$EXECD automata-osb/execd:1.2.1" \
   "$EGRESS automata-osb/egress:1.2.1" "$PY automata-osb/py:3.12"; do
   pull_one "${pair% *}"
+  # A tag that now points at another image (a bumped pin) restarts the unit.
+  before="$(dk image inspect -f '{{.Id}}' "${pair#* }" 2>/dev/null || true)"
   dk tag "${pair% *}" "${pair#* }"
+  [ "$before" = "$(dk image inspect -f '{{.Id}}' "${pair#* }")" ] || changed=1
 done
 log "images pulled by digest and tagged automata-osb/*"
 
 # ── 3. the key ───────────────────────────────────────────────────────────────
 ensure_key_file
+[ "${key_new:-0}" -eq 0 ] || changed=1
 
 # ── 4. the template and the unit ─────────────────────────────────────────────
-changed=0
 install -d -o root -g root -m 0755 "$TEMPLATE_DIR"
 for pair in "$HERE/opensandbox-server.toml $TEMPLATE" "$HERE/$UNIT $UNIT_DEST"; do
   if ! cmp -s "${pair% *}" "${pair#* }"; then
