@@ -168,7 +168,7 @@ export function buildPlan(
       worker: "p0",
       epoch: "1",
       deployment: `p0-${hostname()}`,
-      stepKey: `p0:${randomBytes(4).toString("hex")}`,
+      stepKey: `p0-${randomBytes(4).toString("hex")}`,
       attempt: "1",
       expiresAt: String(Date.now() + ttlMs),
     },
@@ -383,7 +383,7 @@ async function negativeControl(
       metadata: {
         automata: "cell",
         worker: "p0",
-        stepKey: `p0-neg:${randomBytes(4).toString("hex")}`,
+        stepKey: `p0-neg-${randomBytes(4).toString("hex")}`,
       },
     }),
     signal: AbortSignal.timeout(60_000),
