@@ -1,0 +1,108 @@
+# Builds the cell guest image (ADR-014, #656): the batteries image by digest
+# plus the daemon bundle and the entry scripts. `build-verify` builds, scans
+# and verifies it with read-only permissions (pull requests, and any run that
+# will not publish). `publish` (main only) holds the registry and signing
+# permissions: it builds, scans, verifies, pushes and attests. The box pins the
+# pushed DIGEST, never a tag; the digest is written to the job summary.
+name: cell-image
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "deploy/images/cell/**"
+      - ".github/actions/cell-image-build/**"
+      - "packages/daemon/**"
+      - "packages/agent/**" # a daemon dependency
+      - "packages/tsconfig/**" # the daemon's tsconfig base
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - ".npmrc"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/cell-image.yml"
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # PRs: one group per ref, a newer push supersedes its build. Everything else
+  # (main): one group per commit, because a group keeps only one pending run and
+  # a skipped main run would leave that revision without a published digest.
+  group: cell-image-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/be-automata/automata-cell
+
+jobs:
+  build-verify:
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/cell-image-build
+
+  # Independent of build-verify: it builds, scans and verifies the very image
+  # it pushes (a runner's image store does not cross jobs, and ~8.3 GB is far
+  # over the artifact budget), so a prior job would add nothing.
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/cell-image-build
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        id: push
+        run: |
+          tag="${IMAGE}:sha-${GITHUB_SHA}"
+          docker tag automata-cell:ci "$tag"
+          docker push "$tag"
+          ref="$(docker image inspect "$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "${IMAGE}@" | head -n 1)"
+          digest="${ref#*@}"
+          case "$digest" in sha256:*) ;; *) echo "no pushed digest for $tag" >&2; exit 1 ;; esac
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Cell image"
+            echo
+            echo "Pin this reference (never the tag):"
+            echo
+            echo '```'
+            echo "OPENSANDBOX_GUEST_IMAGE=${IMAGE}@${digest}"
+            echo '```'
+            echo
+            echo "Tag: \`$tag\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Attest provenance
+        if: steps.push.outcome == 'success'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

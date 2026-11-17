@@ -121,3 +121,5 @@ deploy/images/batteries/verify.sh ghcr.io/be-automata/automata-batteries@sha256:
 - **Bumping a pin** is a reviewed change to the `ARG` lines only: the image records them in
   `/opt/automata/pins.env` and `verify.sh` checks the installed tools against that file. Update the
   table above in the same change.
+  A new batteries digest also bumps `deploy/images/cell/Dockerfile` (its `FROM` and `base.name`
+  label), because the cell image is built on top of it.
