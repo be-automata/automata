@@ -45,7 +45,7 @@ at a time.
 
 1. **undici 8.11.2 is an npm alias.** `e2b@2.52.1` (via `@e2b/code-interpreter` 2.7.1, in broadcast,
    www, sandbox, debug-scripts) has `optionalDependencies: undici8: npm:undici@8.11.2`
-   (pnpm-lock.yaml:17999-18013). pnpm matches override selectors on the dependency key, so an
+   (pnpm-lock.yaml at c596e47f, entry `e2b@2.52.1`). pnpm matches override selectors on the dependency key, so an
    `undici@…` selector never touches `undici8`. Fix: `e2b@>=2.39.0 <2.56.0` → `>=2.56.0 <3`
    (e2b 2.56.0+ drops the alias and depends on `undici ^8.12.x` directly; same major, inside
    code-interpreter's `^2.39.0`). The `undici@>=8.0.0 <8.12.2` override is kept as a floor.
@@ -57,7 +57,7 @@ at a time.
    (undici 7 is a different major, not superseded). Each new selector is at least as wide as the
    union of the ones it replaces, so no version an old entry forced up can come back.
 3. **prosemirror-model.** prosemirror-view 1.42.5+ requires `prosemirror-model ^1.25.12`; the lockfile
-   has 1.25.1 (pnpm-lock.yaml:9944). Add `prosemirror-model@<1.25.12` → `>=1.25.12 <2` so the editor
+   has 1.25.1 (pnpm-lock.yaml at c596e47f, entry `prosemirror-model@1.25.1`). Add `prosemirror-model@<1.25.12` → `>=1.25.12 <2` so the editor
    keeps one model copy. Gate: `pnpm why -r prosemirror-model` and `prosemirror-view` each one version.
 4. **Audit gate.** `pnpm audit --prod --audit-level high` cannot exit 0 while picomatch (no fix) remains.
    Gate instead: the set of high/critical `module_name`s in `pnpm audit --prod --json` is exactly
@@ -71,9 +71,11 @@ at a time.
    `zod: ^3.25 || ^4.0` spec to `>=4.6.6 <5` and broke the zod-3 peer that `@google/gemini-cli-core`
    (packages/daemon) supplies (new `pnpm install` peer warning). The 7 direct pins plus fumadocs-mdx
    11.10.1 already put every production path on zod 4.6.7 (`pnpm why -r --prod 'zod@3'` is empty).
-   Residual: a future production dependency pinning zod 4 below 4.6.6 is not forced up; the CI audit
-   gate would show it. The same holds for versions no selector here matches (axios 0.x, e2b <2.39,
-   @grpc/grpc-js <1.14): none is in the lockfile today.
+   Residual: a future production dependency pinning zod 4 below 4.6.6 is not forced up, and nothing
+   automated would catch it: CI's audit gate is `--audit-level critical` (ci.yml:40) and these
+   advisories are high. The same holds for versions no selector here matches (axios 0.x, e2b <2.39,
+   @grpc/grpc-js <1.14); none is in the lockfile today. A CI step failing on any high/critical prod
+   module outside an allowlist (`{picomatch}`) would close it; proposed as a follow-up, not built here.
 7. **Workers bundles.** e2b 2.63 is now on the production paths of www (OpenNext on Cloudflare) and
    broadcast (PartyKit). Gates: `opennextjs-cloudflare build` in apps/www, and an esbuild bundle of
    broadcast's `src/server.ts` + `src/sandbox.ts` with workerd conditions. A live e2b sandbox smoke
