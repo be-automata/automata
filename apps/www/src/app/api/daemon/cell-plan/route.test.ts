@@ -259,7 +259,7 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(third.attempt).toBe(3);
     });
 
-    it("409 invalid_run_key for an apiKeyId that breaks the label rule, with no step row", async () => {
+    it("403 invalid_run_key for an apiKeyId that breaks the label rule, with no step row", async () => {
       for (const bad of ["a:b", "a".repeat(60)]) {
         vi.mocked(getDaemonTokenContext).mockResolvedValueOnce(
           ctx({ apiKeyId: bad }),

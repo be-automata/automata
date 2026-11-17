@@ -105,3 +105,7 @@ Verdict: **Pass**, one Medium, no High, no Low (the log lists no other finding, 
 - lint-migrations, tsc, `tsc-check --force`, `lint --force`
 
 The adapter is unchanged, so the live suite from the `/simplify` run (10/10) still stands.
+
+## Roborev job 1254 (final range `08c1b19..18ef348`)
+
+**Pass**, with one Low: a test title said 409 for `invalid_run_key`, while the route and the spec answer 403. The title is renamed; no code changed.
