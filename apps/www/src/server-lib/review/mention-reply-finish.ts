@@ -1,13 +1,24 @@
+import { desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
 import type { MentionLaneStamp } from "@terragon/shared";
 import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "@terragon/shared/db/schema";
+import {
   getThreadChat,
   getThreadMinimal,
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
-import { isAbandonedTerminalCause } from "@terragon/shared/model/terminal-cause";
+import {
+  isMentionSilentTerminalCause,
+  isTerminalCause,
+  type TerminalCause,
+} from "@terragon/shared/model/terminal-cause";
+import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
+import { assertNever } from "@terragon/shared/utils";
 import type { ReviewLogger } from "@terragon/review/state/review-github-client";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import {
@@ -43,6 +54,7 @@ import {
   reviewReplyTargetId,
 } from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
+import type { MentionTerminalTarget } from "./mention-terminal-reply";
 
 /**
  * The org-owned mention lane's terminal writer (emit-only, like the review
@@ -60,7 +72,8 @@ import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
  *     so a crash between the two is finished by a redelivered run (the reply
  *     marker below makes the whole effect idempotent);
  *   - no parseable block → one short notice reply, never silence; a run the
- *     provider refused (#441/#472) names that cause instead.
+ *     provider refused (#441/#472) names that cause instead, and so does a run
+ *     that ended on a typed terminal cause (#668).
  * Every reply carries the hidden marker `<!-- automata:mention-reply
  * comment=<id> -->`; an App-authored comment already carrying it means this
  * mention was answered and nothing is posted again. Only the App's own
@@ -79,6 +92,40 @@ export function renderMentionProviderNotice(
   provider: ProviderUnavailable,
 ): string {
   return `Nothing was changed: ${describeProviderUnavailable(provider)} Mention me again ${providerUnavailableRetryWhen(provider)}.`;
+}
+
+/**
+ * #668: the reply for a mention whose run ended on a typed terminal cause
+ * (worker terminal, supersede sweep, stalled watchdog) instead of a daemon
+ * finish. Says what happened in the commenter's terms; it never claims that
+ * nothing was pushed, because a run that timed out may already have pushed.
+ */
+export function renderMentionTerminalNotice(cause: TerminalCause): string {
+  return `I couldn't finish this: ${describeMentionTerminal(cause)}. Mention me again to retry.`;
+}
+
+function describeMentionTerminal(cause: TerminalCause): string {
+  switch (cause) {
+    case "timeout":
+      return "the run hit its time limit before it could answer";
+    case "daemon-failed":
+      return "the agent failed before it could answer";
+    case "publish-failed":
+      return "my answer could not be posted";
+    case "plane-offline":
+      return "the run never started on the execution plane";
+    case "run-failed-unreported":
+      return "the run failed before it could report back";
+    case "out-of-memory":
+      return "the run ran out of memory";
+    case "superseded":
+    case "discarded":
+    case "stale-skipped":
+    case "user-cancelled":
+      return "the run was stopped";
+    default:
+      return assertNever(cause);
+  }
 }
 
 export { mentionReplyMarker };
@@ -157,6 +204,7 @@ export async function executeMentionReply({
   terminalText,
   runReview,
   providerUnavailable,
+  terminalCause,
   logger,
 }: {
   github: MentionReplyGitHub;
@@ -168,6 +216,12 @@ export async function executeMentionReply({
    * only when no reply parsed: a parsed reply is always posted as is.
    */
   providerUnavailable?: ProviderUnavailable | null;
+  /**
+   * #668: the cause a typed terminal wrote, when the run ended without a
+   * daemon finish. Consulted only when no reply parsed and the provider did
+   * not refuse the run.
+   */
+  terminalCause?: TerminalCause | null;
   logger?: Logger;
 }): Promise<MentionReplyOutcome> {
   const marker = mentionReplyMarker(stamp.commentId);
@@ -222,11 +276,14 @@ export async function executeMentionReply({
   }
 
   const provider = parsed.ok ? null : (providerUnavailable ?? null);
+  const cause = parsed.ok || provider ? null : (terminalCause ?? null);
   const body = parsed.ok
     ? renderMentionReply(parsed.value, stamp.commentId)
     : provider
       ? `${renderMentionProviderNotice(provider)}\n\n${marker}`
-      : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
+      : cause
+        ? `${renderMentionTerminalNotice(cause)}\n\n${marker}`
+        : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
   try {
     if (inThread) {
       await github.replyToReviewComment(
@@ -246,7 +303,9 @@ export async function executeMentionReply({
   if (!parsed.ok) {
     const reason = provider
       ? `provider_unavailable: ${provider.kind}`
-      : parsed.reason;
+      : cause
+        ? `terminal: ${cause}`
+        : parsed.reason;
     logger?.error("mention-reply: no usable block — posted the notice", {
       ...meta,
       reason,
@@ -318,7 +377,11 @@ export async function handleMentionReplyAtFinish({
   db: DB;
   userId: string;
   threadId: string;
-  threadChatId: string;
+  /**
+   * The chat the daemon event named. Null from a typed-terminal path (#668),
+   * which knows only the thread: the chat is resolved from the thread.
+   */
+  threadChatId: string | null;
 }): Promise<void> {
   try {
     if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
@@ -326,10 +389,13 @@ export async function handleMentionReplyAtFinish({
     const stampMetadata = thread?.sourceMetadata;
     if (!thread || !isMentionLaneStamp(stampMetadata)) return;
     const stamp = stampMetadata.mention;
-    if (isAbandonedTerminalCause(thread.terminalCause ?? null)) {
-      logger.info("abandoned run — no reply", { threadId });
+    const rawCause = thread.terminalCause ?? null;
+    if (isMentionSilentTerminalCause(rawCause)) {
+      logger.info("stopped run — no reply", { threadId, cause: rawCause });
       return;
     }
+    const terminalCause =
+      rawCause !== null && isTerminalCause(rawCause) ? rawCause : null;
     const mode = await getOrganizationInstallationMode({
       db,
       organizationId: thread.organizationId ?? null,
@@ -338,12 +404,13 @@ export async function handleMentionReplyAtFinish({
       logger.info("[shadow] reply suppressed", { threadId });
       return;
     }
-    const threadChat = await getThreadChat({
-      db,
-      threadId,
-      threadChatId,
-      userId,
-    });
+    const chatId =
+      threadChatId ??
+      (await resolveThreadChatId({ db, threadId, version: thread.version }));
+    const threadChat =
+      chatId === null
+        ? undefined
+        : await getThreadChat({ db, threadId, threadChatId: chatId, userId });
     const terminalText =
       findLastLeadAgentText(threadChat?.messages ?? null, (text) =>
         text.includes(MENTION_REPLY_KIND),
@@ -368,6 +435,7 @@ export async function handleMentionReplyAtFinish({
             })
         : undefined,
       providerUnavailable: providerUnavailableOfChat(threadChat),
+      terminalCause,
       logger,
     });
     getPostHogServer().capture({
@@ -392,6 +460,80 @@ export async function handleMentionReplyAtFinish({
     console.error("[mention-reply] finish hook failed (non-fatal)", {
       threadId,
       error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * The chat a typed-terminal path reads when its caller did not name one (the
+ * sweeps know only the thread): a v0 thread keeps its chat on the thread row;
+ * for a v1 thread, the chat the terminal moved — markThreadsTerminal stamps
+ * its `terminalCause` mirror (#153) — and, failing that, the chat written
+ * last. Null when a v1 thread has no chat row.
+ */
+async function resolveThreadChatId({
+  db,
+  threadId,
+  version,
+}: {
+  db: DB;
+  threadId: string;
+  version: number;
+}): Promise<string | null> {
+  if (version === 0) return LEGACY_THREAD_CHAT_ID;
+  const [first] = await db
+    .select({ id: threadChatTable.id })
+    .from(threadChatTable)
+    .where(eq(threadChatTable.threadId, threadId))
+    .orderBy(
+      sql`${threadChatTable.terminalCause} IS NULL`,
+      desc(threadChatTable.updatedAt),
+    )
+    .limit(1);
+  return first?.id ?? null;
+}
+
+/**
+ * #668: the typed-terminal entry. A thread ended by the worker's terminal
+ * post, the supersede sweep or the stalled watchdog never reaches the daemon
+ * finish, so its mention would stay unanswered forever. Callers pass ONLY the
+ * ids their write actually moved; every non-mention thread is skipped here
+ * with no GitHub call. Never throws (the finish entry never does).
+ */
+export async function handleMentionRepliesAtTerminal({
+  db,
+  targets,
+}: {
+  db: DB;
+  targets: readonly MentionTerminalTarget[];
+}): Promise<void> {
+  if (targets.length === 0) return;
+  const threadIds = targets.map((t) => t.threadId);
+  let rows;
+  try {
+    rows = await db
+      .select({
+        id: threadTable.id,
+        userId: threadTable.userId,
+        sourceMetadata: threadTable.sourceMetadata,
+      })
+      .from(threadTable)
+      .where(inArray(threadTable.id, threadIds));
+  } catch (error) {
+    logger.error("terminal: thread read failed", {
+      threadIds,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  for (const row of rows) {
+    if (!isMentionLaneStamp(row.sourceMetadata)) continue;
+    await handleMentionReplyAtFinish({
+      db,
+      userId: row.userId,
+      threadId: row.id,
+      threadChatId:
+        targets.find((t) => t.threadId === row.id)?.threadChatId ?? null,
     });
   }
 }
