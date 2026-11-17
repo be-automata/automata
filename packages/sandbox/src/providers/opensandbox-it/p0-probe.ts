@@ -482,7 +482,9 @@ async function negativeControl(
     const reached = r.filter((x) => x.ok).length;
     rep.check("negative-control-4of4", reached === 4, `${reached}/4 reached`);
   } finally {
-    await provider.teardown(id);
+    // No policy means no egress sidecar: revoke and deny-all would be proxied
+    // to nothing (502). A plain delete, as the IT's AC-8 does.
+    await provider.delete(id);
   }
 }
 
