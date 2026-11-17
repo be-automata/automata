@@ -15,13 +15,13 @@ import {
 } from "@terragon/shared/model/threads";
 import { revokeDaemonTokensForThread } from "@/lib/daemon-token";
 import { mapLimit } from "@/lib/map-limit";
-import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
+import {
+  isMentionSilentTerminalCause,
+  type TerminalCause,
+} from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
-import {
-  isMentionSilentCause,
-  replyToMentionsAtTerminal,
-} from "./review/mention-terminal-reply";
+import { replyToMentionsAtTerminal } from "./review/mention-terminal-reply";
 import {
   getAgentRunStatus,
   listAgentRunsForThread,
@@ -253,6 +253,29 @@ export async function runSupersedeSweep(
     unreported: [],
     errors: [],
   };
+  try {
+    return await sweepTick(deps, report);
+  } finally {
+    // #668: a mention run this tick ended never reaches the daemon finish,
+    // its only other reply writer. Once per tick, so GitHub never holds an
+    // engine-read slot, and in `finally`: a later rule that throws must not
+    // strand the terminals an earlier rule already wrote (they are terminal
+    // now; no later tick would pick them up). Never throws.
+    await replyToMentionsAtTerminal([
+      ...report.terminals
+        .filter((t) => !isMentionSilentTerminalCause(t.cause))
+        .map((t) => ({ threadId: t.threadId })),
+      ...report.orphans.map((threadId) => ({ threadId })),
+      ...report.unreported.map((threadId) => ({ threadId })),
+    ]);
+  }
+}
+
+/** One sweep tick; every terminal it writes is recorded in `report`. */
+async function sweepTick(
+  deps: SweepDeps,
+  report: SweepReport,
+): Promise<SweepReport> {
   if (!env.SUPERSEDE_SWEEP_ENABLED) return report;
   const now = new Date();
   const cancelledAfterMs =
@@ -532,16 +555,6 @@ export async function runSupersedeSweep(
       report.errors.push({ externalId: runs[0]?.externalId ?? "", message });
     }
   });
-  // #668: a mention run this tick ended never reaches the daemon finish, its
-  // only other reply writer. Once per tick, after every rule, so GitHub never
-  // holds an engine-read slot; the silent causes cost nothing.
-  await replyToMentionsAtTerminal([
-    ...report.terminals
-      .filter((t) => !isMentionSilentCause(t.cause))
-      .map((t) => ({ threadId: t.threadId })),
-    ...report.orphans.map((threadId) => ({ threadId })),
-    ...report.unreported.map((threadId) => ({ threadId })),
-  ]);
   return report;
 }
 

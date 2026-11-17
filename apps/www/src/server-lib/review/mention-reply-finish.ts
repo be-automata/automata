@@ -13,6 +13,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import {
+  isMentionSilentTerminalCause,
   isTerminalCause,
   type TerminalCause,
 } from "@terragon/shared/model/terminal-cause";
@@ -53,10 +54,7 @@ import {
   reviewReplyTargetId,
 } from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
-import {
-  isMentionSilentCause,
-  type MentionTerminalTarget,
-} from "./mention-terminal-reply";
+import type { MentionTerminalTarget } from "./mention-terminal-reply";
 
 /**
  * The org-owned mention lane's terminal writer (emit-only, like the review
@@ -392,7 +390,7 @@ export async function handleMentionReplyAtFinish({
     if (!thread || !isMentionLaneStamp(stampMetadata)) return;
     const stamp = stampMetadata.mention;
     const rawCause = thread.terminalCause ?? null;
-    if (isMentionSilentCause(rawCause)) {
+    if (isMentionSilentTerminalCause(rawCause)) {
       logger.info("stopped run — no reply", { threadId, cause: rawCause });
       return;
     }

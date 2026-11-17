@@ -13,7 +13,10 @@ import {
 import { hatchetRun as hatchetRunTable } from "@terragon/shared/db/schema";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
@@ -445,6 +448,70 @@ describe("POST /api/daemon/run-terminal — mention reply (#668)", () => {
     await vi.waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]!.body).toContain(
       "the run never started on the execution plane",
+    );
+  });
+
+  // The worker names the chat; the writer must read THAT chat, not guess. A
+  // chat-mode thread with a newer, empty chat beside it: only the named chat
+  // holds the agent's reply, so a guess posts the timeout notice instead.
+  it("a chat-mode mention: the reply comes from the chat the worker named", async () => {
+    user = (await createTestUser({ db })).user;
+    const agentText =
+      'Done.\n\n```json mention-reply\n{"kind":"mention-reply","reply":"Re-reviewed at 183c8a6."}\n```';
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      enableThreadChatCreation: true,
+      chatOverrides: { status: "working" },
+    });
+    threadId = t.threadId;
+    threadChatId = t.threadChatId;
+    await db
+      .update(threadChatTable)
+      .set({
+        messages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [{ type: "text", text: agentText }],
+          },
+        ] as never,
+      })
+      .where(eq(threadChatTable.id, threadChatId));
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "x",
+          source: "db-version",
+          mention: STAMP,
+        } as never,
+      })
+      .where(eq(threadTable.id, threadId));
+    await db.insert(threadChatTable).values({
+      userId: user.id,
+      threadId,
+      status: "complete",
+      messages: [],
+      updatedAt: new Date(Date.now() + 60_000),
+    } as never);
+    vi.mocked(getDaemonTokenContext).mockResolvedValue({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+      organizationId: null,
+      threadChatId,
+      threadId,
+      tokenType: "daemon",
+    } as DaemonTokenContext);
+
+    expect(await (await terminal("timeout")).json()).toEqual({
+      applied: true,
+    });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]!.body).toBe(
+      `Re-reviewed at 183c8a6.\n\n${mentionReplyMarker(STAMP.commentId)}`,
     );
   });
 

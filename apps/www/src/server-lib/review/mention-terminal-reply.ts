@@ -1,24 +1,5 @@
 import { db } from "@/lib/db";
 
-/**
- * #668: the typed terminal causes a mention stays silent for. A policy cause
- * cannot reach a mention (no prKey, so the engine never supersedes, discards
- * or stale-skips it) and a person stopped a `user-cancelled` run on purpose.
- * Every other cause — `plane-offline` included, unlike the review lane's
- * `ABANDONED_TERMINAL_CAUSES` — is a run that never answered: no newer run
- * speaks for a mention, so silence here is silence forever.
- */
-const MENTION_SILENT_CAUSES: ReadonlySet<string> = new Set([
-  "superseded",
-  "discarded",
-  "stale-skipped",
-  "user-cancelled",
-]);
-
-export function isMentionSilentCause(cause: string | null): boolean {
-  return cause !== null && MENTION_SILENT_CAUSES.has(cause);
-}
-
 /** One thread a typed terminal moved; the chat when the caller knows it. */
 export interface MentionTerminalTarget {
   threadId: string;
