@@ -280,6 +280,7 @@ describe("agent-bus delivery", () => {
       if ("conflict" in inserted) throw new Error("unexpected conflict");
       await backdateCreated([inserted.id], 60_000);
       h.kick.mockClear();
+      h.broadcast.mockClear();
 
       await runAgentBusSweep();
 
@@ -298,6 +299,37 @@ describe("agent-bus delivery", () => {
         .from(agentMessages)
         .where(eq(agentMessages.id, inserted.id));
       expect(row?.consumedAt).not.toBeNull();
+      // This sweep applied to the child, so it is broadcast once.
+      expect(broadcastsFor(child.threadId)).toBe(1);
+    });
+
+    it("re-kicks a recently delivered target without broadcasting again", async () => {
+      const { organizationId, root, child } = await pair();
+      await sendAgentMessage({
+        organizationId,
+        from: root.threadId,
+        to: child.threadId,
+        key: "already-broadcast",
+        body: "one",
+      });
+      h.kick.mockClear();
+      h.broadcast.mockClear();
+
+      await runAgentBusSweep();
+
+      const kicked = (h.kick.mock.calls as [{ threadId: string }][]).map(
+        ([arg]) => arg.threadId,
+      );
+      expect(kicked.filter((id: string) => id === child.threadId)).toHaveLength(
+        1,
+      );
+      expect(broadcastsFor(child.threadId)).toBe(0);
     });
   });
 });
+
+function broadcastsFor(threadId: string): number {
+  return (h.broadcast.mock.calls as [{ data: { threadId: string } }][]).filter(
+    ([arg]) => arg.data.threadId === threadId,
+  ).length;
+}

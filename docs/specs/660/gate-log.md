@@ -64,3 +64,16 @@ None of these files imports the code this branch adds. The PR's CI is the clean 
 `sendAgentMessage` resolve while the drain never settles, and the drain is handed to `waitUntil`.
 Known limit (for S5): on a request path Cloudflare keeps `waitUntil` work ~30 s after the response, the same
 exposure `queueFollowUpInternal` already accepts; the cron path is unaffected.
+
+## Roborev fix round 3 (owner-approved, 2026-11-17)
+
+Job 1243 (`..6fd24ac`): Pass + 1 Low (every sweep re-kick re-broadcast an already-broadcast message, up to 200
+per tick) + a hardening note (lock the target thread `FOR NO KEY UPDATE`). Fixed: `sweepUnconsumed` reports only
+targets it applied to; `runAgentBusSweep` broadcasts only for those, and re-kicks recently delivered targets
+silently (`kickTarget(id, { broadcast: false })`); receive locks the thread `FOR NO KEY UPDATE`. Refinement and
+simplify of this ~20-line delta: reviewed inline by the orchestrator (no findings).
+
+`pnpm --filter @terragon/shared exec vitest run --no-file-parallelism src/model/agent-bus` 0 (4 files, 105 tests,
+all 4 crash drills) · `pnpm --filter @terragon/www exec vitest run --no-file-parallelism src/server-lib/agent-bus
+src/server-lib/cron.test.ts src/server-lib/cron-routes.static.test.ts` 0 (49 tests; new: a re-kicked recently
+delivered target is kicked once with 0 broadcasts) · `pnpm turbo tsc-check lint format-check` 0.

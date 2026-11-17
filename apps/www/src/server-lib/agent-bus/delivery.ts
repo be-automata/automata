@@ -25,12 +25,16 @@ import { maybeProcessFollowUpQueue } from "../process-follow-up-queue";
  */
 
 /**
- * Broadcasts the queued message, then schedules the drain of the target's follow-up queue unless
+ * Broadcasts the queued message (unless `broadcast: false`: a re-kick of a message
+ * already broadcast), then schedules the drain of the target's follow-up queue unless
  * the target must not start now: tier `none`, a shadow or terminal thread, a chat
  * that is already working, or a run blocked after the send (A5). The message stays
  * queued and visible in every skip case. Never throws: delivery is committed.
  */
-export async function kickTarget(threadId: string): Promise<void> {
+export async function kickTarget(
+  threadId: string,
+  { broadcast: shouldBroadcast = true }: { broadcast?: boolean } = {},
+): Promise<void> {
   try {
     const rows = await db
       .select({
@@ -56,16 +60,18 @@ export async function kickTarget(threadId: string): Promise<void> {
     const status = target.chatStatus ?? target.threadStatus;
 
     // A UI refresh only: its failure must never keep the queue from draining.
-    const broadcast = publishBroadcastUserMessage({
-      type: "user",
-      id: target.userId,
-      data: { threadId, threadChatId },
-    }).catch((error: unknown) => {
-      console.error("[agent-bus] broadcast failed (non-fatal)", {
-        threadId,
-        error,
-      });
-    });
+    const broadcast = shouldBroadcast
+      ? publishBroadcastUserMessage({
+          type: "user",
+          id: target.userId,
+          data: { threadId, threadChatId },
+        }).catch((error: unknown) => {
+          console.error("[agent-bus] broadcast failed (non-fatal)", {
+            threadId,
+            error,
+          });
+        })
+      : undefined;
     const mustSkip =
       target.shadow ||
       target.blockedAt ||
@@ -111,13 +117,16 @@ export async function sendAgentMessage(
 
 /**
  * Delivers messages whose receive never ran, then kicks every target with a
- * message consumed in the last minutes (a kick lost after commit, A6). Swept
- * targets are always a subset: their messages were just consumed. The kick is
- * idempotent: an empty queue returns at once.
+ * message consumed in the last minutes (a kick lost after commit, A6). Only the
+ * targets this sweep applied to are broadcast; the re-kick of an earlier delivery
+ * is silent. The kick is idempotent: an empty queue returns at once.
  */
 export async function runAgentBusSweep(): Promise<void> {
-  await sweepUnconsumed({ db, apply: queuedFollowUpApply });
-  for (const target of await recentlyDeliveredTargets({ db })) {
-    await kickTarget(target);
+  const { targets } = await sweepUnconsumed({ db, apply: queuedFollowUpApply });
+  const swept = new Set(targets);
+  const recent = await recentlyDeliveredTargets({ db });
+  // Broadcast only where this sweep applied a message; a re-kick is silent.
+  for (const target of new Set([...targets, ...recent])) {
+    await kickTarget(target, { broadcast: swept.has(target) });
   }
 }

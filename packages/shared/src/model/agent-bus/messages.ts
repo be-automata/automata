@@ -189,7 +189,9 @@ export async function receiveFor({
         .select({ id: thread.id })
         .from(thread)
         .where(eq(thread.id, toRun))
-        .for("update");
+        // NO KEY UPDATE: serializes receivers per target without blocking inserts
+        // that reference the thread (they take KEY SHARE).
+        .for("no key update");
       const rows = await tx
         .select()
         .from(agentMessages)
@@ -284,7 +286,8 @@ export async function sweepUnconsumed({
   for (const { toRun } of rows) {
     try {
       const result = await receiveFor({ db, toRun, apply });
-      targets.push(toRun);
+      // Only targets that actually received a message (the caller broadcasts for them).
+      if (result.applied > 0) targets.push(toRun);
       applied += result.applied;
     } catch (error) {
       logger.error(`agent-bus sweep: delivery to ${toRun} failed`, error);
