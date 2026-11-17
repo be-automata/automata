@@ -76,4 +76,19 @@ export WORKER_RUN_TERMINAL_ROOT="${WORKER_RUN_TERMINAL_ROOT:-/usr/local/automata
 install -d -m 0700 "$WORKER_RUN_TERMINAL_ROOT" \
   || echo "run-worker: could not create $WORKER_RUN_TERMINAL_ROOT; the run-terminal ledger will not survive a reboot" >&2
 
+# #656 (OpenSandbox cells): systemd hands the server's API key to this unit as a
+# credential file (LoadCredential=, with the fallback SetCredential= value `none`
+# on a box without OpenSandbox). The launcher exports the file's PATH and the
+# loopback URL and never reads, sources or prints the key, so it stays out of the
+# environment and of worker-box.env. The WORKER decides: a credential without an
+# OPENSANDBOX_API_KEY= line (the `none` fallback) means OpenSandbox is not
+# configured, and the cell path stays off (#656 PR-E, fail closed).
+# WORKER_OPENSANDBOX_GUEST_IMAGE (the digest-pinned cell image) comes from
+# worker-box.env, sourced above; worker-box.env may also override the URL.
+opensandbox_credential="${CREDENTIALS_DIRECTORY:-}/opensandbox.env"
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -s "$opensandbox_credential" ]; then
+  export WORKER_OPENSANDBOX_API_KEY_FILE="$opensandbox_credential"
+  export WORKER_OPENSANDBOX_URL="${WORKER_OPENSANDBOX_URL:-http://127.0.0.1:8090}"
+fi
+
 exec node --import tsx src/hello/worker.ts

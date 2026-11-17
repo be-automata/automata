@@ -1107,3 +1107,62 @@ describe("packages/worker/deploy/linux — OpenSandbox server (#656 G1)", () => 
     }
   });
 });
+
+describe("packages/worker/deploy/linux — worker OpenSandbox wiring (#656 G2)", () => {
+  const launcher = deployFile("linux", "run-worker.sh.template");
+  const unit = deployFile("linux", "automata-worker.service");
+  const guard =
+    /^if \[ -n "\$\{CREDENTIALS_DIRECTORY:-\}" \] && \[ -s "\$opensandbox_credential" \]; then\n([\s\S]*?)^fi$/m;
+
+  // card: protects=#656 a box without the key file still boots, and one with it hands the key to the worker unit only; fails_when=either credential line is dropped or renamed, or the fallback goes empty (systemd 255 then fails the unit, measured on the throwaway box: docs/specs/656/gate-log-g.md); no_claim=systemd's precedence between the two (measured live)
+  it("the unit loads the key credential and falls back to the literal `none`", () => {
+    expect(unit).toMatch(
+      /^LoadCredential=opensandbox\.env:\/etc\/automata\/opensandbox\.env$/m,
+    );
+    expect(unit).toMatch(/^SetCredential=opensandbox\.env:none$/m);
+    // Negative control: the empty form systemd 255 rejects is not what ships.
+    expect(unit).not.toMatch(/^SetCredential=opensandbox\.env:$/m);
+    expect(unit).not.toMatch(/^EnvironmentFile=/m);
+  });
+
+  // card: protects=#656 the env names PR-E reads, exported only when the credential is non-empty; fails_when=a name changes, an export leaves the guard, or the launcher reads the key; no_claim=PR-E's parser
+  it("the launcher exports the three names inside the non-empty-credential guard", () => {
+    const body = launcher.match(guard)?.[1];
+    expect(body, "credential guard not found").toBeTruthy();
+    expect(body).toContain(
+      'export WORKER_OPENSANDBOX_API_KEY_FILE="$opensandbox_credential"',
+    );
+    expect(body).toContain(
+      'export WORKER_OPENSANDBOX_URL="${WORKER_OPENSANDBOX_URL:-http://127.0.0.1:8090}"',
+    );
+    expect(launcher.match(/export WORKER_OPENSANDBOX_/g)).toHaveLength(2);
+    expect(launcher).toContain("${CREDENTIALS_DIRECTORY:-}/opensandbox.env");
+    // The guest image is named in the contract (worker-box.env supplies it).
+    expect(launcher).toContain("WORKER_OPENSANDBOX_GUEST_IMAGE");
+    expect(launcher).not.toMatch(/export WORKER_OPENSANDBOX_GUEST_IMAGE/);
+  });
+
+  // card: protects=#656 the key is never read by the launcher; fails_when=a line sources, cats, or reads the credential file; no_claim=what the worker does with the path
+  it("the launcher never sources, cats or reads the credential", () => {
+    const code = launcher
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"));
+    for (const line of code) {
+      if (!/opensandbox/.test(line)) continue;
+      expect(line, line).not.toMatch(
+        /\b(source|cat|read|head|tail|sed|awk|grep)\b|^\s*\.\s|\$\(<|<\s*"?\$/,
+      );
+    }
+  });
+
+  // card: protects=#656 the SIGTERM contract survives the new block; fails_when=exec node is no longer the last line or the guard sits after it; no_claim=signal delivery
+  it("keeps `exec node` as the last line, after the guard", () => {
+    const lines = launcher.trimEnd().split("\n");
+    expect(lines[lines.length - 1]).toBe(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(launcher.indexOf("opensandbox_credential=")).toBeLessThan(
+      launcher.lastIndexOf("exec node --import tsx"),
+    );
+  });
+});

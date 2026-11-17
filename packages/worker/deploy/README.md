@@ -1130,3 +1130,157 @@ HATCHET_TENANT_API_TOKEN="$T" pnpm exec tsx deploy/bind-hatchet-tenant.ts \
 
 A tenant with no worker enrolled queues its runs until #375 enrolls one. Rollback: delete
 the binding row (the org returns to the default tenant); drain the bound tenant first.
+
+## OpenSandbox cells (ADR-014, #656)
+
+The box hosts the OpenSandbox server that runs remote cells. It listens on `127.0.0.1:8090`
+only, drives a **dedicated rootless Docker daemon** (account `automata-opensandbox`, socket
+`/run/automata-opensandbox-docker/docker.sock`, mode 0600, no shared group, so the worker
+account cannot reach it), and is reached from outside only through a Cloudflare tunnel behind
+Access. The P0 probe proved the rootless daemon enforces egress on x86_64 / Ubuntu 24.04
+(34/34, `docs/specs/656/gate-log-g.md`). All commands run as root on the box.
+
+The order below secures the hostname **before** it is tunnelled (the rule from "Engine
+dashboard hygiene": a tunnelled service with no auth gave the public an owner login). Do not
+reorder steps 3 to 6.
+
+### 1. Install on the box
+
+```bash
+cd /opt/automata-platform/packages/worker/deploy/linux
+./install-rootless-docker.sh --profile opensandbox     # the dedicated rootless daemon
+./install-opensandbox.sh                               # images by digest, key file, server unit
+./install-opensandbox.sh --check                       # read-only; exit 1 on any FAIL
+```
+
+`install-opensandbox.sh` runs the daemon profile itself, so the first line is only for
+inspecting that step alone. The API key is generated once into `/etc/automata/opensandbox.env`
+(root:root, 0600, one `OPENSANDBOX_API_KEY=<hex>` line) and never printed. The server unit
+takes it through `LoadCredential=`, and the worker unit takes the same file through its own
+`LoadCredential=`, so the key is in no other file and in no process environment.
+
+### 2. Pre-pull the cell image (optional, by digest)
+
+```bash
+./install-opensandbox.sh --pull-cell-image <registry/name@sha256:...>
+```
+
+A tag exits 2. The pull is refused when the store's filesystem has less than 20 GB free
+(`CELL_IMAGE_MIN_FREE_GB`). The image is about **12.5 GB on disk** in a third image store
+(the runner daemon and the rootful daemon each hold their own; no layers are shared across
+daemons). The cell's ready timeout is 60 s, which a cold pull cannot meet, so pre-pull
+before the first cell. Decide with the owner before doing this on the production box: the
+80 GB disk has already run out once with two copies.
+
+### 3. Access app and service token (first)
+
+In Cloudflare Zero Trust, create a self-hosted Access application on the server hostname with
+**exactly one policy: action Service Auth, including one service token.**
+
+- Do **not** add an Allow policy or an identity provider. Either one makes Access answer a
+  token-less request with a 302 to the login page instead of a 403.
+- Note the application's **AUD** tag, and keep the token's id and secret out of the repo and
+  out of command lines (they are PR-C's Worker secrets, step 8).
+
+### 4. Tunnel ingress rule with `access.required`
+
+In `/etc/cloudflared/config.yml`, before the catch-all, path-fenced to the reconciler's
+routes (everything else on the hostname, including `/proxy/` and any exec path, gets 404):
+
+```yaml
+- hostname: <host>
+  path: ^/(health|sandboxes(/[^/]+(/(networkpolicy|credential-vault))?)?)$
+  service: http://127.0.0.1:8090
+  originRequest:
+    access:
+      required: true
+      teamName: <team>
+      audTag: ["<AUD>"]
+- hostname: <host>
+  service: http_status:404
+```
+
+`access.required` makes cloudflared reject, at the origin, any request without a valid
+Access JWT, so a deleted or misconfigured Access app does not open the hostname (two locks).
+Ingress cannot filter by method, so `POST /sandboxes` passes the fence; Access, the API key
+and `access.required` still apply. A method filter would need a Worker or WAF rule.
+
+### 5. Validate, then restart the connector
+
+```bash
+cloudflared tunnel ingress validate
+cloudflared tunnel ingress rule https://<host>/sandboxes/x/proxy/44772/ping   # must pick the 404 rule
+systemctl restart cloudflared-automata-hatchet.service
+```
+
+### 6. DNS route last
+
+```bash
+cloudflared tunnel route dns automata-hatchet <host>
+```
+
+Until this step the hostname resolves nowhere, so no unauthenticated window opens.
+
+### 7. Checks (AC-12)
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://<host>/health
+```
+
+Without any token this must print exactly `403` with an empty redirect URL. **A 302 (any
+redirect URL) is a FAIL**: step 3 left a login path open; remove it before going on.
+
+With the two `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers (read them from your
+secret store into the shell, never type them inline):
+
+- no API key, `GET /sandboxes` returns 401;
+- with the API key too, `GET /sandboxes?metadata=automata%3Dcell` returns 200;
+- `…/sandboxes/x/proxy/44772/ping` returns 404.
+
+### 8. www secrets (PR-C's code reads the Access ones)
+
+Every value goes through `wrangler secret put … --name automata-www` on stdin, never on a
+command line. `opensandboxConfigured()` turns the cell plane on once both URL and key are
+non-empty, so set them in this order:
+
+1. PR-C's two Access secrets (the service token's id and secret);
+2. `OPENSANDBOX_GUEST_IMAGE` (the cell image digest);
+3. `OPENSANDBOX_API_KEY`, streamed from the box:
+   `ssh <box> sudo sed -n 's/^OPENSANDBOX_API_KEY=//p' /etc/automata/opensandbox.env | npx wrangler secret put OPENSANDBOX_API_KEY --name automata-www`;
+4. **last**, `OPENSANDBOX_URL=https://<host>`, and only after step 7 passes.
+
+The per-user flag `opensandboxCells` still gates `cell-plan`.
+
+### 9. Worker
+
+The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
+`WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_GUEST_IMAGE`.
+
+- The launcher exports the first two **only when** `$CREDENTIALS_DIRECTORY/opensandbox.env`
+  is non-empty: the file path, and `http://127.0.0.1:8090` unless `worker-box.env` overrides
+  it. On a box without the key file the unit still boots (an empty `SetCredential=` fallback)
+  and nothing is exported, so a marked run fails closed.
+- Set `WORKER_OPENSANDBOX_GUEST_IMAGE` (digest-pinned; a tag is refused) in `worker-box.env`.
+- Re-render the worker unit and launcher, `systemctl daemon-reload`, then restart with
+  `automata-worker-safe-restart`. The worker picks the change up only on that restart.
+
+### Findings every operator must know
+
+- **Metadata values** must match `[A-Za-z0-9._-]`, at most 63 characters, alphanumeric at both
+  ends. The server answers 400 `SANDBOX::INVALID_METADATA_LABEL` otherwise (a `:` in a step
+  key is enough).
+- **Deny-all needs the vault revoked first.** OpenSandbox 1.2.1 refuses a deny-all
+  (`credential vault policy validation: binding ... is not allowed by egress policy`) while
+  the vault holds a binding. An emergency quarantine is revoke, then deny-all.
+- **A cell with no network policy has no egress sidecar**, so its revoke and deny-all
+  return **502**, not 404. Delete such a cell directly (`DELETE /sandboxes/{id}`). Production
+  cells always carry a policy.
+- `docker logs` does not work on the dedicated daemon (its logging driver cannot be read
+  back); use `journalctl -u automata-opensandbox.service` for the server's own output.
+
+### Rollback, in this order
+
+1. unset www's `OPENSANDBOX_URL`;
+2. let the reconciler clear the cells, or run `teardown` by hand;
+3. `systemctl disable --now automata-opensandbox.service`;
+4. remove the DNS route and the ingress rule.

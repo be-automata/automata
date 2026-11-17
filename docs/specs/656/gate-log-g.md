@@ -86,3 +86,38 @@ Each failed run was a probe or production bug, not an enforcement failure. The f
 | `pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism src/providers/opensandbox-it/harness.test.ts` | 0     | 18 passed                                                                                      |
 | `shellcheck -s bash` on the changed scripts                                                                          | 0     |                                                                                                |
 | `pnpm turbo tsc-check --force`; `pnpm turbo lint --force`                                                            | 0 / 0 |                                                                                                |
+
+## G1: live install on the throwaway box
+
+On `automata-cell-uat-656`, at the G1 commit, `install-opensandbox.sh` installed the server on the dedicated rootless daemon:
+
+- `automata-opensandbox.service` is active and `/health` answers 200 on `127.0.0.1:8090`.
+- The listener is on `127.0.0.1` only (not `0.0.0.0` or `[::]`).
+- `GET /sandboxes` without the API key returns 401, and with it returns 200.
+
+The key lives only in `/etc/automata/opensandbox.env` (root:root 0600) and reaches the unit through `LoadCredential=`. No key value was printed or recorded.
+
+## G2: worker wiring and the runbook
+
+Files: `run-worker.sh.template`, `automata-worker.service`, `deploy-assets.test.ts`, `deploy/README.md` (new section "OpenSandbox cells (ADR-014, #656)", steps 1 to 9 in the order Access app, AUD, ingress with `access.required`, `ingress validate`, DNS route, 403 check), and this log.
+
+- **Worker unit:** `LoadCredential=opensandbox.env:/etc/automata/opensandbox.env` plus an empty `SetCredential=opensandbox.env:` fallback, so a box without the file still boots.
+- **Launcher:** inside a guard on a non-empty `$CREDENTIALS_DIRECTORY/opensandbox.env`, it exports `WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_URL` (default `http://127.0.0.1:8090`). `WORKER_OPENSANDBOX_GUEST_IMAGE` comes from `worker-box.env`. `exec node` stays the last line. The launcher never reads the key.
+- **Pinned by tests:** the names, both credential lines, the guard, no source/cat of the credential, and the last line.
+- **Not yet verified:** that systemd 255 uses the empty `SetCredential=` when the `LoadCredential=` file is absent. This is the live check on the throwaway box (the main session runs it; the result goes here).
+
+## G2 live check: the worker unit's credential fallback (systemd 255.4-1ubuntu8.18)
+
+On the throwaway box, a throwaway unit carried the worker unit's two credential lines and a script that reports only whether the credential exists, its size, and whether it has an `OPENSANDBOX_API_KEY=` line:
+
+| `SetCredential=`                             | Key file | Result                                                         |
+| :------------------------------------------- | :------- | :------------------------------------------------------------- |
+| `opensandbox.env:` (empty, as first written) | missing  | **unit fails**: `Failed to set up credentials: Protocol error` |
+| `opensandbox.env:` (empty)                   | present  | starts; the credential has the key line                        |
+| (none)                                       | missing  | unit fails (credentials)                                       |
+| `opensandbox.env:none`                       | missing  | **starts**; the credential is 4 bytes with no key line         |
+| `opensandbox.env:none`                       | present  | starts; the real key wins (85 bytes, one key line)             |
+
+**An empty fallback does not apply on systemd 255.** As first written, the worker unit would not start on any box without the key file, production `automata-exec-1` included. The unit now ships `SetCredential=opensandbox.env:none`. A test pins it, with a negative control against the empty form.
+
+The launcher still never reads the credential. The worker (PR-E) treats a credential without an `OPENSANDBOX_API_KEY=` line as "OpenSandbox not configured" and keeps the cell path off.

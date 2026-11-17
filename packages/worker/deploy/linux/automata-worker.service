@@ -55,6 +55,19 @@ StateDirectoryMode=0700
 # `activating`.
 ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
 
+# ── OpenSandbox API key (#656) ─────────────────────────────────────────────
+#
+# PID 1 reads the root-only key file and exposes it to THIS unit alone at
+# $CREDENTIALS_DIRECTORY/opensandbox.env; the key never enters the environment or
+# worker-box.env. SetCredential= is the fallback when the file is absent (a box
+# without OpenSandbox, production today), so the unit still boots. Its value must
+# NOT be empty: measured on systemd 255 (Ubuntu 24.04), an empty fallback does not
+# apply and the unit fails with "Failed to set up credentials: Protocol error". The
+# literal `none` holds no OPENSANDBOX_API_KEY= line, which the worker reads as
+# "OpenSandbox not configured" and keeps the cell path off (#656 PR-E).
+LoadCredential=opensandbox.env:/etc/automata/opensandbox.env
+SetCredential=opensandbox.env:none
+
 ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 
 # ── Drain BEFORE the signal (#386) ─────────────────────────────────────────
