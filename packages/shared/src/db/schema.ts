@@ -3334,6 +3334,12 @@ export const cellStep = pgTable(
     /** Every attempt up to and including this one is revoked (the sweep's verdict). */
     revokedThrough: integer("revoked_through"),
     doneAt: timestamp("done_at", { mode: "date" }),
+    /**
+     * The lease of the current attempt (#656 R2): database now() when the attempt was
+     * opened by openNextAttempt or last seen by thread-status. NULL = no lease (opened
+     * by openStep or before the column existed): judged by revocation, fence and done only.
+     */
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "date" }),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
@@ -3472,5 +3478,34 @@ export const cellEffect = pgTable(
       name: "cell_effect_pk",
       columns: [table.stepKey, table.idempotencyKey],
     }),
+  ],
+);
+
+/**
+ * The control-plane effect ledger (#652): one row per effect key, written as an
+ * intent (`done_at` null) before the effect runs and completed after it.
+ * Unlike `cell_effect` it has no cell step: the control plane has no bearer.
+ * The key is sha256(organizationId|mission|step|effect|outputDigest) cut to 32
+ * hex (`effectKey`); the row never holds the payload or the output.
+ */
+export const controlEffects = pgTable(
+  "control_effects",
+  {
+    key: text("key").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    mission: text("mission").notNull(),
+    step: text("step").notNull(),
+    effect: text("effect").notNull(),
+    outputDigest: text("output_digest").notNull(),
+    intentAt: timestamp("intent_at", { mode: "date" }).defaultNow().notNull(),
+    /** Null = intent only: the effect may or may not have happened. */
+    doneAt: timestamp("done_at", { mode: "date" }),
+    /** True when `done_at` was set by finding the effect's marker, not by applying it. */
+    reconciled: boolean("reconciled").notNull().default(false),
+  },
+  (table) => [
+    index("control_effects_organization_id_index").on(table.organizationId),
   ],
 );

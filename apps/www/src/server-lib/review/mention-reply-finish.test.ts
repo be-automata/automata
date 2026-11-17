@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MentionLaneStamp } from "@terragon/shared";
 import { getOctokitForApp } from "@/lib/github";
+import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import {
   getThreadChat,
   getThreadMinimal,
@@ -10,9 +11,11 @@ import { getOrganizationInstallationMode } from "@terragon/shared/model/github-i
 import {
   MENTION_REPLY_NOTICE,
   executeMentionReply,
+  handleMentionRepliesAtTerminal,
   handleMentionReplyAtFinish,
   mentionReplyMarker,
   parseMentionReply,
+  renderMentionTerminalNotice,
   type MentionReplyGitHub,
 } from "./mention-reply-finish";
 import { MENTION_SKILL_NAME, validateSkillBody } from "./review-skill";
@@ -250,6 +253,68 @@ describe("executeMentionReply", () => {
     });
     expect(parsed.calls[0]).toContain("All good.");
     expect(parsed.calls[0]).not.toContain("credential");
+  });
+
+  // Card: protects=#668, a mention whose run ended on a typed terminal (no
+  // daemon finish) says what happened instead of "a human should look";
+  // fails_when=the generic notice posts, the marker is lost, or the cause
+  // outranks a parsed reply or a provider refusal; no_claim=which path wrote
+  // the cause (the call-site suites).
+  it("a typed terminal cause → the cause notice, with the marker", async () => {
+    const { github, calls } = fakeGitHub();
+    const outcome = await executeMentionReply({
+      github,
+      stamp: ISSUE_STAMP,
+      terminalText: "",
+      terminalCause: "timeout",
+    });
+    expect(outcome).toEqual({
+      outcome: "notice_posted",
+      reason: "terminal: timeout",
+    });
+    expect(calls).toEqual([
+      `issue:I couldn't finish this: the run hit its time limit before it could answer. Mention me again to retry.\n\n${mentionReplyMarker(ISSUE_STAMP.commentId)}`,
+    ]);
+
+    const parsed = fakeGitHub();
+    await executeMentionReply({
+      github: parsed.github,
+      stamp: ISSUE_STAMP,
+      terminalText: block({ kind: "mention-reply", reply: "Done anyway." }),
+      terminalCause: "timeout",
+    });
+    expect(parsed.calls[0]).toContain("Done anyway.");
+    expect(parsed.calls[0]).not.toContain("couldn't finish");
+
+    const refused = fakeGitHub();
+    await executeMentionReply({
+      github: refused.github,
+      stamp: ISSUE_STAMP,
+      terminalText: "",
+      providerUnavailable: { kind: "auth_rejected" },
+      terminalCause: "daemon-failed",
+    });
+    expect(refused.calls[0]).toContain("an org admin must reconnect it");
+    expect(refused.calls[0]).not.toContain("couldn't finish");
+  });
+
+  it("every failure cause has its own wording, none claims nothing was pushed", () => {
+    const failures = [
+      "timeout",
+      "daemon-failed",
+      "publish-failed",
+      "plane-offline",
+      "run-failed-unreported",
+      "out-of-memory",
+    ] as const;
+    const texts = failures.map(renderMentionTerminalNotice);
+    expect(new Set(texts).size).toBe(failures.length);
+    for (const text of texts) {
+      expect(text).toMatch(
+        /^I couldn't finish this: .+\. Mention me again to retry\.$/,
+      );
+      expect(text).not.toMatch(/nothing was (changed|pushed)/i);
+    }
   });
 
   it("a marker lookup failure still posts (a lost reply is worse than a duplicate)", async () => {
@@ -599,6 +664,181 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
     } as never);
     await handleMentionReplyAtFinish(args);
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+  });
+});
+
+describe("typed-terminal mention replies (#668)", () => {
+  const octokit = {
+    paginate: vi.fn(async () => [] as unknown[]),
+    rest: {
+      issues: {
+        listComments: vi.fn(),
+        createComment: vi.fn(async () => ({ data: {} })),
+      },
+    },
+  };
+  const mentionThread = (terminalCause: string | null) => ({
+    organizationId: "o-1",
+    version: 0,
+    terminalCause,
+    sourceMetadata: {
+      type: "automation-skill",
+      skillName: MENTION_SKILL_NAME,
+      contentSha: "x",
+      source: "db-version",
+      mention: ISSUE_STAMP,
+    },
+  });
+  /** The one `select … from thread where id in (…)` the batch entry runs. */
+  const fakeDb = (rows: unknown[]) =>
+    ({
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({ where: vi.fn(async () => rows) })),
+      })),
+    }) as never;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+    // The run ended before the agent said anything.
+    vi.mocked(getThreadChat).mockResolvedValue({ messages: [] } as never);
+  });
+
+  // Card: protects=#668 AC-3, plane-offline (a mention that never ran) is
+  // answered although the review lane treats it as abandoned; a person's stop
+  // and the policy causes stay silent; fails_when=the review lane's abandoned
+  // list is reused; no_claim=the cause each path writes.
+  it.each([
+    ["plane-offline", true],
+    ["timeout", true],
+    ["run-failed-unreported", true],
+    ["daemon-failed", true],
+    ["out-of-memory", true],
+    ["user-cancelled", false],
+    ["superseded", false],
+    ["discarded", false],
+    ["stale-skipped", false],
+  ])("cause %s → replies: %s", async (cause, replies) => {
+    vi.mocked(getThreadMinimal).mockResolvedValue(
+      mentionThread(cause) as never,
+    );
+    await handleMentionReplyAtFinish({
+      db: {} as never,
+      userId: "u-1",
+      threadId: "t-1",
+      threadChatId: null,
+    });
+    if (replies) {
+      expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(octokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issue_number: 7,
+          body: expect.stringContaining(
+            renderMentionTerminalNotice(cause as never),
+          ),
+        }),
+      );
+    } else {
+      expect(getOctokitForApp).not.toHaveBeenCalled();
+      expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    }
+  });
+
+  it("no chat id from the caller: a v0 thread reads its chat from the thread row", async () => {
+    vi.mocked(getThreadMinimal).mockResolvedValue(
+      mentionThread("timeout") as never,
+    );
+    await handleMentionReplyAtFinish({
+      db: {} as never,
+      userId: "u-1",
+      threadId: "t-1",
+      threadChatId: null,
+    });
+    expect(getThreadChat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: "t-1",
+        threadChatId: LEGACY_THREAD_CHAT_ID,
+      }),
+    );
+  });
+
+  // Card: protects=#668 AC-4/5, the batch entry answers mention threads only
+  // and a mention already answered is not answered again; fails_when=a
+  // non-mention thread costs a GitHub call or the marker is ignored.
+  it("the batch entry answers mention threads only", async () => {
+    vi.mocked(getThreadMinimal).mockResolvedValue(
+      mentionThread("timeout") as never,
+    );
+    await handleMentionRepliesAtTerminal({
+      db: fakeDb([
+        { id: "t-task", userId: "u-1", sourceMetadata: null },
+        {
+          id: "t-review",
+          userId: "u-1",
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName: "pr-review",
+            contentSha: "x",
+            source: "db-version",
+          },
+        },
+        {
+          id: "t-mention",
+          userId: "u-1",
+          sourceMetadata: mentionThread("timeout").sourceMetadata,
+        },
+      ]),
+      targets: [
+        { threadId: "t-task" },
+        { threadId: "t-review" },
+        { threadId: "t-mention", threadChatId: "c-9" },
+      ],
+    });
+    expect(getThreadMinimal).toHaveBeenCalledTimes(1);
+    expect(getThreadMinimal).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "t-mention", userId: "u-1" }),
+    );
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    // The chat the caller named is the one read.
+    expect(getThreadChat).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "t-mention", threadChatId: "c-9" }),
+    );
+
+    // Answered already (the App's marker is there): nothing posts again.
+    octokit.paginate.mockResolvedValueOnce([
+      { user: { login: resolveBotLogin() }, body: mentionReplyMarker(101) },
+    ]);
+    await handleMentionRepliesAtTerminal({
+      db: fakeDb([
+        {
+          id: "t-mention",
+          userId: "u-1",
+          sourceMetadata: mentionThread("timeout").sourceMetadata,
+        },
+      ]),
+      targets: [{ threadId: "t-mention" }],
+    });
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("no ids → no read; a failed read is logged, never thrown", async () => {
+    const db = fakeDb([]);
+    await handleMentionRepliesAtTerminal({ db, targets: [] });
+    expect(
+      (db as { select: ReturnType<typeof vi.fn> }).select,
+    ).not.toHaveBeenCalled();
+
+    const broken = {
+      select: vi.fn(() => {
+        throw new Error("db down");
+      }),
+    } as never;
+    await expect(
+      handleMentionRepliesAtTerminal({
+        db: broken,
+        targets: [{ threadId: "t-1" }],
+      }),
+    ).resolves.toBeUndefined();
   });
 });
 

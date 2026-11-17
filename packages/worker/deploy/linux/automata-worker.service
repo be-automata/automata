@@ -55,6 +55,13 @@ StateDirectoryMode=0700
 # `activating`.
 ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8888/api/ready && exit 0; sleep 2; done; echo "engine not ready on 127.0.0.1:8888 after 60s" >&2; exit 1'
 
+# ── OpenSandbox API key (#656) ─────────────────────────────────────────────
+#
+# Not here. install-opensandbox.sh adds the credential to a box that hosts the
+# server, as the drop-in automata-worker.service.d/opensandbox.conf (source:
+# automata-worker-opensandbox.conf), so a box without OpenSandbox has no
+# credential line and boots as before.
+
 ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 
 # ── Drain BEFORE the signal (#386) ─────────────────────────────────────────

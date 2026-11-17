@@ -26,8 +26,9 @@ const h = vi.hoisted(() => ({
 vi.mock("@/lib/db", () => ({ db: {} }));
 vi.mock("@terragon/shared/model/threads", () => ({
   getStalledThreads: h.getStalledThreads,
-  stopStalledThreads: vi.fn(async () => {
+  stopStalledThreads: vi.fn(async ({ threadIds }: { threadIds: string[] }) => {
     h.order.push("stop");
+    return threadIds;
   }),
   getUserIdsWithThreadsStuckInQueue: h.stuckUsers,
   getUserIdsWithThreadsReadyToProcess: vi.fn(async () => []),
@@ -50,6 +51,13 @@ vi.mock("@/agent/sandbox", () => ({ maybeHibernateSandboxById: vi.fn() }));
 vi.mock("@/server-lib/process-queued-thread", () => ({
   maybeStartQueuedThreadChat: h.drain,
   retireStrandedQueuedThreads: h.strandedSweep,
+}));
+vi.mock("@/server-lib/review/mention-terminal-reply", () => ({
+  replyToMentionsAtTerminal: vi.fn(
+    async (targets: readonly { threadId: string }[]) => {
+      h.order.push(`mention-reply:${targets.map((t) => t.threadId).join(",")}`);
+    },
+  ),
 }));
 vi.mock("@/server-lib/review/review-sweep", () => ({
   runReviewSweep: vi.fn(async () => {
@@ -147,6 +155,8 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-hatchet",
       "prune-egress",
       "stop",
+      // #668: the threads the watchdog moved, after hibernation.
+      "mention-reply:t1",
       "self-heal:hourly",
       "knowledge-purge",
       "profile-evidence",
@@ -161,6 +171,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-hatchet",
       "prune-egress",
       "stop",
+      "mention-reply:t1",
       "knowledge-purge",
       "profile-evidence",
     ]);
@@ -196,6 +207,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "prune-hatchet",
       "prune-egress",
       "stop",
+      "mention-reply:t1",
     ]);
   });
 
