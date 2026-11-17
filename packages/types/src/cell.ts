@@ -93,6 +93,19 @@ export const CELL_MIN_TTL_MS = 60_000;
  */
 export const CELL_RUN_TTL_MS = 45 * 60 * 1000;
 
+/** A cell attempt unseen this long is dead (#656 R2): ≥ 30 polls at the worker's 5-10 s cadence. */
+export const CELL_LEASE_STALE_MS = 5 * 60 * 1000;
+
+export interface CellKey {
+  stepKey: string;
+  attempt: number;
+}
+
+/** The dead-set key of a cell: `stepKey#attempt`. */
+export function cellKeyId(key: CellKey): string {
+  return `${key.stepKey}#${key.attempt}`;
+}
+
 /** Carries raw secrets in `vault`: sealing it for transport is the caller's job. */
 export interface OpenSandboxCellCreatePlan {
   provider: "opensandbox";

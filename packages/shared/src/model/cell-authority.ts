@@ -1,5 +1,6 @@
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
+import { cellKeyId, type CellKey } from "@terragon/types/cell";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 
 import { DB } from "../db";
@@ -19,11 +20,14 @@ import { hashOpaqueToken, mintOpaqueToken } from "../utils/opaque-token";
  *  3. an idempotency key on every effect       → `beginEffect` / `completeEffect`
  *                                                (`releaseEffect` drops a claim that
  *                                                never got an answer);
- *  4. an attempt fence                         → `openStep` (monotone lease) +
- *                                                the bearer check under the step
- *                                                lock in `beginEffect`;
+ *  4. an attempt fence                         → `openNextAttempt` (server-assigned,
+ *                                                monotone lease; `openStep` is the
+ *                                                caller-chosen fixture form) + the
+ *                                                bearer check under the step lock
+ *                                                in `beginEffect`;
  *  5. an effect budget per step                → reserved in `beginEffect`;
- *  6. a reconciler                             → uses `revokeAttempt` (L3 PR 3).
+ *  6. a reconciler                             → uses `revokeAttempt` and reads
+ *                                                `deadCellAttempts` (#656).
  *
  * Contract notes:
  *  - `stepKey` is the engine's identity for a step and is globally unique; a step
@@ -68,12 +72,82 @@ const effectKey = (stepKey: string, idempotencyKey: string) =>
 const isRevoked = (attempt: number, revokedThrough: number | null): boolean =>
   revokedThrough !== null && attempt <= revokedThrough;
 
+const CELL_MAX_ATTEMPTS = 1000;
+const DEAD_READ_MAX_KEYS = 1000;
+
+function assertStepShape(step: {
+  stepTimeoutMs: number;
+  effectBudget: number | null;
+  allowedRef: string | null;
+}): void {
+  assertPositiveInt("stepTimeoutMs", step.stepTimeoutMs);
+  if (
+    step.effectBudget !== null &&
+    (!Number.isInteger(step.effectBudget) || step.effectBudget < 0)
+  ) {
+    throw new RangeError("effectBudget must be null or a non-negative integer");
+  }
+  if (step.allowedRef !== null && !isBranchRef(step.allowedRef)) {
+    throw new RangeError("allowedRef must be null or a refs/heads/ branch ref");
+  }
+}
+
 /**
- * Take the lease for `attempt`. Creates the step on the first attempt; a newer
- * attempt replaces the current one. Re-opening with the attempt that already
- * holds the lease is a no-op success (a restarted worker re-opening its own
- * attempt). A stale or revoked attempt, a finished step, or a step that belongs
- * to another organization or thread is refused.
+ * Explains an empty upsert: the shared refusals in one order. Org/thread
+ * mismatch (or a vanished row) is a `conflict`, then a done step (a
+ * finishStep tombstone has no ref to compare), then an `allowedRef` mismatch.
+ * Otherwise the row is returned for the caller's own tail.
+ */
+async function classifyMiss(
+  db: DB,
+  step: {
+    stepKey: string;
+    organizationId: string;
+    threadId: string;
+    allowedRef: string | null;
+  },
+): Promise<
+  | { reason: "conflict" | "step_done" }
+  | { currentAttempt: number; revokedThrough: number | null }
+> {
+  const existing = (
+    await db
+      .select({
+        currentAttempt: cellStep.currentAttempt,
+        doneAt: cellStep.doneAt,
+        revokedThrough: cellStep.revokedThrough,
+        organizationId: cellStep.organizationId,
+        threadId: cellStep.threadId,
+        allowedRef: cellStep.allowedRef,
+      })
+      .from(cellStep)
+      .where(eq(cellStep.stepKey, step.stepKey))
+      .limit(1)
+  )[0];
+  if (
+    !existing ||
+    existing.organizationId !== step.organizationId ||
+    existing.threadId !== step.threadId
+  ) {
+    return { reason: "conflict" };
+  }
+  if (existing.doneAt) return { reason: "step_done" };
+  if (existing.allowedRef !== step.allowedRef) return { reason: "conflict" };
+  return {
+    currentAttempt: existing.currentAttempt,
+    revokedThrough: existing.revokedThrough,
+  };
+}
+
+/**
+ * Take the lease for a CALLER-CHOSEN `attempt`. Creates the step on the first
+ * attempt; a newer attempt replaces the current one. Re-opening with the attempt
+ * that already holds the lease is a no-op success (a restarted worker re-opening
+ * its own attempt). A stale or revoked attempt, a finished step, or a step that
+ * belongs to another organization or thread is refused. It does not stamp the
+ * lease: advancing clears `last_seen_at`, so a stale stamp never condemns the new
+ * attempt. After #656 PR-C this is the fixture and spike primitive; production
+ * opens through `openNextAttempt`, which chooses the attempt itself.
  *
  * `allowedRef` is the one ref (`refs/heads/<name>`) the step may push, or null
  * when it does not push. It is fixed for the life of the step: re-opening with a
@@ -101,16 +175,7 @@ export async function openStep({
     }
 > {
   assertPositiveInt("attempt", step.attempt);
-  assertPositiveInt("stepTimeoutMs", step.stepTimeoutMs);
-  if (
-    step.effectBudget !== null &&
-    (!Number.isInteger(step.effectBudget) || step.effectBudget < 0)
-  ) {
-    throw new RangeError("effectBudget must be null or a non-negative integer");
-  }
-  if (step.allowedRef !== null && !isBranchRef(step.allowedRef)) {
-    throw new RangeError("allowedRef must be null or a refs/heads/ branch ref");
-  }
+  assertStepShape(step);
   const rows = await db
     .insert(cellStep)
     .values({
@@ -124,7 +189,7 @@ export async function openStep({
     })
     .onConflictDoUpdate({
       target: cellStep.stepKey,
-      set: { currentAttempt: step.attempt },
+      set: { currentAttempt: step.attempt, lastSeenAt: null },
       where: and(
         lt(cellStep.currentAttempt, step.attempt),
         isNull(cellStep.doneAt),
@@ -140,34 +205,210 @@ export async function openStep({
     .returning({ stepKey: cellStep.stepKey });
   if (rows[0]) return { ok: true };
 
-  const existing = (
-    await db
-      .select({
-        currentAttempt: cellStep.currentAttempt,
-        doneAt: cellStep.doneAt,
-        revokedThrough: cellStep.revokedThrough,
-        organizationId: cellStep.organizationId,
-        threadId: cellStep.threadId,
-        allowedRef: cellStep.allowedRef,
-      })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, step.stepKey))
-      .limit(1)
-  )[0];
-  if (
-    !existing ||
-    existing.organizationId !== step.organizationId ||
-    existing.threadId !== step.threadId ||
-    existing.allowedRef !== step.allowedRef
-  ) {
-    return { ok: false, reason: "conflict" };
-  }
-  if (existing.doneAt) return { ok: false, reason: "step_done" };
-  if (isRevoked(step.attempt, existing.revokedThrough)) {
+  const miss = await classifyMiss(db, step);
+  if ("reason" in miss) return { ok: false, reason: miss.reason };
+  if (isRevoked(step.attempt, miss.revokedThrough)) {
     return { ok: false, reason: "revoked" };
   }
-  if (existing.currentAttempt === step.attempt) return { ok: true };
+  if (miss.currentAttempt === step.attempt) return { ok: true };
   return { ok: false, reason: "stale_attempt" };
+}
+
+/**
+ * Open the next attempt of a step, numbered by the database (#656 R3): attempt 1
+ * on first open, `current + 1` after. Stamps the lease (`last_seen_at = now()`).
+ * Concurrent calls get distinct, consecutive attempts. Refused for a finished
+ * step (`step_done`), another org/thread/`allowedRef` (`conflict`) and past
+ * 1000 attempts (`attempt_limit`). Revocation does not block it: `finishStep`
+ * is what ends a run. `stepTimeoutMs` and `effectBudget` are fixed at first open.
+ */
+export async function openNextAttempt({
+  db,
+  step,
+}: {
+  db: DB;
+  step: {
+    stepKey: string;
+    organizationId: string;
+    threadId: string;
+    stepTimeoutMs: number;
+    effectBudget: number | null;
+    allowedRef: string | null;
+  };
+}): Promise<
+  | { ok: true; attempt: number }
+  | { ok: false; reason: "step_done" | "conflict" | "attempt_limit" }
+> {
+  assertStepShape(step);
+  const rows = await db
+    .insert(cellStep)
+    .values({
+      stepKey: step.stepKey,
+      organizationId: step.organizationId,
+      threadId: step.threadId,
+      currentAttempt: 1,
+      stepTimeoutMs: step.stepTimeoutMs,
+      effectBudget: step.effectBudget,
+      allowedRef: step.allowedRef,
+      lastSeenAt: sql`now()`,
+    })
+    .onConflictDoUpdate({
+      target: cellStep.stepKey,
+      set: {
+        currentAttempt: sql`${cellStep.currentAttempt} + 1`,
+        lastSeenAt: sql`now()`,
+      },
+      where: and(
+        isNull(cellStep.doneAt),
+        eq(cellStep.organizationId, step.organizationId),
+        eq(cellStep.threadId, step.threadId),
+        sql`${cellStep.allowedRef} IS NOT DISTINCT FROM ${step.allowedRef}`,
+        lt(cellStep.currentAttempt, CELL_MAX_ATTEMPTS),
+      ),
+    })
+    .returning({ attempt: cellStep.currentAttempt });
+  if (rows[0]) return { ok: true, attempt: rows[0].attempt };
+
+  const miss = await classifyMiss(db, step);
+  if ("reason" in miss) return { ok: false, reason: miss.reason };
+  return { ok: false, reason: "attempt_limit" };
+}
+
+/**
+ * Renew the lease of `attempt` (database now()). True only when it is the
+ * current attempt, neither revoked nor done, and already leased (a NULL lease
+ * is never granted by a stamp: such a row is judged by revocation only). False
+ * covers unknown, fenced, revoked, done and unleased steps: a fenced attempt's poll never
+ * renews anything. Run as one autocommit statement, not inside a long transaction.
+ */
+export async function stampSeen({
+  db,
+  stepKey,
+  attempt,
+}: {
+  db: DB;
+  stepKey: string;
+  attempt: number;
+}): Promise<boolean> {
+  assertPositiveInt("attempt", attempt);
+  const rows = await db
+    .update(cellStep)
+    .set({ lastSeenAt: sql`now()` })
+    .where(
+      and(
+        eq(cellStep.stepKey, stepKey),
+        eq(cellStep.currentAttempt, attempt),
+        isNull(cellStep.doneAt),
+        isNotNull(cellStep.lastSeenAt),
+        or(
+          isNull(cellStep.revokedThrough),
+          lt(cellStep.revokedThrough, attempt),
+        ),
+      ),
+    )
+    .returning({ stepKey: cellStep.stepKey });
+  return rows.length > 0;
+}
+
+/** Placeholder timeout of a done tombstone: it is never minted against. */
+const TOMBSTONE_TIMEOUT_MS = 1;
+
+/**
+ * The run is over (the terminal read, #656 R1): every attempt is revoked and
+ * the step is done. Idempotent. A step that was never opened gets a done
+ * tombstone (`current_attempt` 0), so a late `openNextAttempt` returns
+ * `step_done`. False only when the key belongs to another org or thread.
+ */
+export async function finishStep({
+  db,
+  stepKey,
+  organizationId,
+  threadId,
+}: {
+  db: DB;
+  stepKey: string;
+  organizationId: string;
+  threadId: string;
+}): Promise<boolean> {
+  const rows = await db
+    .insert(cellStep)
+    .values({
+      stepKey,
+      organizationId,
+      threadId,
+      currentAttempt: 0,
+      stepTimeoutMs: TOMBSTONE_TIMEOUT_MS,
+      revokedThrough: 0,
+      doneAt: sql`now()`,
+    })
+    .onConflictDoUpdate({
+      target: cellStep.stepKey,
+      set: {
+        revokedThrough: sql`greatest(coalesce(${cellStep.revokedThrough}, 0), ${cellStep.currentAttempt})`,
+        doneAt: sql`coalesce(${cellStep.doneAt}, now())`,
+      },
+      where: and(
+        eq(cellStep.organizationId, organizationId),
+        eq(cellStep.threadId, threadId),
+      ),
+    })
+    .returning({ stepKey: cellStep.stepKey });
+  return rows.length > 0;
+}
+
+/**
+ * The `stepKey#attempt` ids (`cellKeyId`) positively known dead, the shape the
+ * reconciler's isDead consumes (#656 scope 7).
+ * Unknown steps, NULL leases and attempts above the current one are kept.
+ * `staleMs: null` disables the lease rule. Throws on a database error (the
+ * reconciler catches it and reaps expired only).
+ */
+export async function deadCellAttempts({
+  db,
+  keys,
+  staleMs,
+}: {
+  db: DB;
+  keys: readonly CellKey[];
+  staleMs: number | null;
+}): Promise<Set<string>> {
+  if (keys.length === 0) return new Set();
+  if (keys.length > DEAD_READ_MAX_KEYS) {
+    throw new RangeError(`keys must not exceed ${DEAD_READ_MAX_KEYS}`);
+  }
+  for (const key of keys) assertPositiveInt("attempt", key.attempt);
+  if (staleMs !== null && !(Number.isFinite(staleMs) && staleMs > 0)) {
+    throw new RangeError("staleMs must be null or a positive finite number");
+  }
+  const stale =
+    staleMs === null
+      ? sql<boolean>`false`
+      : sql<boolean>`${cellStep.lastSeenAt} IS NOT NULL AND ${cellStep.lastSeenAt} < now() - make_interval(secs => ${staleMs / 1000}::double precision)`;
+  const rows = await db
+    .select({
+      stepKey: cellStep.stepKey,
+      currentAttempt: cellStep.currentAttempt,
+      revokedThrough: cellStep.revokedThrough,
+      done: sql<boolean>`${cellStep.doneAt} IS NOT NULL`,
+      stale,
+    })
+    .from(cellStep)
+    .where(inArray(cellStep.stepKey, [...new Set(keys.map((k) => k.stepKey))]));
+  const byStep = new Map(rows.map((r) => [r.stepKey, r]));
+  const dead = new Set<string>();
+  for (const key of keys) {
+    const row = byStep.get(key.stepKey);
+    if (!row) continue;
+    if (
+      isRevoked(key.attempt, row.revokedThrough) ||
+      row.currentAttempt > key.attempt ||
+      row.done ||
+      (key.attempt === row.currentAttempt && row.stale)
+    ) {
+      dead.add(cellKeyId(key));
+    }
+  }
+  return dead;
 }
 
 /**

@@ -1,19 +1,24 @@
 import { randomUUID } from "node:crypto";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
-import { createDb } from "../db";
+import { cellKeyId } from "@terragon/types/cell";
+import { createDb, type DB } from "../db";
 import { cellBearer, cellEffect, cellStep } from "../db/schema";
 import {
   beginEffect,
   completeEffect,
+  deadCellAttempts,
+  finishStep,
   markStepDone,
   mintBearer,
+  openNextAttempt,
   openStep,
   releaseEffect,
   revokeAttempt,
+  stampSeen,
   verifyBearer,
 } from "./cell-authority";
 import {
@@ -51,7 +56,17 @@ async function newStep(
     if (!m.ok) throw new Error(m.reason);
     return m.token;
   };
-  return { stepKey, organizationId, threadId, open, bearer };
+  const step = {
+    stepKey,
+    organizationId,
+    threadId,
+    stepTimeoutMs: STEP_TIMEOUT,
+    effectBudget,
+    allowedRef,
+  };
+  const next = () => openNextAttempt({ db, step });
+  const owner = { stepKey, organizationId, threadId };
+  return { stepKey, organizationId, threadId, owner, step, open, next, bearer };
 }
 
 async function effectsUsed(stepKey: string): Promise<number> {
@@ -593,5 +608,446 @@ describe("cell authority (ADR-014 remote cells)", () => {
       await holder;
       expect(await pending).toBe(true);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #656 PR-A: the lease and the server-assigned attempt
+// ---------------------------------------------------------------------------
+
+const STALE_MS = 5 * 60_000;
+
+async function row(stepKey: string) {
+  const r = (
+    await db
+      .select({
+        currentAttempt: cellStep.currentAttempt,
+        revokedThrough: cellStep.revokedThrough,
+        doneAt: cellStep.doneAt,
+        lastSeenAt: cellStep.lastSeenAt,
+        fresh: sql<boolean>`${cellStep.lastSeenAt} > now() - interval '1 minute'`,
+      })
+      .from(cellStep)
+      .where(eq(cellStep.stepKey, stepKey))
+  )[0];
+  if (!r) throw new Error("no step row");
+  return r;
+}
+
+/**
+ * Ages a STAMPED lease by 10 minutes. A NULL lease (a row opened by the old
+ * openStep, before the migration) stays NULL: backdating must not invent a stamp.
+ */
+async function backdate(stepKey: string) {
+  await db
+    .update(cellStep)
+    .set({ lastSeenAt: sql`${cellStep.lastSeenAt} - interval '10 minutes'` })
+    .where(and(eq(cellStep.stepKey, stepKey), isNotNull(cellStep.lastSeenAt)));
+}
+
+/** Holds the step's row lock in a transaction that COMMITS on release. */
+async function holdAndCommit(
+  write: (tx: Pick<DB, "update">) => Promise<unknown>,
+) {
+  let locked!: () => void;
+  let release!: () => void;
+  const lockedP = new Promise<void>((r) => (locked = r));
+  const releasedP = new Promise<void>((r) => (release = r));
+  const done = db.transaction(async (tx) => {
+    await write(tx);
+    locked();
+    await releasedP;
+  });
+  await lockedP;
+  return { release, done };
+}
+
+async function waitUntilBlocked(): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const r = await db.execute(
+      sql`select count(*)::int as n from pg_stat_activity
+          where wait_event_type = 'Lock' and datname = current_database()
+            and query ilike '%last_seen_at%'`,
+    );
+    if (Number(r.rows[0]?.n) >= 1) return;
+    await new Promise((res) => setTimeout(res, 20));
+  }
+  throw new Error("statement never blocked on the row lock");
+}
+
+describe("#656 PR-A openNextAttempt", () => {
+  it("1 opens 1 with a lease, then 2, and fences attempt 1", async () => {
+    const s = await newStep(null, null);
+    expect(await s.next()).toEqual({ ok: true, attempt: 1 });
+    expect((await row(s.stepKey)).fresh).toBe(true);
+    const b1 = await s.bearer(1);
+    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
+    const v = await verifyBearer({ db, token: b1 });
+    expect(v).toMatchObject({ ok: false, reason: "fenced" });
+    expect(
+      await mintBearer({
+        db,
+        stepKey: s.stepKey,
+        attempt: 1,
+        ttlMs: STEP_TIMEOUT,
+      }),
+    ).toMatchObject({ ok: false, reason: "fenced" });
+  });
+
+  it("2 concurrent opens get consecutive attempts", async () => {
+    const s = await newStep(null, null);
+    const rs = await Promise.all(Array.from({ length: 8 }, () => s.next()));
+    const attempts = rs
+      .map((r) => (r.ok ? r.attempt : -1))
+      .sort((a, b) => a - b);
+    expect(attempts).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect((await row(s.stepKey)).currentAttempt).toBe(8);
+  });
+
+  it("3 a finished step refuses a new attempt (finishStep and markStepDone)", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
+    expect((await row(s.stepKey)).currentAttempt).toBe(1);
+
+    const t = await newStep(null, null);
+    await t.next();
+    expect(await markStepDone({ db, token: await t.bearer(1) })).toEqual({
+      ok: true,
+    });
+    expect(await t.next()).toEqual({ ok: false, reason: "step_done" });
+    expect((await row(t.stepKey)).currentAttempt).toBe(1);
+  });
+
+  it("4 revocation does not block the next attempt", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await revokeAttempt({ db, stepKey: s.stepKey, attempt: 1 });
+    expect(await s.next()).toEqual({ ok: true, attempt: 2 });
+  });
+
+  it("5 another org, thread or allowedRef is a conflict and changes nothing", async () => {
+    const s = await newStep(null, "refs/heads/feat/x");
+    await s.next();
+    const other = await createTestOrg({ db });
+    const { user } = await createTestUser({ db });
+    const { threadId } = await createTestThread({ db, userId: user.id });
+    for (const patch of [
+      { organizationId: other },
+      { threadId },
+      { allowedRef: "refs/heads/feat/y" },
+      { allowedRef: null },
+    ]) {
+      expect(
+        await openNextAttempt({ db, step: { ...s.step, ...patch } }),
+      ).toEqual({ ok: false, reason: "conflict" });
+    }
+    expect((await row(s.stepKey)).currentAttempt).toBe(1);
+  });
+
+  it("6a a committing finishStep write blocks the open, which then sees step_done", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    const holder = await holdAndCommit((tx) =>
+      tx
+        .update(cellStep)
+        .set({
+          revokedThrough: sql`${cellStep.currentAttempt}`,
+          doneAt: sql`now()`,
+        })
+        .where(eq(cellStep.stepKey, s.stepKey)),
+    );
+    const open = s.next();
+    await waitUntilBlocked();
+    holder.release();
+    await holder.done;
+    expect(await open).toEqual({ ok: false, reason: "step_done" });
+    expect((await row(s.stepKey)).currentAttempt).toBe(1);
+  });
+
+  it("6b the 1000th attempt opens, the 1001st is refused", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await db
+      .update(cellStep)
+      .set({ currentAttempt: 999 })
+      .where(eq(cellStep.stepKey, s.stepKey));
+    expect(await s.next()).toEqual({ ok: true, attempt: 1000 });
+    expect(await s.next()).toEqual({ ok: false, reason: "attempt_limit" });
+  });
+
+  it("6c a re-open with other effectBudget/stepTimeoutMs keeps the stored values", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await openNextAttempt({
+      db,
+      step: { ...s.step, effectBudget: 7, stepTimeoutMs: 999 },
+    });
+    const r = (
+      await db
+        .select({
+          budget: cellStep.effectBudget,
+          timeout: cellStep.stepTimeoutMs,
+          attempt: cellStep.currentAttempt,
+        })
+        .from(cellStep)
+        .where(eq(cellStep.stepKey, s.stepKey))
+    )[0];
+    expect(r).toEqual({ budget: null, timeout: STEP_TIMEOUT, attempt: 2 });
+  });
+
+  it("7 validation errors match openStep", async () => {
+    const s = await newStep(null, null);
+    await expect(
+      openNextAttempt({ db, step: { ...s.step, stepTimeoutMs: 0 } }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      openNextAttempt({ db, step: { ...s.step, effectBudget: -1 } }),
+    ).rejects.toThrow("effectBudget must be null or a non-negative integer");
+    await expect(
+      openNextAttempt({ db, step: { ...s.step, allowedRef: "feat/x" } }),
+    ).rejects.toThrow("allowedRef must be null or a refs/heads/ branch ref");
+  });
+});
+
+describe("#656 PR-A stampSeen", () => {
+  it("8 stamps the current attempt and moves a backdated lease forward", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await backdate(s.stepKey);
+    expect((await row(s.stepKey)).fresh).toBe(false);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(true);
+    expect((await row(s.stepKey)).fresh).toBe(true);
+  });
+
+  it("9 a fenced attempt's stamp does not renew the lease", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await s.next();
+    await backdate(s.stepKey);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(false);
+    expect((await row(s.stepKey)).fresh).toBe(false);
+    const dead = await deadCellAttempts({
+      db,
+      keys: [{ stepKey: s.stepKey, attempt: 2 }],
+      staleMs: STALE_MS,
+    });
+    expect(dead).toEqual(
+      new Set([cellKeyId({ stepKey: s.stepKey, attempt: 2 })]),
+    );
+  });
+
+  it("10 a revoked, done or unknown step is not stamped", async () => {
+    const r = await newStep(null, null);
+    await r.next();
+    await revokeAttempt({ db, stepKey: r.stepKey, attempt: 1 });
+    expect(await stampSeen({ db, stepKey: r.stepKey, attempt: 1 })).toBe(false);
+    const d = await newStep(null, null);
+    await d.next();
+    await finishStep({ db, ...d.owner });
+    expect(await stampSeen({ db, stepKey: d.stepKey, attempt: 1 })).toBe(false);
+    expect(
+      await stampSeen({ db, stepKey: `nope-${randomUUID()}`, attempt: 1 }),
+    ).toBe(false);
+  });
+
+  it("11 a stamp blocked behind a committing fence returns false", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    const holder = await holdAndCommit((tx) =>
+      tx
+        .update(cellStep)
+        .set({ currentAttempt: 2, lastSeenAt: sql`now()` })
+        .where(eq(cellStep.stepKey, s.stepKey)),
+    );
+    const stamp = stampSeen({ db, stepKey: s.stepKey, attempt: 1 });
+    await waitUntilBlocked();
+    holder.release();
+    await holder.done;
+    expect(await stamp).toBe(false);
+    expect((await row(s.stepKey)).currentAttempt).toBe(2);
+  });
+
+  it("10a a NULL lease is never granted by a stamp", async () => {
+    const s = await newStep();
+    await s.open(1);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(false);
+    expect((await row(s.stepKey)).lastSeenAt).toBeNull();
+  });
+
+  it("rejects a non-positive attempt", async () => {
+    await expect(stampSeen({ db, stepKey: "x", attempt: 0 })).rejects.toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe("#656 PR-A finishStep", () => {
+  it("12 revokes through the current attempt, sets done_at once, and is idempotent", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    const b = await s.bearer(1);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    const first = await row(s.stepKey);
+    expect(first.revokedThrough).toBe(1);
+    expect(first.doneAt).not.toBeNull();
+    expect((await verifyBearer({ db, token: b })).ok).toBe(false);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    expect((await row(s.stepKey)).doneAt).toEqual(first.doneAt);
+    // Another org or thread's key is not finished.
+    const other = await newStep(null, null);
+    expect(
+      await finishStep({
+        db,
+        ...s.owner,
+        organizationId: other.organizationId,
+      }),
+    ).toBe(false);
+    expect(await finishStep({ db, ...s.owner, threadId: other.threadId })).toBe(
+      false,
+    );
+  });
+
+  it("12a finish-before-open leaves a tombstone, so a late open is step_done", async () => {
+    const s = await newStep(null, null);
+    expect(await finishStep({ db, ...s.owner })).toBe(true);
+    const r = await row(s.stepKey);
+    expect(r.currentAttempt).toBe(0);
+    expect(r.doneAt).not.toBeNull();
+    expect(await s.next()).toEqual({ ok: false, reason: "step_done" });
+    expect(
+      await openNextAttempt({
+        db,
+        step: { ...s.step, allowedRef: "refs/heads/feat/x" },
+      }),
+    ).toEqual({ ok: false, reason: "step_done" });
+    expect((await row(s.stepKey)).currentAttempt).toBe(0);
+    expect(await stampSeen({ db, stepKey: s.stepKey, attempt: 1 })).toBe(false);
+  });
+});
+
+describe("#656 PR-A deadCellAttempts", () => {
+  async function matrix() {
+    const fresh = await newStep(null, null);
+    await fresh.next();
+    const fenced = await newStep(null, null);
+    await fenced.next();
+    await fenced.next();
+    const revoked = await newStep(null, null);
+    await revoked.next();
+    await revokeAttempt({ db, stepKey: revoked.stepKey, attempt: 1 });
+    const done = await newStep(null, null);
+    await done.next();
+    await finishStep({ db, ...done.owner });
+    const stale = await newStep(null, null);
+    await stale.next();
+    await backdate(stale.stepKey);
+    const nul = await newStep();
+    await nul.open(1);
+    const unknown = `nope-${randomUUID()}`;
+    const k = (stepKey: string, attempt: number) => ({ stepKey, attempt });
+    const keys = [
+      k(fresh.stepKey, 1),
+      k(fenced.stepKey, 1),
+      k(revoked.stepKey, 1),
+      k(done.stepKey, 1),
+      k(stale.stepKey, 1),
+      k(nul.stepKey, 1),
+      k(unknown, 1),
+      k(fresh.stepKey, 2),
+      k(fenced.stepKey, 1),
+    ];
+    return { keys, k, fenced, revoked, done, stale };
+  }
+
+  it("13 returns exactly the dead set, once each, in input order", async () => {
+    const m = await matrix();
+    const dead = await deadCellAttempts({
+      db,
+      keys: m.keys,
+      staleMs: STALE_MS,
+    });
+    expect(dead).toEqual(
+      new Set([
+        cellKeyId(m.k(m.fenced.stepKey, 1)),
+        cellKeyId(m.k(m.revoked.stepKey, 1)),
+        cellKeyId(m.k(m.done.stepKey, 1)),
+        cellKeyId(m.k(m.stale.stepKey, 1)),
+      ]),
+    );
+  });
+
+  it("14 staleMs null keeps the backdated current attempt", async () => {
+    const m = await matrix();
+    const dead = await deadCellAttempts({ db, keys: m.keys, staleMs: null });
+    expect(dead).toEqual(
+      new Set([
+        cellKeyId(m.k(m.fenced.stepKey, 1)),
+        cellKeyId(m.k(m.revoked.stepKey, 1)),
+        cellKeyId(m.k(m.done.stepKey, 1)),
+      ]),
+    );
+  });
+
+  it("15 input bounds", async () => {
+    expect(await deadCellAttempts({ db, keys: [], staleMs: STALE_MS })).toEqual(
+      new Set(),
+    );
+    const key = { stepKey: "x", attempt: 1 };
+    await expect(
+      deadCellAttempts({
+        db,
+        keys: [{ ...key, attempt: 0 }],
+        staleMs: STALE_MS,
+      }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      deadCellAttempts({ db, keys: [key], staleMs: Number.NaN }),
+    ).rejects.toThrow(RangeError);
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ stepKey: `k-${i}`, attempt: 1 }));
+    await expect(
+      deadCellAttempts({ db, keys: many(1001), staleMs: STALE_MS }),
+    ).rejects.toThrow(RangeError);
+    expect(
+      await deadCellAttempts({ db, keys: many(1000), staleMs: STALE_MS }),
+    ).toEqual(new Set());
+  });
+
+  it("15a a database error propagates", async () => {
+    const broken = {
+      select: () => {
+        throw new Error("db down");
+      },
+    } as unknown as DB;
+    await expect(
+      deadCellAttempts({
+        db: broken,
+        keys: [{ stepKey: "x", attempt: 1 }],
+        staleMs: STALE_MS,
+      }),
+    ).rejects.toThrow("db down");
+  });
+});
+
+describe("#656 PR-A openStep lease", () => {
+  it("16 advancing over a stamped row clears last_seen_at, and the attempt is kept", async () => {
+    const s = await newStep();
+    await s.open(1);
+    await db
+      .update(cellStep)
+      .set({ lastSeenAt: sql`now() - interval '10 minutes'` })
+      .where(eq(cellStep.stepKey, s.stepKey));
+    await s.open(2);
+    expect((await row(s.stepKey)).lastSeenAt).toBeNull();
+    expect(
+      await deadCellAttempts({
+        db,
+        keys: [{ stepKey: s.stepKey, attempt: 2 }],
+        staleMs: STALE_MS,
+      }),
+    ).toEqual(new Set());
   });
 });

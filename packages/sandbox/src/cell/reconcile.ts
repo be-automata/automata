@@ -5,7 +5,12 @@
  * tags (there is no cell table). Pure over injected dependencies: the caller
  * supplies the provider, the control plane's revoke, the clock and a logger.
  */
-import type { CellLogger, ICellProvider } from "@terragon/types/cell";
+import {
+  cellKeyId,
+  type CellKey,
+  type CellLogger,
+  type ICellProvider,
+} from "@terragon/types/cell";
 
 /**
  * Cells reaped per run. Each reap is a few provider requests and the run sits
@@ -16,11 +21,6 @@ const DEFAULT_RECONCILE_LIMIT = 20;
 
 /** Listing pages per run (100 cells each): a deployment's cells stay well under it. */
 const DEFAULT_RECONCILE_MAX_PAGES = 5;
-
-/** The dead-set key of a cell: `stepKey#attempt`. */
-export function cellKeyId(key: CellKey): string {
-  return `${key.stepKey}#${key.attempt}`;
-}
 
 interface ReconcileExpiredCellsInput {
   provider: Pick<ICellProvider, "listByTags" | "teardown">;
@@ -53,11 +53,6 @@ export interface ReconcileResult {
   dead: number;
   /** The listing stopped at `maxPages` with more cells unlisted. */
   truncated: boolean;
-}
-
-export interface CellKey {
-  stepKey: string;
-  attempt: number;
 }
 
 function errorCode(e: unknown): string {
