@@ -2,9 +2,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
+import {
+  codeOf,
+  describeBashScriptHygiene,
+  repoRoot,
+} from "./bash-script-hygiene";
 import { CONTAINER_DAEMON_BUNDLE } from "./container-argv";
 import { CONTAINER_FLUTTER_SHIM_DIR } from "./container-entry";
 import { parsePinnedImage } from "./container-image";
@@ -17,7 +21,6 @@ import {
   CELL_ENTRY_EXIT,
   CELL_ENV_ALLOWLIST,
   CELL_FORBIDDEN_ENV_PATTERN,
-  CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
   CELL_NODE,
   CELL_RUN_ENV,
   CELL_SEND,
@@ -33,13 +36,6 @@ import {
  * and verify.sh run in the PR's cell-image workflow, not here.
  */
 
-const repoRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "..",
-);
 const CELL_DIR = "deploy/images/cell";
 const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
 
@@ -51,15 +47,8 @@ const SCAN = `${CELL_DIR}/scan-layers.sh`;
 const WORKFLOW = ".github/workflows/cell-image.yml";
 const ACTION = ".github/actions/cell-image-build/action.yml";
 const BATTERIES_REPOSITORY = "ghcr.io/be-automata/automata-batteries";
-const FORBIDDEN_NAME = /TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|AUTH/i;
+const BATTERIES_DOCKERFILE = "deploy/images/batteries/Dockerfile";
 const PLACEHOLDER = "automata-cell-daemon-token";
-
-/** Code lines only: comments state guarantees in prose. */
-const codeOf = (text: string) =>
-  text
-    .split("\n")
-    .filter((l) => !/^\s*#/.test(l))
-    .join("\n");
 
 interface Instruction {
   op: string;
@@ -89,7 +78,7 @@ function credentialShapedNames(dockerfile: string): string[] {
   return instructionsOf(dockerfile)
     .filter((i) => i.op === "ARG" || i.op === "ENV")
     .flatMap((i) => envPairs(i.args).map(([name]) => name))
-    .filter((name) => FORBIDDEN_NAME.test(name));
+    .filter((name) => CELL_FORBIDDEN_ENV_PATTERN.test(name));
 }
 
 /** Command words `node` that are not an absolute path. */
@@ -194,27 +183,9 @@ describe("the Dockerfile syntax frontend", () => {
   });
 });
 
-describe.each([ENTRY, SEND, VERIFY, SCAN])("%s: bash script hygiene", (rel) => {
-  // card: protects=the script is executable, bash in strict mode, parses and is shellcheck clean; fails_when=it loses +x, strict mode, parses wrong or regresses shellcheck; no_claim=its behaviour in a cell
-  it("is executable, strict, parses and is shellcheck clean", (ctx) => {
-    const abs = path.join(repoRoot, rel);
-    expect(fs.statSync(abs).mode & 0o777).toBe(0o755);
-    const lines = read(rel).split("\n");
-    expect(lines[0]).toBe("#!/bin/bash");
-    expect(lines[1]).toBe("set -euo pipefail");
-    expect(spawnSync("bash", ["-n", abs]).status).toBe(0);
-    if (
-      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
-    ) {
-      ctx.skip();
-    }
-    const r = spawnSync("shellcheck", ["-s", "bash", abs], {
-      encoding: "utf8",
-    });
-    expect(r.stdout + r.stderr).toBe("");
-    expect(r.status).toBe(0);
-  });
-});
+[ENTRY, SEND, VERIFY, SCAN].forEach((rel) =>
+  describeBashScriptHygiene(rel, read),
+);
 
 /** Code lines before the first `PATH=/usr/bin:/bin` assignment, or null. */
 function codeBeforePathReset(script: string): string[] | null {
@@ -276,6 +247,8 @@ const PLANTED_COMMANDS = ["node", "mkdir", "base64", "cat"];
 
 interface Sandbox {
   dir: string;
+  /** A copy of a repo script with CELL_NODE pointed at the fake, then `edit`. */
+  copy: (rel: string, edit?: (text: string) => string) => string;
   home: string;
   fakeNode: string;
   planted: string;
@@ -332,13 +305,15 @@ function makeSandbox(): Sandbox {
       { mode: 0o755 },
     );
   }
+  let copies = 0;
   const copy = (rel: string, edit = (s: string) => s) => {
-    const out = path.join(dir, path.basename(rel));
+    const out = path.join(dir, `${copies++}-${path.basename(rel)}`);
     fs.writeFileSync(out, edit(read(rel).split(CELL_NODE).join(fakeNode)));
     return out;
   };
   return {
     dir,
+    copy,
     home,
     fakeNode,
     planted,
@@ -346,6 +321,13 @@ function makeSandbox(): Sandbox {
     entry: copy(ENTRY),
     send: copy(SEND),
   };
+}
+
+/** One sandbox per describe, its temp dir removed afterwards. */
+function useSandbox(): Sandbox {
+  const sb = makeSandbox();
+  afterAll(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  return sb;
 }
 
 /** `undefined` in extraEnv removes the name. */
@@ -375,7 +357,7 @@ const outputOf = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
 const NON_IDENTIFIER_NAMES = ["npm_config_//r.org/:_authToken", "X.Y_TOKEN"];
 
 describeRun("cell-entry.sh behaviour (fake node)", () => {
-  const sb = makeSandbox();
+  const sb = useSandbox();
 
   // card: protects=the entry execs the daemon with exactly the contract argv, by absolute path, and ignores planted commands first on PATH; fails_when=the argv differs or a planted command runs; no_claim=the real daemon
   it("execs the fake node with the contract argv and never a planted command", () => {
@@ -511,11 +493,13 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
 
   // card: protects=the env -i scrub is what drops the name; fails_when=the same run without env -i also hides SOME_PLAIN (so the test above proves nothing); no_claim=the real entry
   it("negative control: without env -i the unlisted name reaches the daemon", () => {
-    const entry = path.join(sb.dir, "no-scrub.sh");
-    const real = read(ENTRY).split(CELL_NODE).join(sb.fakeNode);
-    const edited = real.replace('/usr/bin/env -i "${keep[@]}" ', "");
-    expect(edited).not.toBe(real);
-    fs.writeFileSync(entry, edited, { mode: 0o755 });
+    let changed = false;
+    const entry = sb.copy(ENTRY, (text) => {
+      const edited = text.replace('/usr/bin/env -i "${keep[@]}" ', "");
+      changed = edited !== text;
+      return edited;
+    });
+    expect(changed).toBe(true);
     const r = run(sb, entry, ["--url", GOOD_URL], { SOME_PLAIN: "leak" });
     expect(parseFake(r.stdout).env.get("SOME_PLAIN")).toBe("leak");
   });
@@ -554,7 +538,7 @@ describeRun("cell-entry.sh behaviour (fake node)", () => {
     expect([...list("allow")].sort()).toEqual([...CELL_ENV_ALLOWLIST].sort());
     expect([...list("run_env")].sort()).toEqual([...CELL_RUN_ENV].sort());
     expect(new RegExp("^forbidden='(.*)'$", "m").exec(text)?.[1]).toBe(
-      CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
+      CELL_FORBIDDEN_ENV_PATTERN.source,
     );
     for (const n of CELL_ENV_ALLOWLIST) {
       expect(isForbiddenCellEnvName(n)).toBe(false);
@@ -588,7 +572,7 @@ describe("the forbidden env pattern", () => {
 });
 
 describeRun("cell-send.sh behaviour (fake node)", () => {
-  const sb = makeSandbox();
+  const sb = useSandbox();
 
   // card: protects=a valid base64 argument reaches the daemon as decoded stdin with the contract argv; fails_when=the bytes or the argv differ or a planted command runs; no_claim=the real daemon write
   it("pipes the decoded message to node --write", () => {
@@ -646,16 +630,12 @@ describe("cellEntrypoint", () => {
     ]);
   });
 
-  // card: protects=a bad host fails in the worker, not in a cell; fails_when=an empty, spaced or injected host is accepted; no_claim=the script's own check (see parity below)
-  it.each(["", "a b", "x;y"])("throws on %j", (host) => {
-    expect(() => cellEntrypoint(host)).toThrow();
-  });
-
   const HOSTS: [string, boolean][] = [
     ["example.org", true],
     ["a", true],
     ["localhost:3000", true],
     ["my-app.example.workers.dev", true],
+    ["", false],
     ["Example.org", false],
     ["-a.org", false],
     ["a.org-", false],
@@ -665,31 +645,60 @@ describe("cellEntrypoint", () => {
     ["a.org:12345678", false],
   ];
 
-  // card: protects=the TS host regex and cellEntrypoint agree; fails_when=a host is accepted by the regex and refused by cellEntrypoint or the reverse; no_claim=hosts beyond this table
-  it.each(HOSTS)(
-    "agrees between regex and cellEntrypoint on %j",
-    (host, ok) => {
-      expect(CELL_BROKER_HOST_PATTERN.test(host)).toBe(ok);
-      expect(() => cellEntrypoint(host)).toSatisfy((fn: () => void) => {
-        try {
-          fn();
-          return ok;
-        } catch {
-          return !ok;
-        }
-      });
-    },
-  );
+  // card: protects=a bad host fails in the worker, not in a cell, and the host regex and cellEntrypoint agree; fails_when=a host is accepted by one and refused by the other, or a bad one is accepted; no_claim=hosts beyond this table
+  it.each(HOSTS)("accepts or refuses %j consistently", (host, ok) => {
+    expect(CELL_BROKER_HOST_PATTERN.test(host)).toBe(ok);
+    if (ok) expect(cellEntrypoint(host)).toHaveLength(3);
+    else expect(() => cellEntrypoint(host)).toThrow();
+  });
 
-  // card: protects=the script's host check agrees with the TS one; fails_when=the script accepts what the regex refuses or the reverse; no_claim=hosts beyond this table
-  it.skipIf(bashMajor < 4).each(HOSTS)(
-    "agrees with the script on %j",
-    (host, ok) => {
-      const sb = makeSandbox();
+  describeRun("against cell-entry.sh", () => {
+    const sb = useSandbox();
+
+    // card: protects=the script's host check agrees with the TS one; fails_when=the script accepts what the regex refuses or the reverse; no_claim=hosts beyond this table
+    it.each(HOSTS)("the script agrees on %j", (host, ok) => {
       const r = run(sb, sb.entry, ["--url", `https://${host}`]);
       expect(r.status).toBe(ok ? 0 : CELL_ENTRY_EXIT.usage);
-    },
-  );
+    });
+  });
+});
+
+describe("CELL_ENV_ALLOWLIST and the batteries image", () => {
+  /** Names the allowlist takes from elsewhere than the batteries ENV. */
+  const NOT_FROM_BATTERIES = [
+    "OPENSANDBOX_ID",
+    "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "OPENSANDBOX_MERGED_CA_PATH",
+    "GIT_SSL_CAINFO",
+  ];
+  const batteriesEnv = (dockerfile: string) =>
+    instructionsOf(dockerfile)
+      .filter((i) => i.op === "ENV")
+      .flatMap((i) => envPairs(i.args).map(([name]) => name))
+      .sort();
+  const fromBatteries = (list: readonly string[]) =>
+    list.filter((n) => !NOT_FROM_BATTERIES.includes(n)).sort();
+
+  // card: protects=the allowlist's batteries names are exactly the batteries image's ENV names; fails_when=the batteries Dockerfile adds, renames or drops an ENV and the allowlist is not updated; no_claim=env set at run time
+  it("matches the ENV names of the batteries Dockerfile", () => {
+    expect(fromBatteries(CELL_ENV_ALLOWLIST)).toEqual(
+      batteriesEnv(read(BATTERIES_DOCKERFILE)),
+    );
+  });
+
+  // card: protects=the parity check can fail; fails_when=a batteries ENV missing from the allowlist, or an extra one, passes; no_claim=the real Dockerfile
+  it("negative control: a new or missing ENV name is caught", () => {
+    const real = read(BATTERIES_DOCKERFILE);
+    expect(batteriesEnv(`${real}\nENV NEW_BATTERIES_NAME=1\n`)).not.toEqual(
+      fromBatteries(CELL_ENV_ALLOWLIST),
+    );
+    expect(
+      fromBatteries(CELL_ENV_ALLOWLIST.filter((n) => n !== "MCP_TIMEOUT")),
+    ).not.toEqual(batteriesEnv(real));
+  });
 });
 
 /** Text of one top-level job under `jobs:`. */
@@ -772,12 +781,13 @@ describe("cell-image.yml and its build action", () => {
     expect(perms?.trim()).not.toBe("contents: read");
   });
 
-  // card: protects=publishing waits for build-verify, runs only off a PR on main, and is the only holder of the write permissions; fails_when=needs or if differ, or a write permission is missing or elsewhere; no_claim=branch protection
-  it("gates publish on build-verify, main and a non-PR event", () => {
-    expect(publish).toMatch(/^ {4}needs: build-verify$/m);
+  // card: protects=publishing runs only off a PR on main and is the only holder of the write permissions, and verifies what it pushes itself; fails_when=the if differs, a write permission is missing or elsewhere, or publish skips the shared verify action; no_claim=branch protection
+  it("gates publish on main and a non-PR event, with the write permissions", () => {
+    expect(publish).not.toMatch(/^ {4}needs:/m);
     expect(publish).toContain(
       "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'",
     );
+    expect(publish).toContain(`uses: ${LOCAL_ACTION}`);
     for (const p of [
       "packages: write",
       "id-token: write",
@@ -786,6 +796,13 @@ describe("cell-image.yml and its build action", () => {
       expect(publish).toContain(p);
       expect(buildVerify).not.toContain(p);
     }
+  });
+
+  // card: protects=build-verify and publish never both run for one event; fails_when=build-verify's if is not the complement of publish's; no_claim=dispatch from other refs
+  it("runs build-verify exactly when publish does not", () => {
+    expect(buildVerify).toContain(
+      "if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'",
+    );
   });
 
   // card: protects=both jobs run the same shared build action and the checkout leaves no token; fails_when=a job lacks the local action, or a checkout lacks persist-credentials: false; no_claim=other credential paths
@@ -842,28 +859,35 @@ describe("cell-image.yml and its build action", () => {
     expect(workflow).toContain("IMAGE: ghcr.io/be-automata/automata-cell");
   });
 
-  // card: protects=a change to anything the bundle is built from triggers the build on push and PR; fails_when=a listed path is missing from either trigger; no_claim=transitive dependencies beyond these
+  // card: protects=a change to anything the bundle is built from triggers the build on push and PR; fails_when=a listed path is missing from the push filter, or the PR filter is not the same list; no_claim=transitive dependencies beyond these
   it("filters paths on everything the image is built from", () => {
     const on = workflow.split(/^permissions:/m)[0] ?? "";
-    const triggers = on.split(/^ {2}pull_request:/m);
-    expect(triggers).toHaveLength(2);
-    for (const block of triggers) {
-      for (const p of [
-        "deploy/images/cell/**",
-        ".github/actions/cell-image-build/**",
-        "packages/daemon/**",
-        "packages/agent/**",
-        "packages/tsconfig/**",
-        "package.json",
-        "pnpm-workspace.yaml",
-        ".npmrc",
-        "pnpm-lock.yaml",
-        ".github/workflows/cell-image.yml",
-      ]) {
-        expect(block).toContain(`"${p}"`);
-      }
+    const [push = "", pr = ""] = on.split(/^ {2}pull_request:/m);
+    for (const p of [
+      "deploy/images/cell/**",
+      ".github/actions/cell-image-build/**",
+      "packages/daemon/**",
+      "packages/agent/**",
+      "packages/tsconfig/**",
+      "package.json",
+      "pnpm-workspace.yaml",
+      ".npmrc",
+      "pnpm-lock.yaml",
+      ".github/workflows/cell-image.yml",
+    ]) {
+      expect(push).toContain(`"${p}"`);
     }
+    // One list, shared by an anchor: the PR trigger cannot drift from push.
+    expect(push).toContain("paths: &paths");
+    expect(pr).toMatch(/^ {4}paths: \*paths$/m);
     expect(on).toContain("workflow_dispatch:");
+  });
+
+  // card: protects=pnpm downloads are cached in the shared build action; fails_when=setup-node loses cache: pnpm; no_claim=cache hit rate
+  it("caches pnpm in setup-node", () => {
+    const node =
+      actionSteps[stepIndex(actionSteps, "actions/setup-node")] ?? "";
+    expect(node).toContain("cache: pnpm");
   });
 
   // card: protects=no secret or credential-shaped name in the build args; fails_when=the build passes any build-arg but REVISION or reads secrets.*; no_claim=repo secrets config

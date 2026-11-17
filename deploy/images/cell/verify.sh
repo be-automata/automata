@@ -55,6 +55,21 @@ expect_exit() {
   if [ "$got" -eq "$want" ]; then ok "$name" "exit $want"; else bad "$name" "want exit $want, got $got"; fi
 }
 
+# expect_refusal NAME ENVVAR=VALUE: the entry exits 78 for that env entry and
+# never echoes the value (an `env` entry can carry any name, identifier or not).
+expect_refusal() {
+  local name="$1" entry="$2" out status
+  out="$(env "$entry" "$ENTRY" --url https://example.org 2>&1)"
+  status=$?
+  if [ "$status" -ne 78 ]; then
+    bad "$name" "want exit 78, got $status"
+  elif printf '%s' "$out" | grep -qF "${entry#*=}"; then
+    bad "$name" "the canary value was echoed"
+  else
+    ok "$name" "exit 78, canary not echoed"
+  fi
+}
+
 # ── identity ────────────────────────────────────────────────────────────────
 assert identity-uid "uid=$(id -u)" test "$(id -u)" -eq 10001
 assert identity-home "HOME=$HOME" test "$HOME" = /home/agent
@@ -103,14 +118,11 @@ assert no-credential-env "no credential-shaped env name${leaks:+ (found:$leaks)}
 assert allow-list-read "the entry's allow list and pattern are read" \
   test "${#allow}" -gt 10 -a "${#forbidden}" -gt 10
 # Nothing a layer could hold that the agent would read at start.
-for f in .npmrc .git-credentials .config/gh/hosts.yml; do
+for f in .npmrc .git-credentials .config/gh/hosts.yml .claude/settings.json .claude.json .claude/.credentials.json; do
   assert "no-$(basename "$f")" "no ~/$f" test ! -e "$HOME/$f"
 done
 assert root-dir-empty "/root is unreadable or empty" \
   bash -c 'test ! -r /root || test -z "$(ls -A /root 2>/dev/null)"'
-assert no-settings "no ~/.claude/settings.json" test ! -e "$HOME/.claude/settings.json"
-assert no-claude-json "no ~/.claude.json" test ! -e "$HOME/.claude.json"
-assert no-credentials-file "no ~/.claude/.credentials.json" test ! -e "$HOME/.claude/.credentials.json"
 
 # ── CA config for a non-root guest ──────────────────────────────────────────
 assert ca-merged-path "OPENSANDBOX_MERGED_CA_PATH=$CA" test "${OPENSANDBOX_MERGED_CA_PATH:-}" = "$CA"
@@ -136,25 +148,9 @@ expect_exit entry-http 64 "$ENTRY" --url http://x
 expect_exit entry-bad-host 64 "$ENTRY" --url 'https://a;b'
 expect_exit entry-no-home 66 env -u HOME "$ENTRY" --url https://example.org
 canary="canary-$$-$RANDOM"
+expect_refusal entry-env-refusal "DAEMON_TOKEN=$canary"
 # A name that is not a shell identifier still reaches children of bash.
-out="$(env "npm_config_//r.org/:_authToken=$canary" "$ENTRY" --url https://example.org 2>&1)"
-status=$?
-if [ "$status" -ne 78 ]; then
-  bad entry-nonident-refusal "want exit 78, got $status"
-elif printf '%s' "$out" | grep -qF "$canary"; then
-  bad entry-nonident-refusal "the canary value was echoed"
-else
-  ok entry-nonident-refusal "exit 78, canary not echoed"
-fi
-out="$(DAEMON_TOKEN="$canary" "$ENTRY" --url https://example.org 2>&1)"
-status=$?
-if [ "$status" -ne 78 ]; then
-  bad entry-env-refusal "want exit 78, got $status"
-elif printf '%s' "$out" | grep -qF "$canary"; then
-  bad entry-env-refusal "the canary value was echoed"
-else
-  ok entry-env-refusal "exit 78, canary not echoed"
-fi
+expect_refusal entry-nonident-refusal "npm_config_//r.org/:_authToken=$canary"
 
 # ── round trip: the daemon starts and accepts a message ─────────────────────
 "$ENTRY" --url https://example.org >/dev/null 2>&1 &

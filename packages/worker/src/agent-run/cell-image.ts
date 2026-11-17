@@ -1,5 +1,4 @@
-import { CONTAINER_DAEMON_BUNDLE, CONTAINER_HOME } from "./container-argv";
-import { CONTAINER_FLUTTER_SHIM_DIR } from "./container-entry";
+import { CONTAINER_HOME } from "./container-argv";
 
 /**
  * Constants of the cell guest image (deploy/images/cell, #656 PR-F). PR-E
@@ -11,11 +10,6 @@ export const CELL_SEND = "/opt/automata/cell-send.sh";
 export const CELL_NODE = "/usr/local/bin/node";
 export const CELL_DAEMON_SOCKET = `${CONTAINER_HOME}/.automata-run/daemon.sock`;
 export const CELL_CA_BUNDLE = `${CONTAINER_HOME}/.opensandbox/merged-ca-certificates.pem`;
-
-/** Where the daemon bundle sits in the image: the box's path, baked in. */
-export const CELL_DAEMON_BUNDLE = CONTAINER_DAEMON_BUNDLE;
-/** The PATH-first dir PR-E writes pin shims into: the box's own constant. */
-export const CELL_FLUTTER_SHIM_DIR = CONTAINER_FLUTTER_SHIM_DIR;
 
 /**
  * Exit codes of cell-entry.sh (sysexits): 64 bad arguments, 66 HOME missing or
@@ -38,15 +32,11 @@ export const CELL_SEND_MAX_BYTES = 128 * 1024 - 1;
 
 /**
  * Env names the entry refuses (case-insensitive), the AWS_ prefix included.
- * The script holds the same text in its `forbidden=` line (a test keeps them
- * equal).
+ * The script holds the same text in its `forbidden=` line (a test compares it
+ * with this regex's `.source`).
  */
-export const CELL_FORBIDDEN_ENV_PATTERN_SOURCE =
-  "TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|APIKEY|_KEY$|PRIVATE|PASS|AUTH|_PAT$|COOKIE|DATABASE_URL|^AWS_";
-export const CELL_FORBIDDEN_ENV_PATTERN = new RegExp(
-  CELL_FORBIDDEN_ENV_PATTERN_SOURCE,
-  "i",
-);
+export const CELL_FORBIDDEN_ENV_PATTERN =
+  /TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIAL|APIKEY|_KEY$|PRIVATE|PASS|AUTH|_PAT$|COOKIE|DATABASE_URL|^AWS_/i;
 
 /**
  * Names exempt from the refusal. Must equal the `allow` list in

@@ -1,15 +1,15 @@
 # Builds the cell guest image (ADR-014, #656): the batteries image by digest
 # plus the daemon bundle and the entry scripts. `build-verify` builds, scans
-# and verifies it with read-only permissions (PRs and main). `publish` (main
-# only) holds the registry and signing permissions: it rebuilds, re-verifies,
-# pushes and attests. The box pins the pushed DIGEST, never a tag; the digest
-# is written to the job summary.
+# and verifies it with read-only permissions (pull requests, and any run that
+# will not publish). `publish` (main only) holds the registry and signing
+# permissions: it builds, scans, verifies, pushes and attests. The box pins the
+# pushed DIGEST, never a tag; the digest is written to the job summary.
 name: cell-image
 
 on:
   push:
     branches: [main]
-    paths:
+    paths: &paths
       - "deploy/images/cell/**"
       - ".github/actions/cell-image-build/**"
       - "packages/daemon/**"
@@ -21,17 +21,7 @@ on:
       - "pnpm-lock.yaml"
       - ".github/workflows/cell-image.yml"
   pull_request:
-    paths:
-      - "deploy/images/cell/**"
-      - ".github/actions/cell-image-build/**"
-      - "packages/daemon/**"
-      - "packages/agent/**" # a daemon dependency
-      - "packages/tsconfig/**" # the daemon's tsconfig base
-      - "package.json"
-      - "pnpm-workspace.yaml"
-      - ".npmrc"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/cell-image.yml"
+    paths: *paths
   workflow_dispatch:
 
 permissions:
@@ -47,6 +37,7 @@ env:
 
 jobs:
   build-verify:
+    if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -58,12 +49,10 @@ jobs:
 
       - uses: ./.github/actions/cell-image-build
 
-  # Rebuilds instead of loading the build-verify image: a runner's local image
-  # store does not cross jobs, and the ~8.3 GB image is far over the artifact
-  # budget. The rebuild runs the same scans and verify.sh on the image it then
-  # pushes, so what is pushed is what was verified, not what an earlier job saw.
+  # Independent of build-verify: it builds, scans and verifies the very image
+  # it pushes (a runner's image store does not cross jobs, and ~8.3 GB is far
+  # over the artifact budget), so a prior job would add nothing.
   publish:
-    needs: build-verify
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
