@@ -1,0 +1,48 @@
+# OpenSandbox 1.2.1 server config for the box (#656, ADR-014). The server runs
+# as a container on the DEDICATED rootless daemon (automata-opensandbox.service)
+# with --network host, so `127.0.0.1` here is the box's real loopback: the API
+# is never bound to a routable address. Same keys as the OPENSANDBOX_IT config
+# (packages/sandbox/opensandbox-it/config.toml); the differences are the bind,
+# the image tags and the PLACEHOLDER key.
+#
+# `__API_KEY__` is never a value: ExecStartPre renders this file into
+# /run/automata-opensandbox/config.toml (0600) from the root-only credential, so
+# the key is in no file of the repo, no argv and no environment.
+[server]
+host = "127.0.0.1"
+port = 8090
+api_key = "__API_KEY__"
+# Must stay >= CELL_RUN_TTL_MS (45 min = 2700 s): the 30-minute run plus margin.
+max_sandbox_timeout_seconds = 3600
+
+[proxy]
+resolve_internal = false
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "automata-osb/execd:1.2.1"
+
+[store]
+type = "sqlite"
+path = "/data/opensandbox.db"
+
+[docker]
+network_mode = "bridge"
+host_ip = "127.0.0.1"
+publish_host = "127.0.0.1"
+port_range_min = 40000
+port_range_max = 40999
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 4096
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "automata-osb/egress:1.2.1"
+mode = "dns+nft"
+readiness_timeout_seconds = 60.0

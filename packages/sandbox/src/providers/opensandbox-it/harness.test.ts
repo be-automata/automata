@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDnsQuery,
   encodeSecret,
   normalizeIptablesSave,
   parseProbeOutput,
@@ -124,5 +125,87 @@ describe("https_headers probe", () => {
       ]),
     );
     expect(r?.markersFound).toBeUndefined();
+  });
+});
+
+describe("buildDnsQuery", () => {
+  const body = (qtype: number) => [
+    ...[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0],
+    ...[7, ...Buffer.from("example"), 3, ...Buffer.from("org"), 0],
+    ...[0, qtype, 0, 1],
+  ];
+
+  it("builds the exact bytes for example.org A and AAAA (id masked)", () => {
+    expect([...buildDnsQuery("example.org", "A").slice(2)]).toEqual(body(1));
+    expect([...buildDnsQuery("example.org", "AAAA").slice(2)]).toEqual(
+      body(28),
+    );
+  });
+
+  it("uses the given id and a trailing dot is ignored", () => {
+    const q = buildDnsQuery("example.org.", "A", 0xabcd);
+    expect([...q.slice(0, 2)]).toEqual([0xab, 0xcd]);
+    expect([...q.slice(2)]).toEqual(body(1));
+  });
+
+  it("refuses an empty label and a label over 63 bytes", () => {
+    expect(() => buildDnsQuery("a..org", "A")).toThrow();
+    expect(() => buildDnsQuery("", "A")).toThrow();
+    expect(() => buildDnsQuery(`${"a".repeat(64)}.org`, "A")).toThrow();
+    expect(() => buildDnsQuery(`${"a".repeat(63)}.org`, "A")).not.toThrow();
+  });
+});
+
+describe("dns6, udpdns and ipv6_route probes", () => {
+  const wire = (specs: Parameters<typeof probeArgv>[0]) =>
+    JSON.parse(probeArgv(specs)[3] ?? "") as Record<string, unknown>[];
+
+  it("puts dns6 and ipv6_route on the wire unchanged", () => {
+    expect(
+      wire([{ kind: "dns6", host: "example.org" }, { kind: "ipv6_route" }]),
+    ).toEqual([{ kind: "dns6", host: "example.org" }, { kind: "ipv6_route" }]);
+  });
+
+  it("sends udpdns as query_b64 for an IPv4 and an IPv6 server", () => {
+    const [v4, v6] = wire([
+      { kind: "udpdns", server: "8.8.8.8", host: "example.org" },
+      {
+        kind: "udpdns",
+        server: "2001:4860:4860::8888",
+        host: "example.org",
+        qtype: "AAAA",
+      },
+    ]);
+    expect(v4).toMatchObject({ kind: "udpdns", server: "8.8.8.8" });
+    expect(v6).toMatchObject({ server: "2001:4860:4860::8888" });
+    expect(v4).not.toHaveProperty("host");
+    const q4 = Buffer.from(String(v4?.query_b64), "base64");
+    const q6 = Buffer.from(String(v6?.query_b64), "base64");
+    expect([...q4.subarray(2)]).toEqual([
+      ...buildDnsQuery("example.org", "A", 0).subarray(2),
+    ]);
+    expect(q6[q6.length - 3]).toBe(28);
+  });
+
+  it("the guest script reads rcode and ANCOUNT from the header", () => {
+    const py = probeArgv([{ kind: "ipv6_route" }])[2] ?? "";
+    expect(py).toContain("data[3] & 15");
+    expect(py).toContain('struct.unpack(">H", data[6:8])');
+    expect(py).toContain("/proc/net/ipv6_route");
+  });
+
+  it("parseProbeOutput keeps the new fields", () => {
+    const out = parseProbeOutput(
+      JSON.stringify([
+        { kind: "udpdns", ok: true, rcode: 3, answers: 0 },
+        { kind: "ipv6_route", ok: true, default: false },
+      ]),
+    );
+    expect(out[0]).toMatchObject({ rcode: 3, answers: 0 });
+    expect(out[1]?.default).toBe(false);
+  });
+
+  it("still refuses bare TCP on :80 and :443", () => {
+    expect(() => probeArgv([{ kind: "tcp", host: "h", port: 443 }])).toThrow();
   });
 });

@@ -46,7 +46,24 @@ umask 022
 #     on cgroup v2.
 #     It does not prove the limits are enforced: prove-container-limits.sh does.
 #
-# Usage: install-rootless-docker.sh [--worker-user NAME] [--check]
+# Profiles (--profile): `runner` (default, everything above) and `opensandbox`
+# (#656): a SECOND, separate daemon for the OpenSandbox server and its cells.
+# The opensandbox profile shares the packages, the AppArmor handling, the subid
+# range, the delegation, linger and the unit install, and differs in identity:
+#   - system user `automata-opensandbox`, home /var/lib/automata-opensandbox;
+#   - NO shared group and no group grant to the worker: the socket dir
+#     /run/automata-opensandbox-docker is 0700 and the socket 0600, both owned
+#     by the account, so only that account (and root) reaches the daemon;
+#   - /run/automata-opensandbox (0700, same owner): the server's rendered config
+#     and the P0 probe's state. Both dirs come from one tmpfiles.d file and
+#     exist BEFORE the daemon starts (rootlesskit copies /run up at start; a
+#     directory made later is invisible to it), and a daemon already running
+#     when either is new is restarted once;
+#   - the user unit automata-opensandbox-docker.service (this dir);
+#   - verify also proves the worker account can NOT reach the socket.
+#
+# Usage: install-rootless-docker.sh [--profile runner|opensandbox] [--worker-user NAME] [--check]
+#   --profile      runner (default) or opensandbox; anything else exits 2
 #   --worker-user  the worker's account (default: automata)
 #   --check        verify only; change nothing (exit 1 on any failure)
 #
@@ -54,19 +71,23 @@ umask 022
 #   sudo -u automata-runner -- env XDG_RUNTIME_DIR=/run/user/<uid> \
 #     docker -H unix:///run/automata-docker/docker.sock pull <repo>@sha256:<digest>
 
-RUNNER=automata-runner
-RUNNER_HOME=/var/lib/automata-runner
-GROUP=automata-docker
-SOCK_DIR=/run/automata-docker
-SOCK="$SOCK_DIR/docker.sock"
-UNIT=automata-runner-docker.service
 SUBID_COUNT=65536
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+usage() {
+  echo "usage: $0 [--profile runner|opensandbox] [--worker-user NAME] [--check]" >&2
+  exit 2
+}
+
+profile=runner
 worker_user=automata
 check_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --profile)
+      profile="${2:?--profile needs runner|opensandbox}"
+      shift 2
+      ;;
     --worker-user)
       worker_user="${2:?--worker-user needs a name}"
       shift 2
@@ -75,12 +96,36 @@ while [ "$#" -gt 0 ]; do
       check_only=1
       shift
       ;;
-    *)
-      echo "usage: $0 [--worker-user NAME] [--check]" >&2
-      exit 2
-      ;;
+    *) usage ;;
   esac
 done
+
+# The profile fixes every identity constant; RUNNER is the daemon's account in
+# both profiles, so the shared steps below read the same names.
+case "$profile" in
+  runner)
+    RUNNER=automata-runner
+    RUNNER_HOME=/var/lib/automata-runner
+    GROUP=automata-docker
+    SOCK_DIR=/run/automata-docker
+    SOCK="$SOCK_DIR/docker.sock"
+    UNIT=automata-runner-docker.service
+    tmpfiles=/etc/tmpfiles.d/automata-docker.conf
+    want_tmpfiles="d $SOCK_DIR 0750 $RUNNER $GROUP -"
+    ;;
+  opensandbox)
+    RUNNER=automata-opensandbox
+    RUNNER_HOME=/var/lib/automata-opensandbox
+    GROUP=
+    SOCK_DIR=/run/automata-opensandbox-docker
+    SOCK="$SOCK_DIR/docker.sock"
+    RUN_DIR=/run/automata-opensandbox
+    UNIT=automata-opensandbox-docker.service
+    tmpfiles=/etc/tmpfiles.d/automata-opensandbox-docker.conf
+    want_tmpfiles="$(printf 'd %s 0700 %s %s -\nd %s 0700 %s %s -' "$SOCK_DIR" "$RUNNER" "$RUNNER" "$RUN_DIR" "$RUNNER" "$RUNNER")"
+    ;;
+  *) usage ;;
+esac
 
 log() { printf 'rootless-docker: %s\n' "$*"; }
 # in_group USER GROUP: USER is a member of GROUP (primary or supplementary).
@@ -95,9 +140,41 @@ die() {
 [ -f /sys/fs/cgroup/cgroup.controllers ] || die "cgroup v2 (unified hierarchy) is required"
 id -u "$worker_user" >/dev/null 2>&1 || die "worker account $worker_user does not exist"
 
+# verify_account_limits UID: the daemon account's subuid/subgid ranges, linger
+# and cgroup delegation (shared by both profiles; returns non-zero on a FAIL).
+verify_account_limits() {
+  local fail=0 uid="$1" ctrl
+  # Each id range is what maps container uids to unprivileged host ids, and
+  # linger is what keeps the daemon up with nobody logged in.
+  for f in /etc/subuid /etc/subgid; do
+    if grep -q "^$RUNNER:[0-9]*:$SUBID_COUNT\$" "$f" 2>/dev/null; then
+      echo "ok   ${f#/etc/}-range        $RUNNER has its $SUBID_COUNT ids"
+    else
+      echo "FAIL ${f#/etc/}-range        no $RUNNER:<start>:$SUBID_COUNT line in $f"
+      fail=1
+    fi
+  done
+  if [ "$(loginctl show-user "$RUNNER" --property=Linger --value 2>/dev/null || true)" = yes ]; then
+    echo "ok   linger              $RUNNER lingers"
+  else
+    echo "FAIL linger              $RUNNER does not linger (its daemon stops at logout/reboot)"
+    fail=1
+  fi
+  ctrl="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
+  for c in cpu memory pids; do
+    if [ -r "$ctrl" ] && tr ' ' '\n' <"$ctrl" | grep -x "$c" >/dev/null; then
+      echo "ok   delegated-$c        user@$uid.service"
+    else
+      echo "FAIL delegated-$c        not in $ctrl"
+      fail=1
+    fi
+  done
+  return "$fail"
+}
+
 # ── verification (also the tail of every install run) ─────────────────────────
 verify() {
-  local fail=0 uid run_group info ctrl got
+  local fail=0 uid run_group info got
   uid="$(id -u "$RUNNER" 2>/dev/null)" || {
     echo "FAIL runner-user        $RUNNER does not exist"
     return 1
@@ -133,31 +210,7 @@ verify() {
     echo "FAIL socket-perms        $SOCK is $got, want a socket $RUNNER:$GROUP 660"
     fail=1
   fi
-  # Each id range is what maps container uids to unprivileged host ids, and
-  # linger is what keeps the daemon up with nobody logged in.
-  for f in /etc/subuid /etc/subgid; do
-    if grep -q "^$RUNNER:[0-9]*:$SUBID_COUNT\$" "$f" 2>/dev/null; then
-      echo "ok   ${f#/etc/}-range        $RUNNER has its $SUBID_COUNT ids"
-    else
-      echo "FAIL ${f#/etc/}-range        no $RUNNER:<start>:$SUBID_COUNT line in $f"
-      fail=1
-    fi
-  done
-  if [ "$(loginctl show-user "$RUNNER" --property=Linger --value 2>/dev/null || true)" = yes ]; then
-    echo "ok   linger              $RUNNER lingers"
-  else
-    echo "FAIL linger              $RUNNER does not linger (its daemon stops at logout/reboot)"
-    fail=1
-  fi
-  ctrl="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
-  for c in cpu memory pids; do
-    if [ -r "$ctrl" ] && tr ' ' '\n' <"$ctrl" | grep -x "$c" >/dev/null; then
-      echo "ok   delegated-$c        user@$uid.service"
-    else
-      echo "FAIL delegated-$c        not in $ctrl"
-      fail=1
-    fi
-  done
+  verify_account_limits "$uid" || fail=1
   # As the WORKER, through its group grant, with no DOCKER_HOST of its own.
   if info="$(runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
     info --format '{{.CgroupVersion}} {{json .SecurityOptions}}' 2>&1)"; then
@@ -175,8 +228,56 @@ verify() {
   return "$fail"
 }
 
+# The opensandbox profile's checks: the account owns a 0700 dir and a 0600
+# socket, reaches the daemon (rootless, cgroup v2), and the worker does NOT.
+verify_opensandbox() {
+  local fail=0 uid info got
+  uid="$(id -u "$RUNNER" 2>/dev/null)" || {
+    echo "FAIL runner-user        $RUNNER does not exist"
+    return 1
+  }
+  for d in "$SOCK_DIR" "$RUN_DIR"; do
+    got="$(stat -c '%U:%G %a' "$d" 2>/dev/null || echo missing)"
+    if [ "$got" = "$RUNNER:$RUNNER 700" ]; then
+      echo "ok   dir-perms           $d is $got"
+    else
+      echo "FAIL dir-perms           $d is $got, want $RUNNER:$RUNNER 700"
+      fail=1
+    fi
+  done
+  got="$(stat -c '%U:%G %a' "$SOCK" 2>/dev/null || echo missing)"
+  if [ -S "$SOCK" ] && [ "$got" = "$RUNNER:$RUNNER 600" ]; then
+    echo "ok   socket-perms        $SOCK is $got"
+  else
+    echo "FAIL socket-perms        $SOCK is $got, want a socket $RUNNER:$RUNNER 600"
+    fail=1
+  fi
+  verify_account_limits "$uid" || fail=1
+  if info="$(runuser -u "$RUNNER" -- env -u DOCKER_HOST docker -H "unix://$SOCK" \
+    info --format '{{.CgroupVersion}} {{json .SecurityOptions}}' 2>&1)"; then
+    case "$info" in
+      2\ *rootless*) echo "ok   rootless-socket     $SOCK answers $RUNNER: cgroup v2, rootless" ;;
+      *)
+        echo "FAIL rootless-socket     $SOCK answers but is not rootless on cgroup v2: $info"
+        fail=1
+        ;;
+    esac
+  else
+    echo "FAIL rootless-socket     $SOCK does not answer $RUNNER: $info"
+    fail=1
+  fi
+  # The negative check: no group grant exists, so the worker must be refused.
+  if runuser -u "$worker_user" -- env -u DOCKER_HOST docker -H "unix://$SOCK" info >/dev/null 2>&1; then
+    echo "FAIL worker-denied       $worker_user reaches $SOCK (it must not)"
+    fail=1
+  else
+    echo "ok   worker-denied       $worker_user cannot reach $SOCK"
+  fi
+  return "$fail"
+}
+
 if [ "$check_only" -eq 1 ]; then
-  verify
+  if [ "$profile" = opensandbox ]; then verify_opensandbox; else verify; fi
   exit $?
 fi
 
@@ -201,7 +302,11 @@ fi
 command -v dockerd-rootless.sh >/dev/null || die "dockerd-rootless.sh missing after install"
 
 # ── AppArmor: unprivileged userns for rootlesskit only (Ubuntu 24.04) ─────────
-if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+# A distro-shipped /etc/apparmor.d/rootlesskit already allows it: adding ours on
+# top of it made the daemon fail (fork/exec /proc/self/exe: permission denied).
+# An automata-rootlesskit that exists is never removed.
+if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ] &&
+  [ ! -f /etc/apparmor.d/rootlesskit ]; then
   rk="$(command -v rootlesskit)" || die "rootlesskit missing"
   profile="/etc/apparmor.d/automata-rootlesskit"
   want="$(printf 'abi <abi/4.0>,\ninclude <tunables/global>\n\n%s flags=(unconfined) {\n  userns,\n}\n' "$rk")"
@@ -213,31 +318,35 @@ if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || ec
 fi
 
 # ── the runner account and its id ranges ─────────────────────────────────────
-if ! getent group "$GROUP" >/dev/null; then
-  log "creating group $GROUP"
-  groupadd --system "$GROUP"
+if [ "$profile" = runner ]; then
+  if ! getent group "$GROUP" >/dev/null; then
+    log "creating group $GROUP"
+    groupadd --system "$GROUP"
+  fi
 fi
 if ! id -u "$RUNNER" >/dev/null 2>&1; then
   log "creating system user $RUNNER"
   useradd --system --create-home --home-dir "$RUNNER_HOME" --shell /usr/sbin/nologin "$RUNNER"
 fi
-# The runner needs automata-docker itself: the unit's ExecStartPost chgrp runs
-# as the runner, and its user manager only has the groups it started with.
 runner_joined=0
-if ! in_group "$RUNNER" "$GROUP"; then
-  log "adding $RUNNER to $GROUP"
-  usermod -aG "$GROUP" "$RUNNER"
-  runner_joined=1
-fi
-# The worker: automata-docker for the socket, the runner's primary group for
-# the run-dir hand-over (WORKER_CONTAINER_RUN_GID, --group-add 0).
-run_group="$(id -gn "$RUNNER")"
-for g in "$GROUP" "$run_group"; do
-  if ! in_group "$worker_user" "$g"; then
-    log "adding $worker_user to $g (a RUNNING worker gets it only when it restarts)"
-    usermod -aG "$g" "$worker_user"
+if [ "$profile" = runner ]; then
+  # The runner needs automata-docker itself: the unit's ExecStartPost chgrp runs
+  # as the runner, and its user manager only has the groups it started with.
+  if ! in_group "$RUNNER" "$GROUP"; then
+    log "adding $RUNNER to $GROUP"
+    usermod -aG "$GROUP" "$RUNNER"
+    runner_joined=1
   fi
-done
+  # The worker: automata-docker for the socket, the runner's primary group for
+  # the run-dir hand-over (WORKER_CONTAINER_RUN_GID, --group-add 0).
+  run_group="$(id -gn "$RUNNER")"
+  for g in "$GROUP" "$run_group"; do
+    if ! in_group "$worker_user" "$g"; then
+      log "adding $worker_user to $g (a RUNNING worker gets it only when it restarts)"
+      usermod -aG "$g" "$worker_user"
+    fi
+  done
+fi
 # One range per file, placed after every existing range so no two accounts
 # share a host id.
 for f in /etc/subuid /etc/subgid; do
@@ -251,8 +360,14 @@ done
 runner_uid="$(id -u "$RUNNER")"
 
 # ── socket dir, delegation, linger ───────────────────────────────────────────
-tmpfiles=/etc/tmpfiles.d/automata-docker.conf
-want_tmpfiles="d $SOCK_DIR 0750 $RUNNER $GROUP -"
+# opensandbox: a daemon that is already running holds a stale /run copy-up, so
+# it is restarted once when either directory below is new.
+run_dir_new=0
+if [ "$profile" = opensandbox ]; then
+  for d in "$SOCK_DIR" "$RUN_DIR"; do
+    [ -d "$d" ] || run_dir_new=1
+  done
+fi
 if [ "$(cat "$tmpfiles" 2>/dev/null || true)" != "$want_tmpfiles" ]; then
   printf '%s\n' "$want_tmpfiles" >"$tmpfiles"
 fi
@@ -301,7 +416,7 @@ as_runner() {
 }
 as_runner systemctl --user daemon-reload
 as_runner systemctl --user enable "$UNIT" >/dev/null
-if [ "$changed_unit" -eq 1 ]; then
+if [ "$changed_unit" -eq 1 ] || [ "$run_dir_new" -eq 1 ]; then
   as_runner systemctl --user restart "$UNIT"
 else
   as_runner systemctl --user start "$UNIT"
@@ -314,8 +429,12 @@ done
 # The unit's ExecStartPost sets the socket's group right after it appears;
 # give a restart the same bounded wait for it.
 for _ in $(seq 1 50); do
-  [ "$(stat -c %G "$SOCK" 2>/dev/null || true)" = "$GROUP" ] && break
+  if [ "$profile" = runner ]; then
+    [ "$(stat -c %G "$SOCK" 2>/dev/null || true)" = "$GROUP" ] && break
+  else
+    [ "$(stat -c %a "$SOCK" 2>/dev/null || true)" = 600 ] && break
+  fi
   sleep 0.2
 done
 
-verify
+if [ "$profile" = opensandbox ]; then verify_opensandbox; else verify; fi

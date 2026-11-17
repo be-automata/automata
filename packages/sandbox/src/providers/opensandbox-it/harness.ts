@@ -230,6 +230,20 @@ export type ProbeSpec =
   /** Status only, no body. `@gateway` in the host or url is the default gateway. */
   | { kind: "http"; url: string }
   | { kind: "gateway" }
+  /** AAAA through getaddrinfo(AF_INET6): the DNS proxy's v6 path. */
+  | { kind: "dns6"; host: string }
+  /**
+   * One raw UDP DNS query to `server:53` (IPv4 or bracket-free IPv6 literal).
+   * The query bytes are built here (`buildDnsQuery`) and sent as `query_b64`.
+   */
+  | {
+      kind: "udpdns";
+      server: string;
+      host: string;
+      qtype?: DnsQueryType;
+    }
+  /** Whether /proc/net/ipv6_route has a default route (else v6 checks are vacuous). */
+  | { kind: "ipv6_route" }
   | {
       kind: "canary_scan";
       /** Plain canaries; encoded into argv, never echoed. */
@@ -250,6 +264,11 @@ export interface ProbeResult {
   /** https_headers: per marker, whether the response body held it. */
   markersFound?: boolean[];
   gateway?: string | null;
+  /** udpdns: the reply's rcode (header byte 3, low nibble) and ANCOUNT. */
+  rcode?: number;
+  answers?: number;
+  /** ipv6_route: a default route exists. */
+  default?: boolean;
   found?: boolean[];
   envNames?: string[];
   /** canary_scan: other processes whose environ was read, and whether pid 1 was. */
@@ -291,6 +310,43 @@ def dns(host):
         return {"ok": True, "ips": sorted({a[4][0] for a in socket.getaddrinfo(host, 443, socket.AF_INET)})}
     except Exception as e:
         return {"ok": False, "err": kind_of(e)}
+
+
+def dns6(host):
+    try:
+        return {"ok": True, "ips": sorted({a[4][0] for a in socket.getaddrinfo(host, 443, socket.AF_INET6)})}
+    except Exception as e:
+        return {"ok": False, "err": kind_of(e)}
+
+
+def udpdns(server, query_b64):
+    fam = socket.AF_INET6 if ":" in server else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_DGRAM)
+    s.settimeout(T)
+    try:
+        s.sendto(base64.b64decode(query_b64), (server, 53))
+        data = s.recv(4096)
+        if len(data) < 12:
+            return {"ok": False, "err": "short_reply"}
+        return {"ok": True, "rcode": data[3] & 15, "answers": struct.unpack(">H", data[6:8])[0]}
+    except Exception as e:
+        return {"ok": False, "err": kind_of(e)}
+    finally:
+        s.close()
+
+
+def ipv6_route():
+    try:
+        with open("/proc/net/ipv6_route") as fh:
+            for line in fh:
+                f = line.split()
+                if len(f) < 10 or f[0] != "0" * 32 or f[1] != "00":
+                    continue
+                if f[9] != "lo" and not (int(f[8], 16) & 0x200):
+                    return {"ok": True, "default": True}
+    except Exception:
+        pass
+    return {"ok": True, "default": False}
 
 
 def tcp(host, port):
@@ -408,6 +464,12 @@ def run(spec):
     if k == "gateway":
         g = gateway()
         return {"ok": g is not None, "gateway": g}
+    if k == "dns6":
+        return dns6(spec["host"])
+    if k == "udpdns":
+        return udpdns(spec["server"], spec["query_b64"])
+    if k == "ipv6_route":
+        return ipv6_route()
     if k == "canary_scan":
         return canary_scan(spec["canaries_b64"], spec["pattern"])
     return {"ok": False, "err": "unknown_kind"}
@@ -451,6 +513,47 @@ export const SELF_CHECK_ARGV: readonly string[] = [
   ].join("\n"),
 ];
 
+export type DnsQueryType = "A" | "AAAA";
+
+const DNS_QTYPE: Record<DnsQueryType, number> = { A: 1, AAAA: 28 };
+
+/**
+ * A standard DNS query: random id, RD set, one question, class IN. Refuses an
+ * empty label or one over 63 bytes. Built here so vitest covers the bytes and
+ * the guest's python only sends the datagram.
+ */
+export function buildDnsQuery(
+  host: string,
+  qtype: DnsQueryType,
+  id: number = randomBytes(2).readUInt16BE(0),
+): Uint8Array {
+  const labels = host.replace(/\.$/, "").split(".");
+  const parts: number[] = [
+    id >> 8,
+    id & 0xff,
+    0x01,
+    0x00,
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+  ];
+  for (const label of labels) {
+    const bytes = Buffer.from(label, "utf8");
+    if (bytes.length === 0 || bytes.length > 63) {
+      throw new Error("dns label must be 1 to 63 bytes");
+    }
+    parts.push(bytes.length, ...bytes);
+  }
+  const type = DNS_QTYPE[qtype];
+  parts.push(0, type >> 8, type & 0xff, 0, 1);
+  return Uint8Array.from(parts);
+}
+
 /** argv for the adapter's `exec`: the probe script plus its specs as one JSON arg. */
 export function probeArgv(probes: readonly ProbeSpec[]): string[] {
   const wire = probes.map((probe) => {
@@ -476,6 +579,14 @@ export function probeArgv(probes: readonly ProbeSpec[]): string[] {
           url: probe.url,
           headers: probe.headers,
           markers_b64: probe.markers.map(encodeSecret),
+        };
+      case "udpdns":
+        return {
+          kind: probe.kind,
+          server: probe.server,
+          query_b64: Buffer.from(
+            buildDnsQuery(probe.host, probe.qtype ?? "A"),
+          ).toString("base64"),
         };
       case "canary_scan":
         return {
@@ -545,6 +656,9 @@ export function parseProbeOutput(stdout: string): ProbeResult[] {
         typeof o.gateway === "string" || o.gateway === null
           ? o.gateway
           : undefined,
+      rcode: optionalNumber(o.rcode),
+      answers: optionalNumber(o.answers),
+      default: optionalBoolean(o.default),
       found: booleanArray(o.found),
       envNames: stringArray(o.envNames),
       scanned: optionalNumber(o.scanned),

@@ -1,0 +1,51 @@
+# The DEDICATED rootless Docker daemon for the OpenSandbox server and its cells
+# (#656, ADR-014). A SYSTEMD USER UNIT of `automata-opensandbox`, installed by
+# `install-rootless-docker.sh --profile opensandbox` into
+# ~automata-opensandbox/.config/systemd/user/.
+#
+# Separate from the runner daemon (automata-runner-docker.service) and from the
+# rootful daemon that runs the engine stack: its own account, data root and
+# socket. It is never exposed through a shared group: the socket
+# /run/automata-opensandbox-docker/docker.sock is 0600 in a 0700 directory, both
+# owned by `automata-opensandbox`, so only that account (and root) reaches it.
+#
+# Unlike the runner's daemon, THIS daemon's containers need egress: cells reach
+# the internet through slirp4netns, behind the egress sidecar's deny-by-default
+# policy. Host loopback stays unreachable from them (the rootless default is
+# kept; nothing here overrides it).
+#
+# The socket's mode is set from the HOST side, as in the runner unit: dockerd's
+# own `--group=` resolves inside the rootless user namespace, so it is left
+# empty and the ExecStartPost below (host namespace, as the account) tightens
+# the socket. Type=notify: it runs once dockerd is READY and the socket exists.
+#
+# Resource limits (--memory, --pids-limit, --cpus) need the user manager's
+# cgroup delegation (user@<uid>.service.d/10-automata-delegate.conf); Delegate=
+# below hands this unit's own subtree to dockerd.
+
+[Unit]
+Description=Rootless Docker daemon for the OpenSandbox server and cells (#656)
+Documentation=https://github.com/be-automata/automata/blob/main/docs/adr/ADR-014-third-party-execution-compute.md
+
+[Service]
+Type=notify
+NotifyAccess=all
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
+ExecStart=/usr/bin/dockerd-rootless.sh --data-root=%h/docker --host=unix:///run/automata-opensandbox-docker/docker.sock --group= --exec-opt=native.cgroupdriver=systemd --log-driver=none --live-restore=false
+ExecStartPost=/usr/bin/chmod 0600 /run/automata-opensandbox-docker/docker.sock
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutSec=0
+RestartSec=2
+Restart=always
+StartLimitBurst=3
+StartLimitInterval=60s
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Delegate=yes
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
