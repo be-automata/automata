@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import {
   CONTAINER_SOCKET_DIR,
   CONTAINER_WORKSPACE,
 } from "./container-argv";
+import { fnBody } from "./bash-test-utils";
 import { DEFAULT_CONTAINER_DOCKER_SOCKET } from "./container-config";
 import { CONTAINER_BRIDGES } from "./container-entry";
 import { parsePinnedImage } from "./container-image";
@@ -42,6 +44,14 @@ const SCRIPTS = [
   linux("prove-container-limits.sh"),
   PROVISION,
   PROBES,
+  linux("opensandbox-p0-probe.sh"),
+  linux("render-opensandbox-config.sh"),
+];
+
+/** Sourced libraries: no shebang, no +x; they must still parse and be shellcheck clean. */
+const SOURCED = [
+  linux("opensandbox-bom.sh"),
+  linux("rootless-socket-checks.sh"),
 ];
 
 /** A script's code lines: its comments state guarantees in prose. */
@@ -184,6 +194,273 @@ describe("install-rootless-docker.sh + automata-runner-docker.service (ADR-013 D
       /if ! in_group "\$worker_user" "\$g"; then\n(.*\n)?\s+usermod -aG "\$g" "\$worker_user"/,
     );
     expect(script).toMatch(/d \$SOCK_DIR 0750 \$RUNNER \$GROUP -/);
+  });
+});
+
+describe.each(SOURCED)("%s: sourced library hygiene", (rel) => {
+  // card: protects=a sourced library parses and is shellcheck clean, and is not an executable entry point; fails_when=it stops parsing, regresses shellcheck or gains +x or a shebang; no_claim=its behaviour (the callers' tests)
+  it("parses, is shellcheck clean and is not executable", (ctx) => {
+    const mode = execFileSync("git", ["ls-files", "-s", rel], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).slice(0, 6);
+    expect(mode).toBe("100644");
+    expect(read(rel).startsWith("#!")).toBe(false);
+    expect(() =>
+      execFileSync("bash", ["-n", path.join(repoRoot, rel)], { stdio: "pipe" }),
+    ).not.toThrow();
+    if (
+      spawnSync("shellcheck", ["--version"], { stdio: "ignore" }).status !== 0
+    ) {
+      ctx.skip();
+    }
+    const r = spawnSync(
+      "shellcheck",
+      ["-s", "bash", path.join(repoRoot, rel)],
+      {
+        encoding: "utf8",
+      },
+    );
+    expect(r.stdout + r.stderr).toBe("");
+    expect(r.status).toBe(0);
+  });
+});
+
+describe("install-rootless-docker.sh --profile opensandbox + automata-opensandbox-docker.service (#656 G0a)", () => {
+  const script = read(linux("install-rootless-docker.sh"));
+  const code = codeOf(script);
+  const unit = read(linux("automata-opensandbox-docker.service"));
+  const runnerUnit = read(linux("automata-runner-docker.service"));
+  const SOCK_DIR = "/run/automata-opensandbox-docker";
+  const SOCK = `${SOCK_DIR}/docker.sock`;
+  const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+  /** The body of `case "$profile" in` branch `name`. */
+  const branch = (name: string) => {
+    const m = script.match(
+      new RegExp(`\\n  ${name}\\)\\n([\\s\\S]*?)\\n    ;;\\n`),
+    );
+    return m?.[1] ?? "";
+  };
+
+  // card: protects=the runner profile is the default and its daemon is byte-for-byte what it was: its constants stay as the literal lines the older tests pin, its unit file is unchanged (sha256), and its tmpfiles line is the same; fails_when=the default flips, a runner constant moves, or the runner unit changes; no_claim=a run on a box (the installer needs root)
+  it("runner stays the default and its constants and unit are unchanged", () => {
+    expect(script).toMatch(/^profile=runner$/m);
+    expect(branch("runner")).toBe(
+      [
+        "    RUNNER=automata-runner",
+        "    RUNNER_HOME=/var/lib/automata-runner",
+        "    GROUP=automata-docker",
+        "    SOCK_DIR=/run/automata-docker",
+        '    SOCK="$SOCK_DIR/docker.sock"',
+        "    UNIT=automata-runner-docker.service",
+        "    tmpfiles=/etc/tmpfiles.d/automata-docker.conf",
+        '    want_tmpfiles="d $SOCK_DIR 0750 $RUNNER $GROUP -"',
+      ].join("\n"),
+    );
+    expect(sha256(runnerUnit)).toBe(
+      "aa2dba08ad2ac1b2d4f7a37e0c78bcb58ef81fdc06bdf3e1fec91c45924a1f5f",
+    );
+  });
+
+  // card: protects=an unknown or malformed profile is refused with exit 2 before root, packages or any change; fails_when=the usage exit code changes or the profile is not validated; no_claim=the root path
+  it("rejects an unknown profile with exit 2", () => {
+    const sh = path.join(repoRoot, linux("install-rootless-docker.sh"));
+    for (const args of [["--profile", "bogus"], ["--nope"]]) {
+      const r = spawnSync("bash", [sh, ...args], { encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("--profile runner|opensandbox");
+    }
+  });
+
+  // card: protects=the opensandbox daemon has its own account, no shared group, a 0700 socket dir and its own unit, and the unit and installer agree on the socket path; fails_when=any identity constant drifts, a group is introduced, or the unit's --host differs from the installer's socket; no_claim=the rootlesskit copy-up making the path visible (P0 probe run-dir-visible)
+  it("has its own account, a 0700 socket dir and one socket path", () => {
+    const b = branch("opensandbox");
+    expect(b).toContain("RUNNER=automata-opensandbox");
+    expect(b).toContain("RUNNER_HOME=/var/lib/automata-opensandbox");
+    expect(b).toMatch(/^ {4}GROUP=$/m);
+    expect(b).toContain(`SOCK_DIR=${SOCK_DIR}`);
+    expect(b).toContain('SOCK="$SOCK_DIR/docker.sock"');
+    // the rendered config is under /var/lib now: no run dir in this profile
+    expect(b).not.toContain("RUN_DIR");
+    expect(b).toContain("UNIT=automata-opensandbox-docker.service");
+    expect(unit).toContain(`--host=unix://${SOCK}`);
+    expect(unit).not.toContain("/run/automata-docker/");
+  });
+
+  // card: protects=the dedicated daemon's one tmpfiles entry (the socket dir, 0700 for the account) is written before the daemon first starts, and the server's rendered config no longer lives under /run (rootlesskit copies /run up at daemon start, which is why the marker, visibility and ctime heuristics existed); fails_when=the entry is dropped, loosened or created after the unit start, or a /run run dir or its visibility heuristics come back; no_claim=that the socket is reachable (verify)
+  it("writes the socket dir's tmpfiles entry before the daemon starts and has no /run run dir", () => {
+    const b = branch("opensandbox");
+    expect(b).toContain(
+      "tmpfiles=/etc/tmpfiles.d/automata-opensandbox-docker.conf",
+    );
+    expect(b).toContain('want_tmpfiles="d $SOCK_DIR 0700 $RUNNER $RUNNER -"');
+    const create = code.indexOf('systemd-tmpfiles --create "$tmpfiles"');
+    const start = code.indexOf('as_runner systemctl --user restart "$UNIT"');
+    expect(create).toBeGreaterThan(0);
+    expect(start).toBeGreaterThan(create);
+    expect(code).toContain('if [ "$changed_unit" -eq 1 ]; then');
+    for (const gone of [
+      "RUN_DIR",
+      "run_dir_new",
+      "run_dir_stale",
+      "run_dir_visibility",
+      "ActiveEnterTimestamp",
+      "run-dir-visible",
+      "/run/automata-opensandbox ",
+    ]) {
+      expect(code, gone).not.toContain(gone);
+    }
+    // negative control: the old two-entry line would trip the pin above
+    expect(b).not.toContain("\\nd %s 0700");
+  });
+
+  // card: protects=the profile selector is assigned only while the arguments are parsed (a later `profile=` once clobbered it with an AppArmor path, so every [ "$profile" = runner|opensandbox ] was false on a host with userns restricted); fails_when=any assignment to profile (not aa_profile) appears after the case that reads it; no_claim=other variables
+  it("assigns the profile selector only in argument parsing", () => {
+    const assignsAfterParse = (text: string) => {
+      const at = text.indexOf('case "$profile" in');
+      return /(^|[\s;])profile=/m.test(text.slice(at));
+    };
+    expect(code).toContain('case "$profile" in');
+    expect(assignsAfterParse(code)).toBe(false);
+    expect(code).toContain('aa_profile="/etc/apparmor.d/automata-rootlesskit"');
+    // negative control: the old AppArmor block trips the check
+    const old = code.replace(/aa_profile=/g, "profile=");
+    expect(assignsAfterParse(old)).toBe(true);
+  });
+
+  // card: protects=the unit tightens the socket to 0600 from the host side and never chgrps it, passes an empty --group, keeps Type=notify and the cgroup delegation, and does not override the rootless host-loopback default; fails_when=a chgrp, a wider chmod, a named --group or a loopback override appears; no_claim=runtime behaviour of slirp4netns
+  it("unit: chmod 0600, no chgrp, no host-loopback override", () => {
+    const unitCode = codeOf(unit);
+    const post = [...unitCode.matchAll(/^ExecStartPost=(.*)$/gm)].map(
+      (m) => m[1],
+    );
+    expect(post).toEqual([`/usr/bin/chmod 0600 ${SOCK}`]);
+    expect(unitCode).not.toMatch(/chgrp/);
+    const execStart = unitCode.match(/^ExecStart=(.*)$/m)?.[1] ?? "";
+    expect(execStart).toMatch(/ --group= /);
+    expect(execStart).toContain("--data-root=%h/docker");
+    expect(unitCode).toMatch(/^Type=notify$/m);
+    expect(unitCode).toMatch(/^Delegate=yes$/m);
+    expect(unitCode).toContain(
+      "Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns",
+    );
+    expect(unitCode).not.toMatch(/DISABLE_HOST_LOOPBACK/);
+  });
+
+  // card: protects=verify for the opensandbox profile checks the dir and socket modes, the account's rootless cgroup-v2 socket, and the NEGATIVE check that the worker cannot reach it (refused for permission, not just refused); fails_when=the negative worker check, its three-way outcome or a mode check is dropped; no_claim=the stat output format on non-GNU coreutils
+  it("verify has the negative worker check and the mode checks", () => {
+    const v = fnBody(script, "verify_opensandbox");
+    expect(v).toContain('[ "$got" = "$RUNNER:$RUNNER 700" ]');
+    expect(v).toContain('[ "$got" = "$RUNNER:$RUNNER 600" ]');
+    expect(v).toContain('check_rootless_socket "$RUNNER" || fail=1');
+    expect(v).toContain('socket_denied "$worker_user" || rc=$?');
+    expect(v).toContain('echo "FAIL worker-denied       $worker_user reaches');
+    expect(v).toContain("was refused for another reason");
+    expect(v).not.toContain("run-dir-visible");
+    expect(fnBody(script, "check_rootless_socket")).toContain(
+      'rootless_cgroup2 "$1"',
+    );
+    expect(code).toContain(
+      'if [ "$profile" = opensandbox ]; then verify_opensandbox; else verify; fi',
+    );
+    // the runner profile checks the same socket as the worker
+    expect(fnBody(script, "verify")).toContain(
+      'check_rootless_socket "$worker_user" || fail=1',
+    );
+  });
+
+  // card: protects=the two socket checks both profiles and the P0 probe run are ONE implementation: rootless_cgroup2 needs an answer, rootless and cgroup v2, and socket_denied is 0 only when refused FOR PERMISSION (1 reached, 2 refused for another reason); fails_when=a refusal for another reason reads as a denial, a reachable socket reads as denied, or a non-rootless answer passes; no_claim=real docker (fake docker and runuser on PATH)
+  it("the shared socket checks tell permission-denied from reached and from other errors", () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "socket-checks-"));
+    fs.writeFileSync(
+      path.join(bin, "runuser"),
+      '#!/bin/sh\nshift 3\nexec "$@"\n',
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(bin, "docker"),
+      '#!/bin/sh\nprintf \'%s\\n\' "$FAKE_OUT"\nexit "${FAKE_RC:-0}"\n',
+      { mode: 0o755 },
+    );
+    const lib = path.join(repoRoot, linux("rootless-socket-checks.sh"));
+    const run = (fn: string, out: string, rc: number): number =>
+      spawnSync("bash", ["-c", `SOCK=/x; . "${lib}"; ${fn} someone`], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          FAKE_OUT: out,
+          FAKE_RC: String(rc),
+        },
+        encoding: "utf8",
+      }).status ?? -1;
+    const DENIED = "permission denied while trying to connect";
+    expect(run("socket_denied", DENIED, 1)).toBe(0);
+    expect(run("socket_denied", "Cannot connect: no such file", 1)).toBe(2);
+    expect(run("socket_denied", '2 ["name=rootless"]', 0)).toBe(1);
+    expect(
+      run("rootless_cgroup2", '2 ["name=seccomp","name=rootless"]', 0),
+    ).toBe(0);
+    expect(run("rootless_cgroup2", '2 ["name=seccomp"]', 0)).toBe(1);
+    expect(run("rootless_cgroup2", '1 ["name=rootless"]', 0)).toBe(1);
+    expect(run("rootless_cgroup2", DENIED, 1)).toBe(1);
+  });
+
+  // card: protects=the worker is never added to a group in the opensandbox profile: every usermod and groupadd sits inside an `if [ "$profile" = runner ]` block; fails_when=a usermod/groupadd is reachable by the opensandbox profile (negative control: stripping the runner blocks leaves none); no_claim=other tools editing groups
+  it("never usermods the worker or adds a group in this profile", () => {
+    const blocks = [
+      ...code.matchAll(/^if \[ "\$profile" = runner \]; then\n[\s\S]*?\nfi$/gm),
+    ];
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    expect(
+      blocks.some((m) => /usermod -aG "\$g" "\$worker_user"/.test(m[0])),
+    ).toBe(true);
+    let rest = code;
+    for (const m of blocks) rest = rest.replace(m[0], "");
+    expect(rest).not.toMatch(/\busermod\b/);
+    expect(rest).not.toMatch(/\bgroupadd\b/);
+    expect(rest).not.toMatch(/automata-worker\.service/);
+  });
+
+  // card: protects=a distro /etc/apparmor.d/rootlesskit skips our automata-rootlesskit write (spike 068: both profiles together broke the daemon) and the installer never removes automata-rootlesskit; fails_when=the existence guard is dropped or an rm of the profile appears; no_claim=AppArmor behaviour on a box
+  it("skips the AppArmor profile when the distro one exists and never removes ours", () => {
+    expect(code).toMatch(
+      /kernel\.apparmor_restrict_unprivileged_userns[^\n]*= 1 \] &&\n\s+\[ ! -f \/etc\/apparmor\.d\/rootlesskit \]; then/,
+    );
+    expect(code).not.toMatch(/\brm\b[^\n]*automata-rootlesskit/);
+    expect(code).not.toMatch(/apparmor_parser -R/);
+  });
+});
+
+describe("opensandbox-server.toml (#656 G0a)", () => {
+  const toml = read(linux("opensandbox-server.toml"));
+  const keys = (src: string) =>
+    new Set(
+      src
+        .split("\n")
+        .filter((l) => /^[a-z_]+ = /.test(l) || /^\[/.test(l))
+        .map((l) => l.replace(/ = .*/, "")),
+    );
+
+  // card: protects=the server config binds loopback only, holds the __API_KEY__ placeholder and no key-like hex, uses the local re-tagged images, caps sandbox lifetime at the run TTL, and has the same keys as the IT config; fails_when=it binds a routable address, carries a secret, points at an upstream tag, or drifts from the IT keys; no_claim=the server accepting the file (live)
+  it("is loopback-only, keyless and key-for-key the IT config", () => {
+    expect(toml).toMatch(/^host = "127\.0\.0\.1"$/m);
+    expect(toml).toMatch(/^port = 8090$/m);
+    expect(toml).toMatch(/^api_key = "__API_KEY__"$/m);
+    expect(toml).not.toMatch(/[0-9a-f]{32,}/i);
+    expect(toml).toContain('execd_image = "automata-osb/execd:1.2.1"');
+    expect(toml).toContain('image = "automata-osb/egress:1.2.1"');
+    expect(toml).toMatch(/^mode = "dns\+nft"$/m);
+    expect(toml).toMatch(/^network_mode = "bridge"$/m);
+    expect(toml).toMatch(/^host_ip = "127\.0\.0\.1"$/m);
+    expect(toml).toMatch(/^publish_host = "127\.0\.0\.1"$/m);
+    const ttl = Number(
+      toml.match(/^max_sandbox_timeout_seconds = (\d+)$/m)?.[1],
+    );
+    expect(ttl).toBe(3600);
+    expect(keys(toml)).toEqual(
+      keys(read("packages/sandbox/opensandbox-it/config.toml")),
+    );
   });
 });
 
@@ -800,5 +1077,182 @@ describe("container-security-probes.sh (ADR-013 Security probes, P2 #433)", () =
     expect(
       probes([...args, ...pair], { selfToken: "run-other-9999" }).stdout,
     ).toMatch(/^FAIL 7 .*not 'run-self-0001'/m);
+  });
+});
+
+describe("opensandbox-p0-probe.sh (#656 G0b)", () => {
+  const rel_ = linux("opensandbox-p0-probe.sh");
+  const script = read(rel_);
+  const code = codeOf(script);
+  // card: protects=the probe cannot leak the key or touch the production daemons: no set -x, no host docker socket path, no rootful docker unit, no echo/printf of key material; fails_when=any of those appears in its code; no_claim=what the driver prints (harness tests cover that)
+  it("never traces, never prints the key, never names the rootful daemon", () => {
+    expect(code).not.toMatch(/set\s+-\w*x/);
+    expect(code).not.toMatch(/-v\s+\/var\/run\/docker\.sock/);
+    expect(code).not.toMatch(/unix:\/\/\/var\/run\/docker\.sock/);
+    expect(code).not.toMatch(/(?<![-\w])docker\.service/);
+    expect(code).not.toMatch(/(echo|printf)[^\n]*\$\{?(key|KEY|API_KEY)/);
+    expect(code).not.toMatch(/\bcat\b[^\n]*\$P0\/key/);
+    expect(code).not.toMatch(/OPENSANDBOX_API_KEY|--env-file/);
+  });
+
+  // card: protects=the probe state lives under the account's /var/lib directory (owned by the rootless uid), never a root mktemp dir and not /run; the key reaches the driver by file path only, and the config is rendered by the shared helper; fails_when=mktemp -d appears, the state dir moves, the key is passed in argv/env, or the awk render comes back; no_claim=file modes on a box
+  it("keeps state under the account's var/lib dir and hands the key over by file path", () => {
+    expect(script).toMatch(/^RUNNER_HOME=\/var\/lib\/automata-opensandbox$/m);
+    expect(script).toMatch(/^P0="\$RUNNER_HOME\/p0"$/m);
+    expect(code).not.toContain("/run/automata-opensandbox ");
+    expect(code).not.toMatch(/RUN_DIR|mktemp/);
+    expect(code).toContain('--key-file "$P0/key"');
+    expect(code).not.toMatch(/--api-key|OPENSANDBOX_API_KEY=/);
+    expect(code).toContain("umask 077");
+    expect(fnBody(code, "render_config")).toContain(
+      '"$HERE/render-opensandbox-config.sh" "$P0/key" "$HERE/opensandbox-server.toml" "$P0/config.toml" "$PORT"',
+    );
+    expect(code).not.toContain("__API_KEY__");
+  });
+
+  // card: protects=the copy-up marker check and the throwaway guard exist, the guard refuses a live worker or the seal key, and automata-exec-1 is refused even with the flag; fails_when=any is dropped; no_claim=behaviour on a box
+  it("has the copy-up marker check and the throwaway guard", () => {
+    // the flag is required AND a live worker / seal key refuses even with it
+    const guardCode = code.slice(
+      code.indexOf('[ "$throwaway" -eq 1 ] || die'),
+      code.indexOf('id -u "$RUNNER" >/dev/null'),
+    );
+    expect(guardCode).toContain(
+      '[ "$throwaway" -eq 1 ] || die "pass --i-know-this-is-throwaway',
+    );
+    expect(guardCode).toContain("refused even with --i-know-this-is-throwaway");
+    expect(guardCode).not.toMatch(/\[ "\$throwaway" -ne 1 \]/);
+    // negative control: the old shape (the live check inside the flag test) is what this rejects
+    const old = 'if [ "$throwaway" -ne 1 ]; then\n  if systemctl is-active';
+    expect(guardCode).not.toContain(old);
+    expect(guardCode.indexOf("systemctl is-active")).toBeGreaterThan(
+      guardCode.indexOf('"$throwaway" -eq 1'),
+    );
+    expect(code).toContain('-v "$P0:/x:ro"');
+    expect(code).toContain("cat /x/marker");
+    expect(code).toContain("state_dir_visible");
+    expect(code).toContain(
+      "systemctl is-active --quiet automata-worker.service",
+    );
+    expect(code).toContain("/etc/automata/payload-seal.key");
+    expect(code).toContain("--i-know-this-is-throwaway");
+    expect(code).toMatch(/!= automata-exec-1 \] \|\| die/);
+    const guard = code.indexOf("payload-seal.key");
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(code.indexOf("pull_images()"));
+  });
+
+  // card: protects=the verdict is two exact forms, NOTE never counts toward PASS, and a driver that died early cannot read "rootless" (required checks); fails_when=the verdict text changes, a NOTE is recorded as a pass, or a required check is dropped; no_claim=the live result
+  it("prints one of two verdict forms and requires the key checks", () => {
+    expect(code).toContain('echo "P0 VERDICT: rootless"');
+    expect(code).toContain('-> dind fallback"');
+    expect(code).toContain('PASS | FAIL | NOTE) results+=("$st $name")');
+    for (const c of [
+      "state-dir-visible",
+      "self-check-blocked",
+      "negative-control-4of4",
+      "allowed-https-200",
+    ]) {
+      expect(code).toContain(c);
+    }
+    expect(code).toContain("p0.json");
+  });
+
+  // card: protects=the probe and the installer share the BOM, the socket checks and the teardown instead of re-implementing them; fails_when=either script defines its own digests, pull_one, rootless_cgroup2 or worker_cannot_reach again, stops sourcing the shared files, or teardown_probe stops calling teardown_server_only; no_claim=what the shared files do (their own tests)
+  it("sources the shared BOM and socket checks and reuses the server teardown", () => {
+    for (const rel of [rel_, linux("install-opensandbox.sh")]) {
+      const c = codeOf(read(rel));
+      expect(c, rel).toContain('. "$HERE/opensandbox-bom.sh"');
+      expect(c, rel).not.toMatch(/^(SERVER|EXECD|EGRESS|PY)=/m);
+      expect(c, rel).not.toMatch(/^pull_one\(\)/m);
+    }
+    expect(code).toContain('. "$HERE/rootless-socket-checks.sh"');
+    expect(code).not.toMatch(/^(rootless_cgroup2|worker_cannot_reach)\(\)/m);
+    expect(code).toContain('socket_denied "$WORKER_USER"');
+    expect(fnBody(code, "teardown_probe")).toContain("teardown_server_only");
+    expect(fnBody(code, "teardown_probe")).not.toContain("save_server_log");
+  });
+
+  // card: protects=the BOM file pins the same four digests as the IT harness (up.sh) and pull_one inspects before it pulls, in 3 tries; fails_when=either file drifts, a digest is a tag, or the inspect-first or retry is dropped; no_claim=that the digests still resolve upstream
+  it("pins the BOM digests of the IT harness once", () => {
+    const bom = read(linux("opensandbox-bom.sh"));
+    const up = read("packages/sandbox/opensandbox-it/up.sh");
+    for (const name of ["SERVER", "EXECD", "EGRESS", "PY"]) {
+      const re = new RegExp(`^${name}=(\\S+)$`, "m");
+      const mine = re.exec(bom)?.[1];
+      expect(mine, name).toMatch(/@sha256:[0-9a-f]{64}$/);
+      expect(mine, name).toBe(re.exec(up)?.[1]);
+    }
+    expect(bom).toContain('"$SERVER automata-osb/server:1.2.1"');
+    const pull = fnBody(bom, "pull_one");
+    expect(pull.indexOf("dk image inspect")).toBeLessThan(
+      pull.indexOf("dk pull"),
+    );
+    expect(pull).toContain("for attempt in 1 2 3; do");
+    expect(pull).toContain('die "pull failed: $ref"');
+  });
+});
+
+describe("render-opensandbox-config.sh (#656)", () => {
+  const helper = path.join(repoRoot, linux("render-opensandbox-config.sh"));
+  const template = path.join(repoRoot, linux("opensandbox-server.toml"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "render-osb-"));
+  const keyFile = (name: string, body: string) => {
+    const f = path.join(dir, name);
+    fs.writeFileSync(f, body);
+    return f;
+  };
+  const render = (key: string, out: string, port?: string) =>
+    spawnSync("bash", [helper, key, template, out, ...(port ? [port] : [])], {
+      encoding: "utf8",
+    });
+
+  // card: protects=the server config is the template with the key put in, from either key file shape, mode 0600, the key never on stdout or stderr, and the template's own port kept unless one is given; fails_when=the placeholder survives, the key lands elsewhere, the mode is wider or the port override breaks; no_claim=that the server accepts the file
+  it("renders the credential or a bare key, 0600, with an optional port", () => {
+    const out = path.join(dir, "cred.toml");
+    const r = render(keyFile("cred", "OPENSANDBOX_API_KEY=abc123\n"), out);
+    expect(r.status).toBe(0);
+    expect(r.stdout + r.stderr).not.toContain("abc123");
+    const text = fs.readFileSync(out, "utf8");
+    expect(text).toContain('api_key = "abc123"');
+    expect(text).toContain("port = 8090");
+    expect(text).not.toContain("__API_KEY__");
+    expect(fs.statSync(out).mode & 0o777).toBe(0o600);
+
+    const out2 = path.join(dir, "bare.toml");
+    expect(render(keyFile("bare", "zzz999\n"), out2, "18092").status).toBe(0);
+    const text2 = fs.readFileSync(out2, "utf8");
+    expect(text2).toContain('api_key = "zzz999"');
+    expect(text2).toContain("port = 18092");
+    expect(text2).not.toContain("port = 8090");
+    expect(text2).toContain("port_range_min = 40000");
+  });
+
+  // card: protects=an existing OUT with a wider mode is replaced, not written through, so the key never lands in a 0644 file; fails_when=the helper writes into the existing file; no_claim=ownership
+  it("replaces an existing wider-mode output file with a 0600 one", () => {
+    const out = path.join(dir, "wide.toml");
+    fs.writeFileSync(out, "old", { mode: 0o644 });
+    fs.chmodSync(out, 0o644);
+    expect(render(keyFile("wide", "k9\n"), out).status).toBe(0);
+    expect(fs.statSync(out).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(out, "utf8")).toContain('api_key = "k9"');
+  });
+
+  // card: protects=an empty key or a bad port never yields a config: the helper exits non-zero and leaves no output file; fails_when=an empty key renders a config with an empty api_key, or OUT is left behind; no_claim=the unit's handling of the failure (ExecStartPre fails the start)
+  it("refuses an empty key (no output left) and a bad port", () => {
+    const out = path.join(dir, "empty.toml");
+    const r = render(keyFile("empty", ""), out);
+    expect(r.status).toBe(1);
+    expect(fs.existsSync(out)).toBe(false);
+    const blank = render(keyFile("blank", "OPENSANDBOX_API_KEY=\n"), out);
+    expect(blank.status).toBe(1);
+    expect(fs.existsSync(out)).toBe(false);
+    const port = render(
+      keyFile("ok", "k1\n"),
+      path.join(dir, "port.toml"),
+      "80;rm",
+    );
+    expect(port.status).toBe(2);
+    expect(render(keyFile("ok2", "k1\n"), "").status).not.toBe(0);
   });
 });

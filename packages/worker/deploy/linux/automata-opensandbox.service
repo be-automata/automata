@@ -1,0 +1,76 @@
+# The OpenSandbox 1.2.1 server (#656, ADR-014): a SYSTEM unit that runs the
+# server as a container on the DEDICATED rootless daemon
+# (automata-opensandbox-docker.service, a user unit of the same account).
+# Installed by install-opensandbox.sh.
+#
+# A system unit, not a user unit, so PID 1 can read the root-only key file and
+# hand it over through LoadCredential=. The key is NEVER in the process
+# environment, argv, an EnvironmentFile= or a `-e`: ExecStartPre renders the
+# config (0600) from the credential with render-opensandbox-config.sh, and the
+# container reads that file. A missing /etc/automata/opensandbox.env fails the
+# start (no SetCredential= fallback).
+#
+# The rendered config lives under /var/lib/automata-opensandbox/run, not /run:
+# rootlesskit copies /run up when the dedicated daemon starts, so a directory
+# made there later is invisible to the containers. It holds the key, so it is
+# removed whenever the unit stops (ExecStopPost) and rendered again at each start.
+#
+# Same container settings as the P0 probe (opensandbox-p0-probe.sh): host
+# network (with rootlesskit's --detach-netns that is the box's real loopback,
+# and the config binds 127.0.0.1), and the only docker socket mounted is the
+# dedicated one.
+#
+# Logs: the dedicated daemon runs with --log-driver=none, so `docker logs`
+# cannot read them back. The container runs in the FOREGROUND, attached, so the
+# server's stdout and stderr land in the journal: journalctl -u automata-opensandbox.
+#
+# The daemon is a user unit, so this unit cannot order itself after it; the
+# first ExecStartPre waits (bounded) for the socket instead, as
+# automata-worker.service does for the engine.
+
+[Unit]
+Description=OpenSandbox server on the dedicated rootless daemon (#656)
+Documentation=https://github.com/be-automata/automata/blob/main/docs/adr/ADR-014-third-party-execution-compute.md
+
+[Service]
+User=automata-opensandbox
+Group=automata-opensandbox
+LoadCredential=opensandbox.env:/etc/automata/opensandbox.env
+# The docker CLI wants a writable client config: ProtectHome and ProtectSystem
+# leave no ~/.docker. (The rendered config is not here: it lives under
+# /var/lib/automata-opensandbox/run.)
+RuntimeDirectory=automata-opensandbox-client
+RuntimeDirectoryMode=0700
+Environment=DOCKER_CONFIG=%t/automata-opensandbox-client
+
+# 1. wait up to 60 s for the dedicated daemon
+ExecStartPre=/bin/bash -c 'for _ in $(seq 1 30); do /usr/bin/docker -H unix:///run/automata-opensandbox-docker/docker.sock info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "dedicated docker daemon not ready after 60s" >&2; exit 1'
+# 2. a leftover container of a crashed run (a failure is fine)
+ExecStartPre=-/usr/bin/docker -H unix:///run/automata-opensandbox-docker/docker.sock rm -f automata-osb-server
+# 3. render the config from the credential (%d is the credentials directory)
+ExecStartPre=/usr/local/share/automata-opensandbox/render-opensandbox-config.sh %d/opensandbox.env /usr/local/share/automata-opensandbox/opensandbox-server.toml /var/lib/automata-opensandbox/run/config.toml
+
+ExecStart=/usr/bin/docker -H unix:///run/automata-opensandbox-docker/docker.sock run --rm --name automata-osb-server --network host --label automata.osb=1 -v /run/automata-opensandbox-docker/docker.sock:/var/run/docker.sock -v /var/lib/automata-opensandbox/run:/etc/opensandbox:ro -v automata-osb-data:/data -e SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml automata-osb/server:1.2.1
+# Cells survive a server restart (docs/specs/634/gate-log-s4.md), so a stop is graceful.
+ExecStop=/usr/bin/docker -H unix:///run/automata-opensandbox-docker/docker.sock stop -t 30 automata-osb-server
+ExecStopPost=-/usr/bin/rm -f /var/lib/automata-opensandbox/run/config.toml
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/automata-opensandbox/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# The client only speaks to the unix socket.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

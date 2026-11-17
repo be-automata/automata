@@ -3,7 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 import { describe, expect, it } from "vitest";
+
+import { fnBody } from "./bash-test-utils";
 
 /**
  * Rot guards for the execution-plane deploy templates. These are pure file
@@ -325,6 +328,9 @@ describeBashScriptHygiene(
 );
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/test-postgres-sweep.sh",
+);
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/install-opensandbox.sh",
 );
 
 /** The quoted `echo|log|fail|printf "…"` arguments of a bash script. */
@@ -1007,5 +1013,360 @@ describe("ADR-013 P3: the host-uid execution path stays deleted", () => {
       path.join(repoRoot, "deploy", "images", "batteries", "Dockerfile"),
     );
     expect(dockerfile).not.toMatch(/COPY batteries\//);
+  });
+});
+
+describe("packages/worker/deploy/linux — OpenSandbox server (#656 G1)", () => {
+  const linux = (name: string) => deployFile("linux", name);
+  const config = linux("opensandbox-server.toml");
+  const unit = linux("automata-opensandbox.service");
+  const installer = linux("install-opensandbox.sh");
+  const itConfig = read(
+    path.join(repoRoot, "packages/sandbox/opensandbox-it/config.toml"),
+  );
+  const keys = (toml: string) =>
+    toml
+      .split("\n")
+      .map((l) => /^([a-z_]+)\s*=/.exec(l)?.[1])
+      .filter((k): k is string => k !== undefined);
+
+  // card: protects=#656 TTL cap: the server's max_sandbox_timeout_seconds admits a cell's whole run window; fails_when=the cap drops below CELL_RUN_TTL_MS and the server refuses a production create; no_claim=the server's own enforcement
+  it("allows a sandbox timeout of at least CELL_RUN_TTL_MS", () => {
+    const cap = /^max_sandbox_timeout_seconds = (\d+)$/m.exec(config)?.[1];
+    expect(cap).toBeDefined();
+    expect(Number(cap) * 1000).toBeGreaterThanOrEqual(CELL_RUN_TTL_MS);
+  });
+
+  // card: protects=#656 loopback bind and no key at rest in the repo; fails_when=the server binds a routable address or a key value lands in the template; no_claim=that the IT config's keys stay in step beyond a key-name comparison
+  it("binds loopback, holds only the key placeholder, and keeps the IT's keys", () => {
+    expect(config).toMatch(/^host = "127\.0\.0\.1"$/m);
+    expect(config).toMatch(/^api_key = "__API_KEY__"$/m);
+    expect(config).not.toMatch(/[0-9a-fA-F]{32,}/);
+    expect([...new Set(keys(config))].sort()).toEqual(
+      [...new Set(keys(itConfig))].sort(),
+    );
+  });
+
+  // card: protects=#656 the server controls only the dedicated daemon; fails_when=another docker socket is mounted into the server container; no_claim=the daemon's own isolation
+  it("mounts only the dedicated docker socket", () => {
+    const sockets = [...unit.matchAll(/-v\s+([^\s:]*docker\.sock)/g)].map(
+      (m) => m[1],
+    );
+    expect(sockets).toEqual(["/run/automata-opensandbox-docker/docker.sock"]);
+    expect(unit).not.toContain("/var/run/docker.sock:");
+    expect(unit).toContain("--network host");
+  });
+
+  // card: protects=#656 the API key reaches the server by credential only; fails_when=the key goes through the process environment, an env file or argv; no_claim=the key file's mode (the installer test)
+  it("takes the key by LoadCredential only, with no fallback", () => {
+    expect(unit).toMatch(
+      /^LoadCredential=opensandbox\.env:\/etc\/automata\/opensandbox\.env$/m,
+    );
+    expect(unit).not.toMatch(/^SetCredential=/m);
+    expect(unit).not.toMatch(/^EnvironmentFile=/m);
+    expect(unit).not.toMatch(/--env-file|-e\s+OPENSANDBOX_API_KEY/);
+    // the key goes file to file through the shared helper (%d is the credentials directory)
+    expect(unit).toMatch(
+      /^ExecStartPre=\/usr\/local\/share\/automata-opensandbox\/render-opensandbox-config\.sh %d\/opensandbox\.env \/usr\/local\/share\/automata-opensandbox\/opensandbox-server\.toml \/var\/lib\/automata-opensandbox\/run\/config\.toml$/m,
+    );
+    expect(unit).not.toMatch(/\bawk\b/);
+  });
+
+  // card: protects=#656 the docker client has a writable config; fails_when=DOCKER_CONFIG leaves the RuntimeDirectory; no_claim=runtime behaviour under ProtectSystem
+  it("points DOCKER_CONFIG under its own RuntimeDirectory", () => {
+    expect(unit).toMatch(/^RuntimeDirectory=automata-opensandbox-client$/m);
+    expect(unit).toMatch(
+      /^Environment=DOCKER_CONFIG=%t\/automata-opensandbox-client$/m,
+    );
+    expect(unit).toMatch(/^User=automata-opensandbox$/m);
+  });
+
+  // card: protects=#656 the unit's hardening; fails_when=any of these lines is tidied out; no_claim=that systemd honours them on a given box
+  it("keeps the hardening lines", () => {
+    for (const line of [
+      "NoNewPrivileges=yes",
+      "ProtectSystem=strict",
+      "ReadWritePaths=/var/lib/automata-opensandbox/run",
+      "ProtectHome=yes",
+      "PrivateTmp=yes",
+      "RestrictAddressFamilies=AF_UNIX",
+      "IPAddressDeny=any",
+      "CapabilityBoundingSet=",
+      "Restart=always",
+    ]) {
+      expect(unit.split("\n"), line).toContain(line);
+    }
+  });
+
+  // card: protects=#656 the rendered config (it holds the key) lives in the account's own 0700 run dir under /var/lib, is the only writable path of the unit, is mounted read-only and is removed when the unit stops; fails_when=the config goes back under /run (invisible after the daemon's copy-up), the mount loses :ro, or the stop no longer removes the file; no_claim=the 0700 mode on a box (the installer's check)
+  it("renders the config under /var/lib, mounts it read-only and removes it on stop", () => {
+    const dir = "/var/lib/automata-opensandbox/run";
+    expect(unit).toContain(`-v ${dir}:/etc/opensandbox:ro `);
+    expect(unit).toMatch(
+      new RegExp(`^ExecStopPost=-/usr/bin/rm -f ${dir}/config\\.toml$`, "m"),
+    );
+    expect(unit.split("\n")).toContain(`ReadWritePaths=${dir}`);
+    expect(
+      unit.split("\n").filter((l) => /^ReadWritePaths=/.test(l)),
+    ).toHaveLength(1);
+    // negative control: nothing of the unit's code names the old /run directory
+    expect(unit.replace(/^#.*$/gm, "")).not.toContain(
+      "/run/automata-opensandbox ",
+    );
+    expect(unit.replace(/^#.*$/gm, "")).not.toContain(
+      "/run/automata-opensandbox:",
+    );
+  });
+
+  // card: protects=#656 the installer never prints the key; fails_when=an echo or printf names the key; no_claim=the hygiene checks
+  it("installer never prints the key", () => {
+    for (const text of printedStrings(installer)) {
+      expect(text, text).not.toMatch(/\$\{?KEY\b|OPENSANDBOX_API_KEY=%?s?\$/);
+    }
+    expect(installer).not.toMatch(/set -x|-o xtrace/);
+  });
+});
+
+describe("install-opensandbox.sh key file and restarts (#656 PR-G review)", () => {
+  const installer = deployFile("linux", "install-opensandbox.sh");
+  const code = installer
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+
+  // card: protects=a stale KEY_FILE.new (an old mode) is removed before the key is written, and an existing /etc/automata keeps its mode while a new one is 0700; fails_when=the rm is dropped, the dir is re-moded unconditionally or created 0755; no_claim=the umask under which the key is written
+  it("removes a stale .new and never re-modes an existing /etc/automata", () => {
+    const body = fnBody(code, "ensure_key_file");
+    expect(body.indexOf('rm -f "$KEY_FILE.new"')).toBeGreaterThan(0);
+    expect(body.indexOf('rm -f "$KEY_FILE.new"')).toBeLessThan(
+      body.indexOf('>"$KEY_FILE.new"'),
+    );
+    expect(body).toContain(
+      '[ -d "$(dirname "$KEY_FILE")" ] || install -d -o root -g root -m 0700',
+    );
+    expect(body).not.toMatch(/install -d[^\n]*-m 0755/);
+    // negative control: the unconditional form is what this rejects
+    expect(body).not.toMatch(/^\s*install -d [^\n]*dirname/m);
+  });
+
+  // card: protects=the unit restarts when the key is regenerated or a pinned image's local tag moves to another image; fails_when=either path stops setting changed=1 before the start/restart decision; no_claim=systemd behaviour
+  it("restarts the unit when the key or a pinned image changes", () => {
+    expect(code).toContain('[ "${key_new:-0}" -eq 0 ] || changed=1');
+    expect(code).toContain("key_new=1");
+    expect(code).toContain(
+      `[ "$before" = "$(dk image inspect -f '{{.Id}}' "\${pair#* }")" ] || changed=1`,
+    );
+    const set = code.indexOf("changed=0");
+    expect(set).toBeGreaterThan(0);
+    expect(set).toBeLessThan(code.indexOf("key_new:-0"));
+    expect(code.indexOf("key_new:-0")).toBeLessThan(
+      code.indexOf('if [ "$changed" -eq 1 ]'),
+    );
+  });
+});
+
+describe("worker credential drop-in: docs and installer match the unit (#656 PR-G simplify)", () => {
+  const readme = deployFile("README.md");
+  const launcher = deployFile("linux", "run-worker.sh.template");
+  const installer = deployFile("linux", "install-opensandbox.sh");
+  const code = installer
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+  const spec = read(path.join(repoRoot, "docs/specs/656/spec-g.md"));
+  const dropinPath =
+    "/etc/systemd/system/automata-worker.service.d/opensandbox.conf";
+
+  // card: protects=the README and the launcher say what the box does now: a box without OpenSandbox has no credential and nothing is exported, a box with it gets the drop-in; the old always-exported `none` fallback is gone from both; fails_when=either text goes back to the SetCredential `none` fallback or loses the drop-in; no_claim=systemd behaviour
+  it("describes the drop-in, not the `none` fallback", () => {
+    for (const text of [readme, launcher]) {
+      expect(text).toContain("automata-worker.service.d/opensandbox.conf");
+      // negative controls
+      expect(text).not.toContain("opensandbox.env:none");
+      expect(text).not.toMatch(/ALWAYS exported|ALWAYS exports/);
+    }
+    expect(readme).toContain("WORKER_OPENSANDBOX_API_KEY_FILE");
+    expect(launcher).toMatch(/fail\s+#?\s*closed/);
+  });
+
+  // card: protects=spec-g's "Left to PR-E" records that PR-E fails closed when WORKER_OPENSANDBOX_API_KEY_FILE is unset (the `none` file test is no longer needed); fails_when=the section drops that rule or still demands the `none` test; no_claim=PR-E's code
+  it("spec-g leaves PR-E the unset-key-file fail-closed rule", () => {
+    const section = spec.slice(
+      spec.indexOf("## Left to PR-E"),
+      spec.indexOf("## Left to the live steps"),
+    );
+    expect(section).toContain("WORKER_OPENSANDBOX_API_KEY_FILE");
+    expect(section).toContain("fails closed");
+    expect(section).not.toContain("literal `none` file");
+  });
+
+  // card: protects=the installer puts the worker drop-in in place (a repo file, mode 0644, only after the key file exists), reloads systemd, and NEVER restarts or starts the worker; fails_when=the drop-in install moves before the key file, the mode changes, or a systemctl restart/start of the worker appears; no_claim=what systemd does with the drop-in (measured live)
+  it("installs the drop-in after the key file and never restarts the worker", () => {
+    expect(code).toContain(`WORKER_DROPIN=${dropinPath}`);
+    expect(code).toContain(
+      'install_changed "$HERE/automata-worker-opensandbox.conf" "$WORKER_DROPIN" 0644',
+    );
+    expect(code.indexOf("ensure_key_file\n")).toBeLessThan(
+      code.indexOf('install_changed "$HERE/automata-worker-opensandbox.conf"'),
+    );
+    expect(
+      code.indexOf('install_changed "$HERE/automata-worker-opensandbox.conf"'),
+    ).toBeLessThan(code.indexOf("systemctl daemon-reload\nsystemctl enable"));
+    expect(code).not.toMatch(/systemctl\s+\S*(re)?start[^\n]*automata-worker/);
+    expect(code).not.toMatch(/automata-worker-safe-restart/);
+    // negative control: the unit restart the installer does perform is the server's
+    expect(code).toMatch(/systemctl restart "\$UNIT"/);
+  });
+
+  // card: protects=the installer's run dir for the rendered config is the account's 0700 directory under /var/lib, made before the unit starts, verified by --check, and the first layout's key at rest under /run is removed; fails_when=the dir is made after the restart, not 0700 for the account, unchecked, or the legacy config is left behind; no_claim=the unit's own write access (ReadWritePaths test)
+  it("makes the 0700 run dir before the start, checks it, and retires the /run layout", () => {
+    expect(code).toContain('RUN_DIR="$RUNNER_HOME/run"');
+    const make = code.indexOf(
+      'install -d -o "$RUNNER" -g "$RUNNER" -m 0700 "$RUN_DIR"',
+    );
+    expect(make).toBeGreaterThan(0);
+    expect(make).toBeLessThan(code.indexOf('systemctl restart "$UNIT"'));
+    expect(fnBody(code, "verify_server")).toContain(
+      '[ "$got" = "$RUNNER:$RUNNER 700" ]',
+    );
+    expect(fnBody(code, "verify_server")).toContain("worker-dropin");
+    expect(code).toContain("rm -f /run/automata-opensandbox/config.toml");
+    expect(code).not.toMatch(/rm -rf/);
+  });
+
+  // card: protects=the worker drop-in (LoadCredential= has no fallback) is never left beside an invalid key file: an existing wrong key file and a generated invalid one both exit 2 with a message that says the drop-in goes first; fails_when=the refusal goes back to a plain die (exit 1), loses the drop-in warning, or the generated key is not verified; no_claim=running as root on a box
+  it("refuses (exit 2) to leave the drop-in beside an invalid key file", () => {
+    const refuse = fnBody(code, "refuse_key_file");
+    expect(refuse).toContain("exit 2");
+    expect(refuse).toContain('"$WORKER_DROPIN"');
+    expect(refuse).toContain("BEFORE removing or replacing");
+    expect(refuse).toContain("worker cannot restart without the key file");
+    const body = fnBody(code, "ensure_key_file");
+    expect(body).toContain(
+      'verify_key_file >/dev/null || refuse_key_file "$KEY_FILE exists but is wrong',
+    );
+    expect(body.indexOf('mv "$KEY_FILE.new" "$KEY_FILE"')).toBeLessThan(
+      body.indexOf('refuse_key_file "the generated'),
+    );
+    // A missing key beside an installed drop-in is refused, never regenerated,
+    // and the refusal comes before any key is generated (Automata #669).
+    const missing = body.indexOf('if [ -e "$WORKER_DROPIN" ]; then');
+    expect(missing).toBeGreaterThan(-1);
+    expect(body).toContain(
+      'refuse_key_file "$KEY_FILE is missing while the worker drop-in exists"',
+    );
+    expect(missing).toBeLessThan(body.indexOf('log "generating $KEY_FILE"'));
+    // negative control: the old plain die for a wrong key file is gone
+    expect(body).not.toContain("fix or remove it by hand");
+    expect(body).not.toMatch(/\bdie\b/);
+  });
+
+  // card: protects=the README rollback removes the drop-in first, reloads and safe-restarts the worker, and warns never to remove the key file while the drop-in exists; fails_when=the rollback loses the drop-in step, its order, or the warning; no_claim=systemd behaviour
+  it("README rollback removes the drop-in before the server and warns about the key file", () => {
+    const rb = readme.slice(readme.indexOf("### Rollback, in this order"));
+    const dropin = rb.indexOf("automata-worker.service.d/opensandbox.conf");
+    expect(dropin).toBeGreaterThan(0);
+    expect(rb.indexOf("automata-worker-safe-restart")).toBeGreaterThan(dropin);
+    expect(
+      rb.indexOf("systemctl disable --now automata-opensandbox.service"),
+    ).toBeGreaterThan(dropin);
+    expect(rb).toContain(
+      "Never remove or replace `/etc/automata/opensandbox.env` while the drop-in exists",
+    );
+    expect(rb).toContain("exits 2");
+  });
+
+  // card: protects=--check changes nothing: combined with --pull-cell-image it is a usage error (exit 2), checked before any pull; verify_server cleans its key header file on any exit and bounds every curl; fails_when=the check-only combination can reach a pull, the trap is dropped, or a curl has no --max-time; no_claim=timing
+  it("--check never pulls, and verify_server cleans up and bounds its curls", () => {
+    expect(code.indexOf('[ "$check_only" -eq 1 ]')).toBeLessThan(
+      code.indexOf("pull_cell_image\n"),
+    );
+    expect(code).toContain("cannot be combined with --pull-cell-image");
+    const v = fnBody(code, "verify_server");
+    expect(v).toContain(`trap 'rm -f "$hdr_dir/h"; rmdir "$hdr_dir"' EXIT`);
+    expect(v.indexOf("trap '")).toBeLessThan(
+      v.indexOf("sed 's/^OPENSANDBOX_API_KEY="),
+    );
+    for (const line of v.split("\n").filter((l) => l.includes("curl "))) {
+      expect(line, line).toContain("--max-time 5");
+    }
+    // negative control: the unbounded form is what this rejects
+    expect(v).not.toMatch(/curl -s -o/);
+  });
+
+  // card: protects=the health wait keeps the status it saw and stops on the first 200 instead of polling twice; fails_when=the loop goes back to a bare curl -sf plus a second request; no_claim=timing
+  it("captures the health status in the wait loop and breaks on 200", () => {
+    const v = fnBody(code, "verify_server");
+    expect(v).toContain(
+      `code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"`,
+    );
+    expect(v).toContain('[ "$code" = 200 ] && break');
+    expect(v).toContain('if [ "$code" = 200 ]; then');
+    expect(v).not.toContain("curl -sf");
+  });
+});
+
+describe("packages/worker/deploy/linux — worker OpenSandbox wiring (#656 G2)", () => {
+  const launcher = deployFile("linux", "run-worker.sh.template");
+  const unit = deployFile("linux", "automata-worker.service");
+  const guard =
+    /^if \[ -n "\$\{CREDENTIALS_DIRECTORY:-\}" \] && \[ -s "\$opensandbox_credential" \]; then\n([\s\S]*?)^fi$/m;
+
+  // card: protects=#656 a box without OpenSandbox has NO credential line in the base worker unit (so it boots as before and exports nothing), and the repo drop-in carries only the LoadCredential= for the key file; fails_when=a LoadCredential/SetCredential of opensandbox.env lands back in the base unit, or the drop-in gains another directive; no_claim=systemd's handling of the drop-in (measured live, docs/specs/656/gate-log-g.md)
+  it("the base unit has no OpenSandbox credential; the drop-in has only LoadCredential", () => {
+    expect(unit).not.toMatch(/^\s*(Load|Set)Credential=/m);
+    expect(unit).not.toContain("opensandbox.env");
+    expect(unit).not.toMatch(/^EnvironmentFile=/m);
+    const dropin = deployFile("linux", "automata-worker-opensandbox.conf")
+      .split("\n")
+      .filter((l) => l.trim() !== "" && !l.startsWith("#"));
+    expect(dropin).toEqual([
+      "[Service]",
+      "LoadCredential=opensandbox.env:/etc/automata/opensandbox.env",
+    ]);
+    // negative control: the `none` fallback and an empty one are not in the drop-in
+    const text = deployFile("linux", "automata-worker-opensandbox.conf");
+    expect(text).not.toMatch(/^SetCredential=/m);
+  });
+
+  // card: protects=#656 the env names PR-E reads, exported only when the credential is non-empty; fails_when=a name changes, an export leaves the guard, or the launcher reads the key; no_claim=PR-E's parser
+  it("the launcher exports the three names inside the non-empty-credential guard", () => {
+    const body = launcher.match(guard)?.[1];
+    expect(body, "credential guard not found").toBeTruthy();
+    expect(body).toContain(
+      'export WORKER_OPENSANDBOX_API_KEY_FILE="$opensandbox_credential"',
+    );
+    expect(body).toContain(
+      'export WORKER_OPENSANDBOX_URL="${WORKER_OPENSANDBOX_URL:-http://127.0.0.1:8090}"',
+    );
+    expect(launcher.match(/export WORKER_OPENSANDBOX_/g)).toHaveLength(2);
+    expect(launcher).toContain("${CREDENTIALS_DIRECTORY:-}/opensandbox.env");
+    // The guest image is named in the contract (worker-box.env supplies it).
+    expect(launcher).toContain("WORKER_OPENSANDBOX_GUEST_IMAGE");
+    expect(launcher).not.toMatch(/export WORKER_OPENSANDBOX_GUEST_IMAGE/);
+  });
+
+  // card: protects=#656 the key is never read by the launcher; fails_when=a line sources, cats, or reads the credential file; no_claim=what the worker does with the path
+  it("the launcher never sources, cats or reads the credential", () => {
+    const code = launcher
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"));
+    for (const line of code) {
+      if (!/opensandbox/.test(line)) continue;
+      expect(line, line).not.toMatch(
+        /\b(source|cat|read|head|tail|sed|awk|grep)\b|^\s*\.\s|\$\(<|<\s*"?\$/,
+      );
+    }
+  });
+
+  // card: protects=#656 the SIGTERM contract survives the new block; fails_when=exec node is no longer the last line or the guard sits after it; no_claim=signal delivery
+  it("keeps `exec node` as the last line, after the guard", () => {
+    const lines = launcher.trimEnd().split("\n");
+    expect(lines[lines.length - 1]).toBe(
+      "exec node --import tsx src/hello/worker.ts",
+    );
+    expect(launcher.indexOf("opensandbox_credential=")).toBeLessThan(
+      launcher.lastIndexOf("exec node --import tsx"),
+    );
   });
 });
