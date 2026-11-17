@@ -60,6 +60,14 @@ function untilAborted(signal: AbortSignal): Promise<never> {
   });
 }
 
+/** The Postgres SQLSTATE of an error, unwrapping drizzle's query error. */
+function pgCode(error: unknown): string | undefined {
+  for (let e: unknown = error; e instanceof Error; e = e.cause) {
+    if ("code" in e && typeof e.code === "string") return e.code;
+  }
+  return undefined;
+}
+
 /** A promise with its resolver, for gating a step from the test. */
 function deferred(): {
   promise: Promise<void>;
@@ -233,6 +241,17 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     expect(target.applied).toEqual(["body", "body2"]);
   });
 
+  it("refuses another organization's identical tuple instead of reporting its effect", async () => {
+    const e = await newEffect();
+    const target = memoryTarget();
+    expect((await e.call(target)).outcome).toBe("applied");
+    const otherOrg = await createTestOrg({ db });
+    await expect(
+      e.call(target, { organizationId: otherOrg }),
+    ).rejects.toBeInstanceOf(ControlEffectKeyCollisionError);
+    expect(target.applied).toEqual(["body"]);
+  });
+
   it("throws on a key collision before any target call", async () => {
     const e = await newEffect();
     const target = memoryTarget();
@@ -262,7 +281,10 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     await e.seedIntent();
     const holder = await holdLock(e.key);
     const started = Date.now();
-    await expect(e.call(target, { lockTimeoutMs: 200 })).rejects.toThrow();
+    const error = await e
+      .call(target, { lockTimeoutMs: 200 })
+      .catch((err: unknown) => err);
+    expect(pgCode(error), String(error)).toBe("55P03"); // lock_not_available
     expect(Date.now() - started).toBeLessThan(3000);
     holder.release();
     await holder.done;

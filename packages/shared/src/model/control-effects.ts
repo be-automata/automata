@@ -178,7 +178,9 @@ export async function runEffect<P>(
     }
     await tx
       .update(controlEffects)
-      .set({ doneAt: sql`now()`, reconciled })
+      // clock_timestamp(), not now(): now() is the transaction start, before
+      // the lock wait and the target calls.
+      .set({ doneAt: sql`clock_timestamp()`, reconciled })
       .where(eq(controlEffects.key, key));
     return reconciled ? ("reconciled" as const) : ("applied" as const);
   });
