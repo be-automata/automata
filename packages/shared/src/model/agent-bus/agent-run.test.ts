@@ -115,6 +115,20 @@ describe("agent run ledger", () => {
       expect(await rowCount(threadId)).toBe(1);
     });
 
+    it("gives a review root read access to its repo, a task root write", async () => {
+      const organizationId = await createTestOrg({ db });
+      const reviewId = await orgThread(organizationId);
+      const review = await ensureRootRun({
+        db,
+        threadId: reviewId,
+        organizationId,
+        lane: "review",
+      });
+      expect(review?.capabilities.repoGrant).toEqual([
+        { repo: "terragon/test-repo", access: "read" },
+      ]);
+    });
+
     it("returns null for a thread without an organization, a mismatch, or an absent thread", async () => {
       const organizationId = await createTestOrg({ db });
       const otherOrg = await createTestOrg({ db });
@@ -388,6 +402,19 @@ describe("agent run ledger", () => {
       .set({
         capabilities: { spawn: ["task"] } as unknown as AgentCapabilities,
       })
+      .where(eq(agentRun.threadId, rootId));
+    await expect(
+      getRunForOrg({ db, organizationId, threadId: rootId }),
+    ).rejects.toThrow(/malformed/);
+  });
+
+  it("throws on a row whose stored lane is not a bus lane", async () => {
+    const organizationId = await createTestOrg({ db });
+    const rootId = await orgThread(organizationId);
+    await ensureRootRun({ db, threadId: rootId, organizationId, lane: "task" });
+    await db
+      .update(agentRun)
+      .set({ lane: "control" as unknown as "task" })
       .where(eq(agentRun.threadId, rootId));
     await expect(
       getRunForOrg({ db, organizationId, threadId: rootId }),

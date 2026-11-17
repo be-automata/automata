@@ -13,7 +13,7 @@ import { assertNever } from "../../utils";
 export const AGENT_BUS_LANES = ["task", "review"] as const;
 export type AgentBusLane = (typeof AGENT_BUS_LANES)[number];
 
-const laneSchema = z.enum(AGENT_BUS_LANES);
+export const agentBusLaneSchema = z.enum(AGENT_BUS_LANES);
 
 /**
  * The one definition of a capability set: the type and the read-time check.
@@ -21,8 +21,8 @@ const laneSchema = z.enum(AGENT_BUS_LANES);
  * is read; a malformed set fails closed and never lifts a limit.
  */
 export const agentCapabilitiesSchema = z.object({
-  spawn: z.array(laneSchema),
-  sendTo: z.array(laneSchema),
+  spawn: z.array(agentBusLaneSchema),
+  sendTo: z.array(agentBusLaneSchema),
   repoGrant: z.array(
     z.object({ repo: z.string(), access: z.enum(["read", "write"]) }),
   ),

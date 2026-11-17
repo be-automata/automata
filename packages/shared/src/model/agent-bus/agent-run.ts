@@ -4,6 +4,7 @@ import { DB } from "../../db";
 import { agentRun, thread } from "../../db/schema";
 import {
   capabilitiesForLane,
+  agentBusLaneSchema,
   agentCapabilitiesSchema,
   narrowForChild,
   type AgentBusError,
@@ -72,14 +73,15 @@ export async function getRunForOrg({
     .limit(1);
   const row = rows[0];
   if (!row) return null;
+  // Stored text and jsonb are typed, not checked: fail closed on either.
+  const lane = agentBusLaneSchema.safeParse(row.lane);
   const capabilities = agentCapabilitiesSchema.safeParse(row.capabilities);
-  if (!capabilities.success) {
-    throw new Error(
-      `agent_run ${row.threadId}: stored capabilities are malformed`,
-    );
+  if (!lane.success || !capabilities.success) {
+    throw new Error(`agent_run ${row.threadId}: stored row is malformed`);
   }
   return {
     ...row,
+    lane: lane.data,
     capabilities: capabilities.data,
     terminal: Boolean(row.terminal),
   };
@@ -124,7 +126,13 @@ export async function ensureRootRun({
       rootThreadId: threadId,
       lane,
       capabilities: capabilitiesForLane(lane, {
-        repoGrant: [{ repo: row.githubRepoFullName, access: "write" }],
+        // Review is emit-only: it reads its repo and never pushes.
+        repoGrant: [
+          {
+            repo: row.githubRepoFullName,
+            access: lane === "review" ? "read" : "write",
+          },
+        ],
         skills: null,
       }),
     })
