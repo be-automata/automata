@@ -1211,7 +1211,7 @@ describe("worker credential drop-in: docs and installer match the unit (#656 PR-
     );
     expect(
       code.indexOf('install_changed "$HERE/automata-worker-opensandbox.conf"'),
-    ).toBeLessThan(code.indexOf("systemctl daemon-reload"));
+    ).toBeLessThan(code.indexOf("systemctl daemon-reload\nsystemctl enable"));
     expect(code).not.toMatch(/systemctl\s+\S*(re)?start[^\n]*automata-worker/);
     expect(code).not.toMatch(/automata-worker-safe-restart/);
     // negative control: the unit restart the installer does perform is the server's
@@ -1234,11 +1234,63 @@ describe("worker credential drop-in: docs and installer match the unit (#656 PR-
     expect(code).not.toMatch(/rm -rf/);
   });
 
+  // card: protects=the worker drop-in (LoadCredential= has no fallback) is never left beside an invalid key file: an existing wrong key file and a generated invalid one both exit 2 with a message that says the drop-in goes first; fails_when=the refusal goes back to a plain die (exit 1), loses the drop-in warning, or the generated key is not verified; no_claim=running as root on a box
+  it("refuses (exit 2) to leave the drop-in beside an invalid key file", () => {
+    const refuse = fnBody(code, "refuse_key_file");
+    expect(refuse).toContain("exit 2");
+    expect(refuse).toContain('"$WORKER_DROPIN"');
+    expect(refuse).toContain("BEFORE removing or replacing");
+    expect(refuse).toContain("worker cannot restart without the key file");
+    const body = fnBody(code, "ensure_key_file");
+    expect(body).toContain(
+      'verify_key_file >/dev/null || refuse_key_file "$KEY_FILE exists but is wrong',
+    );
+    expect(body.indexOf('mv "$KEY_FILE.new" "$KEY_FILE"')).toBeLessThan(
+      body.indexOf('refuse_key_file "the generated'),
+    );
+    // negative control: the old plain die for a wrong key file is gone
+    expect(body).not.toContain("fix or remove it by hand");
+    expect(body).not.toMatch(/\bdie\b/);
+  });
+
+  // card: protects=the README rollback removes the drop-in first, reloads and safe-restarts the worker, and warns never to remove the key file while the drop-in exists; fails_when=the rollback loses the drop-in step, its order, or the warning; no_claim=systemd behaviour
+  it("README rollback removes the drop-in before the server and warns about the key file", () => {
+    const rb = readme.slice(readme.indexOf("### Rollback, in this order"));
+    const dropin = rb.indexOf("automata-worker.service.d/opensandbox.conf");
+    expect(dropin).toBeGreaterThan(0);
+    expect(rb.indexOf("automata-worker-safe-restart")).toBeGreaterThan(dropin);
+    expect(
+      rb.indexOf("systemctl disable --now automata-opensandbox.service"),
+    ).toBeGreaterThan(dropin);
+    expect(rb).toContain(
+      "Never remove or replace `/etc/automata/opensandbox.env` while the drop-in exists",
+    );
+    expect(rb).toContain("exits 2");
+  });
+
+  // card: protects=--check changes nothing: combined with --pull-cell-image it is a usage error (exit 2), checked before any pull; verify_server cleans its key header file on any exit and bounds every curl; fails_when=the check-only combination can reach a pull, the trap is dropped, or a curl has no --max-time; no_claim=timing
+  it("--check never pulls, and verify_server cleans up and bounds its curls", () => {
+    expect(code.indexOf('[ "$check_only" -eq 1 ]')).toBeLessThan(
+      code.indexOf("pull_cell_image\n"),
+    );
+    expect(code).toContain("cannot be combined with --pull-cell-image");
+    const v = fnBody(code, "verify_server");
+    expect(v).toContain(`trap 'rm -f "$hdr_dir/h"; rmdir "$hdr_dir"' EXIT`);
+    expect(v.indexOf("trap '")).toBeLessThan(
+      v.indexOf("sed 's/^OPENSANDBOX_API_KEY="),
+    );
+    for (const line of v.split("\n").filter((l) => l.includes("curl "))) {
+      expect(line, line).toContain("--max-time 5");
+    }
+    // negative control: the unbounded form is what this rejects
+    expect(v).not.toMatch(/curl -s -o/);
+  });
+
   // card: protects=the health wait keeps the status it saw and stops on the first 200 instead of polling twice; fails_when=the loop goes back to a bare curl -sf plus a second request; no_claim=timing
   it("captures the health status in the wait loop and breaks on 200", () => {
     const v = fnBody(code, "verify_server");
     expect(v).toContain(
-      `code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"`,
+      `code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"`,
     );
     expect(v).toContain('[ "$code" = 200 ] && break');
     expect(v).toContain('if [ "$code" = 200 ]; then');

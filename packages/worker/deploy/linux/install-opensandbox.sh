@@ -74,6 +74,10 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
+if [ -n "$cell_image" ] && [ "$check_only" -eq 1 ]; then
+  echo "install-opensandbox: --check changes nothing and cannot be combined with --pull-cell-image" >&2
+  exit 2
+fi
 if [ -n "$cell_image" ]; then
   [[ "$cell_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
     echo "install-opensandbox: the cell image must be pinned by digest (REF@sha256:<64 hex>)" >&2
@@ -130,10 +134,19 @@ verify_key_file() {
 }
 
 # ensure_key_file: sets key_new=1 when it generated the key (the unit must restart).
+# refuse_key_file WHY: exit 2. The worker drop-in's LoadCredential= has no
+# fallback: with the drop-in in place a missing key file stops the worker from
+# restarting, so this never leaves one behind without a valid key file.
+refuse_key_file() {
+  printf 'opensandbox: FATAL: %s\n' "$1" >&2
+  printf 'opensandbox: remove %s and run systemctl daemon-reload BEFORE removing or replacing %s (the worker cannot restart without the key file while the drop-in exists), then fix the key file and re-run\n' "$WORKER_DROPIN" "$KEY_FILE" >&2
+  exit 2
+}
+
 ensure_key_file() {
   key_new=0
   if [ -e "$KEY_FILE" ]; then
-    verify_key_file >/dev/null || die "$KEY_FILE exists but is wrong (owner, mode or shape); fix or remove it by hand"
+    verify_key_file >/dev/null || refuse_key_file "$KEY_FILE exists but is wrong (owner, mode or shape)"
     return 0
   fi
   log "generating $KEY_FILE"
@@ -146,12 +159,14 @@ ensure_key_file() {
   )
   chown root:root "$KEY_FILE.new"
   mv "$KEY_FILE.new" "$KEY_FILE"
+  verify_key_file >/dev/null || refuse_key_file "the generated $KEY_FILE is not valid"
   key_new=1
 }
 
 # ── verification (also the tail of every install run) ────────────────────────
+# hdr_dir is global: the EXIT trap in verify_server runs after the function's locals are gone.
 verify_server() {
-  local fail=0 _ addrs hdr_dir code got
+  local fail=0 _ addrs code got
   verify_key_file || fail=1
   got="$(stat -c '%U:%G %a' "$RUN_DIR" 2>/dev/null || echo missing)"
   if [ "$got" = "$RUNNER:$RUNNER 700" ]; then
@@ -174,7 +189,7 @@ verify_server() {
   fi
   code=000
   for _ in $(seq 1 60); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"
+    code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health" || true)"
     [ "$code" = 200 ] && break
     sleep 1
   done
@@ -191,7 +206,7 @@ verify_server() {
     echo "FAIL loopback-only       listeners: ${addrs:-none} (want 127.0.0.1 only)"
     fail=1
   fi
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/sandboxes" || true)"
+  code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/sandboxes" || true)"
   if [ "$code" = 401 ]; then
     echo "ok   unauthenticated     GET /sandboxes without a key is 401"
   else
@@ -200,10 +215,12 @@ verify_server() {
   fi
   # The key reaches curl through a 0600 header file, never argv.
   hdr_dir="$(mktemp -d)"
+  trap 'rm -f "$hdr_dir/h"; rmdir "$hdr_dir"' EXIT
   sed 's/^OPENSANDBOX_API_KEY=/OPEN-SANDBOX-API-KEY: /' "$KEY_FILE" >"$hdr_dir/h"
-  code="$(curl -s -o /dev/null -w '%{http_code}' -H "@$hdr_dir/h" "http://127.0.0.1:$PORT/sandboxes" || true)"
+  code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' -H "@$hdr_dir/h" "http://127.0.0.1:$PORT/sandboxes" || true)"
   rm -f "$hdr_dir/h"
   rmdir "$hdr_dir"
+  trap - EXIT
   if [ "$code" = 200 ]; then
     echo "ok   authenticated       GET /sandboxes with the key is 200"
   else

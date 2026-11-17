@@ -1228,6 +1228,16 @@ describe("render-opensandbox-config.sh (#656)", () => {
     expect(text2).toContain("port_range_min = 40000");
   });
 
+  // card: protects=an existing OUT with a wider mode is replaced, not written through, so the key never lands in a 0644 file; fails_when=the helper writes into the existing file; no_claim=ownership
+  it("replaces an existing wider-mode output file with a 0600 one", () => {
+    const out = path.join(dir, "wide.toml");
+    fs.writeFileSync(out, "old", { mode: 0o644 });
+    fs.chmodSync(out, 0o644);
+    expect(render(keyFile("wide", "k9\n"), out).status).toBe(0);
+    expect(fs.statSync(out).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(out, "utf8")).toContain('api_key = "k9"');
+  });
+
   // card: protects=an empty key or a bad port never yields a config: the helper exits non-zero and leaves no output file; fails_when=an empty key renders a config with an empty api_key, or OUT is left behind; no_claim=the unit's handling of the failure (ExecStartPre fails the start)
   it("refuses an empty key (no output left) and a bad port", () => {
     const out = path.join(dir, "empty.toml");

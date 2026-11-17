@@ -1292,5 +1292,13 @@ The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
 
 1. unset www's `OPENSANDBOX_URL`;
 2. let the reconciler clear the cells, or run `teardown` by hand;
-3. `systemctl disable --now automata-opensandbox.service`;
-4. remove the DNS route and the ingress rule.
+3. remove the worker drop-in `/etc/systemd/system/automata-worker.service.d/opensandbox.conf`,
+   `systemctl daemon-reload`, then `automata-worker-safe-restart`: the launcher stops
+   exporting `WORKER_OPENSANDBOX_*`;
+4. `systemctl disable --now automata-opensandbox.service`;
+5. remove the DNS route and the ingress rule.
+
+**Never remove or replace `/etc/automata/opensandbox.env` while the drop-in exists.** Its
+`LoadCredential=` has no fallback, so the worker cannot restart without the key file. Remove the
+drop-in first (step 3), reload, then change the key file. `install-opensandbox.sh` exits 2 rather
+than leave the drop-in beside an invalid key file.

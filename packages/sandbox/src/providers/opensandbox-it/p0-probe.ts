@@ -310,7 +310,9 @@ export function ipv4Rows(a: P0Args, canary: string): CheckRow[] {
     row(
       "sidecar-policy-refuses-guest",
       { kind: "http", url: SIDECAR_POLICY_URL },
-      (r) => isBlocked(r) || r?.status === 401 || r?.status === 403,
+      // An HTTP refusal from the sidecar itself, as the IT requires: a refused
+      // connection would also "pass" when nothing listens on 18080.
+      (r) => r?.status === 401 || r?.status === 403,
     ),
     {
       name: "guest-gateway",
@@ -471,8 +473,9 @@ async function quarantineRefusal(
 }
 
 /**
- * Deny-all the enforced cell, check it, and delete it. Returning means the
- * cell is deleted, and the final cleanup then skips it: on 1.2.1 a revoke or
+ * Deny-all the enforced cell, check it, and delete it. `state.deleted` is set
+ * the moment the cell is gone (even if a later step throws), and the final
+ * cleanup then skips it: on 1.2.1 a revoke or
  * quarantine of a deleted cell answers 502 (its sidecar is gone), not 404, so a
  * second adapter teardown of it throws (#656 finding).
  */
@@ -482,6 +485,7 @@ async function denyAllThenDelete(
   id: string,
   a: P0Args,
   apiKey: string,
+  state: { deleted: boolean },
 ): Promise<void> {
   // Production order (adapter teardown): the vault first. OpenSandbox 1.2.1
   // validates vault bindings against a new policy, so a deny-all is refused
@@ -498,6 +502,7 @@ async function denyAllThenDelete(
     );
     // Not teardown(): it re-runs the refused quarantine and would mask the cause.
     await provider.delete(id);
+    state.deleted = true;
     return;
   }
   rep.add(
@@ -510,6 +515,7 @@ async function denyAllThenDelete(
   ]);
   rep.check("deny-all-blocks-allowed", isBlocked(r), brief(r));
   await provider.teardown(id);
+  state.deleted = true;
   rep.check(
     "second-delete-gone",
     (await provider.delete(id)) === "gone",
@@ -604,17 +610,16 @@ export async function runProbe(a: P0Args, rep: Reporter): Promise<void> {
     },
   );
   const id = await enforcedCell(rep, provider, a, canary);
-  let deleted = false;
+  const state = { deleted: false };
   try {
     if (id !== null) {
       await runEnforced(rep, provider, id, a, canary);
-      await denyAllThenDelete(rep, provider, id, a, apiKey);
-      deleted = true;
+      await denyAllThenDelete(rep, provider, id, a, apiKey, state);
     }
     await negativeControl(rep, provider, a, apiKey);
   } finally {
     // Idempotent (404 is done): leaves no cell behind after a mid-run error.
-    if (id !== null && !deleted) await provider.teardown(id);
+    if (id !== null && !state.deleted) await provider.teardown(id);
   }
 }
 

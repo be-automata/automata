@@ -193,6 +193,7 @@ describe("the enforced-cell check rows", () => {
       "allowed-https-200",
       "example-dns-nxdomain",
       "udp-dns-sidecar-nxdomain",
+      "sidecar-policy-refuses-guest",
       "canary-scan-clean",
     ]);
     expect(failedWith(name, r({ ok: false, err: "NameError" }))).toContain(
@@ -210,6 +211,22 @@ describe("the enforced-cell check rows", () => {
     expect(
       failedWith("metadata-blocked", r({ ok: true, status: 200 })),
     ).toContain("metadata-blocked");
+    vi.restoreAllMocks();
+  });
+
+  // negative control: a refused connection (nothing on 18080) is not a sidecar refusal
+  it("sidecar-policy-refuses-guest needs an HTTP 401 or 403", () => {
+    silent();
+    const name = "sidecar-policy-refuses-guest";
+    expect(failedWith(name, r({ ok: true, status: 401 }))).not.toContain(name);
+    expect(failedWith(name, r({ ok: true, status: 403 }))).not.toContain(name);
+    expect(failedWith(name, r({ ok: false, err: "TimeoutError" }))).toContain(
+      name,
+    );
+    expect(
+      failedWith(name, r({ ok: false, err: "ConnectionRefusedError" })),
+    ).toContain(name);
+    expect(failedWith(name, r({ ok: true, status: 200 }))).toContain(name);
     vi.restoreAllMocks();
   });
 
@@ -284,6 +301,9 @@ for f in cfg["files"]:
     out.append(json.loads(buf.getvalue().strip())[0].get("default"))
 print(json.dumps(out))`;
 
+  const hasPython = (): boolean =>
+    spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+
   const runAll = (samples: string[][]): unknown[] => {
     const dir = mkdtempSync(join(tmpdir(), "ipv6route-"));
     const files = samples.map((rows, i) => {
@@ -300,20 +320,16 @@ print(json.dumps(out))`;
     return JSON.parse(out.stdout.trim()) as unknown[];
   };
 
-  const results = runAll([
-    [LINK_LOCAL, DEFAULT_ETH, REJECT_LO],
-    [LINK_LOCAL],
-    [LINK_LOCAL, REJECT_LO],
-    [REJECT_ETH],
-    [""],
-  ]);
-
-  it("finds a gateway default route", () => {
-    expect(results[0]).toBe(true);
+  it("finds a gateway default route", (ctx) => {
+    if (!hasPython()) ctx.skip();
+    expect(runAll([[LINK_LOCAL, DEFAULT_ETH, REJECT_LO]])).toEqual([true]);
   });
 
   // negative controls
-  it("ignores link-local-only, reject-only and lo-only tables", () => {
-    expect(results.slice(1)).toEqual([false, false, false, false]);
+  it("ignores link-local-only, reject-only and lo-only tables", (ctx) => {
+    if (!hasPython()) ctx.skip();
+    expect(
+      runAll([[LINK_LOCAL], [LINK_LOCAL, REJECT_LO], [REJECT_ETH], [""]]),
+    ).toEqual([false, false, false, false]);
   });
 });

@@ -23,6 +23,8 @@ keyfile="$1" template="$2" out="$3" port="${4:-}"
 }
 
 umask 077
+# A file left by a crash keeps its old mode under a redirect: make a new one.
+rm -f "$out"
 if ! awk -v port="$port" '
   FILENAME == ARGV[1] { k = $0; sub(/^OPENSANDBOX_API_KEY=/, "", k); next }
   k == "" { exit 1 }

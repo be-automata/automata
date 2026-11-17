@@ -290,7 +290,7 @@ The bash half. It does the root-side checks and runs the driver.
   - that `parseProbeOutput` keeps the new fields;
   - `buildDnsQuery`'s exact bytes for `example.org` A and AAAA (the id masked), and its refusals;
   - that `probeArgv` puts `query_b64` on the wire for `udpdns`, for both IPv4 and IPv6 servers.
-  - No python runs in vitest.
+  - No python runs in vitest, except the guest `ipv6_route` parser samples, which skip when `python3` is missing.
 
 ### `packages/worker/deploy/linux/run-worker.sh.template` and `automata-worker.service` (changed)
 
@@ -506,3 +506,10 @@ These decisions above were changed after the live runs (`gate-log-g.md` keeps th
 - **Rendered config location (decision 4):** the server's config is rendered to `/var/lib/automata-opensandbox/run/config.toml` (0700 directory made by `install-opensandbox.sh`; `ReadWritePaths` and the container mount point there), not `/run/automata-opensandbox`. This is the fallback decision 4 named: rootlesskit copies `/run` up when the dedicated daemon starts, which is why the marker, visibility and ctime heuristics existed, and they are gone. Only the daemon's socket dir `/run/automata-opensandbox-docker` stays under `/run`. The unit removes the rendered file in `ExecStopPost`. The probe's state moved to `/var/lib/automata-opensandbox/p0`, and its marker check is `state-dir-visible`.
 - **Worker credential (decision 4, "Worker"):** the base `automata-worker.service` has no `LoadCredential=` or `SetCredential=`. `install-opensandbox.sh` installs `automata-worker.service.d/opensandbox.conf` (repo file `automata-worker-opensandbox.conf`, only `[Service]` and `LoadCredential=`) after the key file exists, and does not restart the worker. This replaces the `SetCredential=opensandbox.env:none` fallback.
 - **Shared files:** `opensandbox-bom.sh` (the BOM and `pull_one`), `render-opensandbox-config.sh` (the config render, used by the unit and the probe) and `rootless-socket-checks.sh` (the rootless and worker-denied checks, used by the installer and the probe).
+
+## Follow-ups
+
+Found by roborev job 1219 on this PR and deliberately not changed here:
+
+- **Encoded path fence:** add a runbook step-7 check that `https://<host>/sandboxes/x%2Fproxy%2F44772%2Fping` and its `%2f` variant return 404 (cloudflared's regex and the server may see different forms of the path), and record the result in the gate log.
+- **Daemon restart kills live cells:** re-running `install-opensandbox.sh` restarts the dedicated daemon (or its user manager) when the daemon unit or the delegation drop-in changed, and `--live-restore=false` means the restart kills the server and every live cell. Document it in the README and the installer header (clear cells first), or have the installer refuse to restart while cells exist unless a flag is passed.

@@ -31,16 +31,14 @@
 [Unit]
 Description=OpenSandbox server on the dedicated rootless daemon (#656)
 Documentation=https://github.com/be-automata/automata/blob/main/docs/adr/ADR-014-third-party-execution-compute.md
-After=network-online.target
 
 [Service]
 User=automata-opensandbox
 Group=automata-opensandbox
 LoadCredential=opensandbox.env:/etc/automata/opensandbox.env
 # The docker CLI wants a writable client config: ProtectHome and ProtectSystem
-# leave no ~/.docker. A RuntimeDirectory named differently from the tmpfiles
-# directory (/run/automata-opensandbox, the rendered config), so stopping this
-# unit never removes that one.
+# leave no ~/.docker. (The rendered config is not here: it lives under
+# /var/lib/automata-opensandbox/run.)
 RuntimeDirectory=automata-opensandbox-client
 RuntimeDirectoryMode=0700
 Environment=DOCKER_CONFIG=%t/automata-opensandbox-client
