@@ -30,7 +30,10 @@ runs:
     - name: Build the daemon bundle
       shell: bash
       run: |
-        pnpm install --frozen-lockfile --prefer-offline --filter "@terragon/daemon..."
+        # --ignore-scripts: publish runs this with id-token/packages/attestations
+        # write, so no dependency lifecycle script may run here. esbuild resolves
+        # its platform binary through optionalDependencies, without a postinstall.
+        pnpm install --frozen-lockfile --prefer-offline --ignore-scripts --filter "@terragon/daemon..."
         pnpm --filter @terragon/daemon build
 
     # Same shape the box stages: one bundle file beside the scripts. No

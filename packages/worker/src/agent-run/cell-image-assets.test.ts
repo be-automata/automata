@@ -739,6 +739,28 @@ describe("cell-image.yml and its build action", () => {
   const actionSteps = stepsOf(action, 4);
   const publishSteps = stepsOf(publish, 6);
 
+  // card: protects=no dependency lifecycle script runs in the build action that publish runs with write permissions (Automata #666); fails_when=an install in the action drops --ignore-scripts; no_claim=that the daemon build needs no script (the PR's build-verify run proves that)
+  it("installs with --ignore-scripts in the shared build action", () => {
+    const installs = action
+      .split("\n")
+      .filter((l) => /\bpnpm install\b/.test(l));
+    expect(installs.length).toBeGreaterThan(0);
+    for (const l of installs) expect(l).toContain("--ignore-scripts");
+    // Negative control: the check itself rejects an install without the flag.
+    expect("pnpm install --frozen-lockfile").not.toContain("--ignore-scripts");
+  });
+
+  // card: protects=every main commit gets its own concurrency group, so no publish is skipped (Automata #666); fails_when=main shares a ref-wide group again; no_claim=GitHub's queueing itself
+  it("groups main runs per commit and PR runs per ref", () => {
+    expect(workflow).toContain(
+      "group: cell-image-${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
+    );
+    expect(workflow).toContain(
+      "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+    );
+    expect(workflow).not.toMatch(/group: cell-image-\$\{\{ github\.ref \}\}/);
+  });
+
   // card: protects=every third-party action is pinned by full commit sha; fails_when=a uses: carries a tag or branch (only the repo's own cell-image-build action is local); no_claim=that the sha exists upstream
   it("pins every action by a 40-hex sha", () => {
     const uses = [...(workflow + action).matchAll(/^\s*(?:- )?uses:\s*(\S+)/gm)]

@@ -28,8 +28,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: cell-image-${{ github.ref }}
-  # A newer push to a PR supersedes its build; main builds always finish.
+  # PRs: one group per ref, a newer push supersedes its build. Everything else
+  # (main): one group per commit, because a group keeps only one pending run and
+  # a skipped main run would leave that revision without a published digest.
+  group: cell-image-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
