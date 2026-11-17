@@ -46,9 +46,9 @@ Out of this PR:
   - Optional on both: `placeholder?: string`. When set, the adapter adds a `substitutions` entry replacing that literal in the header.
   - Update the comment.
 - **`CellTags.deployment: string`**, a required tag.
-- **Header comment:** update it at `cell.ts:1-5`. The module now exports a runtime helper (`wasTruncated`) alongside its constants.
+- **Header comment** at `cell.ts:1-5`: the module holds types and constants only. No runtime helper, because `@terragon/sandbox` has `@terragon/types` only as a devDependency (changed in the `/simplify` pass).
 - **`listByTags(tags, opts?: { maxPages?: number })`** keeps returning `CellListEntry[]`. That way every existing caller and mock is unchanged: `reconcile.ts:93`, the adapter's adoption at `opensandbox-cell.ts:692-697`, the IT at `integration.test.ts:434,697,728-729`, the adapter tests `opensandbox-cell.test.ts:1401-1807`, and the mocks at `reconcile.test.ts:17` and `cell-control.test.ts:99`.
-  - **Truncation signal:** the returned array carries a non-enumerable `truncated` boolean (`Object.defineProperty`), exposed through the exported helper `wasTruncated(entries): boolean` in `@terragon/types/cell`. Without `maxPages`, the 1,000-page fail-closed behaviour is unchanged.
+  - **Truncation signal:** the returned array carries a non-enumerable `truncated` boolean (`Object.defineProperty`), typed by `CellList = CellListEntry[] & { readonly truncated?: boolean }`, the return type of `listByTags`. Without `maxPages`, the 1,000-page fail-closed behaviour is unchanged.
 - **`CELL_RUN_TTL_MS`**, exported, and used by this PR for `ttlMs` in `cell-plan/route.ts` (replacing `CELL_STEP_TIMEOUT_MS` there, `route.ts:45,157`). `stepTimeoutMs` (`:144`) follows it too, so the step and its bearer share one bound (ADR-014). Value: `45 * 60 * 1000`, the run's 30-minute execution timeout plus a 15-minute teardown margin (#656 R6). The doc comment names `packages/worker/src/agent-run/definition.ts:200` as the source, which PR-E pins with a test.
 
 ### 2. Adapter (`packages/sandbox/src/providers/opensandbox-cell.ts`)
@@ -112,8 +112,8 @@ Each result goes into the evidence notes (`NOTES.daemon_apikey_*`). Checks 1 and
 - **Vault body:** apiKey and substitutions shape; bearer unchanged; an invalid header or placeholder refused with no fetch; no log, error or `JSON.stringify(error)` contains the credential or placeholder (canary test).
 - **Image:** an empty or blank image is refused in `create()`, with no fetch. Construction with an empty image still succeeds.
 - **Tags:** a plan missing `deployment` refused.
-- **Listing:** `listByTags` with `maxPages: 2` against a fake server with 5 pages returns 200 entries, and `wasTruncated(out)` is true. Assert that with `wasTruncated`, never `toEqual`, which ignores a non-enumerable property. `wasTruncated([...out])` is false, which documents that copies drop the flag. Without `maxPages`, the 1,000-page fail-closed path is unchanged.
-- **Reconciler:** it reads `wasTruncated` on the array `listByTags` returned, before any `.map` (`reconcile.ts:103`).
+- **Listing:** `listByTags` with `maxPages: 2` against a fake server with 5 pages returns 200 entries, and `out.truncated` is true. Assert the property directly, never with `toEqual`, which ignores a non-enumerable property. `([...out] as CellList).truncated` is undefined, which documents that copies drop the flag. Without `maxPages`, the 1,000-page fail-closed path is unchanged.
+- **Reconciler:** it reads `entries.truncated` on the array `listByTags` returned, before any `.map`, and warns once with counts when it is true (roborev job 1203).
 - **Reconciler:**
   - lists with `{ deployment }`;
   - reaps a dead-but-unexpired cell, revoke first;
