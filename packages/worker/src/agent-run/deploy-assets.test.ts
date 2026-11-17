@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -325,6 +326,9 @@ describeBashScriptHygiene(
 );
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/test-postgres-sweep.sh",
+);
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/install-opensandbox.sh",
 );
 
 /** The quoted `echo|log|fail|printf "…"` arguments of a bash script. */
@@ -1007,5 +1011,99 @@ describe("ADR-013 P3: the host-uid execution path stays deleted", () => {
       path.join(repoRoot, "deploy", "images", "batteries", "Dockerfile"),
     );
     expect(dockerfile).not.toMatch(/COPY batteries\//);
+  });
+});
+
+describe("packages/worker/deploy/linux — OpenSandbox server (#656 G1)", () => {
+  const linux = (name: string) => deployFile("linux", name);
+  const config = linux("opensandbox-server.toml");
+  const unit = linux("automata-opensandbox.service");
+  const installer = linux("install-opensandbox.sh");
+  const itConfig = read(
+    path.join(repoRoot, "packages/sandbox/opensandbox-it/config.toml"),
+  );
+  const keys = (toml: string) =>
+    toml
+      .split("\n")
+      .map((l) => /^([a-z_]+)\s*=/.exec(l)?.[1])
+      .filter((k): k is string => k !== undefined);
+
+  // card: protects=#656 TTL cap: the server's max_sandbox_timeout_seconds admits a cell's whole run window; fails_when=the cap drops below CELL_RUN_TTL_MS and the server refuses a production create; no_claim=the server's own enforcement
+  it("allows a sandbox timeout of at least CELL_RUN_TTL_MS", () => {
+    const cap = /^max_sandbox_timeout_seconds = (\d+)$/m.exec(config)?.[1];
+    expect(cap).toBeDefined();
+    expect(Number(cap) * 1000).toBeGreaterThanOrEqual(CELL_RUN_TTL_MS);
+  });
+
+  // card: protects=#656 loopback bind and no key at rest in the repo; fails_when=the server binds a routable address or a key value lands in the template; no_claim=that the IT config's keys stay in step beyond a key-name comparison
+  it("binds loopback, holds only the key placeholder, and keeps the IT's keys", () => {
+    expect(config).toMatch(/^host = "127\.0\.0\.1"$/m);
+    expect(config).toMatch(/^api_key = "__API_KEY__"$/m);
+    expect(config).not.toMatch(/[0-9a-fA-F]{32,}/);
+    expect([...new Set(keys(config))].sort()).toEqual(
+      [...new Set(keys(itConfig))].sort(),
+    );
+  });
+
+  // card: protects=#656 the server controls only the dedicated daemon; fails_when=another docker socket is mounted into the server container; no_claim=the daemon's own isolation
+  it("mounts only the dedicated docker socket", () => {
+    const sockets = [...unit.matchAll(/-v\s+([^\s:]*docker\.sock)/g)].map(
+      (m) => m[1],
+    );
+    expect(sockets).toEqual(["/run/automata-opensandbox-docker/docker.sock"]);
+    expect(unit).not.toContain("/var/run/docker.sock:");
+    expect(unit).toContain("--network host");
+  });
+
+  // card: protects=#656 the API key reaches the server by credential only; fails_when=the key goes through the process environment, an env file or argv; no_claim=the key file's mode (the installer test)
+  it("takes the key by LoadCredential only, with no fallback", () => {
+    expect(unit).toMatch(
+      /^LoadCredential=opensandbox\.env:\/etc\/automata\/opensandbox\.env$/m,
+    );
+    expect(unit).not.toMatch(/^SetCredential=/m);
+    expect(unit).not.toMatch(/^EnvironmentFile=/m);
+    expect(unit).not.toMatch(/--env-file|-e\s+OPENSANDBOX_API_KEY/);
+    expect(unit).toContain("$$CREDENTIALS_DIRECTORY/opensandbox.env");
+  });
+
+  // card: protects=#656 the docker client has a writable config and the rendered config survives a stop; fails_when=DOCKER_CONFIG leaves the RuntimeDirectory, or that directory collides with the tmpfiles one; no_claim=runtime behaviour under ProtectSystem
+  it("points DOCKER_CONFIG under its own RuntimeDirectory", () => {
+    expect(unit).toMatch(/^RuntimeDirectory=automata-opensandbox-client$/m);
+    expect(unit).toMatch(
+      /^Environment=DOCKER_CONFIG=%t\/automata-opensandbox-client$/m,
+    );
+    expect(unit).toMatch(/^User=automata-opensandbox$/m);
+  });
+
+  // card: protects=#656 the unit's hardening; fails_when=any of these lines is tidied out; no_claim=that systemd honours them on a given box
+  it("keeps the hardening lines", () => {
+    for (const line of [
+      "NoNewPrivileges=yes",
+      "ProtectSystem=strict",
+      "ReadWritePaths=/run/automata-opensandbox",
+      "ProtectHome=yes",
+      "PrivateTmp=yes",
+      "RestrictAddressFamilies=AF_UNIX",
+      "IPAddressDeny=any",
+      "CapabilityBoundingSet=",
+      "Restart=always",
+    ]) {
+      expect(unit.split("\n"), line).toContain(line);
+    }
+  });
+
+  // card: protects=#656 the installer never prints the key; fails_when=an echo or printf names the key; no_claim=the hygiene checks
+  it("installer never prints the key and pins the BOM digests of up.sh", () => {
+    for (const text of printedStrings(installer)) {
+      expect(text, text).not.toMatch(/\$\{?KEY\b|OPENSANDBOX_API_KEY=%?s?\$/);
+    }
+    expect(installer).not.toMatch(/set -x|-o xtrace/);
+    const up = read(
+      path.join(repoRoot, "packages/sandbox/opensandbox-it/up.sh"),
+    );
+    for (const name of ["SERVER", "EXECD", "EGRESS", "PY"]) {
+      const re = new RegExp(`^${name}=(\\S+)$`, "m");
+      expect(re.exec(installer)?.[1], name).toBe(re.exec(up)?.[1]);
+    }
   });
 });

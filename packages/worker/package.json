@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
+    "@terragon/types": "workspace:*",
     "@types/node": "^22.15.21",
     "@types/pg": "^8.15.2",
     "tsx": "^4.20.3",
