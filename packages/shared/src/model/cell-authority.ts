@@ -4,6 +4,7 @@ import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 
 import { DB } from "../db";
 import { cellBearer, cellEffect, cellStep } from "../db/schema";
+import { assertPositiveInt } from "../utils";
 import { hashOpaqueToken, mintOpaqueToken } from "../utils/opaque-token";
 
 /**
@@ -63,12 +64,6 @@ const effectKey = (stepKey: string, idempotencyKey: string) =>
     eq(cellEffect.stepKey, stepKey),
     eq(cellEffect.idempotencyKey, idempotencyKey),
   );
-
-function assertPositiveInt(name: string, v: number): void {
-  if (!Number.isInteger(v) || v < 1) {
-    throw new RangeError(`${name} must be a positive integer`);
-  }
-}
 
 const isRevoked = (attempt: number, revokedThrough: number | null): boolean =>
   revokedThrough !== null && attempt <= revokedThrough;
