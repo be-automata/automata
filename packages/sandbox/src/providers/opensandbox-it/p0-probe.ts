@@ -398,6 +398,7 @@ async function denyAllThenDelete(
       await quarantineRefusal(a, apiKey, id),
     );
     await provider.teardown(id);
+    gone.add(id);
     return;
   }
   rep.add(
@@ -415,7 +416,15 @@ async function denyAllThenDelete(
     (await provider.delete(id)) === "gone",
     "404",
   );
+  gone.add(id);
 }
+
+/**
+ * Cells this run confirmed deleted. The final cleanup skips them: on 1.2.1 a
+ * revoke or quarantine of a deleted cell answers 502 (its sidecar is gone),
+ * not 404, so a second adapter teardown of a gone cell throws (#656 finding).
+ */
+const gone = new Set<string>();
 
 async function negativeControl(
   rep: Reporter,
@@ -519,7 +528,7 @@ export async function runProbe(a: P0Args, rep: Reporter): Promise<void> {
     await negativeControl(rep, provider, a, apiKey);
   } finally {
     // Idempotent (404 is done): leaves no cell behind after a mid-run error.
-    if (id !== null) await provider.teardown(id);
+    if (id !== null && !gone.has(id)) await provider.teardown(id);
   }
 }
 
