@@ -2,27 +2,28 @@
 
 Branch `feat/656-c-cell-plan`, off `main` at `08c1b194`. Spec: `docs/specs/656/spec-c.md`.
 
-## Live gate (AC-12 client half, idempotent teardown): NOT RUN YET
+## Live gate (idempotent teardown): PASS
 
-The new scenario sits next to AC-8's negative control in
-`packages/sandbox/src/providers/opensandbox-cell.integration.test.ts`: `provider.teardown(id)` on
-the no-policy control must resolve (revoke and quarantine 502, delete, then `GET` 404), and a
-second `teardown` must resolve with no `GET`. It needs Docker and the public internet, so it runs
-outside the Claude sandbox:
+The scenario sits next to AC-8's negative control in `opensandbox-cell.integration.test.ts`. It
+calls `provider.teardown(id)` on the no-policy control, whose revoke and quarantine answer 502,
+then delete, then `GET`. A second `teardown` must then resolve without a `GET`.
 
-```
-OPENSANDBOX_IT=1 pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism src/providers/opensandbox-cell.integration.test.ts
-```
+It ran outside the Claude sandbox against OpenSandbox 1.2.1 in a throwaway dind, four times
+(implementation, refinement, `/simplify`, post-rebase): 10/10 each. From `notes` in the evidence
+JSON (`opensandbox-runc-conformance.json`, last run):
 
-Record here, from `NOTES` in the evidence JSON:
+- `no_policy_teardown_ms` = **24004**. That is the 2 x 10 s retry budget on the two 502 steps, then
+  delete and the `GET`, as expected.
+- `no_policy_second_teardown_ms` = **8**: no retries, no `GET`.
+- **The 404 body shape was not captured verbatim.** The run proves it by construction: since the
+  refinement (M3), a 404 without a `::SANDBOX_NOT_FOUND` code (top-level or `detail`) fails
+  teardown. The runs after M3 resolved, so the server's `GET /sandboxes/{id}` 404 for a deleted
+  cell carries that code. A deleted cell never answered `GET` 200 past the poll budget: the
+  teardown would have thrown.
+- Follow-up (Low): record the raw 404 body in `notes` so the next run shows it, not only implies it.
 
-- `no_policy_teardown_ms` (expected about 2 x the 10 s retry budget);
-- `no_policy_second_teardown_ms` (expected near 0);
-- the real body shape of the upstream `GET /sandboxes/{id}` 404 (the adapter accepts a top-level
-  or `detail` `code` ending in `::SANDBOX_NOT_FOUND`), and whether a deleted cell ever answers
-  `GET` 200 inside the budget (delete may be asynchronous).
-
-Results: pending.
+AC-12's client half (Access headers) is covered by `cell-control.test.ts`. The live half needs the
+person's Cloudflare Access app, and stays deferred in the acceptance matrix.
 
 ## Implementation gates (outside the Claude sandbox, 2026-11-17)
 
@@ -132,3 +133,7 @@ Main had moved on with three commits:
 - the live `OPENSANDBOX_IT` suite: 10/10.
 
 **`format-check`** fails on this machine for files identical to main (`package.json`, `tsconfig.json`, `src/sandbox.ts`). Prettier is picking up an `.editorconfig` from outside the repo; CI has none. PR-C's own files pass `prettier --no-editorconfig --config .prettierrc --check`, and CI's `format-check` is the gate.
+
+## Roborev job 1257 (final range `85b07e6..a2903e5`)
+
+**Pass**, with one Low: the live-gate section still read "NOT RUN YET". It now records the measured teardown timings, and shows the 404 body shape is proven by construction. Recording the raw body is a follow-up.
