@@ -3435,8 +3435,8 @@ export const cellEffect = pgTable(
  * The control-plane effect ledger (#652): one row per effect key, written as an
  * intent (`done_at` null) before the effect runs and completed after it.
  * Unlike `cell_effect` it has no cell step: the control plane has no bearer.
- * The key is derived from (mission, step, effect, output digest); the row never
- * holds the payload or the output.
+ * The key is sha256(organizationId|mission|step|effect|outputDigest) cut to 32
+ * hex (`effectKey`); the row never holds the payload or the output.
  */
 export const controlEffects = pgTable(
   "control_effects",
