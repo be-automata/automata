@@ -18,15 +18,7 @@ import { createTestOrg } from "./test-helpers";
 const db = createDb(env.DATABASE_URL!);
 
 /** In-memory target: the marker set is the "remote" state. */
-function memoryTarget(): EffectTarget<string> & {
-  applied: string[];
-  markers: Set<string>;
-  failNextApply: boolean;
-  failFind: boolean;
-  gate: Promise<void> | null;
-  signals: AbortSignal[];
-  honourSignal: boolean;
-} {
+function memoryTarget() {
   const target = {
     applied: [] as string[],
     markers: new Set<string>(),
@@ -55,7 +47,41 @@ function memoryTarget(): EffectTarget<string> & {
       return target.markers.has(key);
     },
   };
-  return target;
+  return target satisfies EffectTarget<string>;
+}
+
+/** A promise with its resolver, for gating a step from the test. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/**
+ * Takes the row lock of `key` in its own transaction, runs `whileHeld`, then
+ * holds it until `release()`; the transaction rolls back.
+ */
+async function holdLock(
+  key: string,
+  whileHeld: () => Promise<void> = async () => {},
+) {
+  const locked = deferred();
+  const released = deferred();
+  const done = db
+    .transaction(async (tx) => {
+      await tx
+        .select()
+        .from(controlEffects)
+        .where(eq(controlEffects.key, key))
+        .for("update");
+      await whileHeld();
+      locked.resolve();
+      await released.promise;
+      throw new Error("rollback");
+    })
+    .catch(() => undefined);
+  await locked.promise;
+  return { release: released.resolve, done };
 }
 
 async function newEffect(digest = "d1") {
@@ -66,6 +92,7 @@ async function newEffect(digest = "d1") {
     effect: "post",
     outputDigest: digest,
   };
+  const key = effectKey(parts);
   const call = (target: EffectTarget<string>, extra = {}) =>
     runEffect({
       db,
@@ -77,12 +104,12 @@ async function newEffect(digest = "d1") {
     });
   const seedIntent = async () => {
     await db.insert(controlEffects).values({
-      key: effectKey(parts),
+      key,
       organizationId,
       ...parts,
     });
   };
-  return { organizationId, parts, call, seedIntent, key: effectKey(parts) };
+  return { organizationId, call, seedIntent, key };
 }
 
 /** Backends waiting on a lock (the delivery blocked behind a holder). */
@@ -154,13 +181,13 @@ describe("runEffect (#652 exactly-once control effects)", () => {
   it("AC3: two concurrent deliveries produce one effect", async () => {
     const e = await newEffect();
     const target = memoryTarget();
-    let open: () => void = () => {};
-    target.gate = new Promise<void>((resolve) => (open = resolve));
+    const gate = deferred();
+    target.gate = gate.promise;
     const first = e.call(target);
     await vi.waitFor(() => expect(target.signals).toHaveLength(1));
     const second = e.call(target);
     await vi.waitFor(async () => expect(await lockWaiters()).toBe(1));
-    open();
+    gate.resolve();
     const results = await Promise.all([first, second]);
     expect(target.applied).toHaveLength(1);
     expect(results.map((r) => r.outcome)).toEqual(["applied", "already_done"]);
@@ -170,13 +197,9 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     const first = await newEffect("d1");
     const target = memoryTarget();
     await first.call(target);
-    const second = await runEffect({
-      db,
-      target,
-      organizationId: first.organizationId,
-      payload: "body2",
-      ...first.parts,
+    const second = await first.call(target, {
       outputDigest: "d2",
+      payload: "body2",
     });
     expect(second.outcome).toBe("applied");
     expect(second.key).not.toBe(first.key);
@@ -210,25 +233,12 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     const e = await newEffect();
     const target = memoryTarget();
     await e.seedIntent();
-    let release: () => void = () => {};
-    const held = new Promise<void>((resolve) => (release = resolve));
-    let locked: () => void = () => {};
-    const isLocked = new Promise<void>((resolve) => (locked = resolve));
-    const holder = db.transaction(async (tx) => {
-      await tx
-        .select()
-        .from(controlEffects)
-        .where(eq(controlEffects.key, e.key))
-        .for("update");
-      locked();
-      await held;
-    });
-    await isLocked;
+    const holder = await holdLock(e.key);
     const started = Date.now();
     await expect(e.call(target, { lockTimeoutMs: 200 })).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(3000);
-    release();
-    await holder;
+    holder.release();
+    await holder.done;
     expect(target.applied).toEqual([]);
     expect((await readRow(e.key))?.doneAt).toBeNull();
   });
@@ -247,28 +257,13 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     const e = await newEffect();
     const target = memoryTarget();
     await e.seedIntent();
-    let rollback: () => void = () => {};
-    const release = new Promise<void>((resolve) => (rollback = resolve));
-    let locked: () => void = () => {};
-    const isLocked = new Promise<void>((resolve) => (locked = resolve));
-    const holder = db
-      .transaction(async (tx) => {
-        await tx
-          .select()
-          .from(controlEffects)
-          .where(eq(controlEffects.key, e.key))
-          .for("update");
-        await target.apply(e.key, "body", new AbortController().signal);
-        locked();
-        await release;
-        throw new Error("rollback");
-      })
-      .catch(() => undefined);
-    await isLocked;
+    const holder = await holdLock(e.key, () =>
+      target.apply(e.key, "body", new AbortController().signal),
+    );
     const delivery = e.call(target);
     await vi.waitFor(async () => expect(await lockWaiters()).toBe(1));
-    rollback();
-    await holder;
+    holder.release();
+    await holder.done;
     expect((await delivery).outcome).toBe("reconciled");
     expect(target.applied).toEqual(["body"]);
   });

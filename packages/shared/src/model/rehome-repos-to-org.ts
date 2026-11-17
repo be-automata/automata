@@ -130,7 +130,8 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "knowledge_usage_window",
   "knowledge_admin_log",
   // The exactly-once effect ledger (#652) records effects the org already
-  // performed; keys derive from the run, so a moved repo's next run gets new ones.
+  // performed. Its rows carry no repo or thread, a re-home refuses while a run
+  // is in flight (the guard below), and a moved repo's next run gets new keys.
   "control_effects",
 ];
 

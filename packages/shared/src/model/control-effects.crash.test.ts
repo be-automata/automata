@@ -99,12 +99,12 @@ function outcomeOf(d: Delivery): string {
 
 const markerCount = (s: Scenario) => readdirSync(s.dir).length;
 
-async function readRow(s: Scenario, digest = "d1") {
+async function readRow(s: Scenario) {
   const key = effectKey({
     mission: s.mission,
     step: "summary",
     effect: "post",
-    outputDigest: digest,
+    outputDigest: "d1",
   });
   const rows = await db
     .select()
@@ -113,14 +113,19 @@ async function readRow(s: Scenario, digest = "d1") {
   return rows[0];
 }
 
+/** One delivery killed at `killPoint`, leaving `markers` files behind. */
+async function crashAt(s: Scenario, killPoint: KillPoint, markers: number) {
+  const d = await deliver(s, { killPoint });
+  expect(d.killed, d.stderr).toBe(true);
+  expect(markerCount(s)).toBe(markers);
+}
+
 describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => {
   it(
     "AC1: killed after the intent, before the upload: uploaded exactly once after the restart",
     async () => {
       const s = await newScenario();
-      const d = await deliver(s, { killPoint: "before-apply" });
-      expect(d.killed, d.stderr).toBe(true);
-      expect(markerCount(s)).toBe(0);
+      await crashAt(s, "before-apply", 0);
       expect((await readRow(s))?.doneAt).toBeNull();
       expect(outcomeOf(await deliver(s))).toBe("applied");
       expect(markerCount(s)).toBe(1);
@@ -132,9 +137,7 @@ describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => 
     "AC2: killed after the upload, before effect_done: reconciled by marker, nothing uploaded again",
     async () => {
       const s = await newScenario();
-      const d = await deliver(s, { killPoint: "after-apply" });
-      expect(d.killed, d.stderr).toBe(true);
-      expect(markerCount(s)).toBe(1);
+      await crashAt(s, "after-apply", 1);
       expect((await readRow(s))?.doneAt).toBeNull();
       expect(outcomeOf(await deliver(s))).toBe("reconciled");
       expect(markerCount(s)).toBe(1);
@@ -149,9 +152,7 @@ describe("control effects crash drill (#652, SIGKILL at the boundaries)", () => 
     "AC5: with reconcile disabled the same crash uploads a second copy",
     async () => {
       const s = await newScenario();
-      const d = await deliver(s, { killPoint: "after-apply" });
-      expect(d.killed, d.stderr).toBe(true);
-      expect(markerCount(s)).toBe(1);
+      await crashAt(s, "after-apply", 1);
       expect(outcomeOf(await deliver(s, { noReconcile: true }))).toBe(
         "applied",
       );

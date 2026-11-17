@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { DB } from "../db";
 import { controlEffects } from "../db/schema";
+import { assertPositiveInt } from "../utils";
 
 /**
  * Exactly-once control-plane effects (#652). An effect that leaves Automata (a
@@ -80,12 +81,6 @@ export function effectKey(parts: EffectKeyParts): string {
     .update(values.join("|"))
     .digest("hex")
     .slice(0, KEY_LENGTH);
-}
-
-function assertPositiveInt(name: string, value: number): void {
-  if (!Number.isInteger(value) || value < 1) {
-    throw new RangeError(`${name} must be a positive integer`);
-  }
 }
 
 type LedgerRow = typeof controlEffects.$inferSelect;

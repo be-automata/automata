@@ -29,12 +29,22 @@ function killSelf(): never {
   throw new Error("unreachable: SIGKILL did not end the process");
 }
 
-function fileTarget(dir: string): EffectTarget<string> {
+/**
+ * One file per apply, holding the key as its marker. `killPoint` SIGKILLs the
+ * process around the write; `reconcile: false` makes findByMarker answer false.
+ */
+function fileTarget(
+  dir: string,
+  opts: { killPoint?: string; reconcile: boolean },
+): EffectTarget<string> {
   return {
     async apply(key) {
+      if (opts.killPoint === "before-apply") killSelf();
       writeFileSync(join(dir, `${randomUUID()}.marker`), key);
+      if (opts.killPoint === "after-apply") killSelf();
     },
     async findByMarker(key) {
+      if (!opts.reconcile) return false;
       return readdirSync(dir).some(
         (name) => readFileSync(join(dir, name), "utf8") === key,
       );
@@ -42,32 +52,13 @@ function fileTarget(dir: string): EffectTarget<string> {
   };
 }
 
-function withKillPoint(
-  inner: EffectTarget<string>,
-  killPoint: string | undefined,
-): EffectTarget<string> {
-  return {
-    findByMarker: (key) => inner.findByMarker(key),
-    async apply(key, payload, signal) {
-      if (killPoint === "before-apply") killSelf();
-      await inner.apply(key, payload, signal);
-      if (killPoint === "after-apply") killSelf();
-    },
-  };
-}
-
-function withoutReconcile(inner: EffectTarget<string>): EffectTarget<string> {
-  return { apply: inner.apply, findByMarker: async () => false };
-}
-
 async function main(): Promise<void> {
   const databaseUrl = requireEnv("DATABASE_URL");
   const db = createDb(databaseUrl);
-  let target = withKillPoint(
-    fileTarget(requireEnv("CRASH_DIR")),
-    process.env.KILL_POINT,
-  );
-  if (process.env.NO_RECONCILE === "1") target = withoutReconcile(target);
+  const target = fileTarget(requireEnv("CRASH_DIR"), {
+    killPoint: process.env.KILL_POINT,
+    reconcile: process.env.NO_RECONCILE !== "1",
+  });
   const result = await runEffect({
     db,
     target,
