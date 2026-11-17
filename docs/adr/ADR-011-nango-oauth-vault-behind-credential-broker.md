@@ -2,7 +2,8 @@
 
 - **Status:** Proposed (2026-10-18). Not implemented. Open decisions resolved 2026-10-18 by the
   operator (deployment mode: Nango Cloud; see "Deployment mode"). Stays Proposed until the Phase 1
-  spike report proves the checks listed there; acceptance follows that report.
+  spike report proves the checks listed there; acceptance follows that report. Amendment 1
+  (Nango for every third-party connection) Proposed 2026-11-17, see the end of this record.
 - **Date:** 2026-10-18
 - **Context source:** anchors are against `main` @ `a50935e`.
   `packages/worker/src/agent-run/gh-broker.ts:128-157` (`startGhBroker` takes `installationToken`
@@ -431,3 +432,123 @@ One integration per org-owned Slack app applies in either mode (see Consequences
   a stub token endpoint, including expiry mid-stream.
 - Phase 1 spike report (the five checks under "Deployment mode") before acceptance and before any
   production change.
+
+## Amendment 1 (Proposed 2026-11-17): Nango is the platform's OAuth vault for every third-party connection
+
+- **Status:** Proposed. Accepted together with the body once Phase 1 checks 3 and 4 pass (see
+  "Acceptance path"). Decision §1–§10 stand except where amended below.
+- **Amends:** Decision §1 (scope), §3 "Plane fit", §10 (tenancy trigger), Options "Composio"
+  (data-path claim), Consequences "Custody and residency"; corrects §4 (per-box key); adds D-1…D-8
+  and I8–I12.
+- **Relates to:** ADR-014 ("Remote cells cannot rely on the worker heap"; Amendment 1,
+  customer-accepted credential injection), #652 (control-plane effect ledger).
+
+**Decision statement.** In the context of every third-party connection the platform makes on a
+customer's behalf (Slack, trackers, Google Drive for scheduled report delivery, later MCP servers),
+facing per-provider hand-rolled OAuth with no refresh and remote cells that outlive the worker, we
+decided that Nango Cloud is the single OAuth vault, and the proxy for control-plane effects, of
+every such provider, behind the generalized broker and the control plane only. We neglected a
+per-provider vault, Composio, and self-hosting now, to get one consent, refresh and revocation
+path and a token that is never resident in a guest. We accept that Nango becomes a platform-wide
+sub-processor on the data path of proxied effects, that one environment key reads every
+customer's tokens, and that a Nango outage stops every third-party effect.
+
+### Rulings
+
+- **D-1 Scope.** Every third-party OAuth connection, except the GitHub App (I7) and agent-provider
+  credentials (§7), is a Nango connection. A new provider is a Nango integration plus a broker
+  allowlist entry; no provider is hand-rolled again.
+- **D-2 We own every OAuth client.** Each integration uses an Automata-owned OAuth client, never
+  Nango's managed developer app: only tokens issued to our own client can be exported and still
+  refresh after an exit (Nango auth primitives; RFC 6749 §6). An org-owned app stays an option
+  per connection (`config_override`), as for Slack today. Google Drive uses `drive.file` with the
+  Google Picker (non-sensitive, no CASA assessment); a spike confirms that `drive.file` writes
+  into a Picker-chosen folder before #647 relies on it. If it does not, Drive needs the
+  restricted `drive` scope and Google's annual security assessment, still on our own client.
+- **D-3 Proxy calls are constant per call site** (unchanged from the Phase 1 consequence). Every
+  Nango header, including forwarded `nango-proxy-*` headers, is built by the control-plane client
+  from constants per call site; `Base-Url-Override` is never sent.
+- **D-4 Drive delivery pattern.** Uploads use `uploadType=resumable`: create the session through
+  the proxy with `nango-proxy-X-Upload-Content-{Type,Length}`, then PUT the bytes from the control
+  plane to the returned `Location`. Multipart and `uploadType=media` are not used (they break
+  through the proxy, measured 2026-11-13). The session URL is a bearer capability: it never leaves
+  the control plane, is never logged, and is never given to a cell or an agent. Replace = upload,
+  verify the bytes, then trash the old copy.
+- **D-5 Managed-tier cells are refused by name.** §3's dispatch refusal of a Nango-brokered grant
+  covers every ADR-014 managed profile (Agent37, OpenSandbox), not only E2B and Daytona. It
+  stays until a token endpoint that checks liveness against the durable authority (`cell_step`
+  lease, attempt fence, `cell_bearer` TTL), instead of the worker heap, is built and drilled.
+  Control-plane effects of such a run (e.g. Drive delivery) are unaffected.
+- **D-6 Vaulted credentials are never injected.** A credential held as a Nango connection is
+  never eligible for an ADR-014 Amendment 1 risk-acceptance injection; the resolver refuses a
+  record that names one. A customer who needs a token inside a cell supplies a separate one.
+- **D-7 Outage semantics.** A Nango failure leaves a control-plane effect "not applied" (§5). It
+  is retried with backoff under its #652 effect key inside the effect's delivery window; an ops
+  alert fires when the window closes. There is no fallback path (I4). The control plane watches
+  Nango's status page. Measured history: about 4 h (2025-10-06) and about 5 h (2026-06-11) outages;
+  no SLA below Enterprise.
+- **D-8 Tenancy trigger.** One shared environment stays the default (§10). A contract term that
+  requires vault-level separation triggers a dedicated environment (its own key and data); a
+  residency requirement triggers Enterprise BYOC (Nango has no EU cloud). A dedicated environment
+  does not isolate rate limits (per account) or outages.
+
+### Acceptance path (decided 2026-11-17)
+
+ADR-011 and this amendment are accepted by the TL once checks 3 and 4 pass. The others become
+conditions on the work that needs them:
+
+| Check                            | State                                                                                                | Gates                             |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------- |
+| 1 Exit                           | Met for a static Slack bot token. Repeat with a refreshable connection on our own OAuth client (D-2) | #647, before production Drive use |
+| 2 Slack dry-run                  | Open                                                                                                 | the Slack migration onto Nango    |
+| 3 Key scope                      | Open                                                                                                 | **acceptance**                    |
+| 4 Latency from a Worker          | Open (424 behaviour met)                                                                             | **acceptance**                    |
+| 5 Production Slack installations | Open                                                                                                 | the Slack migration onto Nango    |
+| Drive (new)                      | Read and resumable upload proven 2026-11-13 through Nango Cloud                                      | —                                 |
+
+If check 3 fails, §2 is reopened before any acceptance.
+
+**Deviation recorded.** The 2026-11-13 Drive evaluation placed a real customer Google connection
+in Nango Cloud before acceptance (Testing: the report comes "before any production change"). It
+is kept under a written risk acceptance owned by the operator, limited to the #650 pilot, with an
+end date; it is revoked and re-consented through our own OAuth client (D-2) when that client
+exists.
+
+### New invariants
+
+- **I8 — Vaulted tokens are never injected.** _Guard:_ resolver test that a risk-acceptance
+  record naming a Nango-held credential is refused.
+- **I9 — The Drive session URL stays on the control plane.** _Guard:_ test that the upload client
+  returns no `Location` to any caller outside it, and that logs redact it.
+- **I10 — Proxy headers are constants.** _Guard:_ extends the `Base-Url-Override` test to every
+  `nango-proxy-*` header and path, per call site.
+- **I11 — Managed-tier grants are refused.** _Guard:_ dispatch test that a run on every ADR-014
+  managed profile with a Nango-brokered grant is refused with a named reason; I2's grep extended
+  to the managed-cell adapter packages.
+- **I12 — Key and rate-limit health.** _Guard:_ ops alert when Nango rate-limit headroom drops
+  below a set threshold; a rotation runbook for the environment key with a recorded cadence.
+
+### Consequences (added)
+
+- **Negative / watch:** Nango is on the data path of proxied effects (metadata and responses, e.g.
+  Drive listings). The Options claim "Nango sits on the credential path only" is corrected for
+  control-plane proxy calls. Nango is a sub-processor: add it to the DPA and sub-processor list
+  (ADR-014 Consequences). It runs from the US on AWS; logs are kept 15 days and never hold request
+  or response bodies (Nango security page).
+- **Negative / watch:** rate limits are per account (Pay-as-you-go 1,000 requests per minute),
+  shared by every org and every environment; proxied effects are not cached.
+- **Negative / watch:** cost scales with orgs × providers ($0.29 per connection per month); the
+  projection and its budget owner are recorded before the second provider ships.
+- **Negative / watch:** an exit lands on a self-hosted build with no scoped keys, so a post-exit
+  key is unscoped. The exit stays a contingency, not a steady state.
+- **Correction:** §4's "per-box key" and the Consequences item "a per-box worker key pair … new
+  work" are superseded by I6f: the broker credential is one more field of the #380 `payload-seal`
+  envelope.
+
+### Testing (added)
+
+- Checks 3 and 4 before acceptance; check 1 repeated with a refreshable connection on our own
+  OAuth client before production Drive use.
+- `drive.file` + Picker: upload into a Picker-chosen folder succeeds.
+- Drive: resumable upload end to end from the Worker, with a byte check and replace-then-trash; a
+  stub Nango answering 424, 429 and a hang, with the effect retried under its #652 key.
