@@ -21,13 +21,14 @@ import type {
   OpenSandboxNetworkRule,
 } from "@terragon/types/cell";
 
+import { reconcileExpiredCells } from "../cell/reconcile";
 import { createOpenSandboxCellProvider } from "./opensandbox-cell";
 import {
   buildConformanceEvidence,
   RUNC_REQUIRED_CHECKS,
   type ConformanceChecks,
   type RuncCheckName,
-} from "./opensandbox-it/evidence";
+} from "../cell/conformance-evidence";
 import {
   API_BASE_URL,
   dind,
@@ -130,6 +131,7 @@ function plan(
   scenario: string,
   networkPolicy: OpenSandboxNetworkPolicy,
   vault: CellVaultEntry[] = [],
+  expiresAt?: number,
 ): OpenSandboxCellCreatePlan {
   const ttlMs = 15 * 60 * 1000;
   return {
@@ -141,7 +143,7 @@ function plan(
       epoch: "1",
       stepKey: newStepKey(scenario),
       attempt: "1",
-      expiresAt: String(Date.now() + ttlMs),
+      expiresAt: String(expiresAt ?? Date.now() + ttlMs),
     },
     networkPolicy,
     vault,
@@ -653,6 +655,103 @@ describe(
       });
     });
 
+    it("AC-7: the reconciler reaps an expired cell after a server restart, with no worker", async () => {
+      // Clear leftovers of earlier scenarios first (a no-op revoke: they have
+      // no control-plane step), so the real pass below sees only X and Y.
+      const clearing = await reconcileExpiredCells({
+        provider,
+        revoke: async () => undefined,
+        now: () => Date.now(),
+        logger: SILENT_LOGGER,
+        limit: 1000,
+      });
+      NOTES.reconcile_leftovers_before_ac7 = clearing;
+
+      const expiredPlan = plan("reap-x", P_CRED, [], Date.now() - 1000);
+      const livePlan = plan("reap-y", P_CRED, [], Date.now() + 10 * 60 * 1000);
+      const x = await create(expiredPlan);
+      const y = await create(livePlan);
+      try {
+        const restart = await dind(["docker", "restart", "osb-server"], {
+          timeoutMs: 120_000,
+        });
+        expect(restart.exitCode, "server restart").toBe(0);
+        const deadline = Date.now() + 120_000;
+        let healthy = false;
+        while (!healthy && Date.now() < deadline) {
+          try {
+            const res = await fetch(`${API_BASE_URL}/health`, {
+              signal: AbortSignal.timeout(5_000),
+            });
+            healthy = res.ok;
+          } catch {
+            healthy = false;
+          }
+          if (!healthy) await sleep(1_000);
+        }
+        expect(healthy, "server healthy after restart").toBe(true);
+
+        // One ordered log of what the reconciler did, in call order.
+        const events: string[] = [];
+        const recording = {
+          listByTags: provider.listByTags.bind(provider),
+          teardown: async (cellId: string) => {
+            events.push(`teardown:${cellId}`);
+            await provider.teardown(cellId);
+          },
+        };
+        const result = await reconcileExpiredCells({
+          provider: recording,
+          revoke: async (stepKey, attempt) => {
+            events.push(`revoke:${stepKey}:${attempt}`);
+          },
+          now: () => Date.now(),
+          logger: SILENT_LOGGER,
+        });
+        live.delete(x);
+        NOTES.reconcile_result_ac7 = result;
+
+        // Only X's and Y's own calls are asserted; other cells are not ours.
+        const xKey = expiredPlan.tags.stepKey;
+        const yKey = livePlan.tags.stepKey;
+        const xEvents = events.filter(
+          (e) => e === `revoke:${xKey}:1` || e === `teardown:${x}`,
+        );
+        const revokedBeforeTeardown =
+          xEvents.length === 2 &&
+          xEvents[0] === `revoke:${xKey}:1` &&
+          xEvents[1] === `teardown:${x}`;
+        const yUntouched = !events.some(
+          (e) => e.includes(yKey) || e === `teardown:${y}`,
+        );
+        const gone = (await provider.delete(x)) === "gone";
+        const xListed = await provider.listByTags({ stepKey: xKey });
+        const yListed = (await provider.listByTags({})).some(
+          (c) => c.cellId === y,
+        );
+        check(
+          "teardown_verified",
+          "reconciler_reaped_expired_after_restart",
+          revokedBeforeTeardown &&
+            yUntouched &&
+            gone &&
+            xListed.length === 0 &&
+            yListed &&
+            result.failed === 0,
+          {
+            revokedBeforeTeardown,
+            yUntouched,
+            gone,
+            xListed: xListed.length,
+            yListed,
+            failed: result.failed,
+          },
+        );
+      } finally {
+        await destroy(y);
+      }
+    });
+
     it("AC-8 negative control: a cell with no policy reaches the internet", async () => {
       const created = await rawApi("POST", "/sandboxes", {
         image: { uri: GUEST_IMAGE },
@@ -712,6 +811,9 @@ describe(
         execFileSync("git", ["status", "--porcelain"], {
           encoding: "utf8",
         }).trim() !== "";
+      const measuredAt = new Date();
+      const platformSha = dirty ? `${head}-dirty` : head;
+      const artifactDigest = `sha256:${sha256Hex(results)}`;
       const rows = buildConformanceEvidence({
         profileId: "opensandbox/runc",
         allowlist: (
@@ -723,16 +825,28 @@ describe(
           .filter((h) => h !== ""),
         checks: CHECKS,
         required: RUNC_REQUIRED_CHECKS,
-        measuredAt: new Date(),
+        measuredAt,
         // A dirty tree is not the commit it names; S4 can refuse the suffix.
-        platformSha: dirty ? `${head}-dirty` : head,
-        artifactDigest: `sha256:${sha256Hex(results)}`,
+        platformSha,
+        artifactDigest,
       });
       const file = evidenceFile();
       const tmp = `${file}.${process.pid}.tmp`;
       writeFileSync(
         tmp,
-        JSON.stringify({ rows, ...JSON.parse(results) }, null, 2),
+        JSON.stringify(
+          {
+            // The four fields push-evidence.sh sends to the ingest route.
+            measuredAt: measuredAt.toISOString(),
+            platformSha,
+            artifactDigest,
+            checks: CHECKS,
+            rows,
+            ...JSON.parse(results),
+          },
+          null,
+          2,
+        ),
         { mode: 0o600 },
       );
       renameSync(tmp, file);

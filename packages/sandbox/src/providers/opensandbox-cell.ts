@@ -9,6 +9,7 @@ import type {
   CellExecOptions,
   CellExecResult,
   CellListEntry,
+  CellLogger,
   CellProviderErrorCode,
   CellTags,
   CellVaultEntry,
@@ -82,10 +83,7 @@ export interface OpenSandboxCellDeps {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
-  logger: {
-    info(msg: string, fields?: Record<string, unknown>): void;
-    warn(msg: string, fields?: Record<string, unknown>): void;
-  };
+  logger: CellLogger;
 }
 
 type RetryMode = "idempotent" | "undelivered";

@@ -107,6 +107,13 @@ export const env = envsafe({
   // Remote-cell broker routes (/api/cell/git, /api/v3, /api/graphql) answer 404
   // unless this is true. ADR-014 L3 PR 2 ships them dark; PR 4 turns them on.
   CELL_BROKER_ENABLED: bool({ default: false }),
+  // ADR-014 OpenSandbox cells (#634 S4). Optional: "configured" means URL and API
+  // key are both non-empty; with either unset the cell control plane is off (the
+  // reconciler no-ops, POST /api/daemon/cell-plan answers 404). The key is a
+  // secret: never logged. OPENSANDBOX_GUEST_IMAGE is a digest-pinned reference.
+  OPENSANDBOX_URL: str({ default: "", allowEmpty: true }),
+  OPENSANDBOX_API_KEY: str({ default: "", allowEmpty: true }),
+  OPENSANDBOX_GUEST_IMAGE: str({ default: "", allowEmpty: true }),
   // ADR-036: the single-writer review channel (emit-only agent → control-plane
   // posts exactly once at finish, with the per-repo tolerance floor + a grace-period
   // sweep backstop) is now UNCONDITIONAL — the former REVIEW_SINGLE_WRITER flag was

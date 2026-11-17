@@ -182,6 +182,12 @@ export type AgentRunInput = {
    */
   workBranch?: string;
   /**
+   * #634 S4: set by dispatch for plain org task runs when OpenSandbox cells are on
+   * for the user. A reference only; the worker ignores it until S5. Mirror of www
+   * AgentRunInput.cell.
+   */
+  cell?: "opensandbox";
+  /**
    * #125 (C2 stamps, C1 consumes): per-PR concurrency key
    * `${orgId}/${repo}/${prNumber}`. Present ONLY on runs dispatched to a
    * policy variant (agent-run-newest / -strict / -discard) — the variants'

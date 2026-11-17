@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ConformanceEvidenceError,
   RUNC_REQUIRED_CHECKS,
   buildConformanceEvidence,
   type BuildConformanceEvidenceInput,
   type ConformanceChecks,
-} from "./evidence";
+} from "./conformance-evidence";
 
 const ok = (name: string) => ({ name, ok: true });
 
@@ -35,6 +36,40 @@ function input(
     ...overrides,
   };
 }
+
+function codeOf(fn: () => unknown): string | undefined {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof ConformanceEvidenceError ? e.code : "other";
+  }
+  return undefined;
+}
+
+describe("buildConformanceEvidence error codes", () => {
+  it("types each refusal", () => {
+    const failed = checks();
+    failed.peer_isolated = [{ name: "peer", ok: false }];
+    expect(
+      codeOf(() => buildConformanceEvidence(input({ checks: failed }))),
+    ).toBe("check_failed");
+    const empty = checks();
+    empty.metadata_blocked = [];
+    expect(
+      codeOf(() => buildConformanceEvidence(input({ checks: empty }))),
+    ).toBe("check_missing");
+    expect(
+      codeOf(() =>
+        buildConformanceEvidence(
+          input({ required: { peer_isolated: ["peer", "peer_80"] } }),
+        ),
+      ),
+    ).toBe("check_missing");
+    expect(
+      codeOf(() => buildConformanceEvidence(input({ allowlist: [] }))),
+    ).toBe("allowlist_empty");
+  });
+});
 
 describe("buildConformanceEvidence", () => {
   it("emits the row set the guard and cell.rego read", () => {

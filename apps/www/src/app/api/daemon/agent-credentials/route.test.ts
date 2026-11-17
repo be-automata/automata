@@ -90,6 +90,21 @@ describe("POST /api/daemon/agent-credentials", () => {
     );
   });
 
+  it("400 Invalid body for a null, array or non-object JSON body", async () => {
+    for (const raw of ["null", "[]", '"x"', "7"]) {
+      const res = await POST(
+        new NextRequest("http://localhost/api/daemon/agent-credentials", {
+          method: "POST",
+          body: raw,
+          headers: { "X-Daemon-Token": "tok" },
+        }),
+      );
+      expect(res.status, raw).toBe(400);
+      expect(await res.json()).toEqual({ error: "Invalid body" });
+    }
+    expect(getAndVerifyCredentials).not.toHaveBeenCalled();
+  });
+
   it("401 without a valid daemon token", async () => {
     vi.mocked(getDaemonTokenContext).mockResolvedValue(null);
     const res = await POST(req({ threadId, threadChatId }));

@@ -79,6 +79,7 @@ export const RUNC_REQUIRED_CHECKS = {
     "second_delete_gone",
     "no_survivors",
     "run_baseline_restored",
+    "reconciler_reaped_expired_after_restart",
   ],
   secret_brokering: [
     "vault_injects_bearer",
@@ -99,10 +100,18 @@ export const RUNC_REQUIRED_CHECKS = {
 export type RuncCheckName<G extends keyof ConformanceChecks> =
   (typeof RUNC_REQUIRED_CHECKS)[G][number];
 
+export type ConformanceEvidenceErrorCode =
+  | "allowlist_empty"
+  | "check_missing"
+  | "check_failed";
+
 export class ConformanceEvidenceError extends Error {
-  constructor(message: string) {
+  readonly code: ConformanceEvidenceErrorCode;
+
+  constructor(code: ConformanceEvidenceErrorCode, message: string) {
     super(message);
     this.name = "ConformanceEvidenceError";
+    this.code = code;
   }
 }
 
@@ -116,14 +125,17 @@ export function buildConformanceEvidence(
 ): ConformanceEvidenceRow[] {
   const allowlist = input.allowlist.filter((host) => host.trim() !== "");
   if (allowlist.length === 0) {
-    throw new ConformanceEvidenceError("allowlist is empty");
+    throw new ConformanceEvidenceError("allowlist_empty", "allowlist is empty");
   }
   const groups = Object.entries(input.checks) as Array<
     [keyof ConformanceChecks, ConformanceCheck[]]
   >;
   for (const [group, checks] of groups) {
     if (checks.length === 0) {
-      throw new ConformanceEvidenceError(`no checks for ${group}`);
+      throw new ConformanceEvidenceError(
+        "check_missing",
+        `no checks for ${group}`,
+      );
     }
     const have = new Set(names(checks));
     const missing = (input.required[group] ?? []).filter(
@@ -131,12 +143,14 @@ export function buildConformanceEvidence(
     );
     if (missing.length > 0) {
       throw new ConformanceEvidenceError(
+        "check_missing",
         `missing checks in ${group}: ${missing.join(", ")}`,
       );
     }
     const failed = checks.filter((check) => !check.ok);
     if (failed.length > 0) {
       throw new ConformanceEvidenceError(
+        "check_failed",
         `failed checks in ${group}: ${names(failed).join(", ")}`,
       );
     }
@@ -173,4 +187,17 @@ export function buildConformanceEvidence(
       checks.provider_endpoints_reachable,
     ),
   ];
+}
+
+/** A fully passing check set for the runc profile (what a good IT run measures). */
+export function passingRuncChecks(): ConformanceChecks {
+  const groups = Object.entries(RUNC_REQUIRED_CHECKS) as Array<
+    [keyof ConformanceChecks, readonly string[]]
+  >;
+  return Object.fromEntries(
+    groups.map(([group, names]) => [
+      group,
+      names.map((name) => ({ name, ok: true })),
+    ]),
+  ) as unknown as ConformanceChecks;
 }

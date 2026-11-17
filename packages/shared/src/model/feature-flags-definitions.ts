@@ -139,6 +139,11 @@ export const featureFlagsDefinitions = {
     description:
       "Offer the gstack/GSD/ruflo harness packs in the task-pack picker; turn on only after the harness installer and run seeding are deployed to the execution box. Off also refuses a settings write that adds a harness pack (an already-saved one can still be kept or removed).",
   },
+  opensandboxCells: {
+    defaultValue: false,
+    description:
+      "Runs eligible tasks in an OpenSandbox cell (ADR-014 #634); needs OPENSANDBOX_URL/API_KEY.",
+  },
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
 export type FeatureFlagName = keyof typeof featureFlagsDefinitions;

@@ -409,8 +409,12 @@ export async function runScheduledCron(cron: string): Promise<void> {
       try {
         await runQueuedTasksCron();
       } finally {
+        // Every *Safe runner swallows its own errors, so the reconciler (#634
+        // S4) needs no finally of its own; it stays LAST so cell reaping can
+        // never delay the runners above.
         await runSelfHealCronSafe("tick");
         await runDeliveryLoopCronSafe();
+        await runCellReconcilerSafe();
       }
       return;
     case "*/30 * * * *": // every 30m — fire due automations
@@ -451,6 +455,24 @@ async function runDeliveryLoopCronSafe(): Promise<void> {
     await runDeliveryLoopSweep();
   } catch (error) {
     console.error("[cron:delivery-loop] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * The remote-cell reconciler (#634 S4, AC-7): reaps cells whose expiresAt has
+ * passed. No-op while OpenSandbox is not configured; dynamic import, every
+ * failure logged and swallowed.
+ */
+async function runCellReconcilerSafe(): Promise<void> {
+  try {
+    const { cellProvider, runCellReconciler } = await import(
+      "@/server-lib/compute/cell-control"
+    );
+    const provider = cellProvider();
+    if (!provider) return;
+    await runCellReconciler({ db, provider });
+  } catch (error) {
+    console.error("[cron:cell-reconciler] failed (non-fatal)", error);
   }
 }
 
