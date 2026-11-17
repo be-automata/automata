@@ -16,7 +16,7 @@ import {
   getRunForOrg,
   markBlocked,
 } from "./agent-run";
-import { authorizeSend } from "./capabilities";
+import { authorizeSend, type AgentCapabilities } from "./capabilities";
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -367,5 +367,83 @@ describe("agent run ledger", () => {
     expect(authorizeSend(child.run, otherRoot)).toBe(
       authorizeSend(child.run, absent),
     );
+  });
+
+  it("reads null when the thread's own org differs from the ledger row's", async () => {
+    const organizationId = await createTestOrg({ db });
+    const rootId = await orgThread(organizationId);
+    await ensureRootRun({ db, threadId: rootId, organizationId, lane: "task" });
+    const otherOrg = await createTestOrg({ db });
+    await db
+      .update(thread)
+      .set({ organizationId: otherOrg })
+      .where(eq(thread.id, rootId));
+    expect(await getRunForOrg({ db, organizationId, threadId: rootId })).toBe(
+      null,
+    );
+  });
+
+  it("throws on a row whose stored capabilities are malformed", async () => {
+    const organizationId = await createTestOrg({ db });
+    const rootId = await orgThread(organizationId);
+    await ensureRootRun({ db, threadId: rootId, organizationId, lane: "task" });
+    await db
+      .update(agentRun)
+      .set({
+        capabilities: { spawn: ["task"] } as unknown as AgentCapabilities,
+      })
+      .where(eq(agentRun.threadId, rootId));
+    await expect(
+      getRunForOrg({ db, organizationId, threadId: rootId }),
+    ).rejects.toThrow(/malformed/);
+  });
+
+  describe("foreign keys on delete", () => {
+    async function tree() {
+      const { organizationId, rootId, childId } = await rootAndChild();
+      const child = await createChildRun({
+        db,
+        organizationId,
+        parentThreadId: rootId,
+        childThreadId: childId,
+        request: { lane: "task" },
+      });
+      if (!child.ok) throw new Error(child.error);
+      const grandchildId = await orgThread(organizationId, {
+        parentThreadId: childId,
+      });
+      const grandchild = await createChildRun({
+        db,
+        organizationId,
+        parentThreadId: childId,
+        childThreadId: grandchildId,
+        request: { lane: "task" },
+      });
+      if (!grandchild.ok) throw new Error(grandchild.error);
+      return { organizationId, rootId, childId, grandchildId };
+    }
+
+    it("deleting a mid-tree parent keeps the grandchild, not a root (parent nulled, depth and root kept)", async () => {
+      const { organizationId, rootId, childId, grandchildId } = await tree();
+      await db.delete(thread).where(eq(thread.id, childId));
+      const run = await getRunForOrg({
+        db,
+        organizationId,
+        threadId: grandchildId,
+      });
+      expect(run).not.toBeNull();
+      expect(run?.parentThreadId).toBeNull();
+      expect(run?.depth).toBe(2);
+      expect(run?.rootThreadId).toBe(rootId);
+      expect(run?.rootThreadId).not.toBe(run?.threadId);
+    });
+
+    it("deleting the root removes every run in its tree (root_thread_id cascade)", async () => {
+      const { rootId, childId, grandchildId } = await tree();
+      await db.delete(thread).where(eq(thread.id, rootId));
+      expect(await rowCount(rootId)).toBe(0);
+      expect(await rowCount(childId)).toBe(0);
+      expect(await rowCount(grandchildId)).toBe(0);
+    });
   });
 });

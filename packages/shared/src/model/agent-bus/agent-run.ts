@@ -4,6 +4,7 @@ import { DB } from "../../db";
 import { agentRun, thread } from "../../db/schema";
 import {
   capabilitiesForLane,
+  isAgentCapabilities,
   narrowForChild,
   type AgentBusError,
   type AgentBusLane,
@@ -55,13 +56,25 @@ export async function getRunForOrg({
     .where(
       and(
         eq(agentRun.organizationId, organizationId),
+        // The thread's own org too: a thread moved by any path other than
+        // rehome stops answering to its old org.
+        eq(thread.organizationId, organizationId),
         eq(agentRun.threadId, threadId),
       ),
     )
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  return { ...row, terminal: Boolean(row.terminal) };
+  if (!isAgentCapabilities(row.capabilities)) {
+    throw new Error(
+      `agent_run ${row.threadId}: stored capabilities are malformed`,
+    );
+  }
+  return {
+    ...row,
+    capabilities: row.capabilities,
+    terminal: Boolean(row.terminal),
+  };
 }
 
 /**

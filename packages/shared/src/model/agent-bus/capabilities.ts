@@ -23,6 +23,45 @@ export interface AgentCapabilities {
   maxDepth: number;
 }
 
+const AGENT_BUS_LANES: readonly string[] = ["task", "review"];
+
+function isLaneList(value: unknown): value is AgentBusLane[] {
+  return (
+    Array.isArray(value) && value.every((l) => AGENT_BUS_LANES.includes(l))
+  );
+}
+
+/**
+ * Narrows a stored `capabilities` value. The jsonb column is typed, not checked,
+ * so a row is validated on read: a malformed set must fail closed, never lift a
+ * limit (a missing `maxDepth` would otherwise compare as NaN and allow any depth).
+ */
+export function isAgentCapabilities(
+  value: unknown,
+): value is AgentCapabilities {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    isLaneList(v.spawn) &&
+    isLaneList(v.sendTo) &&
+    Array.isArray(v.repoGrant) &&
+    v.repoGrant.every(
+      (g: unknown) =>
+        typeof g === "object" &&
+        g !== null &&
+        typeof (g as Record<string, unknown>).repo === "string" &&
+        ["read", "write"].includes(
+          (g as Record<string, unknown>).access as string,
+        ),
+    ) &&
+    (v.skills === null ||
+      (Array.isArray(v.skills) &&
+        v.skills.every((s: unknown) => typeof s === "string"))) &&
+    Number.isInteger(v.maxDepth) &&
+    (v.maxDepth as number) >= 0
+  );
+}
+
 /** A run as the bus sees it: the ledger row plus its thread's effective status. */
 export interface AgentRunView {
   threadId: string;
@@ -131,7 +170,8 @@ export function narrowForChild(
 
   const maxDepth = Math.min(LANE_DEFAULT_MAX_DEPTH, parentCaps.maxDepth);
   const depth = parent.depth + 1;
-  if (depth > maxDepth) {
+  // Fails closed: a non-integer limit (NaN from a malformed set) refuses.
+  if (!Number.isInteger(maxDepth) || depth > maxDepth) {
     return { ok: false, error: "depth_exceeded" };
   }
 

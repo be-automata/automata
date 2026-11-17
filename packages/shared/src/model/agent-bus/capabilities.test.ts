@@ -5,6 +5,7 @@ import {
   authorizeSend,
   busStateOf,
   capabilitiesForLane,
+  isAgentCapabilities,
   LANE_DEFAULT_MAX_DEPTH,
   narrowForChild,
   type AgentBusLane,
@@ -183,6 +184,17 @@ describe("narrowForChild", () => {
     });
   });
 
+  it("fails closed on a malformed limit: a NaN maxDepth refuses", () => {
+    const broken = {
+      ...parent,
+      capabilities: { ...parent.capabilities, maxDepth: Number.NaN },
+    };
+    expect(narrowForChild(broken, { lane: "task" })).toEqual({
+      ok: false,
+      error: "depth_exceeded",
+    });
+  });
+
   it("property: a permitted child is never wider than its parent (seeded, 1000 cases)", () => {
     const rand = seeded(659);
     const errors = new Set<string>();
@@ -234,15 +246,22 @@ describe("narrowForChild", () => {
       expect(c.maxDepth).toBeLessThanOrEqual(LANE_DEFAULT_MAX_DEPTH);
       expect(res.depth).toBe(p.depth + 1);
       expect(res.depth).toBeLessThanOrEqual(c.maxDepth);
+      expect(c.repoGrant).toHaveLength(1);
       for (const g of c.repoGrant) {
-        expect(parentCaps.repoGrant.some((x) => x.repo === g.repo)).toBe(true);
+        expect(
+          parentCaps.repoGrant.some(
+            (x) => x.repo.toLowerCase() === g.repo.toLowerCase(),
+          ),
+        ).toBe(true);
         expect(g.access).toBe("read");
       }
-      if (parentCaps.skills !== null) {
-        expect(c.skills).not.toBeNull();
-        expect(c.skills!.every((s) => parentCaps.skills!.includes(s))).toBe(
-          true,
-        );
+      const parentSkills = parentCaps.skills;
+      if (parentSkills !== null) {
+        const childSkills = c.skills;
+        expect(childSkills).not.toBeNull();
+        if (childSkills !== null) {
+          expect(childSkills.every((s) => parentSkills.includes(s))).toBe(true);
+        }
       }
       if (request.skills === undefined) {
         expect(c.skills).toEqual(parentCaps.skills);
@@ -257,6 +276,38 @@ describe("narrowForChild", () => {
         "depth_exceeded",
       ]),
     );
+  });
+});
+
+describe("isAgentCapabilities", () => {
+  const good = capabilitiesForLane("task", {
+    repoGrant: [{ repo: "acme/app", access: "write" }],
+    skills: ["a"],
+  });
+
+  it("accepts every set capabilitiesForLane builds, either lane", () => {
+    expect(isAgentCapabilities(good)).toBe(true);
+    expect(isAgentCapabilities(reviewCaps())).toBe(true);
+    expect(isAgentCapabilities({ ...good, skills: null })).toBe(true);
+  });
+
+  it("rejects missing or wrong-typed fields", () => {
+    const noDepth: Record<string, unknown> = { ...good };
+    delete noDepth.maxDepth;
+    for (const bad of [
+      null,
+      "x",
+      noDepth,
+      { ...good, maxDepth: 1.5 },
+      { ...good, maxDepth: -1 },
+      { ...good, spawn: ["control"] },
+      { ...good, sendTo: "task" },
+      { ...good, repoGrant: [{ repo: "a/b", access: "admin" }] },
+      { ...good, repoGrant: [{ access: "read" }] },
+      { ...good, skills: [1] },
+    ]) {
+      expect(isAgentCapabilities(bad)).toBe(false);
+    }
   });
 });
 
