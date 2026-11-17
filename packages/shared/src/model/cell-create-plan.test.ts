@@ -161,6 +161,7 @@ describe("buildCellCreatePlan", () => {
     ["modelToken", { modelToken: "\t" }],
     ["daemonToken", { daemonToken: " " }],
     ["daemonToken", { daemonToken: "" }],
+    ["daemonToken", { daemonToken: " tok-with-spaces " }],
   ] as const)(
     "%s out of range throws RangeError before the guard and mint",
     async (_field, patch) => {

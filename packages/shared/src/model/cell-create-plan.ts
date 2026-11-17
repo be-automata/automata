@@ -173,6 +173,9 @@ export async function buildCellCreatePlan(
   assertNonBlank("modelToken", input.modelToken);
   if (input.daemonToken !== undefined) {
     assertNonBlank("daemonToken", input.daemonToken);
+    if (input.daemonToken !== input.daemonToken.trim()) {
+      throw new RangeError("daemonToken must not have surrounding whitespace");
+    }
   }
   if (input.runtime !== "runc") throw new CellPlanError("runtime_not_runc");
   const brokerHost = normalizeCellBrokerHost(input.egress.brokerHost);

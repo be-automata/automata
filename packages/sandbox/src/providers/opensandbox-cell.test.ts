@@ -371,6 +371,9 @@ describe("vault auth shapes", () => {
     ["missing header", { header: undefined }],
     ["blank placeholder", { placeholder: "  " }],
     ["empty placeholder", { placeholder: "" }],
+    ["an auth kind outside bearer and apiKey", { auth: "basic" }],
+    ["passthrough auth", { auth: "passthrough" }],
+    ["an empty paths list", { paths: [] }],
   ])(
     "%s: refused invalid_plan with no fetch and no echo",
     async (_n, patch) => {
@@ -1591,6 +1594,16 @@ describe("listByTags", () => {
     expect(out).toHaveLength(200);
     expect(wasTruncated(out)).toBe(false);
   });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 1_001])(
+    "maxPages %s is refused invalid_argv with no HTTP call",
+    async (maxPages) => {
+      const { provider, server } = pagedServer(5);
+      const err = await rejection(provider.listByTags({}, { maxPages }));
+      expect(err).toMatchObject({ code: "invalid_argv", op: "list" });
+      expect(server.count("GET /sandboxes?metadata")).toBe(0);
+    },
+  );
 
   it("without maxPages a server that never stops paging still fails closed", async () => {
     const { provider, server } = pagedServer(Number.MAX_SAFE_INTEGER);

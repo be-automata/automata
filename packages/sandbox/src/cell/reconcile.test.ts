@@ -13,6 +13,7 @@ function setup(
     limit?: number;
     isDead?: (keys: CellKey[]) => Promise<Set<string>>;
     truncated?: boolean;
+    deployment?: string;
   } = {},
 ) {
   const calls: string[] = [];
@@ -42,7 +43,7 @@ function setup(
       now: () => NOW,
       logger,
       limit: over.limit,
-      deployment: "d1",
+      deployment: over.deployment ?? "d1",
       isDead: over.isDead,
       // Just under 1 keeps every element in place: list order, no shuffle.
       random: () => 0.9999999,
@@ -160,6 +161,43 @@ describe("reconcileExpiredCells", () => {
       truncated: false,
     });
   });
+
+  it.each([[""], ["  "]])(
+    "refuses deployment %j before listing (an unset filter would list every deployment)",
+    async (deployment) => {
+      const h = setup([], { deployment });
+      await expect(h.run()).rejects.toThrow(RangeError);
+      expect(h.provider.listByTags).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses an undefined deployment from an untyped caller before listing", async () => {
+    const h = setup([]);
+    await expect(
+      reconcileExpiredCells({
+        provider: h.provider,
+        revoke: h.revoke,
+        now: () => NOW,
+        logger: h.logger,
+        deployment: undefined as unknown as string,
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(h.provider.listByTags).not.toHaveBeenCalled();
+  });
+
+  it.each([Number.NaN, 0, -3, 2.5])(
+    "a limit of %s falls back to the default cap instead of removing it",
+    async (limit) => {
+      const cells = Array.from({ length: 25 }, (_, i) => ({
+        cellId: `c${i}`,
+        tags: tags(`cell:k${i}`, NOW - 1),
+      }));
+      const h = setup(cells, { limit });
+      const out = await h.run();
+      expect(out.expired).toBe(20);
+      expect(out.deferred).toBe(5);
+    },
+  );
 
   it("stops at the limit", async () => {
     const cells = [1, 2, 3, 4].map((n) => ({

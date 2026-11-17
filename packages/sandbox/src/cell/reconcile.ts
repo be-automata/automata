@@ -51,7 +51,7 @@ export interface ReconcileResult {
   expired: number;
   reaped: number;
   failed: number;
-  /** Expired cells left for the next run because `limit` was reached. */
+  /** Expired or dead cells left for the next run because `limit` was reached. */
   deferred: number;
   /** Unexpired cells reaped because `isDead` named their key (a subset of the candidates). */
   dead: number;
@@ -135,7 +135,18 @@ export async function reconcileExpiredCells(
   input: ReconcileExpiredCellsInput,
 ): Promise<ReconcileResult> {
   const { provider, revoke, now, logger } = input;
-  const limit = input.limit ?? DEFAULT_RECONCILE_LIMIT;
+  // An undefined deployment would drop the filter and list every deployment's
+  // cells; refuse it before listing.
+  if (typeof input.deployment !== "string" || input.deployment.trim() === "") {
+    throw new RangeError("deployment must be a non-blank string");
+  }
+  // A NaN or non-positive limit would remove the per-run cap on reaps.
+  const limit =
+    input.limit !== undefined &&
+    Number.isSafeInteger(input.limit) &&
+    input.limit >= 1
+      ? input.limit
+      : DEFAULT_RECONCILE_LIMIT;
   const entries = await provider.listByTags(
     { deployment: input.deployment },
     { maxPages: input.maxPages ?? DEFAULT_RECONCILE_MAX_PAGES },

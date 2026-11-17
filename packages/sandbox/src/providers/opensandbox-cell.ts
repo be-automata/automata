@@ -235,17 +235,26 @@ function assertPlanFields(plan: CellCreatePlan): void {
   }
 }
 
-/** A header name or placeholder that is blank or malformed is refused, never echoed. */
+/**
+ * An auth kind other than bearer or apiKey, an empty `paths` (upstream could read
+ * it as every path), and a header name or placeholder that is blank or malformed
+ * are refused, never echoed.
+ */
 function assertVault(vault: readonly CellVaultEntry[] | undefined): void {
   for (const v of vault ?? []) {
+    const auth: unknown = v.auth;
+    const paths: unknown = v.paths;
     const placeholder = (v as { placeholder?: unknown }).placeholder;
     const header = (v as { header?: unknown }).header;
+    const badAuth = auth !== "bearer" && auth !== "apiKey";
+    const badPaths =
+      paths !== undefined && !(Array.isArray(paths) && paths.length > 0);
     const badPlaceholder =
       placeholder !== undefined && !isNonBlank(placeholder);
     const badHeader =
-      v.auth === "apiKey" &&
+      auth === "apiKey" &&
       !(typeof header === "string" && HEADER_NAME_PATTERN.test(header));
-    if (badPlaceholder || badHeader) {
+    if (badAuth || badPaths || badPlaceholder || badHeader) {
       throw new CellProviderError("invalid_plan", "create");
     }
   }
@@ -542,7 +551,20 @@ export function createOpenSandboxCellProvider(
     tags: Partial<CellTags>,
     opts?: CellListOptions,
   ): Promise<CellListEntry[]> {
-    const maxPages = opts?.maxPages ?? MAX_LIST_PAGES;
+    const requested = opts?.maxPages;
+    // A cap outside 1..MAX_LIST_PAGES would silently list nothing (0, NaN) or
+    // page without bound (Infinity): refuse it.
+    if (
+      requested !== undefined &&
+      !(
+        Number.isSafeInteger(requested) &&
+        requested >= 1 &&
+        requested <= MAX_LIST_PAGES
+      )
+    ) {
+      throw new CellProviderError("invalid_argv", "list");
+    }
+    const maxPages = requested ?? MAX_LIST_PAGES;
     const defined = Object.entries(tags).filter(
       (e): e is [string, string] => typeof e[1] === "string",
     );
