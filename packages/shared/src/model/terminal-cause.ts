@@ -112,6 +112,29 @@ export const ABANDONED_TERMINAL_CAUSES = [
   "plane-offline",
 ] as const satisfies readonly TerminalCause[];
 
+/**
+ * #668: the causes a MENTION run ends on without its mention being answered.
+ * A policy cause cannot reach a mention (no prKey, so the engine never
+ * supersedes, discards or stale-skips it) and a person stopped a
+ * `user-cancelled` run on purpose. Unlike ABANDONED_TERMINAL_CAUSES,
+ * `plane-offline` is NOT here: no newer run speaks for a mention, so a
+ * mention that never ran must still be told so.
+ */
+export const MENTION_SILENT_TERMINAL_CAUSES = [
+  "superseded",
+  "discarded",
+  "stale-skipped",
+  "user-cancelled",
+] as const satisfies readonly TerminalCause[];
+
+/** True when a mention run ending on this cause gets no reply (see above). */
+export function isMentionSilentTerminalCause(cause: string | null): boolean {
+  return (
+    cause !== null &&
+    (MENTION_SILENT_TERMINAL_CAUSES as readonly string[]).includes(cause)
+  );
+}
+
 /** True when a terminal cause means the run was abandoned (see above). */
 export function isAbandonedTerminalCause(cause: string | null): boolean {
   return (

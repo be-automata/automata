@@ -13,11 +13,19 @@ import {
 import { hatchetRun as hatchetRunTable } from "@terragon/shared/db/schema";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { setThreadActiveRun } from "@terragon/shared/model/threads";
-import { thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  thread as threadTable,
+  threadChat as threadChatTable,
+} from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
+import { getOctokitForApp } from "@/lib/github";
+import { mentionReplyMarker } from "@/server-lib/review/mention-reply-finish";
+import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
+import { markThreadTerminal } from "@terragon/shared/model/threads";
+import { resolveBotLogin } from "@/server-lib/review/bot-login";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
 
@@ -331,5 +339,256 @@ describe("POST /api/daemon/run-terminal — detail.info and error mapping (#437)
       errorMessage: null,
       errorMessageInfo: null,
     });
+  });
+});
+
+/**
+ * #668: a mention run the worker ends with a typed terminal never reaches the
+ * daemon finish, so this route is where its mention gets answered. Real
+ * database, real writer; only GitHub is a fake.
+ *
+ * protects: the person who mentioned the App gets one reply naming what
+ *   happened; a retried terminal and a non-mention thread post nothing.
+ * fails_when: the route stops calling the mention writer, calls it for an
+ *   unapplied write, or the writer cannot resolve the thread's chat.
+ * no_claim: GitHub's API (fake) and the worker posting this terminal.
+ */
+describe("POST /api/daemon/run-terminal — mention reply (#668)", () => {
+  const STAMP = {
+    repoFullName: "acme/widgets",
+    issueOrPrNumber: 664,
+    isPullRequest: true,
+    commentId: 6954998535,
+    commentKind: "issue" as const,
+    commenterLogin: "alice",
+  };
+  const posted: { issue_number: number; body: string }[] = [];
+  let answered: { user: { login: string }; body: string }[] = [];
+  const octokit = {
+    paginate: vi.fn(async () => answered),
+    rest: {
+      issues: {
+        listComments: vi.fn(),
+        createComment: vi.fn(
+          async (args: { issue_number: number; body: string }) => {
+            posted.push({ issue_number: args.issue_number, body: args.body });
+            answered = [
+              ...answered,
+              { user: { login: resolveBotLogin() }, body: args.body },
+            ];
+            return { data: {} };
+          },
+        ),
+      },
+    },
+  };
+  let user: User;
+  let threadId: string;
+  let threadChatId: string;
+
+  async function seed(sourceMetadata: unknown) {
+    user = (await createTestUser({ db })).user;
+    const t = await createTestThread({ db, userId: user.id });
+    threadId = t.threadId;
+    threadChatId = t.threadChatId;
+    await db
+      .update(threadTable)
+      .set({ status: "working", sourceMetadata: sourceMetadata as never })
+      .where(eq(threadTable.id, threadId));
+    vi.mocked(getDaemonTokenContext).mockResolvedValue({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+      organizationId: null,
+      threadChatId,
+      threadId,
+      tokenType: "daemon",
+    } as DaemonTokenContext);
+  }
+  const terminal = (cause: string) =>
+    POST(req({ threadId, threadChatId, runExternalId: "run-m", cause }));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    posted.length = 0;
+    answered = [];
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+  });
+
+  it("a mention run ended by timeout → one reply on the mention, with its marker", async () => {
+    await seed({
+      type: "automation-skill",
+      skillName: "github-mention",
+      contentSha: "x",
+      source: "db-version",
+      mention: STAMP,
+    });
+    const res = await terminal("timeout");
+    expect(await res.json()).toEqual({ applied: true });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]!.issue_number).toBe(664);
+    expect(posted[0]!.body).toBe(
+      `I couldn't finish this: the run hit its time limit before it could answer. Mention me again to retry.\n\n${mentionReplyMarker(STAMP.commentId)}`,
+    );
+
+    // A retried terminal is applied:false and answers nothing again.
+    expect(await (await terminal("timeout")).json()).toEqual({
+      applied: false,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(posted).toHaveLength(1);
+  });
+
+  it("a mention run that never ran (plane-offline) is answered too", async () => {
+    await seed({
+      type: "automation-skill",
+      skillName: "github-mention",
+      contentSha: "x",
+      source: "db-version",
+      mention: STAMP,
+    });
+    await terminal("plane-offline");
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]!.body).toContain(
+      "the run never started on the execution plane",
+    );
+  });
+
+  // The worker names the chat; the writer must read THAT chat, not guess. A
+  // chat-mode thread with a newer, empty chat beside it: only the named chat
+  // holds the agent's reply, so a guess posts the timeout notice instead.
+  it("a chat-mode mention: the reply comes from the chat the worker named", async () => {
+    user = (await createTestUser({ db })).user;
+    const agentText =
+      'Done.\n\n```json mention-reply\n{"kind":"mention-reply","reply":"Re-reviewed at 183c8a6."}\n```';
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      enableThreadChatCreation: true,
+      chatOverrides: { status: "working" },
+    });
+    threadId = t.threadId;
+    threadChatId = t.threadChatId;
+    await db
+      .update(threadChatTable)
+      .set({
+        messages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [{ type: "text", text: agentText }],
+          },
+        ] as never,
+      })
+      .where(eq(threadChatTable.id, threadChatId));
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "x",
+          source: "db-version",
+          mention: STAMP,
+        } as never,
+      })
+      .where(eq(threadTable.id, threadId));
+    await db.insert(threadChatTable).values({
+      userId: user.id,
+      threadId,
+      status: "complete",
+      messages: [],
+      updatedAt: new Date(Date.now() + 60_000),
+    } as never);
+    vi.mocked(getDaemonTokenContext).mockResolvedValue({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+      organizationId: null,
+      threadChatId,
+      threadId,
+      tokenType: "daemon",
+    } as DaemonTokenContext);
+
+    expect(await (await terminal("timeout")).json()).toEqual({
+      applied: true,
+    });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]!.body).toBe(
+      `Re-reviewed at 183c8a6.\n\n${mentionReplyMarker(STAMP.commentId)}`,
+    );
+  });
+
+  // The sweeps name no chat: the writer must find the one the terminal moved
+  // (its terminalCause mirror), not merely the newest.
+  it("no chat named (sweep/watchdog): the reply comes from the chat the terminal moved", async () => {
+    user = (await createTestUser({ db })).user;
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      enableThreadChatCreation: true,
+      chatOverrides: { status: "working" },
+    });
+    threadId = t.threadId;
+    await db
+      .update(threadChatTable)
+      .set({
+        messages: [
+          {
+            type: "agent",
+            parent_tool_use_id: null,
+            parts: [
+              {
+                type: "text",
+                text: '```json mention-reply\n{"kind":"mention-reply","reply":"From the run chat."}\n```',
+              },
+            ],
+          },
+        ] as never,
+      })
+      .where(eq(threadChatTable.id, t.threadChatId));
+    await db
+      .update(threadTable)
+      .set({
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "x",
+          source: "db-version",
+          mention: STAMP,
+        } as never,
+      })
+      .where(eq(threadTable.id, threadId));
+    // A newer chat the terminal does not move (already complete, empty).
+    await db.insert(threadChatTable).values({
+      userId: user.id,
+      threadId,
+      status: "complete",
+      messages: [],
+      updatedAt: new Date(Date.now() + 60 * 60_000),
+    } as never);
+
+    expect(await markThreadTerminal({ db, threadId, cause: "timeout" })).toBe(
+      true,
+    );
+    await replyToMentionsAtTerminal([{ threadId }]);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.body).toBe(
+      `From the run chat.\n\n${mentionReplyMarker(STAMP.commentId)}`,
+    );
+  });
+
+  it("a person's stop (user-cancelled) and a non-mention thread post nothing", async () => {
+    await seed({
+      type: "automation-skill",
+      skillName: "github-mention",
+      contentSha: "x",
+      source: "db-version",
+      mention: STAMP,
+    });
+    await terminal("user-cancelled");
+    await seed(null);
+    await terminal("timeout");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(posted).toHaveLength(0);
+    expect(getOctokitForApp).not.toHaveBeenCalled();
   });
 });

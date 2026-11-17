@@ -1594,13 +1594,14 @@ export async function getStalledThreads({
   return threads;
 }
 
+/** Returns the ids this call actually moved to the `timeout` terminal. */
 export async function stopStalledThreads({
   db,
   threadIds,
 }: {
   db: DB;
   threadIds: string[];
-}) {
+}): Promise<string[]> {
   // Route through the typed-terminal writer instead of a bare UPDATE. The old
   // statement wrote `status = complete` with NO `terminalCause`, and
   // decideThreadGeneration treats a PRESENT-but-null cause as "not terminal"
@@ -1614,7 +1615,7 @@ export async function stopStalledThreads({
   // the reapable-status guard (idempotent under retry), and one transaction.
   // Its default writes `request-timeout` for this cause, which the chat UI
   // renders a dedicated case for.
-  await markThreadsTerminal({ db, threadIds, cause: "timeout" });
+  return await markThreadsTerminal({ db, threadIds, cause: "timeout" });
 }
 
 /**
