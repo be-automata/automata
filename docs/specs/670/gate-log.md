@@ -112,3 +112,17 @@ Dockerfile COPY sources). The repo imports only `Daytona`, `Sandbox` and `Dayton
 packages/debug-scripts/daytona-ssh.ts:2) and never builds an `Image`. fumadocs-mdx > tinyglobby runs at
 docs build time over `apps/docs/content`, with patterns from `apps/docs/source.config.ts`. No
 user-controlled glob pattern reaches picomatch in a production path.
+
+## After merging `origin/main` (08c1b194)
+
+Re-run on the merge commit c48a37c1, every gate exit 0: install (`--frozen-lockfile`), fumadocs-mdx,
+`turbo tsc-check`, `lint`, `format-check`, the utils, knowledge, agent, shared, www, sandbox, migrate,
+worker, cli and review suites, `pnpm audit --prod --audit-level critical`,
+`turbo build --filter='@terragon/www^...'` and `e2e:build`. The prod audit is still exactly
+`{picomatch}` (`high: 2, critical: 0`).
+
+Local trap found on the way: the OpenNext build leaves `apps/www/.open-next/`, which
+`apps/www/tsconfig.json` (`include: ["**/*.ts", …]`, `exclude: [".next/**/*", "node_modules"]`) pulls
+into the www type-check. With it present, a cold www `tsc` doubles to 1.35M types and runs out of the
+default 4 GB heap; without it the branch matches `origin/main` (592k types, about 2.6 GB). CI never has
+`.open-next`. Adding `.open-next` to that exclude is a follow-up, not part of this change.
