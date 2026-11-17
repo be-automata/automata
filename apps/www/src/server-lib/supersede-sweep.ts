@@ -18,6 +18,7 @@ import { mapLimit } from "@/lib/map-limit";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
 import { assertNever } from "@terragon/shared/utils";
 import { maybeRecheckOnComplete } from "./supersede-recheck";
+import { replyToMentionsAtTerminal } from "./review/mention-terminal-reply";
 import {
   getAgentRunStatus,
   listAgentRunsForThread,
@@ -576,5 +577,7 @@ async function sweepTerminal({
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  // #668: rule (iii) ends mention runs too; their answer has no other writer.
+  await replyToMentionsAtTerminal([threadId]);
   return true;
 }

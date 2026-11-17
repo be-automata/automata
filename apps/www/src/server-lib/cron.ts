@@ -8,6 +8,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { getScheduledAutomationsDueToRun } from "@terragon/shared/model/automations";
 import { maybeHibernateSandboxById } from "@/agent/sandbox";
+import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
 import {
   maybeStartQueuedThreadChat,
   retireStrandedQueuedThreads,
@@ -119,7 +120,7 @@ export async function runStalledTasksCron(): Promise<void> {
   if (stalledThreads.length === 0) {
     return;
   }
-  await stopStalledThreads({
+  const stoppedIds = await stopStalledThreads({
     db,
     threadIds: stalledThreads.map((t) => t.id),
   });
@@ -143,6 +144,10 @@ export async function runStalledTasksCron(): Promise<void> {
     );
     await sleep();
   }
+  // #668: the watchdog is also the backstop for a dropped finish event; a
+  // mention thread it reaps would otherwise never be answered. After the
+  // hibernation above, so freeing slots never waits on GitHub.
+  await replyToMentionsAtTerminal(stoppedIds);
 }
 
 /**

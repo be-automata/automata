@@ -13,6 +13,7 @@ import {
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 import { waitUntil } from "@/lib/wait-until";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
+import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
 
 /**
  * POST /api/daemon/run-terminal
@@ -138,5 +139,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // crash between the terminal write and the ledger claim (the UNIQUE ledger
   // keeps it at-most-once).
   waitUntil(maybeRecheckOnComplete({ threadId }));
+  // #668: a mention run ended here never reaches the daemon finish, its only
+  // other reply writer. Only on the write that moved the thread: a retried
+  // terminal (`applied: false`) must not answer twice.
+  if (applied) waitUntil(replyToMentionsAtTerminal([threadId]));
   return NextResponse.json({ applied });
 }
