@@ -394,6 +394,42 @@ describe("agent run ledger", () => {
     ).rejects.toThrow(/malformed/);
   });
 
+  it("waits on a concurrent markBlocked of the parent and then refuses (agent_blocked)", async () => {
+    const { organizationId, rootId, childId } = await rootAndChild();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let blockedInTx: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => (blockedInTx = resolve));
+    const blocker = db.transaction(async (tx) => {
+      await markBlocked({
+        db: tx,
+        organizationId,
+        threadId: rootId,
+        reason: "held",
+      });
+      blockedInTx();
+      await held;
+    });
+    await blocked;
+    let settled = false;
+    const spawn = createChildRun({
+      db,
+      organizationId,
+      parentThreadId: rootId,
+      childThreadId: childId,
+      request: { lane: "task" },
+    }).then((res) => {
+      settled = true;
+      return res;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(settled).toBe(false);
+    release();
+    await blocker;
+    expect(await spawn).toEqual({ ok: false, error: "agent_blocked" });
+    expect(await rowCount(childId)).toBe(0);
+  });
+
   describe("foreign keys on delete", () => {
     async function tree() {
       const { organizationId, rootId, childId } = await rootAndChild();

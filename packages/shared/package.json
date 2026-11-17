@@ -7,6 +7,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "test": "vitest --no-file-parallelism",
+    "test:coverage": "vitest run --coverage --no-file-parallelism",
     "drizzle-kit-push-test": "drizzle-kit push --config drizzle.config.ts",
     "drizzle-kit-push-dev": "dotenv -e .env.development.local -- drizzle-kit push",
     "drizzle-kit-push-prod": "dotenv -e .env.production.local -- drizzle-kit push",

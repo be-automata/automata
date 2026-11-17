@@ -138,6 +138,12 @@ export async function ensureRootRun({
  * in order: both rows in this organization and the child thread's parent
  * matches (`not_found`), parent terminal, parent blocked, narrowing, then the
  * insert; a child that already has a row is refused with `run_exists`.
+ *
+ * One transaction holding the parent's ledger row (`FOR UPDATE`), so a
+ * concurrent `markBlocked` cannot land between the check and the insert. A
+ * parent that ends in that window is not serialized here (its thread, not its
+ * ledger row, changes); the reconciler that cancels children of a terminal
+ * parent covers it (#651 G6).
  */
 export async function createChildRun({
   db,
@@ -146,15 +152,24 @@ export async function createChildRun({
   childThreadId,
   request,
 }: {
-  db: Executor;
+  db: Pick<DB, "transaction">;
   organizationId: string;
   parentThreadId: string;
   childThreadId: string;
   request: { lane: AgentBusLane; repo?: string; skills?: string[] };
 }): Promise<CreateChildRunResult> {
-  const [parent, childRows] = await Promise.all([
-    getRunForOrg({ db, organizationId, threadId: parentThreadId }),
-    db
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ threadId: agentRun.threadId })
+      .from(agentRun)
+      .where(runInOrg(organizationId, parentThreadId))
+      .for("update");
+    const parent = await getRunForOrg({
+      db: tx,
+      organizationId,
+      threadId: parentThreadId,
+    });
+    const childRows = await tx
       .select({ parentThreadId: thread.parentThreadId })
       .from(thread)
       .where(
@@ -163,40 +178,42 @@ export async function createChildRun({
           eq(thread.organizationId, organizationId),
         ),
       )
-      .limit(1),
-  ]);
-  const child = childRows[0];
-  if (!parent || !child || child.parentThreadId !== parentThreadId) {
-    return { ok: false, error: "not_found" };
-  }
-  if (parent.terminal) return { ok: false, error: "sender_not_running" };
-  if (parent.blockedAt !== null) return { ok: false, error: "agent_blocked" };
+      .limit(1);
+    const child = childRows[0];
+    if (!parent || !child || child.parentThreadId !== parentThreadId) {
+      return { ok: false, error: "not_found" };
+    }
+    if (parent.terminal) return { ok: false, error: "sender_not_running" };
+    if (parent.blockedAt !== null) {
+      return { ok: false, error: "agent_blocked" };
+    }
 
-  const narrowed = narrowForChild(parent, request);
-  if (!narrowed.ok) return { ok: false, error: narrowed.error };
+    const narrowed = narrowForChild(parent, request);
+    if (!narrowed.ok) return { ok: false, error: narrowed.error };
 
-  const inserted = await db
-    .insert(agentRun)
-    .values({
-      threadId: childThreadId,
+    const inserted = await tx
+      .insert(agentRun)
+      .values({
+        threadId: childThreadId,
+        organizationId,
+        parentThreadId,
+        rootThreadId: parent.rootThreadId,
+        lane: request.lane,
+        capabilities: narrowed.capabilities,
+        depth: narrowed.depth,
+      })
+      .onConflictDoNothing({ target: agentRun.threadId })
+      .returning({ threadId: agentRun.threadId });
+    if (inserted.length === 0) return { ok: false, error: "run_exists" };
+
+    const run = await getRunForOrg({
+      db: tx,
       organizationId,
-      parentThreadId,
-      rootThreadId: parent.rootThreadId,
-      lane: request.lane,
-      capabilities: narrowed.capabilities,
-      depth: narrowed.depth,
-    })
-    .onConflictDoNothing({ target: agentRun.threadId })
-    .returning({ threadId: agentRun.threadId });
-  if (inserted.length === 0) return { ok: false, error: "run_exists" };
-
-  const run = await getRunForOrg({
-    db,
-    organizationId,
-    threadId: childThreadId,
+      threadId: childThreadId,
+    });
+    if (!run) return { ok: false, error: "not_found" };
+    return { ok: true, run };
   });
-  if (!run) return { ok: false, error: "not_found" };
-  return { ok: true, run };
 }
 
 /** Marks the run blocked. A no-op for an absent run or one in another organization. */
