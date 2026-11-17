@@ -74,6 +74,12 @@ export const REHOME_MOVE_BY_THREAD: readonly RehomeByThreadTable[] = [
   // Remote-cell authority belongs to the run's thread; bearers and effects follow
   // by step_key (no organization_id of their own).
   { table: "cell_step", threadColumn: "thread_id", idColumn: "step_key" },
+  // Agent-bus run ledger (#659): a run's row follows its thread, so the bus
+  // keeps finding it under the thread's org. Until #648 a grant holds only the
+  // parent's own repo, so a tree stays under one owner; once a grant spans
+  // owners, re-homing one repo splits the tree and cross-org sends fail closed
+  // (not_found).
+  { table: "agent_run", threadColumn: "thread_id", idColumn: "thread_id" },
   {
     table: "self_heal_slot",
     threadColumn: "holder_thread_id",
