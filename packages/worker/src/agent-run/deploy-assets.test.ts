@@ -1248,6 +1248,14 @@ describe("worker credential drop-in: docs and installer match the unit (#656 PR-
     expect(body.indexOf('mv "$KEY_FILE.new" "$KEY_FILE"')).toBeLessThan(
       body.indexOf('refuse_key_file "the generated'),
     );
+    // A missing key beside an installed drop-in is refused, never regenerated,
+    // and the refusal comes before any key is generated (Automata #669).
+    const missing = body.indexOf('if [ -e "$WORKER_DROPIN" ]; then');
+    expect(missing).toBeGreaterThan(-1);
+    expect(body).toContain(
+      'refuse_key_file "$KEY_FILE is missing while the worker drop-in exists"',
+    );
+    expect(missing).toBeLessThan(body.indexOf('log "generating $KEY_FILE"'));
     // negative control: the old plain die for a wrong key file is gone
     expect(body).not.toContain("fix or remove it by hand");
     expect(body).not.toMatch(/\bdie\b/);

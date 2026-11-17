@@ -149,6 +149,11 @@ ensure_key_file() {
     verify_key_file >/dev/null || refuse_key_file "$KEY_FILE exists but is wrong (owner, mode or shape)"
     return 0
   fi
+  # A missing key beside an installed drop-in was deleted, not never made: never
+  # replace it silently (Automata #669). The drop-in goes first, then a re-run.
+  if [ -e "$WORKER_DROPIN" ]; then
+    refuse_key_file "$KEY_FILE is missing while the worker drop-in exists"
+  fi
   log "generating $KEY_FILE"
   # An existing /etc/automata keeps its mode; a new one is 0700 (README: root only).
   [ -d "$(dirname "$KEY_FILE")" ] || install -d -o root -g root -m 0700 "$(dirname "$KEY_FILE")"
