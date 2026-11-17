@@ -41,6 +41,16 @@ const setSecret = (v: string): void => {
   (env as { ADDON_CALLBACK_SECRET: string }).ADDON_CALLBACK_SECRET = v;
 };
 
+/**
+ * `capability` with its first signature character changed, which always changes
+ * the decoded MAC. A tamper of the last characters does not always (#615).
+ */
+function forge(capability: string): string {
+  const [payload = "", signature = ""] = capability.split(".");
+  const first = signature.startsWith("A") ? "B" : "A";
+  return `${payload}.${first}${signature.slice(1)}`;
+}
+
 interface Fixture {
   organizationId: string;
   callId: string;
@@ -117,16 +127,31 @@ describe("callback capability", () => {
     };
     const cap = signCallbackCapability(SECRET, claims);
     expect(verifyCallbackCapability(SECRET, cap)).toEqual(claims);
-    const [p = "", s = ""] = cap.split(".");
-    expect(
-      verifyCallbackCapability(SECRET, `${p}.${s.slice(0, -2)}AA`),
-    ).toBeNull();
+    expect(verifyCallbackCapability(SECRET, forge(cap))).toBeNull();
     expect(verifyCallbackCapability("another-key", cap)).toBeNull();
     expect(
       verifyCallbackCapability(SECRET, cap, claims.expiresAt + 1),
     ).toBeNull();
     expect(verifyCallbackCapability("", cap)).toBeNull();
     expect(() => signCallbackCapability("", claims)).toThrow();
+  });
+
+  it("forges a different signature every time, and the forgery never verifies", () => {
+    const claims = {
+      callId: "c1",
+      groupId: "g1",
+      organizationId: "o1",
+      expiresAt: Date.now() + 60_000,
+    };
+    const signature = (cap: string) =>
+      Buffer.from(cap.split(".")[1] ?? "", "base64url");
+    for (let i = 0; i < 1000; i++) {
+      const secret = randomUUID();
+      const cap = signCallbackCapability(secret, claims);
+      const forged = forge(cap);
+      expect(signature(forged).equals(signature(cap))).toBe(false);
+      expect(verifyCallbackCapability(secret, forged)).toBeNull();
+    }
   });
 });
 
@@ -183,7 +208,6 @@ describe("POST /api/addon-callback/[capability]", () => {
 
   it("refuses a forged, foreign-key, expired or disabled capability with 401 and stores nothing", async () => {
     const f = await recordedCall();
-    const [p = "", s = ""] = f.capability.split(".");
     const expired = signCallbackCapability(SECRET, {
       callId: f.callId,
       groupId: f.groupId,
@@ -197,7 +221,7 @@ describe("POST /api/addon-callback/[capability]", () => {
       expiresAt: Date.now() + 60_000,
     });
     for (const cap of [
-      `${p}.${s.slice(0, -2)}AA`,
+      forge(f.capability),
       expired,
       foreign,
       "not-a-capability",
