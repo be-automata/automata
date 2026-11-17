@@ -73,9 +73,9 @@ Decisions (2026-11-16, owner + TL, recorded on the issue body):
    3. The stored `organization_id` / `mission` / `step` / `effect` / `output_digest` differ from
       the call's → throw `ControlEffectKeyCollisionError` (never apply).
    4. `done_at` set → `already_done` (no target call).
-   5. `done_at` null → always `findByMarker(key)`: found → set `done_at`, `reconciled = true` →
+   5. `done_at` null → always `findByMarker(key, signal)`: found → set `done_at`, `reconciled = true` →
       `reconciled`.
-   6. Otherwise → `apply(key, payload, signal)` with `signal = AbortSignal.timeout(applyTimeoutMs)`
+   6. Otherwise → `apply(key, payload, signal)` with the `signal = AbortSignal.timeout(targetTimeoutMs)` shared with `findByMarker`
       (default 60 s, a positive integer; the target must honour it), then set `done_at` → `applied`.
       A failing `apply` or `findByMarker` propagates; the intent stays, so the next delivery
       reconciles. Residual risk: a holder partitioned from the database but still reaching its

@@ -137,11 +137,11 @@ async function insertIntent(
  * Exactly-once is preferred over liveness. The lock is held until `apply`
  * returns or throws and is never released mid-effect; `findByMarker` and
  * `apply` share an `AbortSignal` that fires after `targetTimeoutMs`, and the
- * target must honour it. A hung holder only delays waiters: they throw at `lockTimeoutMs`, and the
- * intent stays for a later delivery. A failing `apply` or `findByMarker`
- * propagates and leaves the intent. Residual risk: a holder partitioned from the
- * database but still reaching its target loses its connection (the lock goes
- * with it) while its `apply` may land late.
+ * target must honour it. A hung holder only delays waiters: they throw at
+ * `lockTimeoutMs`, and the intent stays for a later delivery. A failing
+ * `apply` or `findByMarker` propagates and leaves the intent. Residual risk: a
+ * holder partitioned from the database but still reaching its target loses its
+ * connection (the lock goes with it) while its `apply` may land late.
  *
  * Pool cost: each running effect holds one pooled connection in an open
  * transaction for up to `targetTimeoutMs`, and each delivery waiting on the

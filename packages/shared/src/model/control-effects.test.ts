@@ -32,9 +32,7 @@ function memoryTarget() {
       target.signals.push(signal);
       if (target.gate) await target.gate;
       if (target.honourSignal) {
-        await new Promise<void>((_, reject) =>
-          signal.addEventListener("abort", () => reject(signal.reason)),
-        );
+        await untilAborted(signal);
       }
       if (target.failNextApply) {
         target.failNextApply = false;
@@ -46,14 +44,20 @@ function memoryTarget() {
     async findByMarker(key: string, signal: AbortSignal) {
       if (target.failFind) throw new Error("find failed");
       if (target.hangFind) {
-        await new Promise<void>((_, reject) =>
-          signal.addEventListener("abort", () => reject(signal.reason)),
-        );
+        await untilAborted(signal);
       }
       return target.markers.has(key);
     },
   };
   return target satisfies EffectTarget<string>;
+}
+
+/** Rejects with the signal's reason once it aborts (at once if it already has). */
+function untilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (signal.aborted) reject(signal.reason);
+    signal.addEventListener("abort", () => reject(signal.reason));
+  });
 }
 
 /** A promise with its resolver, for gating a step from the test. */
@@ -98,7 +102,10 @@ async function holdLock(
       throw new Rollback();
     })
     .catch((error: unknown) => {
-      if (!(error instanceof Rollback)) locked.reject(error);
+      if (error instanceof Rollback) return;
+      // Before the lock: fail the waiting test; after it: fail `done`.
+      locked.reject(error);
+      throw error;
     });
   await locked.promise;
   return { release: released.resolve, done };
@@ -273,6 +280,9 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     expect(await readRow(e.key)).toBeUndefined();
   });
 
+  // Exercises the reconcile path behind a holder that applied and rolled back.
+  // The removed `created` shortcut's race needs a seam inside runEffect, so this
+  // is not its regression test: dropping the shortcut is what closes it.
   it("reconciles when a lock holder applied and rolled back while the delivery waited", async () => {
     const e = await newEffect();
     const target = memoryTarget();
@@ -301,7 +311,9 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     const e = await newEffect();
     const target = memoryTarget();
     target.honourSignal = true;
-    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toBeDefined();
+    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toMatchObject(
+      { name: "TimeoutError" },
+    );
     expect(target.signals[0]?.aborted).toBe(true);
     expect((await readRow(e.key))?.doneAt).toBeNull();
   });
@@ -310,7 +322,9 @@ describe("runEffect (#652 exactly-once control effects)", () => {
     const e = await newEffect();
     const target = memoryTarget();
     target.hangFind = true;
-    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toBeDefined();
+    await expect(e.call(target, { targetTimeoutMs: 50 })).rejects.toMatchObject(
+      { name: "TimeoutError" },
+    );
     expect(target.applied).toEqual([]);
     expect((await readRow(e.key))?.doneAt).toBeNull();
   });
