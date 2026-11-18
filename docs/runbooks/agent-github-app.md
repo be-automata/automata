@@ -119,12 +119,15 @@ approval the ruleset asks for. An agent running `gh pr review --approve` (or an 
 `gh api`) on an App-authored PR would supply the "human" approval itself. Before section 5, the TL
 (a person's edit; the harness blocks agents from changing it) adds to `.claude/settings.json`:
 
-- `permissions.deny`: `Bash(gh pr review*--approve*)`, `Bash(gh pr review*-a*)`,
-  `Bash(gh pr merge*--admin*)`, `Bash(gh api*rulesets*)`, `Bash(gh api*/reviews*)`,
-  `Bash(gh auth token*)`, `Bash(deploy/github/apply-ruleset.sh*)`;
+- `permissions.deny`: `Bash(gh pr review*--approve*)`, `Bash(gh pr review* -a *)`,
+  `Bash(gh pr review* -a)`, `Bash(gh pr merge*--admin*)`, `Bash(gh auth token*)` and
+  `Bash(deploy/github/apply-ruleset.sh*)`. Keep `gh pr review --comment` and every read
+  (`gh api .../pulls/<n>/reviews`, which the harness watch uses for Automata's verdict) allowed:
+  do not deny `gh api` by path, since a prefix pattern cannot tell a GET from a write;
 - because deny entries match by prefix (see the `deny-destructive-cloud.py` note in `AGENTS.md`), a
-  tokenising `PreToolUse(Bash)` hook in the same style that refuses an approving review, `--admin`
-  merges and ruleset writes in any segment of a compound command.
+  tokenising `PreToolUse(Bash)` hook in the same style that refuses an approving review (including
+  a `gh api` write to `/reviews` with `event=APPROVE`), `--admin` merges and ruleset writes
+  (`gh api` with a write method on `/rulesets`) in any segment of a compound command.
 
 The durable fix is an agent session whose `gh` holds only the App token (a separate `GH_CONFIG_DIR`,
 pushes through the App with the Workflows permission, and the review automation's `excludeBotSenders`

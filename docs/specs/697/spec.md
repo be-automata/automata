@@ -158,9 +158,12 @@ TL's global `CLAUDE.md`) once the App works; the plugin itself is changed upstre
   its claims, the endpoint and headers sent, that stdout is exactly the token, that stderr never
   holds the token or the JWT, the three key encodings, the keychain lookup arguments, the config-file
   fallback, and the exit codes for missing config and an API error.
-- `deploy/github/branch-protection.test.ts` (`node --test`): the ruleset's shape; its required
-  contexts equal CI's job names; no other PR-triggered workflow defines a job with a required name;
-  every CODEOWNERS pattern matches a tracked file and is owned by `@espinozasenior`.
+- `deploy/github/branch-protection.test.ts` (`node --test`): the ruleset's shape (rule types,
+  code-owner review at count 0, the one bypass); it requires only `ci-gate` from integration 15368;
+  `ci-gate` runs `if: always()`, checks every result is `success`, and its `needs:` lists every other
+  `ci.yml` job; no other workflow defines a `ci-gate` job; every CODEOWNERS pattern is anchored,
+  owned by `@espinozasenior` and matches a tracked file by git's own gitignore matcher; the #697
+  paths are owned; `/apps/*/wrangler.jsonc` does not reach the `__fixtures__` wrangler files.
 - CI: the `check` job runs `node --test 'deploy/*.test.ts' 'deploy/github/*.test.ts'` and
   `shellcheck deploy/github/*.sh`.
 - After the push, `GET /repos/be-automata/automata/codeowners/errors?ref=feat/697-branch-protection`
