@@ -87,3 +87,23 @@ simplify of this ~20-line delta: reviewed inline by the orchestrator (no finding
 all 4 crash drills) · `pnpm --filter @terragon/www exec vitest run --no-file-parallelism src/server-lib/agent-bus
 src/server-lib/cron.test.ts src/server-lib/cron-routes.static.test.ts` 0 (49 tests; new: a re-kicked recently
 delivered target is kicked once with 0 broadcasts) · `pnpm turbo tsc-check lint format-check` 0.
+
+## Merged tree (`caf12bdb` = this branch + `origin/main` @ `85b07e6c`)
+
+main gained `2026-11-18-control-effects` (#652) and `2026-11-19-cell-step-last-seen` (#656 PR-A); this branch's
+migration was renamed `2026-11-20-agent-messages` to keep sorting last. Every gate rerun on the merged tree,
+each command's own exit code captured:
+
+| Gate | Exit | Output |
+|---|---|---|
+| `pnpm install --frozen-lockfile --prefer-offline` | 0 | |
+| `pnpm --filter @terragon/docs exec fumadocs-mdx` | 0 | |
+| `pnpm turbo tsc-check` | 0 | 21/21 tasks |
+| `pnpm turbo lint` | 0 | 2/2 tasks |
+| `pnpm turbo format-check` | 0 | 18/18 tasks |
+| `node deploy/lint-migrations.ts` | 0 | `OK — 23 file(s) linted, 5 grandfathered` |
+| `pnpm --filter @terragon/migrate test` | 0 | 5 files, 45 tests |
+| `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism` | 0 | 100 files, 1759 tests |
+| `pnpm --filter @terragon/shared exec vitest run --coverage --no-file-parallelism src/model/agent-bus` | 0 | 105 tests; `messages.ts` 99.1 / 95.45 / 87.5 / 99.1 |
+| `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` | 0 | 337 files passed, 1 skipped; 4499 tests passed, 9 skipped |
+| schema drift, postgres:18 (migrate ×2, drizzle-kit push, schema-drift.ts) | 0 / 0 / 0 / 0 | `applied 28 migration(s)`, then `applied 0`; `compared 1546 objects in a (a) with 1546 in b (b)`, `schema drift: none` |
