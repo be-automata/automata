@@ -359,7 +359,15 @@ export async function getClaudeCredentialsJSONOrNull({
   // primary credential lookup so the agent uses THIS org's credential. The
   // downstream by-credentialId refresh reads are already gated by that id.
   organizationId?: string | null;
-}): Promise<{ contents: string | null; error: string | null }> {
+}): Promise<{
+  contents: string | null;
+  error: string | null;
+  /**
+   * #442: the agent_provider_credentials row `contents` came from, set only
+   * when `contents` is. Optional so injected test readers need not supply it.
+   */
+  credentialId?: string;
+}> {
   try {
     // Get the stored tokens
     const credentials = await getAgentProviderCredentialsDecrypted({
@@ -377,6 +385,7 @@ export async function getClaudeCredentialsJSONOrNull({
       return {
         contents: JSON.stringify({ anthropicApiKey: credentials.apiKey }),
         error: null,
+        credentialId: credentials.id,
       };
     }
     if (!credentials.accessToken) {
@@ -406,6 +415,7 @@ export async function getClaudeCredentialsJSONOrNull({
           },
         }),
         error: null,
+        credentialId: credentials.id,
       };
     }
     // Try to refresh the token
@@ -451,7 +461,11 @@ export async function getClaudeCredentialsJSONOrNull({
         subscriptionType: orgTypeToSubscriptionType(organizationType),
       },
     };
-    return { contents: JSON.stringify(credentialsJson), error: null };
+    return {
+      contents: JSON.stringify(credentialsJson),
+      error: null,
+      credentialId: finalCredentials.id,
+    };
   } catch (error) {
     console.error(
       "[getCredentialsJSONOrNull] Failed to get credentials:",

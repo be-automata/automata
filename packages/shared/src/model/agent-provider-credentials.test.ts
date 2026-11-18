@@ -598,9 +598,9 @@ describe("agent-provider-credentials", () => {
           agent: "claudeCode",
         });
         expect(resolved.status).toBe("available");
-        expect(
-          resolved.status === "available" && resolved.credential.id,
-        ).toBe(cred.id);
+        expect(resolved.status === "available" && resolved.credential.id).toBe(
+          cred.id,
+        );
       });
 
       it("a timed mark whose until has passed is available again", async () => {

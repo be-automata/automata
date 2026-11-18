@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
-import { getThreadChat } from "@terragon/shared/model/threads";
-import { getAndVerifyCredentials } from "@/agent/credentials";
+import {
+  getThreadChat,
+  setThreadChatDeliveredCredential,
+} from "@terragon/shared/model/threads";
+import { getAndVerifyCredentialsWithSource } from "@/agent/credentials";
 import { ensureAgent } from "@terragon/agent/utils";
 import { ThreadError } from "@/agent/error";
 
@@ -52,15 +55,41 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     return new NextResponse(null, { status: 204 });
   }
 
+  // #442 (epic #440 C2): record which credential row this run gets (NULL =
+  // built-in credits), so a classified provider refusal marks THAT row and
+  // never one an operator switches to mid-run. Best effort, and caught here:
+  // a failure must never become a non-OK response, which the worker reads as
+  // "use built-in credits" (packages/worker/src/agent-run/www-client.ts).
+  // Delivery itself is unchanged in C2: a marked row is still delivered; the
+  // dispatch gate (C3, #443) is what stops runs for it.
+  const recordDelivered = async (credentialId: string | null) => {
+    try {
+      await setThreadChatDeliveredCredential({
+        db,
+        userId: ctx.userId,
+        threadId,
+        threadChatId,
+        credentialId,
+      });
+    } catch (error) {
+      console.error("[daemon agent-credentials] delivered-id record failed", {
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   try {
     // Org-fenced on the THREAD's org, exactly like the in-sandbox path
     // (agent/sandbox.ts) — the run uses this org's credential or none.
-    const credentials = await getAndVerifyCredentials({
-      agent: ensureAgent(threadChat.agent),
-      model: null,
-      userId: ctx.userId,
-      organizationId: thread.organizationId,
-    });
+    const { credentials, credentialId } =
+      await getAndVerifyCredentialsWithSource({
+        agent: ensureAgent(threadChat.agent),
+        model: null,
+        userId: ctx.userId,
+        organizationId: thread.organizationId,
+      });
+    await recordDelivered(credentialId);
     // The agent travels with the credential: the worker must build the child env
     // (and so choose the credential file path) BEFORE it pulls next-message, so
     // it cannot learn the agent from there.
@@ -78,6 +107,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         org: ctx.organizationId,
         reason: error.type,
       });
+      await recordDelivered(null);
       return NextResponse.json({
         agent: ensureAgent(threadChat.agent),
         credentials: { type: "built-in-credits" },

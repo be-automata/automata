@@ -1511,9 +1511,8 @@ export const agentProviderCredentials = pgTable(
       mode: "date",
       withTimezone: true,
     }),
-    unavailableReason: text(
-      "unavailable_reason",
-    ).$type<CredentialUnavailableReason>(),
+    unavailableReason:
+      text("unavailable_reason").$type<CredentialUnavailableReason>(),
     unavailableMarkedAt: timestamp("unavailable_marked_at", {
       mode: "date",
       withTimezone: true,

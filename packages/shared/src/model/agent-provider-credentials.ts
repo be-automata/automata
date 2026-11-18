@@ -326,7 +326,10 @@ export async function resolveAgentProviderCredential({
     return { status: "none" };
   }
   const reason = credential.unavailableReason;
-  if (reason !== null && isAgentProviderCredentialUnavailable(credential, now)) {
+  if (
+    reason !== null &&
+    isAgentProviderCredentialUnavailable(credential, now)
+  ) {
     return {
       status: "credential-unavailable",
       credentialId: credential.id,

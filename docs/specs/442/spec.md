@@ -6,28 +6,28 @@ This file adds the verified ground truth and the design the implementation follo
 
 ## Ground truth (verified in this worktree, `origin/main` @ `85b07e6c`)
 
-| Claim | Evidence |
-|---|---|
-| `agent_provider_credentials` has no availability columns | `packages/shared/src/db/schema.ts:1465-1515` |
-| Selection = newest active row for user + org + agent | `packages/shared/src/model/agent-provider-credentials.ts:229-248` |
-| `insertAgentProviderCredentials` takes `Omit<AgentProviderCredentialsDecrypted, "id"\|"userId"\|"organizationId"\|"createdAt"\|"updatedAt">`, so new select columns become required input keys unless they are omitted | `agent-provider-credentials.ts:27-40`, `:50-53` |
-| A connect inserts a new row and deactivates the others | `agent-provider-credentials.ts:83-102` |
-| The delivery route resolves through `getAndVerifyCredentials` and records nothing | `apps/www/src/app/api/daemon/agent-credentials/route.ts:56-84` |
-| `getAndVerifyCredentials` has 3 callers: the route, `agent/sandbox.ts:181`, `api/internal/broadcast/sandbox/env/route.ts:63` | grep |
-| The Claude path resolves via `getClaudeCredentialsJSONOrNull` → `getAgentProviderCredentialsDecrypted` → `getAgentProviderCredentialsRecord`, returning `{contents, error}` only | `apps/www/src/agent/msg/claudeCredentials.ts:353-460` |
-| The worker maps 204 or any non-OK status to `built-in-credits` | `packages/worker/src/agent-run/www-client.ts:233-246` |
-| The classifier hook sits in `handleDaemonEvent`, and `errorMessage = PROVIDER_UNAVAILABLE_ERROR` is set only when `isError && providerUnavailable` (and not prompt-too-long) | `apps/www/src/server-lib/handle-daemon-event.ts:367-392` |
-| The chat write is `updateThreadChatWithTransition` | `handle-daemon-event.ts:594` |
-| `threadChat` comes from `getThreadChat`, which selects `getTableColumns(schema.threadChat)`, so a new column is read automatically | `packages/shared/src/model/threads.ts:760-785` |
-| A legacy chat is synthesized from the thread row and needs the new field explicitly | `threads.ts:827-856` |
-| **Every production thread is legacy** (`enableThreadChatCreation` defaults to false). Its chat state lives on the `thread` row, and `threadChatShared` fields exist on both tables (precedent: `queued_at`) | `feature-flags-definitions.ts:81-85`, `schema.ts:349-374`, `deploy/migrations/2026-10-22-queued-at.sql` |
-| `ThreadInfo` omits chat-shared columns (`queuedAt`), and `ThreadForThreadChatInfoFull` picks them | `packages/shared/src/db/types.ts:372-386`, `threads.ts:789-814` |
-| `createTestThread` defaults to a legacy thread; `enableThreadChatCreation: true` gives a `thread_chat` row | `packages/shared/src/model/test-helpers.ts:131-137` |
-| route.test mocks `@/agent/credentials` with only `getAndVerifyCredentials`; the oauth test injects `read` fakes typed `typeof getClaudeCredentialsJSONOrNull` | `route.test.ts:21-23`, `claudeCredentials.oauth.test.ts:101-116`, `claudeCredentials.ts:499` |
-| `resetsAt` is epoch ms | `classify-provider-result.ts:37` |
-| Kinds are `usage_limit`, `subscription_disabled`, `credit_exhausted`, `auth_rejected`; indefinite = not `usage_limit` | `apps/www/src/agent/msg/classify-provider-result.ts:24-29`, `:398-402` |
-| Newest migration is `2026-11-19-cell-step-last-seen`; the expected list ends there | `deploy/migrations/`, `packages/migrate/src/expected-migrations.ts` |
-| No new table, so the rehome guard (`REHOME_EXCLUDED_TABLES`) does not apply | only columns are added |
+| Claim                                                                                                                                                                                                                  | Evidence                                                                                                |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `agent_provider_credentials` has no availability columns                                                                                                                                                               | `packages/shared/src/db/schema.ts:1465-1515`                                                            |
+| Selection = newest active row for user + org + agent                                                                                                                                                                   | `packages/shared/src/model/agent-provider-credentials.ts:229-248`                                       |
+| `insertAgentProviderCredentials` takes `Omit<AgentProviderCredentialsDecrypted, "id"\|"userId"\|"organizationId"\|"createdAt"\|"updatedAt">`, so new select columns become required input keys unless they are omitted | `agent-provider-credentials.ts:27-40`, `:50-53`                                                         |
+| A connect inserts a new row and deactivates the others                                                                                                                                                                 | `agent-provider-credentials.ts:83-102`                                                                  |
+| The delivery route resolves through `getAndVerifyCredentials` and records nothing                                                                                                                                      | `apps/www/src/app/api/daemon/agent-credentials/route.ts:56-84`                                          |
+| `getAndVerifyCredentials` has 3 callers: the route, `agent/sandbox.ts:181`, `api/internal/broadcast/sandbox/env/route.ts:63`                                                                                           | grep                                                                                                    |
+| The Claude path resolves via `getClaudeCredentialsJSONOrNull` → `getAgentProviderCredentialsDecrypted` → `getAgentProviderCredentialsRecord`, returning `{contents, error}` only                                       | `apps/www/src/agent/msg/claudeCredentials.ts:353-460`                                                   |
+| The worker maps 204 or any non-OK status to `built-in-credits`                                                                                                                                                         | `packages/worker/src/agent-run/www-client.ts:233-246`                                                   |
+| The classifier hook sits in `handleDaemonEvent`, and `errorMessage = PROVIDER_UNAVAILABLE_ERROR` is set only when `isError && providerUnavailable` (and not prompt-too-long)                                           | `apps/www/src/server-lib/handle-daemon-event.ts:367-392`                                                |
+| The chat write is `updateThreadChatWithTransition`                                                                                                                                                                     | `handle-daemon-event.ts:594`                                                                            |
+| `threadChat` comes from `getThreadChat`, which selects `getTableColumns(schema.threadChat)`, so a new column is read automatically                                                                                     | `packages/shared/src/model/threads.ts:760-785`                                                          |
+| A legacy chat is synthesized from the thread row and needs the new field explicitly                                                                                                                                    | `threads.ts:827-856`                                                                                    |
+| **Every production thread is legacy** (`enableThreadChatCreation` defaults to false). Its chat state lives on the `thread` row, and `threadChatShared` fields exist on both tables (precedent: `queued_at`)            | `feature-flags-definitions.ts:81-85`, `schema.ts:349-374`, `deploy/migrations/2026-10-22-queued-at.sql` |
+| `ThreadInfo` omits chat-shared columns (`queuedAt`), and `ThreadForThreadChatInfoFull` picks them                                                                                                                      | `packages/shared/src/db/types.ts:372-386`, `threads.ts:789-814`                                         |
+| `createTestThread` defaults to a legacy thread; `enableThreadChatCreation: true` gives a `thread_chat` row                                                                                                             | `packages/shared/src/model/test-helpers.ts:131-137`                                                     |
+| route.test mocks `@/agent/credentials` with only `getAndVerifyCredentials`; the oauth test injects `read` fakes typed `typeof getClaudeCredentialsJSONOrNull`                                                          | `route.test.ts:21-23`, `claudeCredentials.oauth.test.ts:101-116`, `claudeCredentials.ts:499`            |
+| `resetsAt` is epoch ms                                                                                                                                                                                                 | `classify-provider-result.ts:37`                                                                        |
+| Kinds are `usage_limit`, `subscription_disabled`, `credit_exhausted`, `auth_rejected`; indefinite = not `usage_limit`                                                                                                  | `apps/www/src/agent/msg/classify-provider-result.ts:24-29`, `:398-402`                                  |
+| Newest migration is `2026-11-19-cell-step-last-seen`; the expected list ends there                                                                                                                                     | `deploy/migrations/`, `packages/migrate/src/expected-migrations.ts`                                     |
+| No new table, so the rehome guard (`REHOME_EXCLUDED_TABLES`) does not apply                                                                                                                                            | only columns are added                                                                                  |
 
 **Already done (do not redo):** classification, the `provider-unavailable` error, and the
 per-lane notices (C1 #449 and C6 #472).
@@ -72,19 +72,21 @@ of `expected-migrations.ts`.
   is available.
 - **`resolveAgentProviderCredential({db, userId, agent, organizationId, now = new Date()})`** →
   one of:
+
   - `{status: "available", credential}`;
   - `{status: "credential-unavailable", credentialId, until, reason}`;
   - `{status: "none"}`.
 
   It is built on `getAgentProviderCredentialsRecord`, the same selection, so it can never return
   an older or inactive row.
+
 - `insertAgentProviderCredentials` input type: also omit the three `unavailable_*` keys.
 
 ### Shared model (`threads.ts`)
 
 - `setThreadChatDeliveredCredential({db, userId, threadId, threadChatId, credentialId: string | null})`:
   - for `LEGACY_THREAD_CHAT_ID`, `UPDATE thread SET delivered_credential_id` fenced by thread id
-    + user_id;
+    - user_id;
   - otherwise `UPDATE thread_chat`, fenced by chat id + thread id + user_id.
 - `createLegacyThreadChatFull` maps `thread.deliveredCredentialId`.
 - Admin clear means nulling both `unavailable_until` and `unavailable_reason`.
@@ -110,6 +112,7 @@ of `expected-migrations.ts`.
   body stays as it is.
 - `apps/www/src/server-lib/credential-unavailability.ts` (new):
   `credentialMarkFor(provider, now)` → `{reason, until} | null`:
+
   - `usage_limit` → `until = new Date(resetsAt)`. When `resetsAt` is unknown or `<= now`, it is
     `now + 1 h` (`UNKNOWN_RESET_MARK_MS`);
   - `subscription_disabled` and `auth_rejected` → `until = null`;
@@ -117,6 +120,7 @@ of `expected-migrations.ts`.
 
   `markDeliveredCredentialUnavailable({db, userId, credentialId, provider, now})` returns false
   when there is no id or no mark.
+
 - `handleDaemonEvent`: after `updateThreadChatWithTransition`, when
   `threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR`, call it with
   `threadChat.deliveredCredentialId` and `receivedAt`. Await it inside a try/catch that logs; it

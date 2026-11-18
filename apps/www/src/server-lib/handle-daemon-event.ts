@@ -39,6 +39,7 @@ import {
   PROVIDER_UNAVAILABLE_ERROR,
 } from "@/agent/msg/classify-provider-result";
 import { BOX_AT_CAPACITY_ERROR } from "@/agent/msg/classify-box-capacity";
+import { markDeliveredCredentialUnavailable } from "@/server-lib/credential-unavailability";
 import { isAdmissionExhaustedText } from "@terragon/utils/box-capacity";
 import { maybeStartQueuedThreadChat } from "./process-queued-thread";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
@@ -367,9 +368,8 @@ export async function handleDaemonEvent({
   // A run the provider refused (usage limit, subscription disabled, credit
   // exhausted, or a rejected credential, #472), classified from THIS batch
   // only against the server clock. The legacy route above wins where it
-  // applies, so that plane is unchanged. Hook for #442/#444: a classified
-  // result is where the delivered credential gets marked unavailable (with
-  // no `until` when `providerUnavailableIsIndefinite`) and the operator alerted.
+  // applies, so that plane is unchanged. The delivered credential is marked
+  // after the chat write below (#442); the operator alert is #444's.
   const providerUnavailable =
     threadChat.agent === "claudeCode" && !takesRateLimitRoute
       ? classifyProviderResult(dbMessages, { now: receivedAt })
@@ -611,6 +611,32 @@ export async function handleDaemonEvent({
               : "assistant.message",
     rateLimitResetTime,
   });
+  // #442 (epic #440 C2): a run the provider refused marks the credential it
+  // was DELIVERED (recorded by /api/daemon/agent-credentials), never the
+  // currently active one, so an operator's mid-run switch is not marked. Only
+  // when the stored error is provider-unavailable: the prompt-too-long,
+  // auto-compact and OAuth-retry paths above leave it unset. Idempotent and
+  // monotonic, so a redelivered event is harmless. Best effort: a failed mark
+  // is logged and never fails the event.
+  if (
+    providerUnavailable &&
+    threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR
+  ) {
+    try {
+      await markDeliveredCredentialUnavailable({
+        db,
+        userId,
+        credentialId: threadChat.deliveredCredentialId,
+        provider: providerUnavailable,
+        now: receivedAt,
+      });
+    } catch (error) {
+      console.error("[daemon-event] credential mark failed (non-fatal)", {
+        threadId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   if (isThreadFinished && didUpdateStatus) {
     // #380: a run that ends through THIS path (a normal finish, or the
     // worker's `run-failed` post) leaves its review-run row `in_flight`
