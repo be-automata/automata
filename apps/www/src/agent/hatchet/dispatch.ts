@@ -58,6 +58,7 @@ import {
   setThreadActiveRun,
   clearThreadTerminalForResume,
 } from "@terragon/shared/model/threads";
+import { recordDeliveredCredential } from "@/server-lib/credential-unavailability";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type {
   SelfHealAuditRunInput,
@@ -1257,13 +1258,26 @@ export async function dispatchAgentRun({
     // triggerAgentRun derives it from the input when no plan metadata is
     // given, so a self-heal run stamps self-heal-* on either trigger path.
     // Review runs keep their plan's metadata.
-    // Resolved once per dispatch (#374); a resolve failure takes the same
-    // failure path as a trigger failure.
-    const hatchetTarget = await resolveHatchetConfig({
-      db,
-      organizationId: thread?.organizationId ?? null,
-      repoFullName,
-    });
+    // #442: shed the previous run's delivered-credential record BEFORE the
+    // run exists (after the trigger it would race the run's credential pull),
+    // so only a delivery made during THIS run can attribute a mark. Never
+    // throws. The hatchet target is resolved once per dispatch (#374); a
+    // resolve failure takes the same failure path as a trigger failure.
+    const [, hatchetTarget] = await Promise.all([
+      recordDeliveredCredential({
+        db,
+        userId,
+        threadId,
+        threadChatId,
+        credentialId: null,
+        logLabel: "hatchet",
+      }),
+      resolveHatchetConfig({
+        db,
+        organizationId: thread?.organizationId ?? null,
+        repoFullName,
+      }),
+    ]);
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({

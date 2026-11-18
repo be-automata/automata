@@ -28,19 +28,45 @@ async function orgScopeSuffix(
   }
 }
 
-export async function getAndVerifyCredentials({
-  agent,
-  model: _model,
-  userId,
-  organizationId,
-}: {
+interface GetAndVerifyCredentialsArgs {
   agent: AIAgent;
   model: AIModel | null;
   userId: string;
   // Tenant of the thread this agent run belongs to (WI-5 batch 3a). Fences the
   // credential lookup to this org's credential.
   organizationId?: string | null;
-}): Promise<AIAgentCredentials> {
+}
+
+export interface VerifiedCredentials {
+  credentials: AIAgentCredentials;
+  /**
+   * #442: the agent_provider_credentials row the credentials came from, or
+   * null for built-in credits. Never part of what is sent to the run.
+   */
+  credentialId: string | null;
+}
+
+export async function getAndVerifyCredentials(
+  args: GetAndVerifyCredentialsArgs,
+): Promise<AIAgentCredentials> {
+  return (await getAndVerifyCredentialsWithSource(args)).credentials;
+}
+
+/**
+ * The same resolution as getAndVerifyCredentials, plus the source row id, so
+ * /api/daemon/agent-credentials can record what it delivered (#442): a
+ * classified provider refusal then marks that row and no other.
+ */
+export async function getAndVerifyCredentialsWithSource({
+  agent,
+  model: _model,
+  userId,
+  organizationId,
+}: GetAndVerifyCredentialsArgs): Promise<VerifiedCredentials> {
+  const builtInCredits: VerifiedCredentials = {
+    credentials: { type: "built-in-credits" },
+    credentialId: null,
+  };
   switch (agent) {
     case "amp": {
       const ampCredentials = await getAgentProviderCredentialsDecrypted({
@@ -59,20 +85,28 @@ export async function getAndVerifyCredentials({
         );
       }
       return {
-        type: "env-var",
-        key: "AMP_API_KEY",
-        value: ampApiKey,
+        credentials: {
+          type: "env-var",
+          key: "AMP_API_KEY",
+          value: ampApiKey,
+        },
+        credentialId: ampCredentials?.id ?? null,
       };
     }
     case "codex": {
+      // Codex results are not classified (#441 is Claude-only), so its
+      // source row is not tracked.
       const codexCredentials = await getCodexCredentialsJSONOrNull({
         userId,
         organizationId,
       });
       if (codexCredentials.contents) {
         return {
-          type: "json-file",
-          contents: codexCredentials.contents,
+          credentials: {
+            type: "json-file",
+            contents: codexCredentials.contents,
+          },
+          credentialId: null,
         };
       }
       if (codexCredentials.error) {
@@ -82,9 +116,7 @@ export async function getAndVerifyCredentials({
           null,
         );
       }
-      return {
-        type: "built-in-credits",
-      };
+      return builtInCredits;
     }
     case "claudeCode": {
       const claudeCredentials = await getClaudeCredentialsJSONOrNull({
@@ -93,8 +125,11 @@ export async function getAndVerifyCredentials({
       });
       if (claudeCredentials.contents) {
         return {
-          type: "json-file",
-          contents: claudeCredentials.contents,
+          credentials: {
+            type: "json-file",
+            contents: claudeCredentials.contents,
+          },
+          credentialId: claudeCredentials.credentialId,
         };
       }
       if (claudeCredentials.error) {
@@ -104,15 +139,11 @@ export async function getAndVerifyCredentials({
           null,
         );
       }
-      return {
-        type: "built-in-credits",
-      };
+      return builtInCredits;
     }
     case "gemini":
     case "opencode": {
-      return {
-        type: "built-in-credits",
-      };
+      return builtInCredits;
     }
     default: {
       const _exhaustiveCheck: never = agent;
