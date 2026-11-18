@@ -269,13 +269,15 @@ export async function getAgentProviderCredentialsRecord({
  * mark whose until has passed is available again without any write; an admin
  * clear nulls both columns.
  */
-export function isAgentProviderCredentialUnavailable(
-  credential: Pick<
+export function isAgentProviderCredentialUnavailable<
+  T extends Pick<
     AgentProviderCredentials,
     "unavailableReason" | "unavailableUntil"
   >,
+>(
+  credential: T,
   now: Date,
-): boolean {
+): credential is T & { unavailableReason: CredentialUnavailableReason } {
   if (credential.unavailableReason === null) {
     return false;
   }
@@ -325,17 +327,12 @@ export async function resolveAgentProviderCredential({
   if (!credential) {
     return { status: "none" };
   }
-  const reason = credential.unavailableReason;
-  // `reason !== null` repeats the helper's own check only to narrow the type.
-  if (
-    reason !== null &&
-    isAgentProviderCredentialUnavailable(credential, now)
-  ) {
+  if (isAgentProviderCredentialUnavailable(credential, now)) {
     return {
       status: "credential-unavailable",
       credentialId: credential.id,
       until: credential.unavailableUntil,
-      reason,
+      reason: credential.unavailableReason,
     };
   }
   return { status: "available", credential };

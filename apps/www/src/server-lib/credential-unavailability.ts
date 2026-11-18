@@ -1,5 +1,6 @@
 import type { DB } from "@terragon/shared/db";
 import { markAgentProviderCredentialUnavailable } from "@terragon/shared/model/agent-provider-credentials";
+import { setThreadChatDeliveredCredential } from "@terragon/shared/model/threads";
 import type { CredentialUnavailableReason } from "@terragon/shared/model/credential-unavailable-reason";
 import type { ProviderUnavailable } from "@/agent/msg/classify-provider-result";
 
@@ -46,6 +47,44 @@ export function credentialMarkFor(
       const exhaustive: never = provider.kind;
       throw new Error(`Unknown provider-unavailable kind: ${exhaustive}`);
     }
+  }
+}
+
+/**
+ * Record (or clear, with null) the credential a chat's run was delivered.
+ * Never throws: the two writers (the dispatch clear before the trigger, and
+ * /api/daemon/agent-credentials at delivery) must not fail over bookkeeping,
+ * and the route must never answer non-OK (the worker would fall back to
+ * built-in credits).
+ */
+export async function recordDeliveredCredential({
+  db,
+  userId,
+  threadId,
+  threadChatId,
+  credentialId,
+  logLabel,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  credentialId: string | null;
+  logLabel: string;
+}): Promise<void> {
+  try {
+    await setThreadChatDeliveredCredential({
+      db,
+      userId,
+      threadId,
+      threadChatId,
+      credentialId,
+    });
+  } catch (error) {
+    console.error(`[${logLabel}] delivered-credential record failed`, {
+      threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

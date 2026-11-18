@@ -101,6 +101,7 @@ describe("getClaudeOauthAccessToken (lookup failure)", () => {
       getClaudeOauthAccessToken({ userId: "u" }, async () => ({
         contents: null,
         error: "Failed to get Claude credentials",
+        credentialId: null,
       })),
     ).rejects.toThrow("claude credential lookup failed");
   });
@@ -109,6 +110,7 @@ describe("getClaudeOauthAccessToken (lookup failure)", () => {
     const reading = (contents: string | null) => async () => ({
       contents,
       error: null,
+      credentialId: contents === null ? null : "cred-1",
     });
     for (const contents of [
       JSON.stringify({ anthropicApiKey: "k" }),

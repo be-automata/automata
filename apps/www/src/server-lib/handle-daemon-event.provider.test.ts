@@ -471,13 +471,12 @@ describe("handleDaemonEvent — marks the delivered credential (#442)", () => {
   // no_claim=what the next run is delivered (C3).
   it("a mid-run credential switch marks the delivered row, not the new one", async () => {
     const delivered = await connect();
-    const deliveredIdAtStart = delivered.id;
     // The operator connects a new credential during the run: it becomes the
     // active one and the delivered row is deactivated.
     const switched = await connect();
-    expect((await credential(deliveredIdAtStart)).isActive).toBe(false);
-    await runDelivered(deliveredIdAtStart, weekly());
-    expect((await credential(deliveredIdAtStart)).unavailableReason).toBe(
+    expect((await credential(delivered.id)).isActive).toBe(false);
+    await runDelivered(delivered.id, weekly());
+    expect((await credential(delivered.id)).unavailableReason).toBe(
       "usage_limit",
     );
     expect((await credential(switched.id)).unavailableReason).toBeNull();

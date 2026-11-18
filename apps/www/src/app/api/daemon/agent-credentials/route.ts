@@ -2,11 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
-import {
-  getThreadChat,
-  setThreadChatDeliveredCredential,
-} from "@terragon/shared/model/threads";
+import { getThreadChat } from "@terragon/shared/model/threads";
 import { getAndVerifyCredentialsWithSource } from "@/agent/credentials";
+import { recordDeliveredCredential } from "@/server-lib/credential-unavailability";
 import { ensureAgent } from "@terragon/agent/utils";
 import { ThreadError } from "@/agent/error";
 
@@ -55,29 +53,18 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     return new NextResponse(null, { status: 204 });
   }
 
-  // #442 (epic #440 C2): record which credential row this run gets (NULL =
-  // built-in credits), so a classified provider refusal marks THAT row and
-  // never one an operator switches to mid-run. Best effort, and caught here:
-  // a failure must never become a non-OK response, which the worker reads as
-  // "use built-in credits" (packages/worker/src/agent-run/www-client.ts).
-  // Delivery itself is unchanged in C2: a marked row is still delivered; the
-  // dispatch gate (C3, #443) is what stops runs for it.
-  const recordDelivered = async (credentialId: string | null) => {
-    try {
-      await setThreadChatDeliveredCredential({
-        db,
-        userId: ctx.userId,
-        threadId,
-        threadChatId,
-        credentialId,
-      });
-    } catch (error) {
-      console.error("[daemon agent-credentials] delivered-id record failed", {
-        threadId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
+  // #442: record which credential row this run gets (NULL = built-in
+  // credits), never throwing. Delivery itself is unchanged in C2: a marked
+  // row is still delivered; the dispatch gate (C3, #443) stops runs for it.
+  const recordDelivered = (credentialId: string | null) =>
+    recordDeliveredCredential({
+      db,
+      userId: ctx.userId,
+      threadId,
+      threadChatId,
+      credentialId,
+      logLabel: "daemon agent-credentials",
+    });
 
   try {
     // Org-fenced on the THREAD's org, exactly like the in-sandbox path

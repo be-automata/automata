@@ -611,15 +611,12 @@ export async function handleDaemonEvent({
               : "assistant.message",
     rateLimitResetTime,
   });
-  // #442 (epic #440 C2): a run the provider refused marks the credential it
-  // was DELIVERED (recorded by /api/daemon/agent-credentials), never the
-  // currently active one, so an operator's mid-run switch is not marked. Only
-  // when the stored error is provider-unavailable: the prompt-too-long,
-  // auto-compact and OAuth-retry paths above leave it unset. Idempotent and
-  // monotonic, so a redelivered event is harmless. Best effort: a failed mark
-  // is logged and never fails the event. Worker plane only: the legacy
-  // sandbox plane never pulls through the route, so any id it carries is
-  // another run's.
+  // #442: mark the credential this run was DELIVERED (see
+  // credential-unavailability.ts), only when the stored error is
+  // provider-unavailable (the prompt-too-long, auto-compact and OAuth-retry
+  // paths above leave it unset). Worker plane only: the legacy sandbox plane
+  // never pulls through the route, so any id it carries is another run's.
+  // Idempotent, and a failed mark never fails the event.
   if (
     providerUnavailable &&
     threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR &&

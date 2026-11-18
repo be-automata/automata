@@ -22,9 +22,7 @@ async function orgScopeSuffix(
   }
   try {
     const org = await getOrganizationById({ db, organizationId });
-    return org
-      ? ` in organization "${org.name}"`
-      : ` in organization ${organizationId}`;
+    return org ? ` in organization "${org.name}"` : ` in organization ${organizationId}`;
   } catch {
     return ` in organization ${organizationId}`;
   }
@@ -131,7 +129,7 @@ export async function getAndVerifyCredentialsWithSource({
             type: "json-file",
             contents: claudeCredentials.contents,
           },
-          credentialId: claudeCredentials.credentialId ?? null,
+          credentialId: claudeCredentials.credentialId,
         };
       }
       if (claudeCredentials.error) {

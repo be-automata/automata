@@ -362,11 +362,8 @@ export async function getClaudeCredentialsJSONOrNull({
 }): Promise<{
   contents: string | null;
   error: string | null;
-  /**
-   * #442: the agent_provider_credentials row `contents` came from, set only
-   * when `contents` is. Optional so injected test readers need not supply it.
-   */
-  credentialId?: string;
+  /** #442: the agent_provider_credentials row `contents` came from (null without contents). */
+  credentialId: string | null;
 }> {
   try {
     // Get the stored tokens
@@ -378,7 +375,7 @@ export async function getClaudeCredentialsJSONOrNull({
       encryptionKey: env.ENCRYPTION_MASTER_KEY,
     });
     if (!credentials) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
     // For API keys, just include the API key
     if (credentials.apiKey) {
@@ -389,7 +386,7 @@ export async function getClaudeCredentialsJSONOrNull({
       };
     }
     if (!credentials.accessToken) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
     // A `claude setup-token` token is a long-lived OAuth bearer with no refresh
     // token and no expiry, so it skips the refresh round-trip entirely and is
@@ -437,7 +434,7 @@ export async function getClaudeCredentialsJSONOrNull({
       }
     }
     if (!finalCredentials.accessToken) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
 
     let organizationType: ClaudeOrganizationType | null = null;
@@ -471,7 +468,11 @@ export async function getClaudeCredentialsJSONOrNull({
       "[getCredentialsJSONOrNull] Failed to get credentials:",
       error,
     );
-    return { contents: null, error: "Failed to get Claude credentials" };
+    return {
+      contents: null,
+      error: "Failed to get Claude credentials",
+      credentialId: null,
+    };
   }
 }
 
