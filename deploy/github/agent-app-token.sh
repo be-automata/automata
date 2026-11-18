@@ -56,7 +56,7 @@ esac
 config_value() {
   local wanted=$1 file=$2 key value
   [[ -f $file ]] || return 0
-  while IFS='=' read -r key value; do
+  while IFS='=' read -r key value || [[ -n $key ]]; do
     key=${key//[[:space:]]/}
     if [[ $key == "$wanted" ]]; then
       value=${value%%#*}

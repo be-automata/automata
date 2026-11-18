@@ -245,7 +245,8 @@ describe("agent-app-token.sh", () => {
     const config = join(dir, "app.env");
     writeFileSync(
       config,
-      '# automata-agent\nAPP_ID = "555"\nINSTALLATION_ID=666 # repo only\n',
+      // No final newline: the last line must still be read.
+      '# automata-agent\nAPP_ID = "555"\nINSTALLATION_ID=666 # repo only',
     );
     const result = run([], {
       AUTOMATA_AGENT_CONFIG: config,
