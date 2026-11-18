@@ -399,6 +399,32 @@ describe("POST /api/daemon/thread-status", () => {
       ).toBe(true);
     });
 
+    it("a failed retire answers 500; a retry then answers 200 finished with the token retired", async () => {
+      const attempt = await open("nonce-aaaaaaaaaaaaaaaa");
+      await setComplete();
+      vi.mocked(retireDaemonTokenById).mockRejectedValueOnce(
+        new Error("db down"),
+      );
+      const failed = await POST(
+        req({ threadId, threadChatId, cellAttempt: attempt }),
+      );
+      expect(failed.status).toBe(500);
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: runKey }),
+      ).toBe(true);
+
+      const retried = await POST(
+        req({ threadId, threadChatId, cellAttempt: attempt }),
+      );
+      expect(retried.status).toBe(200);
+      expect((await retried.json()).lease).toBe("finished");
+      const [tok] = await db
+        .select({ name: apikeyTable.name })
+        .from(apikeyTable)
+        .where(eq(apikeyTable.id, apiKeyId));
+      expect(tok?.name).toBe(`${runKey}:retired`);
+    });
+
     it("finishStep false (a foreign step): 409, token revoked not retired, one alert across repeats", async () => {
       const otherThread = await createTestThread({
         db,

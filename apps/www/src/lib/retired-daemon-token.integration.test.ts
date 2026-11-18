@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST as agentCredentials } from "@/app/api/daemon/agent-credentials/route";
 import { POST as cellPlan } from "@/app/api/daemon/cell-plan/route";
+import { POST as egressEvent } from "@/app/api/daemon/egress-event/route";
+import { POST as runCredentialSource } from "@/app/api/daemon/run-credential-source/route";
+import { POST as runStaleness } from "@/app/api/daemon/run-staleness/route";
 import { POST as nextMessage } from "@/app/api/daemon/next-message/route";
 import { POST as runTerminal } from "@/app/api/daemon/run-terminal/route";
 import { POST as threadStatus } from "@/app/api/daemon/thread-status/route";
@@ -17,6 +20,7 @@ import { POST as anthropicProxy } from "@/app/api/proxy/anthropic/[[...path]]/ro
 import { POST as googleProxy } from "@/app/api/proxy/google/[[...path]]/route";
 import { POST as openaiProxy } from "@/app/api/proxy/openai/[[...path]]/route";
 import { POST as openrouterProxy } from "@/app/api/proxy/openrouter/[[...path]]/route";
+import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import {
   mintDaemonToken,
@@ -81,6 +85,7 @@ async function outcomeOf(res: Response): Promise<Outcome> {
 
 describe("a retired daemon token is refused everywhere but cell-teardown", () => {
   let userId: string;
+  let sessionToken: string;
   let orgId: string;
   let threadId: string;
   let threadChatId: string;
@@ -135,8 +140,9 @@ describe("a retired daemon token is refused everywhere but cell-teardown", () =>
     // The internal broadcast routes fall back to the session, which reads
     // next/headers: a logged-out request scope, as in production with no cookie.
     await mockLoggedOutUser();
-    const user = (await createTestUser({ db })).user;
-    userId = user.id;
+    const created = await createTestUser({ db });
+    userId = created.user.id;
+    sessionToken = created.session.token;
     const org = await createOrganization({
       db,
       name: "Org",
@@ -239,6 +245,48 @@ describe("a retired daemon token is refused everywhere but cell-teardown", () =>
             // No cause: refused by the body schema after auth.
             jsonRequest(
               "http://localhost/api/daemon/run-terminal",
+              token,
+              foreignChat(),
+            ),
+          ),
+        ),
+    },
+    {
+      name: "egress-event",
+      liveIsNot401: true,
+      call: async (token) =>
+        outcomeOf(
+          await egressEvent(
+            jsonRequest(
+              "http://localhost/api/daemon/egress-event",
+              token,
+              foreignChat(),
+            ),
+          ),
+        ),
+    },
+    {
+      name: "run-staleness",
+      liveIsNot401: true,
+      call: async (token) =>
+        outcomeOf(
+          await runStaleness(
+            jsonRequest(
+              "http://localhost/api/daemon/run-staleness",
+              token,
+              foreignChat(),
+            ),
+          ),
+        ),
+    },
+    {
+      name: "run-credential-source",
+      liveIsNot401: true,
+      call: async (token) =>
+        outcomeOf(
+          await runCredentialSource(
+            jsonRequest(
+              "http://localhost/api/daemon/run-credential-source",
               token,
               foreignChat(),
             ),
@@ -449,6 +497,52 @@ describe("a retired daemon token is refused everywhere but cell-teardown", () =>
       const res = await runFailed(await mintLive(), "run-live");
       expect(res.status).not.toBe(401);
       expect(refusedAsRetired()).toBe(false);
+    });
+  });
+
+  describe("the api-key update endpoint is disabled", () => {
+    it("refuses a signed-in owner renaming their retired token back (404), and the row is unchanged", async () => {
+      const headers = {
+        Authorization: `Bearer ${sessionToken}`,
+        "content-type": "application/json",
+      };
+      const [row] = await db
+        .select({ id: apikeyTable.id, name: apikeyTable.name })
+        .from(apikeyTable)
+        .where(
+          and(
+            eq(apikeyTable.referenceId, userId),
+            eq(
+              apikeyTable.name,
+              `${daemonRunKey({ threadId, threadChatId })}:retired`,
+            ),
+          ),
+        );
+      if (!row) throw new Error("retired token row not found");
+      const bare = daemonRunKey({ threadId, threadChatId });
+
+      const res = await auth.handler(
+        new Request("http://localhost:3000/api/auth/api-key/update", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ keyId: row.id, name: bare }),
+        }),
+      );
+      expect(res.status).toBe(404);
+      const [after] = await db
+        .select({ name: apikeyTable.name })
+        .from(apikeyTable)
+        .where(eq(apikeyTable.id, row.id));
+      expect(after?.name).toBe(row.name);
+    });
+
+    it("control: the path is mounted, an enabled sibling endpoint is not 404", async () => {
+      const res = await auth.handler(
+        new Request("http://localhost:3000/api/auth/api-key/list", {
+          method: "GET",
+        }),
+      );
+      expect(res.status).not.toBe(404);
     });
   });
 });

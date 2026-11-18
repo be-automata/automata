@@ -301,6 +301,8 @@ Retired-token refusal across routes. **One new file, `apps/www/src/lib/retired-d
 - **Repeated reports.** A retried incomplete report logs the event every time and alerts once per `(stepKey, attempt)` through the ledger. A crash between the post and the done mark re-sends once. Different attempts of one step alert separately.
 - **onFailure after a late failure** (the worker read terminal, then failed) gets 401 on `daemon-event`. That is the loss today's code already has (`www-client.ts:266-268`), unchanged and accepted.
 - **Stacking on PR-C.** PR-D no longer edits `cell-plan/route.test.ts`; it still rebases on PR-C's final head before phase 5.
+- **An open broadcast socket outlives a retired token** (`apps/broadcast/src/auth.ts:25-35` authenticates at connect). Same as the old delete; follow-up, not in this PR.
+- **`/api/auth/api-key/update` is disabled** (`disabledPaths: ["/api-key/update"]` in `auth.ts`): a session user owns their apikey rows and could rename a retired token back, extend it or rewrite its metadata. Nothing calls it. `auth.api` called from server code is unaffected.
 - **Rollback:** revert. Nothing is retired before PR-E. A retired row left behind is an apikey row with a suffix: the sweep prefix still matches it, and it expires within 15 min.
 
 ## Ticket changes to record

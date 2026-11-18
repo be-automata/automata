@@ -229,11 +229,15 @@ async function cellPoll({
   try {
     await retireDaemonTokenById({ userId, apiKeyId });
   } catch (error) {
-    // The status is still served; the token keeps its 1-day life.
+    // 500, so the worker retries: finishStep is idempotent and the retire
+    // matches no row once it has landed. Ids only in the log.
     console.error("[daemon-token] retire-on-terminal-read failed", {
+      threadId,
+      stepKey,
       apiKeyId,
-      error,
+      errorName: error instanceof Error ? error.name : "unknown",
     });
+    return NextResponse.json({ error: "cell_retire_failed" }, { status: 500 });
   }
   return NextResponse.json({ status, terminal, lease: "finished" });
 }
