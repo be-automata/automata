@@ -1,0 +1,91 @@
+{
+  "criteria": [
+    {
+      "id": "AC-1",
+      "text": "AC-1: Once marked terminal, `close()` POSTs nothing (no `postEgressEvents`, no `fetch`, no timer left), and logs one expected-drop line with `count: 1` for one buffered event.",
+      "tiers": ["local"],
+      "hints": [
+        "tests: AC-1: `workflow-cleanup.test.ts` \"#503: once marked terminal (token revoked), close() drops the"
+      ],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/503/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/workflow-cleanup.test.ts",
+          "name": "#503: once marked terminal (token revoked), close() drops the buffer with one expected-drop log \u2014 no post, no sleep"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/workflow-cleanup.test.ts",
+          "name": "#503: after the mark, events added later post nothing; one log counts them all"
+        }
+      ],
+      "defer": null
+    },
+    {
+      "id": "AC-2",
+      "text": "AC-2: Without the mark, `close()` still POSTs the buffer and logs no drop.",
+      "tiers": ["local"],
+      "hints": [
+        "tests: AC-2: `workflow-cleanup.test.ts` \"#503: without the terminal mark, close() still POSTs the buffer\"."
+      ],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/503/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/workflow-cleanup.test.ts",
+          "name": "#503: without the terminal mark, close() still POSTs the buffer"
+        }
+      ],
+      "defer": null
+    },
+    {
+      "id": "AC-3",
+      "text": "AC-3: A `completed` run whose last event lands after the final pre-read flush posts nothing at teardown and logs one expected drop with its count; a `cancelled` run still posts it.",
+      "tiers": ["local"],
+      "hints": [
+        "tests: AC-3: `workflow-cleanup.test.ts` describe \"#503: a batch buffered after the terminal read is dropped"
+      ],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/503/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/workflow-cleanup.test.ts",
+          "name": "completed: teardown posts nothing and logs one expected drop with its count"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/workflow-cleanup.test.ts",
+          "name": "cancelled: the token is still live, so teardown still posts the batch"
+        }
+      ],
+      "defer": null
+    },
+    {
+      "id": "AC-4",
+      "text": "AC-4: The gates pass: `pnpm turbo tsc-check`, `pnpm turbo lint`, `pnpm turbo format-check` and the worker suite.",
+      "tiers": ["unmapped"],
+      "hints": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/503/gate-log.md"
+        }
+      ],
+      "defer": null
+    }
+  ]
+}
