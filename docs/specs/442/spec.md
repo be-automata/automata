@@ -53,7 +53,8 @@ of `expected-migrations.ts`.
   `thread` and `thread_chat` carry it, as with `queuedAt`. The migration has five statements
   (adding `thread`). `ThreadInfo` omits it and `ThreadForThreadChatInfoFull` picks it.
 - `CredentialUnavailableReason = "usage_limit" | "subscription_disabled" | "auth_rejected"` lives
-  in `packages/shared/src/model/credential-kind.ts`, which schema.ts already imports types from.
+  in its own type-only file, `packages/shared/src/model/credential-unavailable-reason.ts`
+  (`credential-kind.ts` is scoped to kind → UI facts).
 
 ### Shared model (`agent-provider-credentials.ts`)
 
@@ -63,11 +64,12 @@ of `expected-migrations.ts`.
   - Indefinite: `SET until = NULL, reason, marked_at = now()`. The guard is
     `NOT (reason IS NOT NULL AND until IS NULL)`, so an existing indefinite mark is left as it was.
   - Timed: `SET until = $until, reason, marked_at = now()`. The guard is
-    `NOT (reason IS NOT NULL AND until IS NULL) AND (until IS NULL OR until < $until)`. This never
+    `NOT (reason IS NOT NULL AND until IS NULL) AND (reason IS NULL OR until IS NULL OR until < $until)`
+    (an unmarked row, even after a half admin clear, always takes the mark). This never
     shortens a mark and never touches an indefinite one, so it is monotonic (`GREATEST`
     semantics). Concurrent marks serialise on the row lock, and READ COMMITTED re-checks the
     guard against the committed version, so the larger `until` wins.
-- **`isAgentProviderCredentialUnavailable(row, now)`**: true when
+- **`isAgentProviderCredentialUnavailable(row, now)`**: a type guard, true when
   `reason != null && (until == null || until > now)`. After the rollback SQL (both NULL), the row
   is available.
 - **`resolveAgentProviderCredential({db, userId, agent, organizationId, now = new Date()})`** →
@@ -85,9 +87,10 @@ of `expected-migrations.ts`.
 ### Shared model (`threads.ts`)
 
 - `setThreadChatDeliveredCredential({db, userId, threadId, threadChatId, credentialId: string | null})`:
-  - for `LEGACY_THREAD_CHAT_ID`, `UPDATE thread SET delivered_credential_id` fenced by thread id
-    - user_id;
-  - otherwise `UPDATE thread_chat`, fenced by chat id + thread id + user_id.
+  - for `LEGACY_THREAD_CHAT_ID`, `UPDATE thread SET delivered_credential_id`, fenced by the
+    thread id and user_id;
+  - otherwise `UPDATE thread_chat`, fenced by the chat id, thread id and user_id;
+  - both keep `updated_at` as it was, and neither broadcasts.
 - `createLegacyThreadChatFull` maps `thread.deliveredCredentialId`.
 - Admin clear means nulling both `unavailable_until` and `unavailable_reason`.
 - The id is a non-secret UUID and may reach the browser in `ThreadChatInfoFull`.
@@ -99,17 +102,26 @@ of `expected-migrations.ts`.
   returns `.credentials`, so its other callers do not change. The Claude path gets the id from
   `getClaudeCredentialsJSONOrNull`, which now also returns `credentialId`. Amp gets it from its
   row. Codex, gemini, opencode and built-in credits return `null`.
-- `getClaudeCredentialsJSONOrNull` gains an **optional** `credentialId?: string`, so the injected
-  `read` fakes keep type-checking.
+- `getClaudeCredentialsJSONOrNull` returns a **required** `credentialId: string | null` (null
+  without contents), so a new success branch cannot silently skip attribution. The injected
+  `read` fakes in `claudeCredentials.oauth.test.ts` supply it.
 - route.test.ts mocks `getAndVerifyCredentialsWithSource`.
 - The 204 branch (no agent) records nothing, which is acceptable because only claudeCode is
   classified.
 - The route has no run-generation fence, so a superseded attempt's late pull can overwrite the
   id. It resolves the same newest active row, so the risk is low; noted for C3.
-- Route: call the `WithSource` variant. Record the id, or `null` in the `ThreadError` branch, with
-  `setThreadChatDeliveredCredential`. A recording failure is caught and logged: it must never turn
-  into a non-OK response, because the worker would read that as built-in credits. The response
-  body stays as it is.
+- Route: call the `WithSource` variant. Record the id, or `null` on **any** resolution failure
+  (a `ThreadError` answers built-in credits; any other error is a 5xx, which the worker also maps
+  to built-in credits), through `recordDeliveredCredential` (below). A recording failure is
+  caught and logged: it must never turn into a non-OK response. The response body stays as it
+  is.
+- **Dispatch clear** (`apps/www/src/agent/hatchet/dispatch.ts`, `dispatchAgentRun`): before the
+  trigger, and alongside `resolveHatchetConfig`, record `null`. Only a delivery made during
+  this run can then attribute a mark: a run that never pulls (a shared box) or falls back to
+  built-in credits marks nothing. Clearing after the trigger would race the run's credential
+  pull.
+- `recordDeliveredCredential({db, userId, threadId, threadChatId, credentialId, logLabel})` in
+  `credential-unavailability.ts` is the one never-throwing wrapper both writers use.
 - `apps/www/src/server-lib/credential-unavailability.ts` (new):
   `credentialMarkFor(provider, now)` → `{reason, until} | null`:
 
@@ -122,19 +134,35 @@ of `expected-migrations.ts`.
   when there is no id or no mark.
 
 - `handleDaemonEvent`: after `updateThreadChatWithTransition`, when
-  `threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR`, call it with
-  `threadChat.deliveredCredentialId` and `receivedAt`. Await it inside a try/catch that logs; it
-  is non-fatal.
+  `threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR` and the thread is on the worker
+  plane (`!thread.codesandboxId`; the legacy sandbox plane never pulls through the route), call
+  it with `threadChat.deliveredCredentialId` and `receivedAt`. It is awaited, so the mark is
+  written before the finish path that C3's gate will follow, inside a try/catch that logs; it is
+  non-fatal.
 
 ## Phases (validator round 1)
 
-1. Migration (5 statements), `expected-migrations.ts`, `schema.ts` (`threadChatShared`), `db/types.ts` (`ThreadInfo` omit), `credential-kind.ts` reason type.
+1. Migration (5 statements), `expected-migrations.ts`, `schema.ts` (`threadChatShared`), `db/types.ts` (`ThreadInfo` omit), `credential-unavailable-reason.ts` reason type.
 2. Credential model: insert-type omission, mark, `isAgentProviderCredentialUnavailable`, resolve, plus model tests.
 3. Thread model: legacy mapping, `setThreadChatDeliveredCredential` for both shapes, plus tests.
-4. `credentials.ts` WithSource, `claudeCredentials.ts` optional id, route recording, route tests (legacy and chat-mode), oauth test doubles.
+4. `credentials.ts` WithSource, `claudeCredentials.ts` required id, route recording, route tests (legacy and chat-mode), oauth test doubles.
 5. `credential-unavailability.ts` (+ test), `handleDaemonEvent` mark, provider tests (legacy and chat-mode, credit, unclassified, no id, mid-run switch).
 
 Tests in AC5 and AC6 cover **both** thread shapes.
+
+## As built: changes after validate
+
+- **Refinement:**
+  - the dispatch clear (above);
+  - NULL is recorded on any resolution failure;
+  - the worker-plane guard on the mark;
+  - the unmarked-row arm of the timed guard;
+  - tests for each.
+- **/simplify:**
+  - one `recordDeliveredCredential` wrapper;
+  - the clear runs in parallel with `resolveHatchetConfig`;
+  - the type-guard helper;
+  - the required Claude `credentialId`.
 
 ## Gates
 
