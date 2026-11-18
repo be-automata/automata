@@ -1,11 +1,18 @@
 import { NextRequest } from "next/server";
+import { and, eq, like } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getClaudeOauthAccessToken } from "@/agent/msg/claudeCredentials";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { db } from "@/lib/db";
-import type { DaemonTokenContext } from "@/lib/daemon-token-context";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import { cellEventTokenName } from "@/lib/daemon-token";
+import {
+  DAEMON_EVENT_SCOPE,
+  type DaemonTokenContext,
+} from "@/lib/daemon-token-context";
+import { apikey as apikeyTable } from "@terragon/shared/db/schema";
 import { env } from "@terragon/env/apps-www";
 import {
   RUNC_REQUIRED_CHECKS,
@@ -13,7 +20,10 @@ import {
   passingRuncChecks,
 } from "@terragon/sandbox/conformance-evidence";
 import { buildDaemonVaultEntry } from "@terragon/shared/model/cell-create-plan";
-import { verifyBearer } from "@terragon/shared/model/cell-authority";
+import {
+  mintBearer,
+  verifyBearer,
+} from "@terragon/shared/model/cell-authority";
 import {
   insertProfileEvidenceRows,
   upsertExecutionProfile,
@@ -29,9 +39,18 @@ import { cellBrokerHost } from "@/server-lib/compute/cell-gate";
 import { CELL_RUN_TTL_MS, cellStepKey } from "@terragon/types/cell";
 import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
 
+import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
+
 import { POST } from "./route";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
+vi.mock("@terragon/shared/model/cell-authority", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@terragon/shared/model/cell-authority")
+    >();
+  return { ...actual, mintBearer: vi.fn(actual.mintBearer) };
+});
 vi.mock("@/agent/msg/claudeCredentials", () => ({
   getClaudeOauthAccessToken: vi.fn(),
 }));
@@ -138,6 +157,16 @@ describe("POST /api/daemon/cell-plan", () => {
     requestId: NONCE_A,
     ...over,
   });
+  const cellTokenRows = async () =>
+    db
+      .select({ id: apikeyTable.id })
+      .from(apikeyTable)
+      .where(
+        and(
+          eq(apikeyTable.referenceId, userId),
+          like(apikeyTable.name, `%:cell-event:${cellStepKey(apiKeyId)}:%`),
+        ),
+      );
   const steps = async () =>
     (await db.query.cellStep.findMany()).filter(
       (s) => s.stepKey === cellStepKey(apiKeyId),
@@ -159,6 +188,7 @@ describe("POST /api/daemon/cell-plan", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    await mockWaitUntil();
     process.env.NEXT_PUBLIC_APP_URL = "https://app.example.test";
     setCellsEnv(true);
     vi.mocked(getFeatureFlagForUser).mockResolvedValue(true);
@@ -226,9 +256,83 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(row?.allowedRef).toBe(
         `refs/heads/${remoteTaskBranchName(threadId)}`,
       );
+      // #693: the vault carries the cell's own event-only token, never the
+      // caller's run token.
+      const daemonEntry = plan.vault.find(
+        (v: { name: string }) => v.name === "daemon",
+      );
+      expect(daemonEntry.credential).not.toBe(DAEMON_TOKEN);
+      expect(daemonEntry).toEqual(
+        buildDaemonVaultEntry(cellBrokerHost(), daemonEntry.credential),
+      );
+      expect(await verifyDaemonApiKey(daemonEntry.credential)).toBe(null);
+      const cellKey = await verifyDaemonApiKey(daemonEntry.credential, {
+        allowEventScoped: true,
+      });
+      expect(cellKey?.name).toBe(
+        cellEventTokenName({
+          threadId,
+          threadChatId,
+          stepKey: cellStepKey(apiKeyId),
+          attempt: 1,
+        }),
+      );
+      expect(cellKey?.metadata).toMatchObject({
+        tokenType: "daemon",
+        threadId,
+        threadChatId,
+        organizationId: orgId,
+        scope: DAEMON_EVENT_SCOPE,
+      });
+    });
+
+    it("#693: a re-plan and a replay leave exactly one live cell token, the latest plan's", async () => {
+      const daemonCredential = (p: {
+        vault: Array<{ name: string; credential: string }>;
+      }) => p.vault.find((v) => v.name === "daemon")?.credential ?? "";
+      const first = await (await POST(req(body()))).json();
+      const second = await (
+        await POST(req(body({ requestId: NONCE_B })))
+      ).json();
+      const replay = await (
+        await POST(req(body({ requestId: NONCE_B })))
+      ).json();
+      expect(replay.attempt).toBe(2);
+      // The supersede runs after the response (waitUntil).
+      await waitUntilResolved();
+      const live = await cellTokenRows();
+      expect(live).toHaveLength(1);
+      const allowed = { allowEventScoped: true };
+      for (const dead of [first.plan, second.plan]) {
+        expect(await verifyDaemonApiKey(daemonCredential(dead), allowed)).toBe(
+          null,
+        );
+      }
       expect(
-        plan.vault.find((v: { name: string }) => v.name === "daemon"),
-      ).toEqual(buildDaemonVaultEntry(cellBrokerHost(), DAEMON_TOKEN));
+        (await verifyDaemonApiKey(daemonCredential(replay.plan), allowed))?.id,
+      ).toBe(live[0]?.id);
+    });
+
+    it("#693: a plan that loses its bearer deletes the cell token it minted", async () => {
+      const kept = await (await POST(req(body()))).json();
+      vi.mocked(mintBearer).mockResolvedValueOnce({
+        ok: false,
+        reason: "superseded",
+      });
+      const res = await POST(req(body()));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: "superseded" });
+      await waitUntilResolved();
+      // Only the earlier response's token is left.
+      const live = await cellTokenRows();
+      expect(live).toHaveLength(1);
+      const keptCredential = kept.plan.vault.find(
+        (v: { name: string }) => v.name === "daemon",
+      ).credential;
+      expect(
+        (await verifyDaemonApiKey(keptCredential, { allowEventScoped: true }))
+          ?.id,
+      ).toBe(live[0]?.id);
     });
 
     it("a new requestId opens the next attempt and fences the old bearer; a replay keeps one live bearer", async () => {
@@ -356,6 +460,10 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(logged).not.toContain(OAUTH_TOKEN);
       expect(logged).not.toContain(bearer);
       expect(logged).not.toContain(DAEMON_TOKEN);
+      const cellToken = plan.vault.find(
+        (v: { name: string }) => v.name === "daemon",
+      ).credential;
+      expect(logged).not.toContain(cellToken);
       spies.forEach((s) => s.mockRestore());
     });
 

@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { mintDaemonToken, retireDaemonTokenById } from "@/lib/daemon-token";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import {
+  mintCellEventToken,
+  mintDaemonToken,
+  retireDaemonTokenById,
+} from "@/lib/daemon-token";
 import { postOpsAlert } from "@/server-lib/knowledge/ops-alert";
 import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
 import {
@@ -139,6 +144,23 @@ describe("POST /api/daemon/cell-teardown", () => {
       );
     if (!row) throw new Error("minted token not found");
     return { token: raw, id: row.id };
+  }
+
+  async function mintCell(step: string, attempt: number): Promise<string> {
+    return (
+      await mintCellEventToken({
+        userId,
+        threadId,
+        threadChatId,
+        stepKey: step,
+        attempt,
+      })
+    ).token;
+  }
+  async function cellTokenLive(cellToken: string): Promise<boolean> {
+    return (
+      (await verifyDaemonApiKey(cellToken, { allowEventScoped: true })) !== null
+    );
   }
 
   beforeEach(async () => {
@@ -329,6 +351,18 @@ describe("POST /api/daemon/cell-teardown", () => {
       expect((await step())?.revokedThrough).toBe(2);
     });
 
+    it("#693 deletes this attempt's cell token, and leaves another attempt's and another run's", async () => {
+      await open("a");
+      await open("b");
+      const step1 = await mintCell(stepKey, 1);
+      const step2 = await mintCell(stepKey, 2);
+      const otherRun = await mintCell("cell-anotherrunsworkertoken0000000", 1);
+      expect((await POST(req(revoke(1)))).status).toBe(200);
+      expect(await cellTokenLive(step1)).toBe(false);
+      expect(await cellTokenLive(step2)).toBe(true);
+      expect(await cellTokenLive(otherRun)).toBe(true);
+    });
+
     it("an unknown step answers 200 revoked:false", async () => {
       const res = await POST(req(revoke(1)));
       expect(res.status).toBe(200);
@@ -472,6 +506,17 @@ describe("POST /api/daemon/cell-teardown", () => {
   });
 
   describe("token custody", () => {
+    it("#693 report deletes this attempt's cell token, with a retired run token too", async () => {
+      const attempt = await open("a");
+      const mine = await mintCell(stepKey, attempt);
+      const later = await mintCell(stepKey, attempt + 1);
+      await retireDaemonTokenById({ userId, apiKeyId });
+      expect((await POST(req(clean(attempt)))).status).toBe(200);
+      await waitUntilResolved();
+      expect(await cellTokenLive(mine)).toBe(false);
+      expect(await cellTokenLive(later)).toBe(true);
+    });
+
     it("after a terminal read, report deletes the retired token and a second report gets 401", async () => {
       const attempt = await open("a");
       await retireDaemonTokenById({ userId, apiKeyId });

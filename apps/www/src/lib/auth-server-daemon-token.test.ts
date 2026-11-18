@@ -10,7 +10,11 @@ import { User } from "@terragon/shared";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
-import { RETIRED_TOKEN_SUFFIX } from "@/lib/daemon-token-context";
+import {
+  CELL_EVENT_TOKEN_INFIX,
+  DAEMON_EVENT_SCOPE,
+  RETIRED_TOKEN_SUFFIX,
+} from "@/lib/daemon-token-context";
 
 /**
  * A drizzle query builder whose every step chains and whose await rejects —
@@ -219,6 +223,96 @@ describe("retired daemon tokens: refused unless allowRetired", () => {
       .where(eq(apikeyTable.id, apiKeyId));
     await expect(
       verifyDaemonApiKey(token, { allowRetired: true }),
+    ).resolves.toBe(null);
+  });
+});
+
+describe("event-scoped daemon tokens (#693): refused unless allowEventScoped", () => {
+  async function mint({
+    name,
+    scope,
+  }: {
+    name?: string;
+    scope?: string;
+  }): Promise<{ key: string; id: string }> {
+    const { user } = await createTestUser({ db });
+    return auth.api.createApiKey({
+      body: {
+        ...(name === undefined ? {} : { name }),
+        userId: user.id,
+        expiresIn: 60 * 60 * 24,
+        metadata: {
+          threadChatId: "tc_1",
+          threadId: "t_1",
+          tokenType: "daemon",
+          ...(scope === undefined ? {} : { scope }),
+        },
+      },
+    });
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a key scoped by its metadata verifies to null by default, with the reason logged", async () => {
+    const { key } = await mint({ scope: DAEMON_EVENT_SCOPE });
+    const log = vi.spyOn(console, "log");
+    await expect(verifyDaemonApiKey(key)).resolves.toBe(null);
+    expect(log).toHaveBeenCalledWith(
+      "Unauthorized",
+      "reason",
+      "event-scoped token",
+    );
+    await expect(getDaemonTokenContext(daemonRequest(key))).resolves.toBe(null);
+    // allowRetired is not allowEventScoped.
+    await expect(verifyDaemonApiKey(key, { allowRetired: true })).resolves.toBe(
+      null,
+    );
+  });
+
+  it("a key scoped only by its name is refused too (fails closed without the metadata)", async () => {
+    const { key, id } = await mint({});
+    await db
+      .update(apikeyTable)
+      .set({ name: `t_1:tc_1${CELL_EVENT_TOKEN_INFIX}1` })
+      .where(eq(apikeyTable.id, id));
+    await expect(verifyDaemonApiKey(key)).resolves.toBe(null);
+    await expect(
+      verifyDaemonApiKey(key, { allowEventScoped: true }),
+    ).resolves.not.toBe(null);
+  });
+
+  it("allowEventScoped returns the key, and the context keeps the F1/F2 binding", async () => {
+    const { key, id } = await mint({ scope: DAEMON_EVENT_SCOPE });
+    await expect(
+      getDaemonTokenContext(daemonRequest(key), { allowEventScoped: true }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        apiKeyId: id,
+        tokenType: "daemon",
+        threadId: "t_1",
+        threadChatId: "tc_1",
+      }),
+    );
+  });
+
+  it("a run key without the scope is unaffected either way (control)", async () => {
+    const { key } = await mint({ name: `run-${nanoid(8)}` });
+    await expect(verifyDaemonApiKey(key)).resolves.not.toBe(null);
+    await expect(
+      verifyDaemonApiKey(key, { allowEventScoped: true }),
+    ).resolves.not.toBe(null);
+  });
+
+  it("an expired event-scoped key is still null with allowEventScoped", async () => {
+    const { key, id } = await mint({ scope: DAEMON_EVENT_SCOPE });
+    await db
+      .update(apikeyTable)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(apikeyTable.id, id));
+    await expect(
+      verifyDaemonApiKey(key, { allowEventScoped: true }),
     ).resolves.toBe(null);
   });
 });

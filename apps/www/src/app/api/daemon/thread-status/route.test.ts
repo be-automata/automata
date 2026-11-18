@@ -28,9 +28,12 @@ import { DaemonTokenContext } from "@/lib/daemon-token-context";
 import {
   hasActiveDaemonToken,
   mintDaemonToken,
+  mintCellEventToken,
   retireDaemonTokenById,
+  revokeCellEventTokens,
   revokeDaemonTokenById,
 } from "@/lib/daemon-token";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
 vi.mock("@/lib/daemon-token", async (importOriginal) => {
@@ -40,6 +43,7 @@ vi.mock("@/lib/daemon-token", async (importOriginal) => {
     ...actual,
     revokeDaemonTokenById: vi.fn().mockResolvedValue(1),
     retireDaemonTokenById: vi.fn(real.retireDaemonTokenById),
+    revokeCellEventTokens: vi.fn(real.revokeCellEventTokens),
   };
 });
 vi.mock("@terragon/shared/model/cell-authority", async (importOriginal) => {
@@ -386,6 +390,58 @@ describe("POST /api/daemon/thread-status", () => {
       ).toBe(false);
     });
 
+    it("#693 terminal read: deletes this step's cell tokens before the retire, and leaves another step's", async () => {
+      const attempt = await open("nonce-aaaaaaaaaaaaaaaa");
+      const mine = await mintCellEventToken({
+        userId: user.id,
+        threadId,
+        threadChatId,
+        stepKey: cellStepKey(apiKeyId),
+        attempt,
+      });
+      const otherRun = await mintCellEventToken({
+        userId: user.id,
+        threadId,
+        threadChatId,
+        stepKey: "cell-anotherrunsworkertoken0000000",
+        attempt,
+      });
+      await setComplete();
+      const res = await POST(
+        req({ threadId, threadChatId, cellAttempt: attempt }),
+      );
+      expect((await res.json()).lease).toBe("finished");
+      const allowed = { allowEventScoped: true };
+      expect(await verifyDaemonApiKey(mine.token, allowed)).toBe(null);
+      expect(await verifyDaemonApiKey(otherRun.token, allowed)).not.toBe(null);
+      expect(
+        vi.mocked(revokeCellEventTokens).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(retireDaemonTokenById).mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it("#693 a failed cell-token revoke answers 500 and retires nothing, so the retry is accepted", async () => {
+      const attempt = await open("nonce-aaaaaaaaaaaaaaaa");
+      await setComplete();
+      vi.mocked(revokeCellEventTokens).mockRejectedValueOnce(
+        new Error("db down"),
+      );
+      const failed = await POST(
+        req({ threadId, threadChatId, cellAttempt: attempt }),
+      );
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toEqual({ error: "cell_revoke_failed" });
+      expect(retireDaemonTokenById).not.toHaveBeenCalled();
+      expect(
+        await hasActiveDaemonToken({ userId: user.id, name: runKey }),
+      ).toBe(true);
+      const retried = await POST(
+        req({ threadId, threadChatId, cellAttempt: attempt }),
+      );
+      expect((await retried.json()).lease).toBe("finished");
+    });
+
     it("finishStep throwing answers 500 and retires nothing", async () => {
       await setComplete();
       vi.mocked(finishStep).mockRejectedValueOnce(new Error("db down"));
@@ -444,6 +500,13 @@ describe("POST /api/daemon/thread-status", () => {
       expect(revokeDaemonTokenById).toHaveBeenCalledWith({
         userId: user.id,
         apiKeyId,
+      });
+      // #693: the step's cell tokens go with it.
+      expect(revokeCellEventTokens).toHaveBeenCalledWith({
+        userId: user.id,
+        threadId,
+        threadChatId,
+        stepKey: cellStepKey(apiKeyId),
       });
       expect(postOpsAlert).toHaveBeenCalledTimes(1);
 

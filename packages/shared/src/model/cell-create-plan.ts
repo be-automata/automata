@@ -75,8 +75,9 @@ export interface CellCreatePlanInput {
   /** A Claude OAuth token (`bearer`); never logged. */
   modelToken: string;
   /**
-   * The daemon's `X-Daemon-Token` value; never logged. When present, the vault
-   * gets a daemon entry for exactly `CELL_DAEMON_EVENT_PATH`.
+   * The cell's `X-Daemon-Token` value; never logged. When present, the vault
+   * gets a daemon entry for exactly `CELL_DAEMON_EVENT_PATH`. www passes the
+   * cell's own event-only token here, never the worker's run token (#693).
    */
   daemonToken?: string;
   runtime: string;
@@ -91,8 +92,9 @@ const BROKER_PATHS: readonly string[] = [
 
 /**
  * The vault entry that lets the daemon call `POST /api/daemon-event` and nothing
- * else. The path is fixed on purpose: a wider binding would hand the guest the
- * daemon token for `cell-plan` and `thread-status` (#656 Scope 9).
+ * else. The path is fixed on purpose (#656 Scope 9). It is no longer the only
+ * barrier: the token is event-scoped, and www refuses it on every other route
+ * (#693).
  */
 export function buildDaemonVaultEntry(
   brokerHost: string,

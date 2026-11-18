@@ -264,6 +264,52 @@ describe("buildCellCreatePlan", () => {
       expect(plan.vault[2]?.paths?.some((p) => p.includes("*"))).toBe(false);
     });
 
+    it("#693: under the sidecar's rule, only the literal path selects the daemon binding, and no other binding overlaps it", async () => {
+      const plan = await buildCellCreatePlan(
+        input({ daemonToken: DAEMON_TOKEN }),
+        makeDeps(),
+      );
+      // OpenSandbox release-1.2.1 `_path_matches` (mitmscripts/system.py:1326):
+      // a trailing `*` is a prefix, anything else is string equality on the
+      // raw path with the query stripped (`_request_path` :1187).
+      const matches = (path: string, pattern: string): boolean =>
+        pattern.endsWith("*")
+          ? path.startsWith(pattern.slice(0, -1))
+          : path === pattern;
+      const selecting = (rawTarget: string): string[] => {
+        const path = rawTarget.split("?", 1)[0] || "/";
+        return plan.vault
+          .filter((v) => v.hosts.includes(BROKER))
+          .filter((v) => (v.paths ?? ["/*"]).some((p) => matches(path, p)))
+          .map((v) => v.name);
+      };
+      expect(selecting("/api/daemon-event")).toEqual(["daemon"]);
+      // A query rides the same route (www serves it as daemon-event).
+      expect(selecting("/api/daemon-event?x=1")).toEqual(["daemon"]);
+      for (const confused of [
+        "/api/daemon/cell-plan",
+        "/api/./daemon-event",
+        "/api/x/../daemon-event",
+        "/api/daemon-event/../daemon/cell-plan",
+        "/api/daemon-event/%2e%2e/daemon/cell-plan",
+        "/api%2Fdaemon-event",
+        "/api%2fdaemon-event",
+        "/api/daemon%2Devent",
+        "/api/daemon%252Devent",
+        "//api/daemon-event",
+        "/api//daemon-event",
+        "/api/daemon-event/",
+        "/api/daemon-event;x",
+        "/api/daemon-event#frag",
+        "/API/daemon-event",
+        "/api/DAEMON-EVENT",
+        "/api\\daemon-event",
+        "/api?/daemon-event",
+      ]) {
+        expect(selecting(confused), confused).not.toContain("daemon");
+      }
+    });
+
     it("has no daemon entry without a daemonToken", async () => {
       const plan = await buildCellCreatePlan(input(), makeDeps());
       expect(plan.vault.map((v) => v.name)).toEqual(["model", "broker"]);

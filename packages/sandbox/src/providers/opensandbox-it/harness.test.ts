@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -126,6 +128,80 @@ describe("https_headers probe", () => {
       ]),
     );
     expect(r?.markersFound).toBeUndefined();
+  });
+});
+
+describe("https_raw probe (#693)", () => {
+  const spec = {
+    kind: "https_raw" as const,
+    host: "h.example",
+    target: "/anything/x/../daemon-event",
+    hostHeader: "other.example",
+    headers: { "X-Daemon-Token": "PLACEHOLDER-P" },
+    markers: ["osbit-canary-c", "PLACEHOLDER-P"],
+  };
+  /** The guest script without its entry point, plus `tail`. */
+  const runPython = (tail: string) => {
+    const script = probeArgv([])[2] ?? "";
+    const body = script.slice(0, script.indexOf("\n# Concurrent"));
+    return spawnSync("python3", ["-c", `${body}\n${tail}`], {
+      encoding: "utf8",
+    });
+  };
+
+  it("builds a wire spec with the target verbatim and base64 markers", () => {
+    expect(JSON.parse(probeArgv([spec])[3] ?? "")).toEqual([
+      {
+        kind: "https_raw",
+        host: spec.host,
+        target: spec.target,
+        host_header: "other.example",
+        headers: spec.headers,
+        markers_b64: spec.markers.map(encodeSecret),
+      },
+    ]);
+    const { hostHeader: _unused, ...noHost } = spec;
+    expect(JSON.parse(probeArgv([noHost])[3] ?? "")[0]).not.toHaveProperty(
+      "host_header",
+    );
+  });
+
+  it("never puts a marker in the argv in clear", () => {
+    expect(probeArgv([spec]).join(" ")).not.toContain("osbit-canary-c");
+  });
+
+  it("the guest script compiles and runs an empty spec list", () => {
+    const [cmd, ...args] = probeArgv([]);
+    const r = spawnSync(cmd ?? "", args, { encoding: "utf8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual([]);
+  });
+
+  it("writes the request line, Host and headers byte for byte, with no normalization", () => {
+    const r = runPython(
+      `import sys\nsys.stdout.write(raw_post("/a/../b%2Fc;x#f", "other.example", {"X-Daemon-Token": "P"}).decode("latin1"))`,
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(
+      [
+        "POST /a/../b%2Fc;x#f HTTP/1.1",
+        "Host: other.example",
+        "user-agent: osbit-probe",
+        "X-Daemon-Token: P",
+        "Content-Length: 0",
+        "Connection: close",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+  });
+
+  it("reads the status off the first line, 0 when there is none", () => {
+    const r = runPython(
+      `print(status_of(b"HTTP/1.1 403 Forbidden\\r\\nx: y\\r\\n\\r\\n"), status_of(b""), status_of(b"garbage"))`,
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe("403 0 0");
   });
 });
 

@@ -4,7 +4,10 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
-import { revokeRetiredDaemonTokenById } from "@/lib/daemon-token";
+import {
+  revokeCellEventTokens,
+  revokeRetiredDaemonTokenById,
+} from "@/lib/daemon-token";
 import {
   alertCellStepOnce,
   cellAttemptSchema,
@@ -95,7 +98,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     response.headers.set("Cache-Control", NO_STORE["Cache-Control"]);
     return response;
   }
-  const { ctx, threadId, thread } = auth;
+  const { ctx, threadId, threadChatId, thread } = auth;
 
   const parsed = bodySchema.safeParse(auth.body);
   if (!parsed.success) return reply({ error: "invalid_body" }, 400);
@@ -103,14 +106,21 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (ctx.apiKeyId === null) return reply({ error: "no_run_key" }, 403);
   const apiKeyId = ctx.apiKeyId;
   const stepKey = cellStepKey(apiKeyId);
+  /** This attempt's event-only token (#693); another attempt's stays. */
+  const cellToken = {
+    userId: ctx.userId,
+    threadId,
+    threadChatId,
+    stepKey,
+    attempt: body.attempt,
+  };
 
   if (body.action === "revoke") {
     try {
-      const revoked = await revokeAttempt({
-        db,
-        stepKey,
-        attempt: body.attempt,
-      });
+      const [revoked] = await Promise.all([
+        revokeAttempt({ db, stepKey, attempt: body.attempt }),
+        revokeCellEventTokens(cellToken),
+      ]);
       return reply({ ok: true, revoked });
     } catch (error) {
       console.error("[cell] cell-teardown revoke failed", {
@@ -139,14 +149,17 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     });
   }
 
-  // Only a retired token is deleted: a live one (no terminal read) stays.
+  // Only a retired run token is deleted: a live one (no terminal read) stays.
+  // The attempt's cell token goes either way.
   waitUntil(
-    revokeRetiredDaemonTokenById({ userId: ctx.userId, apiKeyId }).catch(
-      (error) =>
-        console.error("[daemon-token] delete of retired token failed", {
-          apiKeyId,
-          error,
-        }),
+    Promise.all([
+      revokeRetiredDaemonTokenById({ userId: ctx.userId, apiKeyId }),
+      revokeCellEventTokens(cellToken),
+    ]).catch((error) =>
+      console.error("[daemon-token] teardown token delete failed", {
+        apiKeyId,
+        error,
+      }),
     ),
   );
   return reply({ ok: true });

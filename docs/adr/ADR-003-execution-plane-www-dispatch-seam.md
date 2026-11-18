@@ -234,3 +234,28 @@ The seam **dispatches and stamps; it never cancels prior runs**. The pre-#165 ap
 cancel pass (`supersedePriorReviewRuns`) and the automation's prior-thread archival are
 deleted; supersession of prior review runs is engine-only (the policy variant's per-PR
 concurrency), reconciled by the C4 sweep. See ADR-007.
+
+## Amendment (2026-11-18, #693): F1b, the cell's event-only token
+
+F1 narrows a daemon token to one thread's daemon protocol. A remote cell's guest gets one step
+narrower: **`POST /api/daemon-event` only.**
+
+- `cell-plan` never puts the worker's run token in the cell's vault. Instead it mints a second
+  daemon token per attempt. That token carries the same F1/F2 metadata (`tokenType: 'daemon'`,
+  `threadId`, `threadChatId`, the org), plus `metadata.scope = 'daemon-event'`. Its name is
+  `${runKey}:cell-event:${stepKey}:${attempt}`, and its expiry is capped at `CELL_RUN_TTL_MS`.
+- `verifyDaemonApiKey` refuses that token like an unknown one (401) on every daemon route, model
+  proxy, internal broadcast route and the CLI router. Only `/api/daemon-event` opts in
+  (`allowEventScoped`), the same default-deny shape as the retired token (`allowRetired`,
+  cell-teardown only).
+- F3 still applies. The token is revoked:
+
+  - when a winning re-plan supersedes it;
+  - at the terminal cell read, before the run token is retired;
+  - at cell-teardown, for that attempt;
+  - by the per-thread sweep.
+
+  The 45-minute cap is the backstop.
+
+The sidecar's exact-path vault binding stays, but it is no longer the only barrier. A guest that
+got past it would hold a token www refuses everywhere except event ingestion for its own thread.

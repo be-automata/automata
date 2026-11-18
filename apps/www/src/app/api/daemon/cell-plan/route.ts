@@ -3,8 +3,14 @@ import { z } from "zod";
 
 import { getClaudeOauthAccessToken } from "@/agent/msg/claudeCredentials";
 import { db } from "@/lib/db";
+import { waitUntil } from "@/lib/wait-until";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
+import {
+  mintCellEventToken,
+  revokeDaemonTokenById,
+  supersedeCellEventTokens,
+} from "@/lib/daemon-token";
 import {
   OPENSANDBOX_RUNC_PROFILE_ID,
   cellBrokerHost,
@@ -43,7 +49,10 @@ import { getThreadChat } from "@terragon/shared/model/threads";
  * (#634 S4). Nothing is built at dispatch and nothing secret rides in the
  * workflow input: the worker authenticates with the run's daemon token (the
  * same contract as agent-credentials, with a strict threadId binding) and gets
- * a plan whose vault carries the model token and a per-attempt broker bearer.
+ * a plan whose vault carries the model token, a per-attempt broker bearer and
+ * the cell's own event-only daemon token (#693). The caller's run token never
+ * enters the vault, and the cell's token is refused here and on every other
+ * daemon route (verifyDaemonApiKey).
  *
  * The attempt is server-assigned (`openNextAttempt`), idempotent per `requestId`:
  * the worker reuses one id for every HTTP retry of a plan fetch, so a lost
@@ -94,10 +103,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (!(await cellsEnabledForUser({ db, userId: ctx.userId }))) {
     return reply({ error: "cells_disabled" }, 404);
   }
-  const daemonToken = request.headers.get("X-Daemon-Token");
-  if (ctx.apiKeyId === null || daemonToken === null) {
-    return reply({ error: "no_run_key" }, 403);
-  }
+  if (ctx.apiKeyId === null) return reply({ error: "no_run_key" }, 403);
   const stepKey = cellStepKey(ctx.apiKeyId);
   let attempt: number | undefined;
 
@@ -187,8 +193,15 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   });
   if (!opened.ok) return refuse(opened.reason, 409);
   attempt = opened.attempt;
+  // The cell's own event-only token (#693): the vault never holds the caller's
+  // run token, so a guest past the sidecar's path match still cannot reach
+  // cell-plan or any other daemon route. A throw here is a 5xx, and the
+  // worker's retry with the same requestId replays the open.
+  const cellStep = { userId: ctx.userId, threadId, threadChatId, stepKey };
+  const cellToken = await mintCellEventToken({ ...cellStep, attempt });
+  let plan: Awaited<ReturnType<typeof buildCellCreatePlan>>;
   try {
-    const plan = await buildCellCreatePlan(
+    plan = await buildCellCreatePlan(
       {
         stepKey,
         attempt,
@@ -199,7 +212,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         tags: { worker, epoch, deployment: brokerHost },
         resources: { cpu: 2, memoryMiB: 4096 },
         modelToken,
-        daemonToken,
+        daemonToken: cellToken.token,
         runtime: "runc",
       },
       {
@@ -213,14 +226,19 @@ export const POST = withDaemonAuthUnavailable(async function POST(
           }),
       },
     );
-    console.log("[daemon cell-plan]", {
-      threadId,
-      stepKey,
-      attempt,
-      outcome: "planned",
-    });
-    return reply({ attempt, plan });
   } catch (error) {
+    // No plan left this route: its token must not outlive the call.
+    await revokeDaemonTokenById({
+      userId: ctx.userId,
+      apiKeyId: cellToken.apiKeyId,
+    }).catch((revokeError: unknown) =>
+      console.error("[daemon cell-plan] cell token revoke failed", {
+        threadId,
+        stepKey,
+        attempt,
+        errorName: revokeError instanceof Error ? revokeError.name : "unknown",
+      }),
+    );
     if (error instanceof CellPlanError) {
       // A newer open for this requestId holds the live bearer: the worker has
       // already moved on to that response.
@@ -234,4 +252,27 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     }
     throw error;
   }
+  // This plan won its bearer: the step's older cell tokens (earlier attempts,
+  // a replay's earlier response) die, off the response path. A failure leaves
+  // them event-only and capped at CELL_RUN_TTL_MS, so it is logged, not fatal.
+  waitUntil(
+    supersedeCellEventTokens({
+      ...cellStep,
+      keepApiKeyId: cellToken.apiKeyId,
+    }).catch((error: unknown) =>
+      console.error("[daemon cell-plan] cell token supersede failed", {
+        threadId,
+        stepKey,
+        attempt,
+        errorName: error instanceof Error ? error.name : "unknown",
+      }),
+    ),
+  );
+  console.log("[daemon cell-plan]", {
+    threadId,
+    stepKey,
+    attempt,
+    outcome: "planned",
+  });
+  return reply({ attempt, plan });
 });
