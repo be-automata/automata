@@ -18,6 +18,9 @@ import {
 
 import { maybeProcessFollowUpQueue } from "../process-follow-up-queue";
 
+/** Kicks run in parallel batches of this size inside the sweep. */
+const KICK_CONCURRENCY = 10;
+
 /**
  * www binding of the agent bus (#660, S2). The shared module commits and applies
  * a message (a queued user message in the target's primary chat); this file
@@ -125,8 +128,15 @@ export async function runAgentBusSweep(): Promise<void> {
   const { targets } = await sweepUnconsumed({ db, apply: queuedFollowUpApply });
   const swept = new Set(targets);
   const recent = await recentlyDeliveredTargets({ db });
-  // Broadcast only where this sweep applied a message; a re-kick is silent.
-  for (const target of new Set([...targets, ...recent])) {
-    await kickTarget(target, { broadcast: swept.has(target) });
+  const all = [...new Set([...targets, ...recent])];
+  // Bounded batches: the sweep runs in the every-minute cron, and each kick is a
+  // select, a broadcast and a tier lookup (the drain itself is in waitUntil).
+  // kickTarget never throws. Broadcast only where this sweep applied a message.
+  for (let i = 0; i < all.length; i += KICK_CONCURRENCY) {
+    await Promise.all(
+      all
+        .slice(i, i + KICK_CONCURRENCY)
+        .map((target) => kickTarget(target, { broadcast: swept.has(target) })),
+    );
   }
 }

@@ -88,6 +88,7 @@ async function backdateCreated(ids: number[], ms: number): Promise<void> {
 
 describe("agent-bus delivery", () => {
   beforeEach(() => {
+    vi.mocked(waitUntil).mockClear();
     h.kick.mockReset();
     h.kick.mockResolvedValue(undefined);
     h.tier.mockReset();
@@ -324,6 +325,40 @@ describe("agent-bus delivery", () => {
         1,
       );
       expect(broadcastsFor(child.threadId)).toBe(0);
+    });
+    it("kicks in parallel batches of at most 10", async () => {
+      const pairs = await Promise.all(Array.from({ length: 12 }, () => pair()));
+      await Promise.all(
+        pairs.map(({ organizationId, root, child }, i) =>
+          sendAgentMessage({
+            organizationId,
+            from: root.threadId,
+            to: child.threadId,
+            key: `batch-${i}`,
+            body: "one",
+          }),
+        ),
+      );
+      let inFlight = 0;
+      let maxInFlight = 0;
+      h.tier.mockImplementation(async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight -= 1;
+        return { tier: "core" };
+      });
+      h.kick.mockClear();
+
+      await runAgentBusSweep();
+
+      const ours = new Set(pairs.map(({ child }) => child.threadId));
+      const kicked = (h.kick.mock.calls as [{ threadId: string }][])
+        .map(([arg]) => arg.threadId)
+        .filter((id) => ours.has(id));
+      expect(new Set(kicked).size).toBe(12);
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(maxInFlight).toBeLessThanOrEqual(10);
     });
   });
 });

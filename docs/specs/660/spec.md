@@ -91,8 +91,8 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 Names/types in the SQL file must match drizzle exactly (`schema-drift` CI job). drizzle:
 `bigserial("id", { mode: "number" })`, `bigint("msg_id", { mode: "number" }).primaryKey().references(() => agentMessages.id)` (schema-drift compares conname + pg_get_constraintdef: `packages/migrate/src/drift/catalog.ts:108-118`), `uniqueIndex("agent_messages_idem")`,
-`index("agent_messages_inbox").on(t.toRun, t.id).where(sql\`consumed_at is null\`)`. Append
-`"2026-11-21-agent-messages"`to`EXPECTED_MIGRATION_IDS`(it must sort LAST:`packages/migrate/src/files.test.ts:108`). Migration must pass
+`index("agent_messages_inbox").on(t.toRun, t.id).where(sql`consumed_at is null`)` (template literal). Append
+`"2026-11-21-agent-messages"` to `EXPECTED_MIGRATION_IDS` (it must sort LAST: `packages/migrate/src/files.test.ts:108`). Migration must pass
 `node deploy/lint-migrations.ts`.
 
 ### Module `packages/shared/src/model/agent-bus/messages.ts` (never imports www) — as shipped
