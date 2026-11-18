@@ -9,6 +9,7 @@ import {
   SCHEMA_READY,
   SCHEMA_READY_TABLES,
   acquireItStackLock,
+  ItStackNotHeldError,
   createStackGuard,
   schemaIsReady,
 } from "./hatchet-it-harness";
@@ -211,5 +212,42 @@ describe("createStackGuard — teardown only by the holder (#395)", () => {
     const guard = createStackGuard(acquire);
     await Promise.all([guard.enter(), guard.enter()]);
     expect(acquire).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createStackGuard — a released hold stays released (#395 roborev 1259)", () => {
+  const fakeLock = () => ({
+    release: vi.fn(async () => {}),
+    lost: false,
+    slot: 0,
+  });
+
+  it("assertHeld throws before enter, passes while held, throws again after exit", async () => {
+    const guard = createStackGuard(async () => fakeLock());
+    expect(() => guard.assertHeld()).toThrow(ItStackNotHeldError);
+    await guard.enter();
+    expect(() => guard.assertHeld()).not.toThrow();
+    await guard.exit(async () => {});
+    // A beforeAll that timed out keeps running after its afterAll: it must
+    // not mint a token on the next holder's stack.
+    expect(() => guard.assertHeld()).toThrow(ItStackNotHeldError);
+  });
+
+  it("a grant that lands after exit aborted the hold is released, never leaked", async () => {
+    const lock = fakeLock();
+    let grant: (l: BoxLock) => void = () => {};
+    // An acquire that ignores the abort (the signal-less try path).
+    const guard = createStackGuard(
+      () =>
+        new Promise<BoxLock>((resolve) => {
+          grant = resolve;
+        }),
+    );
+    const entering = guard.enter();
+    const exiting = guard.exit(async () => {});
+    grant(lock);
+    await exiting;
+    await expect(entering).rejects.toBeInstanceOf(ItStackNotHeldError);
+    expect(lock.release).toHaveBeenCalledOnce();
   });
 });

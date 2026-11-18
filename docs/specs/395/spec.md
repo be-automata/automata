@@ -146,3 +146,18 @@ Validation: cycle 1 BLOCK (5 fixes, applied); cycle 2 PASS_WITH_WARNINGS (3 note
   unaffected. Accepted.
 - A `/tmp/automata-hatchet-it/box.lock` left behind is harmless. `flock` holds nothing after
   the holder dies, and the file is only a name.
+
+## Review amendments
+
+- roborev job 1259 (verdict F, assessment Pass with one Medium and one Low finding):
+  - **Medium.** A `beforeAll` that timed out keeps running after its `afterAll` released the
+    hold. Left alone, it could mint a token and start a worker on the next holder's stack.
+    Fix: `StackGuard.assertHeld()` throws `ItStackNotHeldError`. `composeUp` calls it after
+    `up`, and `bootstrapTenant` calls it before minting, so a released hold gets no token and
+    starts no worker.
+  - **Low.** A grant from the signal-less try path can race `exit`'s abort and be leaked.
+    Fix: the guard releases a grant that lands after its hold was aborted.
+  - Both fixes have unit tests in `hatchet-it-harness.test.ts`.
+- Not taken (scope, reported as a follow-up): a per-run vitest `globalSetup` lock, which would
+  keep the wait out of `beforeAll` budgets. `packages/worker` has no vitest config today, and
+  adding one changes the whole worker suite's setup.

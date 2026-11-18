@@ -134,6 +134,23 @@ export interface StackGuard {
    * another process's.
    */
   exit(teardown: () => Promise<void>): Promise<void>;
+  /**
+   * Throw unless this process holds the stack right now. A `beforeAll` that
+   * timed out keeps running after its `afterAll` released the stack; this
+   * stops it from minting a token (and starting a worker) on whichever stack
+   * the next holder brings up on the same fixed ports.
+   */
+  assertHeld(): void;
+}
+
+/** The stack is not (or no longer) this process's — see `StackGuard.assertHeld`. */
+export class ItStackNotHeldError extends Error {
+  constructor() {
+    super(
+      "hatchet IT stack lock is not held by this process (#395): its hold was released — a timed-out setup must not join the next holder's stack",
+    );
+    this.name = "ItStackNotHeldError";
+  }
 }
 
 export function createStackGuard(
@@ -152,6 +169,13 @@ export function createStackGuard(
         const controller = new AbortController();
         const take = async (h: Hold) => {
           const lock = await acquire(controller.signal);
+          if (controller.signal.aborted) {
+            // exit() already dropped this hold (e.g. a grant from the
+            // signal-less try path racing the abort): nobody else would ever
+            // release it, and the next file would park behind its own process.
+            await lock.release();
+            throw new ItStackNotHeldError();
+          }
           h.lock = lock;
         };
         const h: Hold = { controller, acquired: Promise.resolve() };
@@ -177,6 +201,9 @@ export function createStackGuard(
         await h.lock.release();
       }
     },
+    assertHeld() {
+      if (!hold?.lock) throw new ItStackNotHeldError();
+    },
   };
 }
 
@@ -186,6 +213,7 @@ export async function composeUp(): Promise<void> {
   await stack.enter();
   await writeFile(OVERRIDE_FILE, OVERRIDE_YAML, "utf8");
   await compose(["up", "-d", "postgres", "hatchet-lite"]);
+  stack.assertHeld();
 }
 
 export async function composeDownV(): Promise<void> {
@@ -341,6 +369,10 @@ export async function bootstrapTenant(
     500,
   );
   await waitForEngineReady();
+  // #395: no token (so no worker) for a setup whose stack hold was released
+  // while it was still polling — the engine on these ports may be the next
+  // holder's.
+  stack.assertHeld();
   const token = parseMintedToken(
     await compose([
       "exec",
