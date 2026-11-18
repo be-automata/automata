@@ -332,6 +332,15 @@ let runFn: any;
 let rawRunFn: any;
 let createEgressEventBatcher: typeof import("./workflow").createEgressEventBatcher;
 
+/** #503: the expected-drop lines the batcher logged (console.info is spied per case). */
+const POST_REVOKE_DROP_LOG = "egress events dropped post-revoke (expected)";
+let consoleInfo: ReturnType<typeof vi.spyOn>;
+function postRevokeDropLogs(): unknown[][] {
+  return consoleInfo.mock.calls.filter(([msg]) =>
+    String(msg).includes(POST_REVOKE_DROP_LOG),
+  );
+}
+
 /**
  * #380 strict mode: the run fn accepts sealed inputs only. This file's cases
  * test cleanup, ordering and admission — not the seal — so `runFn` seals each
@@ -423,6 +432,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
   // "owner" is the only mode that pulls a credential at all.
   process.env.WORKER_BOX_TRUST = "owner";
   provisionWorkdir.mockClear();
@@ -461,6 +471,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  consoleInfo.mockRestore();
   delete process.env.WORKER_BOX_TRUST;
   delete process.env.WORKER_CREDENTIAL_BROKER;
   // #386: cases reuse run ids; each case starts with no recorded terminal.
@@ -1049,6 +1060,46 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     await batcher.close();
   });
 
+  it("#503: once marked terminal (token revoked), close() drops the buffer with one expected-drop log — no post, no sleep", async () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    batcher.markTerminal();
+    // The flush tick is gone at once: nothing left to wake up and post.
+    expect(vi.getTimerCount()).toBe(0);
+    await batcher.close();
+
+    // postEgressEvents is the only path to fetch and to its 401 retry sleeps.
+    expect(postEgressEvents).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    const drops = postRevokeDropLogs();
+    expect(drops).toHaveLength(1);
+    expect(drops[0]?.[1]).toMatchObject({ count: 1 });
+  });
+
+  it("#503: without the terminal mark, close() still POSTs the buffer", async () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    await batcher.close();
+
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+    expect(postRevokeDropLogs()).toHaveLength(0);
+  });
+
+  it("#503: after the mark, events added later post nothing; one log counts them all", async () => {
+    const batcher = createEgressEventBatcher(OPTS);
+    batcher.add(event(1));
+    batcher.markTerminal();
+    for (let i = 2; i <= 25; i++) {
+      batcher.add(event(i));
+    }
+    await batcher.close();
+
+    expect(postEgressEvents).not.toHaveBeenCalled();
+    const drops = postRevokeDropLogs();
+    expect(drops).toHaveLength(1);
+    expect(drops[0]?.[1]).toMatchObject({ count: 25 });
+  });
+
   it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({
@@ -1505,6 +1556,65 @@ describe("#473: no egress audit batch is dropped at run end", () => {
     ];
     expect(events).toEqual([
       expect.objectContaining({ destinationHost: "api.example.com" }),
+    ]);
+  });
+});
+
+describe("#503: a batch buffered after the terminal read is dropped as expected, not posted with the revoked token", () => {
+  function setUpRun(outcome: "completed" | "cancelled"): void {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal
+      .mockReset()
+      .mockImplementation(
+        async (pollCtx: { beforeStatusRead?: () => Promise<void> }) => {
+          await pollCtx.beforeStatusRead?.();
+          // The proxy event lands AFTER the final pre-read flush began: only
+          // teardown's close() would ever send it.
+          const [proxyOpts] = startEgressProxy.mock.calls[0] as [
+            { onEvent: (e: unknown) => void },
+          ];
+          proxyOpts.onEvent({
+            destinationHost: "late.example.com",
+            destinationPort: 443,
+            action: "allow",
+            policyLevel: "domain",
+            mode: "enforce",
+          });
+          return { outcome, finalStatus: "complete" };
+        },
+      );
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+  }
+
+  it("completed: teardown posts nothing and logs one expected drop with its count", async () => {
+    setUpRun("completed");
+    await runFn(EGRESS_INPUT, ctx());
+    expect(postEgressEvents).not.toHaveBeenCalled();
+    const drops = postRevokeDropLogs();
+    expect(drops).toHaveLength(1);
+    expect(drops[0]?.[1]).toMatchObject({ count: 1 });
+  });
+
+  it("cancelled: the token is still live, so teardown still posts the batch", async () => {
+    setUpRun("cancelled");
+    await runFn(EGRESS_INPUT, ctx()).catch(() => {});
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+    const [, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(events).toEqual([
+      expect.objectContaining({ destinationHost: "late.example.com" }),
     ]);
   });
 });
