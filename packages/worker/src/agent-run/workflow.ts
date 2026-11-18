@@ -294,11 +294,11 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   close: () => Promise<void>;
 } {
   let buffer: EgressEventWire[] = [];
-  // null = token live; a number = revoked, counting the events dropped since.
-  let droppedPostRevoke: number | null = null;
+  let revoked = false;
+  let droppedPostRevoke = 0;
   const inFlight = new Set<Promise<void>>();
   const flush = async (signal?: AbortSignal): Promise<void> => {
-    if (buffer.length > 0 && droppedPostRevoke === null) {
+    if (buffer.length > 0) {
       const events = buffer;
       buffer = [];
       const post = postEgressEvents(wwwOpts, events);
@@ -329,7 +329,7 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   timer.unref?.();
   return {
     add(event) {
-      if (droppedPostRevoke !== null) {
+      if (revoked) {
         droppedPostRevoke++;
         return;
       }
@@ -351,15 +351,15 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
     },
     flush,
     markTerminal() {
-      if (droppedPostRevoke === null) {
-        droppedPostRevoke = buffer.length;
-        buffer = [];
-      }
+      revoked = true;
+      clearInterval(timer);
+      droppedPostRevoke += buffer.length;
+      buffer = [];
     },
     async close() {
       clearInterval(timer);
       await flush();
-      if (droppedPostRevoke !== null && droppedPostRevoke > 0) {
+      if (droppedPostRevoke > 0) {
         console.info(
           "[agent-run] egress events dropped post-revoke (expected)",
           { threadId: wwwOpts.threadId, count: droppedPostRevoke },
