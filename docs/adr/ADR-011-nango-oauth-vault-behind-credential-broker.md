@@ -268,17 +268,47 @@ Ran against a throwaway self-hosted `nangohq/nango-server:hosted-0.71.13` (serve
 
 Ran against Nango Cloud (`api.nango.dev`) with a dev-environment key and a throwaway `slack` integration using fake credentials. Every object the spike created was deleted afterwards, and the environment returned to its starting state (1 integration, 1 connection, neither touched).
 
-| Check                                       | Result                                                                                                                                                                                                                                                                 |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Import a bot token with `team.id` (check 2) | 201. The import response **echoes the token**, so `environment:connections:create` also reads credentials back.                                                                                                                                                        |
-| `raw.authed_user` import (check 2)          | 400 `unrecognized_keys: "raw"`, same as self-hosted.                                                                                                                                                                                                                   |
-| Exit, Cloud to self-hosted (check 1)        | **Proven.** `GET /connection` on Cloud, reshaped into the `POST /connections` body and imported into a self-hosted 0.71.13 instance, gave a byte-identical token (sha256 match) with `connection_config` intact.                                                       |
-| Refresh failure (check 4, I4)               | Same as self-hosted: `invalid_credentials` on refresh failure, then an immediate "Backing off" answer.                                                                                                                                                                 |
-| **Proxy `Base-Url-Override`**               | **Also leaks on Cloud.** httpbin received `Authorization: Bearer <the connection's token>`.                                                                                                                                                                            |
-| `GET /connection` latency (check 4)         | From the operator's laptop: p50 525 ms, p95 740 ms, max 7.8 s. Not yet measured from a Worker. The broker caches tokens until `expiresAt`, so this is paid once per token lifetime, not per request.                                                                   |
-| Rate limit                                  | `x-ratelimit-limit: 200` per window on this plan. Caching keeps the broker far below that.                                                                                                                                                                             |
-| Key scope (check 3)                         | **Still open.** It needs a custom key with exactly the four Decision §2 scopes, created in the dashboard or with an account key; the spike had only a full-access environment key. Pass: list and `list_credentials` return 403, and the four held operations succeed. |
-| Real Slack workspace (check 2)              | **Still open.** Needs a test workspace.                                                                                                                                                                                                                                |
+| Check                                       | Result                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Import a bot token with `team.id` (check 2) | 201. The import response **echoes the token**, so `environment:connections:create` also reads credentials back.                                                                                                                                                                                                                                                                                              |
+| `raw.authed_user` import (check 2)          | 400 `unrecognized_keys: "raw"`, same as self-hosted.                                                                                                                                                                                                                                                                                                                                                         |
+| Exit, Cloud to self-hosted (check 1)        | **Proven.** `GET /connection` on Cloud, reshaped into the `POST /connections` body and imported into a self-hosted 0.71.13 instance, gave a byte-identical token (sha256 match) with `connection_config` intact.                                                                                                                                                                                             |
+| Refresh failure (check 4, I4)               | Same as self-hosted: `invalid_credentials` on refresh failure, then an immediate "Backing off" answer.                                                                                                                                                                                                                                                                                                       |
+| **Proxy `Base-Url-Override`**               | **Also leaks on Cloud.** httpbin received `Authorization: Bearer <the connection's token>`.                                                                                                                                                                                                                                                                                                                  |
+| `GET /connection` latency (check 4)         | **Measured from a Worker (2026-11-18, colo GRU, N=50 × 3 runs, all 200):** p50 227–248 ms, p95 637–771 ms, max 809–1,607 ms; cold and warm runs did not differ. Detail and the revoked-grant result are in the next table. From the operator's laptop (2026-10-18): p50 525 ms, p95 740 ms, max 7.8 s. The broker caches tokens until `expiresAt`, so this is paid once per token lifetime, not per request. |
+| Rate limit                                  | `x-ratelimit-limit: 200` per window on this plan. Caching keeps the broker far below that.                                                                                                                                                                                                                                                                                                                   |
+| Key scope (check 3)                         | **Still open, needs the operator** (re-checked 2026-11-18, #657). It needs a custom key with exactly the four Decision §2 scopes, created in the Nango dashboard; an environment key cannot create it, and the only key available is a full-access environment key. Pass: list and `list_credentials` return 403, and the four held operations succeed.                                                      |
+| Real Slack workspace (check 2)              | **Still open.** Needs a test workspace.                                                                                                                                                                                                                                                                                                                                                                      |
+
+#### Check 4 from a Worker (2026-11-18, #657)
+
+A throwaway Worker (`nango-latency-probe-657`, `workers_dev` only, no routes) called
+`GET /connection/{id}?provider_config_key=…` 50 times in sequence per request, against a throwaway
+`slack` integration with an imported fake bot token. It returned only timings and status counts,
+never a body. The Nango key was the full-access dev-environment key (the scoped key of check 3 does
+not exist yet); key scope is not expected to change latency. The Worker, both connections and the
+integration were deleted afterwards, and the environment returned to its starting state (4
+integrations, 4 connections, none touched).
+
+| Run (02:35 UTC)                      | p50    | p95    | max      | Statuses |
+| ------------------------------------ | ------ | ------ | -------- | -------- |
+| 1, cold (first request after deploy) | 236 ms | 771 ms | 913 ms   | 50 × 200 |
+| 2, warm                              | 227 ms | 637 ms | 809 ms   | 50 × 200 |
+| 3, warm                              | 248 ms | 771 ms | 1,607 ms | 50 × 200 |
+
+- **Shape.** The fastest calls took 211–217 ms. The first call of each request took 781–913 ms
+  (a new connection to `api.nango.dev`), and the rest clustered near the p50. A cold isolate added
+  nothing measurable over a warm one.
+- **Colo.** `request.cf.colo` was GRU (São Paulo) for every run, so the numbers include a
+  South America to Nango (US, AWS) round trip. A Worker served from a US colo should be faster.
+- **Revoked grant (I4).** A second connection was imported with an expired access token and a
+  bogus refresh token, so Nango attempted a refresh against Slack and failed. The first read
+  returned **400 `invalid_credentials`** after 1,056 ms (the failed refresh). Each of the next 14
+  reads returned **424 `invalid_credentials`** with "A recent refresh attempt failed. Backing off",
+  in 211–753 ms. None timed out (30 s client timeout). The backing-off answer is as fast as a
+  healthy read, not faster: Nango skips the upstream refresh but the round trip remains.
+  Consequence for I4: the broker fails closed on **any** non-2xx, not only on 424, because the
+  first failure is a 400.
 
 **Consequence of the proxy rows (binding on Decision §2):** a key with the `proxy` scope can send any connection's token to any host, so in practice `proxy` is as strong as `read_credentials`. When the control plane uses Nango's proxy, it builds every Nango header itself. It never forwards a header, path or base URL that came from an agent, a webhook or user input, and it never sends `Base-Url-Override`. _Guard:_ a unit test that the control-plane Nango client drops any `Base-Url-Override` it is handed, and that its proxy path is a constant per call site.
 
@@ -501,8 +531,8 @@ conditions on the work that needs them:
 | -------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------- |
 | 1 Exit                           | Met for a static Slack bot token. Repeat with a refreshable connection on our own OAuth client (D-2) | #647, before production Drive use |
 | 2 Slack dry-run                  | Open                                                                                                 | the Slack migration onto Nango    |
-| 3 Key scope                      | Open                                                                                                 | **acceptance**                    |
-| 4 Latency from a Worker          | Open (424 behaviour met)                                                                             | **acceptance**                    |
+| 3 Key scope                      | Open, needs the operator: the four-scope custom key must be created in the Nango dashboard (#657)    | **acceptance**                    |
+| 4 Latency from a Worker          | Measured 2026-11-18 from a Worker (GRU): p50 227–248 ms, p95 637–771 ms; revoked grant fails closed  | **acceptance**                    |
 | 5 Production Slack installations | Open                                                                                                 | the Slack migration onto Nango    |
 | Drive (new)                      | Read and resumable upload proven 2026-11-13 through Nango Cloud                                      | —                                 |
 
