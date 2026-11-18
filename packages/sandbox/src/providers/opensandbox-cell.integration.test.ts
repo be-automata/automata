@@ -892,7 +892,10 @@ describe(
           // the bound path behind a query
           { target: "/anything?/daemon-event", echo: true },
         ];
-        const raw = (target: string, hostHeader?: string): ProbeSpec => ({
+        const raw = (
+          target: string,
+          hostHeader?: string,
+        ): Extract<ProbeSpec, { kind: "https_raw" }> => ({
           kind: "https_raw",
           host: ALLOWED,
           target,
@@ -901,11 +904,21 @@ describe(
           markers,
         });
         const authority: ProbeSpec[] = [
-          // absolute-form target naming another authority than Host
-          raw(`https://example.org${P}`),
-          // Host different from SNI
+          // Host different from SNI: refused.
           raw(P, "example.org"),
         ];
+        // An absolute-form target naming another authority than Host, over TLS
+        // to the allowed host. Measured live 2026-11-18 (#700): OpenSandbox 1.2.1
+        // does NOT refuse the mismatch and injects the token, but the request
+        // still goes to the bound host on the bound path (recorded, like the
+        // same-route cases). The assertion proves the token never left: the
+        // canary comes back only from the bound host's echo, and example.org's
+        // page text ("Example Domain") never appears. Upstream proposal to
+        // refuse the mismatch: see the PR body.
+        const foreignAbsolute: ProbeSpec = {
+          ...raw(`https://example.org${P}`),
+          markers: [...markers, "Example Domain"],
+        };
         // Same route as the bound path: injected by design (recorded only).
         const sameRoute: ProbeSpec[] = [
           raw(`${P}?x=1`),
@@ -916,6 +929,7 @@ describe(
           ...confused.map((c) => raw(c.target)),
           ...authority,
           ...sameRoute,
+          foreignAbsolute,
         ]);
         const row = (x: ProbeResult | undefined) => ({
           ...brief(x),
@@ -929,7 +943,9 @@ describe(
         );
         const sameRouteResults = r.slice(
           1 + confused.length + authority.length,
+          1 + confused.length + authority.length + sameRoute.length,
         );
+        const foreignAbsoluteResult = r[r.length - 1];
         NOTES.daemon_confusion_control = row(control);
         NOTES.daemon_confusion = confused.map((c, i) => ({
           target: c.target,
@@ -937,6 +953,7 @@ describe(
         }));
         NOTES.daemon_confusion_authority = authorityResults.map(row);
         NOTES.daemon_confusion_same_route = sameRouteResults.map(row);
+        NOTES.daemon_confusion_foreign_absolute = row(foreignAbsoluteResult);
 
         // Control: the raw probe does get the token on the literal path.
         const [cc, cp] = control?.markersFound ?? [];
@@ -961,6 +978,15 @@ describe(
             `authority ${i} ${JSON.stringify(row(x))}`,
           ).toBe(true);
         });
+        // Injected, but only to the bound host: its echo returned the canary,
+        // and nothing came from example.org.
+        const [fc, , foreignPage] = foreignAbsoluteResult?.markersFound ?? [];
+        expect(
+          foreignAbsoluteResult?.status === 200 &&
+            fc === true &&
+            foreignPage === false,
+          `foreign absolute ${JSON.stringify(row(foreignAbsoluteResult))}`,
+        ).toBe(true);
       } finally {
         await destroy(id);
       }
