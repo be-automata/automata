@@ -1049,6 +1049,72 @@ describe("createEgressEventBatcher — audit batch add/flush/close", () => {
     await batcher.close();
   });
 
+  it("#503: once marked terminal (token revoked), close() drops the buffer with one expected-drop log — no fetch, no sleep", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const batcher = createEgressEventBatcher(OPTS);
+      batcher.add(event(1));
+      batcher.markTerminal();
+      await batcher.close();
+
+      expect(postEgressEvents).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // No retry sleep and no flush tick left behind.
+      expect(vi.getTimerCount()).toBe(0);
+      const drops = info.mock.calls.filter(([msg]) =>
+        String(msg).includes("egress events dropped post-revoke (expected)"),
+      );
+      expect(drops).toHaveLength(1);
+      expect(drops[0]?.[1]).toMatchObject({ count: 1 });
+    } finally {
+      info.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("#503: without the terminal mark, close() still POSTs the buffer", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const batcher = createEgressEventBatcher(OPTS);
+      batcher.add(event(1));
+      await batcher.close();
+
+      expect(postEgressEvents).toHaveBeenCalledTimes(1);
+      expect(
+        info.mock.calls.some(([msg]) =>
+          String(msg).includes("dropped post-revoke"),
+        ),
+      ).toBe(false);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("#503: after the mark, events added later and timer ticks post nothing; one log counts them all", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const batcher = createEgressEventBatcher(OPTS);
+      batcher.add(event(1));
+      batcher.markTerminal();
+      for (let i = 2; i <= 25; i++) {
+        batcher.add(event(i));
+      }
+      vi.advanceTimersByTime(4_000);
+      await batcher.close();
+
+      expect(postEgressEvents).not.toHaveBeenCalled();
+      const drops = info.mock.calls.filter(([msg]) =>
+        String(msg).includes("dropped post-revoke"),
+      );
+      expect(drops).toHaveLength(1);
+      expect(drops[0]?.[1]).toMatchObject({ count: 25 });
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("null destinationPort (unknown) travels as an ABSENT destinationPort", async () => {
     const batcher = createEgressEventBatcher(OPTS);
     batcher.add({
@@ -1505,6 +1571,72 @@ describe("#473: no egress audit batch is dropped at run end", () => {
     ];
     expect(events).toEqual([
       expect.objectContaining({ destinationHost: "api.example.com" }),
+    ]);
+  });
+});
+
+describe("#503: a batch buffered after the terminal read is dropped as expected, not posted with the revoked token", () => {
+  function setUpRun(outcome: "completed" | "cancelled"): void {
+    process.env.WORKER_BOX_TRUST = "shared";
+    process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
+    materialiseAgentCredentials.mockResolvedValue({
+      delivered: false,
+      env: {},
+      cleanup: vi.fn(async () => {}),
+    });
+    pullNextMessage.mockReset().mockResolvedValue({
+      agent: "claudeCode",
+      model: "m",
+    });
+    pollUntilTerminal
+      .mockReset()
+      .mockImplementation(
+        async (pollCtx: { beforeStatusRead?: () => Promise<void> }) => {
+          await pollCtx.beforeStatusRead?.();
+          // The proxy event lands AFTER the final pre-read flush began: only
+          // teardown's close() would ever send it.
+          const [proxyOpts] = startEgressProxy.mock.calls[0] as [
+            { onEvent: (e: unknown) => void },
+          ];
+          proxyOpts.onEvent({
+            destinationHost: "late.example.com",
+            destinationPort: 443,
+            action: "allow",
+            policyLevel: "domain",
+            mode: "enforce",
+          });
+          return { outcome, finalStatus: "complete" };
+        },
+      );
+    postRunTerminal.mockReset().mockResolvedValue("applied");
+  }
+
+  it("completed: teardown posts nothing and logs one expected drop with its count", async () => {
+    setUpRun("completed");
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await runFn(EGRESS_INPUT, ctx());
+      expect(postEgressEvents).not.toHaveBeenCalled();
+      const drops = info.mock.calls.filter(([msg]) =>
+        String(msg).includes("egress events dropped post-revoke (expected)"),
+      );
+      expect(drops).toHaveLength(1);
+      expect(drops[0]?.[1]).toMatchObject({ count: 1 });
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("cancelled: the token is still live, so teardown still posts the batch", async () => {
+    setUpRun("cancelled");
+    await runFn(EGRESS_INPUT, ctx()).catch(() => {});
+    expect(postEgressEvents).toHaveBeenCalledTimes(1);
+    const [, events] = postEgressEvents.mock.calls[0] as [
+      unknown,
+      Array<Record<string, unknown>>,
+    ];
+    expect(events).toEqual([
+      expect.objectContaining({ destinationHost: "late.example.com" }),
     ]);
   });
 });

@@ -279,16 +279,26 @@ const EGRESS_BATCH_FLUSH_MS = 2_000;
  * the daemon token (pollUntilTerminal's beforeStatusRead). Given a signal, it
  * stops waiting when that aborts; the posts themselves carry on, and close()
  * still awaits them.
+ *
+ * #503: markTerminal() records that www served terminal=true, which revoked
+ * the daemon token. From then on nothing is POSTed (a post would only spend
+ * three 401s and two 2 s sleeps, then lose the rows anyway): the leftover
+ * buffer and any later event are counted, and close() logs the count once as
+ * an expected drop. Only a `completed` run marks it; a cancelled or failed run
+ * keeps the live token (onFailure still needs it), so its batch still posts.
  */
 export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   add: (event: EgressDecisionEvent) => void;
   flush: (signal?: AbortSignal) => Promise<void>;
+  markTerminal: () => void;
   close: () => Promise<void>;
 } {
   let buffer: EgressEventWire[] = [];
+  // null = token live; a number = revoked, counting the events dropped since.
+  let droppedPostRevoke: number | null = null;
   const inFlight = new Set<Promise<void>>();
   const flush = async (signal?: AbortSignal): Promise<void> => {
-    if (buffer.length > 0) {
+    if (buffer.length > 0 && droppedPostRevoke === null) {
       const events = buffer;
       buffer = [];
       const post = postEgressEvents(wwwOpts, events);
@@ -319,6 +329,10 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
   timer.unref?.();
   return {
     add(event) {
+      if (droppedPostRevoke !== null) {
+        droppedPostRevoke++;
+        return;
+      }
       buffer.push({
         destinationHost: event.destinationHost,
         // null = port unknown (unparseable target); the route's schema takes
@@ -336,9 +350,22 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
       }
     },
     flush,
+    markTerminal() {
+      if (droppedPostRevoke === null) {
+        droppedPostRevoke = buffer.length;
+        buffer = [];
+      }
+    },
     async close() {
       clearInterval(timer);
       await flush();
+      if (droppedPostRevoke !== null && droppedPostRevoke > 0) {
+        console.info(
+          "[agent-run] egress events dropped post-revoke (expected)",
+          { threadId: wwwOpts.threadId, count: droppedPostRevoke },
+        );
+        droppedPostRevoke = 0;
+      }
     },
   };
 }
@@ -1807,6 +1834,12 @@ async function runAgentInner(
       wwwOpts,
       config.pollIntervalMs,
     );
+    // #503: that terminal read revoked the daemon token, so whatever the
+    // batcher holds now can no longer be delivered: teardown logs it as an
+    // expected drop instead of retrying a 401. A cancel keeps the live token.
+    if (result.outcome === "completed") {
+      egressEvents?.markTerminal();
+    }
     if (input.selfHeal?.kind === "fix" && result.outcome === "completed") {
       fixReported = true;
       await runSelfHealFixStep({
