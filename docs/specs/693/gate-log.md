@@ -28,7 +28,49 @@ What this means for the daemon binding:
 
 ## Gates
 
-GATES_PLACEHOLDER
+All gates ran at the worktree root on the final tree (`e72cdc33` plus this log). `origin/main` was still `96c28905` at merge time, so `git merge --no-ff origin/main` was a no-op.
+
+| Gate                                                                    | Exit | Result                                                                             |
+| :---------------------------------------------------------------------- | :--- | :--------------------------------------------------------------------------------- |
+| `CI=true pnpm install --frozen-lockfile --prefer-offline`               | 0    |                                                                                    |
+| `pnpm --filter @terragon/docs exec fumadocs-mdx`                        | 0    |                                                                                    |
+| `pnpm turbo tsc-check`                                                  | 0    | 21/21                                                                              |
+| `pnpm turbo lint`                                                       | 0    | No ESLint warnings or errors                                                       |
+| `pnpm turbo format-check`                                               | 0    | 18/18. Formatted with `prettier --config .prettierrc --no-editorconfig`            |
+| `pnpm --filter @terragon/www exec vitest run --no-file-parallelism`     | 0    | 4670 passed, 9 skipped (341 files). Re-run after `/simplify`, with the same counts |
+| `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism`  | 0    | 1786 passed (101 files)                                                            |
+| `pnpm --filter @terragon/sandbox exec vitest run --no-file-parallelism` | 0    | 594 passed, 146 skipped. Re-run after `/simplify`                                  |
+| gstack `/verify` (`gstack-checks run`)                                  | 0    | `READY_FOR_SHIP checks=tests`                                                      |
+| worker suites                                                           | n/a  | Not run: `packages/worker` is untouched                                            |
+
+The new tests do fail when the guard is missing. With the event-scoped check in `verifyDaemonApiKey` disabled, `cell-event-token.integration.test.ts` had 19 of 25 failing (every route row, the cell-plan refusal and the metadata check). With the guard back, all pass.
+
+The `https_raw` probe was smoke-run from the host, with no sidecar, against httpbin.org:
+
+- `/anything/x/../daemon-event`: 200, placeholder echoed;
+- `/ANYTHING/...`: 404;
+- absolute-form: 200;
+- `Host: example.org`: 200, because httpbin ignores the mismatch. The sidecar is expected to answer 403.
+
+Review:
+
+- **Validate:** BLOCK, then folded (see the spec).
+- **`/simplify`:** two agents covering reuse, simplification, efficiency and altitude. Fixed:
+
+  - one shared `cappedExpiresAt` for the UTC expiry cap;
+  - one shared `retry_markers` in the guest probe;
+  - a wrong name in a comment;
+  - the supersede moved off the response path (`waitUntil`);
+  - the teardown revokes made parallel;
+  - a hoisted `cellTokens`.
+
+  Skipped, with the reason:
+
+  - the token-class enum refactor of `verifyDaemonApiKey` (wider than this ticket);
+  - dropping the name fallback in `isEventScopedKey` (deliberate fail-closed);
+  - folding the cell revoke into `retireDaemonTokenById` (changes shared lifecycle code);
+  - an `apikey (reference_id, name)` index (needs a migration; follow-up);
+  - passing the org into the mint to skip one read (once per attempt).
 
 ## Deferred
 
