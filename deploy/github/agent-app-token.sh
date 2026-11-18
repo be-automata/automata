@@ -97,6 +97,8 @@ else
 fi
 unset compact
 [[ $key == -----BEGIN*PRIVATE\ KEY-----* ]] || die 1 "the stored value does not decode to a PEM private key"
+[[ $key == *-----END*PRIVATE\ KEY-----* ]] ||
+  die 1 "the stored key has no END line: the keychain item is truncated (runbook section 2)"
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 

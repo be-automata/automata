@@ -282,6 +282,18 @@ describe("agent-app-token.sh", () => {
     assert.ok(!result.stderr.includes("PRIVATE KEY"));
   });
 
+  test("exits 1 on a truncated key, naming the cause", () => {
+    const cut = join(dir, "cut.b64");
+    writeFileSync(cut, Buffer.from(pem).toString("base64").slice(0, 128));
+    const result = run(["--jwt"], {
+      AUTOMATA_AGENT_APP_ID: "1",
+      AUTOMATA_AGENT_APP_KEY_FILE: cut,
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /truncated/);
+  });
+
   test("exits 1 when the stored value is not a private key", () => {
     const junk = join(dir, "junk.b64");
     writeFileSync(junk, Buffer.from("not a key").toString("base64"));

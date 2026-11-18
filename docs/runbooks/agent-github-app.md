@@ -52,15 +52,22 @@ Run this in your own terminal, not in an agent session. The key is stored base64
 because `security -w` prints a multi-line value as hex.
 
 ```bash
-base64 -i ~/Downloads/automata-agent.*.private-key.pem | tr -d '\n' | pbcopy
-security add-generic-password -U -s automata-agent-app-key -a automata -w
-# paste at the prompt (it asks twice), then clear the clipboard and delete the file:
-pbcopy </dev/null
-rm -P ~/Downloads/automata-agent.*.private-key.pem
+pem=$(ls ~/Downloads/automata-agent.*.private-key.pem)
+key_b64=$(base64 -i "$pem" | tr -d '\n')
+printf 'add-generic-password -U -s automata-agent-app-key -a automata -w %s\n' "$key_b64" | security -i
+# check the whole value landed (the two numbers must be equal), then delete the file:
+printf '%s' "$key_b64" | wc -c
+security find-generic-password -s automata-agent-app-key -a automata -w | tr -d '\n' | wc -c
+unset key_b64
+rm -P "$pem"
 ```
 
-With `-w` last, `security` prompts for the value, so the key never appears in the process list or
-the shell history. The ids are not secret:
+`printf` is a shell builtin and `security -i` reads its command from stdin, so the key never appears
+in the process list or the shell history. Do not paste it at the `-w` prompt instead: the password
+prompt may keep only the first 128 characters, and the base64 key is several KB. If the two counts
+differ, the item is truncated: delete it (`security delete-generic-password -s automata-agent-app-key
+-a automata`) and store it again; `agent-app-token.sh` also refuses a key with no `END` line.
+The ids are not secret:
 
 ```bash
 mkdir -p ~/.config/automata-agent
