@@ -17,6 +17,7 @@ import {
 import { and, eq } from "drizzle-orm";
 import {
   finishStep,
+  leaseRefusal,
   openNextAttempt,
   stampSeen,
 } from "@terragon/shared/model/cell-authority";
@@ -49,6 +50,7 @@ vi.mock("@terragon/shared/model/cell-authority", async (importOriginal) => {
     ...actual,
     finishStep: vi.fn(actual.finishStep),
     stampSeen: vi.fn(actual.stampSeen),
+    leaseRefusal: vi.fn(actual.leaseRefusal),
   };
 });
 vi.mock("@/server-lib/knowledge/ops-alert", () => ({
@@ -315,7 +317,7 @@ describe("POST /api/daemon/thread-status", () => {
       const fenced = await POST(
         req({ threadId, threadChatId, cellAttempt: 1 }),
       );
-      expect((await fenced.json()).lease).toBe("refused");
+      expect((await fenced.json()).lease).toBe("superseded");
       expect((await stepRow())!.lastSeenAt!.getTime()).toBe(before);
 
       const current = await POST(
@@ -323,6 +325,44 @@ describe("POST /api/daemon/thread-status", () => {
       );
       expect((await current.json()).lease).toBe("renewed");
       expect((await stepRow())!.lastSeenAt!.getTime()).toBeGreaterThan(before);
+    });
+
+    it("T-LEASE-SUPERSEDED: a newer attempt is superseded; revoked and done are refused; a live stamp is renewed without a classifier read", async () => {
+      await setWorking();
+      await open("nonce-aaaaaaaaaaaaaaaa");
+      await open("nonce-bbbbbbbbbbbbbbbb");
+      const read = async (cellAttempt: number) =>
+        (
+          await (
+            await POST(req({ threadId, threadChatId, cellAttempt }))
+          ).json()
+        ).lease;
+      expect(await read(1)).toBe("superseded");
+      expect(leaseRefusal).toHaveBeenCalledTimes(1);
+      // The current attempt renews, and costs no classifier read.
+      vi.mocked(leaseRefusal).mockClear();
+      expect(await read(2)).toBe("renewed");
+      expect(leaseRefusal).not.toHaveBeenCalled();
+      // Revoked through the current attempt with no newer one: refused.
+      await db
+        .update(cellStep)
+        .set({ revokedThrough: 2 })
+        .where(eq(cellStep.stepKey, cellStepKey(apiKeyId)));
+      expect(await read(2)).toBe("refused");
+    });
+
+    it("a classifier throw answers lease error, 200, status still served", async () => {
+      await setWorking();
+      await open("nonce-aaaaaaaaaaaaaaaa");
+      await open("nonce-bbbbbbbbbbbbbbbb");
+      vi.mocked(leaseRefusal).mockRejectedValueOnce(new Error("db down"));
+      const res = await POST(req({ threadId, threadChatId, cellAttempt: 1 }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        status: "working",
+        terminal: false,
+        lease: "error",
+      });
     });
 
     it("stampSeen throwing still serves the status with lease error", async () => {

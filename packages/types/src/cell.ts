@@ -202,6 +202,18 @@ export interface CellListOptions {
  */
 export type CellList = CellListEntry[] & { readonly truncated?: boolean };
 
+/**
+ * `copyIn` options. `mode` is an OCTAL-DIGIT integer (`600`, `644`, `755`),
+ * which is how upstream execd's upload reads it (the decimal digits are parsed
+ * as octal), so 0600 is `600`, never `384`. `owner` and `group` are sent
+ * explicitly, so a file never depends on execd's own process identity.
+ */
+export interface CellCopyInOptions {
+  mode: number;
+  owner: string;
+  group: string;
+}
+
 export interface ICellProvider {
   create(plan: CellCreatePlan): Promise<{ cellId: string }>;
   exec(
@@ -210,6 +222,19 @@ export interface ICellProvider {
     opts?: CellExecOptions,
   ): Promise<CellExecResult>;
   copyOut(cellId: string, path: string): Promise<Uint8Array>;
+  /**
+   * Writes `bytes` to the absolute `path` in the cell through upstream execd's
+   * `POST /files/upload` (the bytes ride in the request body, so execd's
+   * request log never records them). Capped at 16 MiB. The file exists with
+   * the default mode between the write and execd's chmod: stage sensitive
+   * bytes only inside a 0700 directory.
+   */
+  copyIn(
+    cellId: string,
+    path: string,
+    bytes: Uint8Array,
+    opts: CellCopyInOptions,
+  ): Promise<void>;
   /** Provider-side vault clear. */
   revoke(cellId: string): Promise<void>;
   /** Deny-all and drop established connections. */

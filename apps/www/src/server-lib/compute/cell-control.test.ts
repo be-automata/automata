@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DB } from "@terragon/shared/db";
-import { cellKeyId } from "@terragon/types/cell";
+import { CELL_LEASE_STALE_MS, cellKeyId } from "@terragon/types/cell";
 
 const h = vi.hoisted(() => ({
   order: [] as string[],
@@ -153,7 +153,7 @@ describe("runCellReconciler isDead wiring (AC-5)", () => {
     );
   });
 
-  it("reaps an unexpired cell that deadCellAttempts names, with the lease rule off", async () => {
+  it("reaps an unexpired cell that deadCellAttempts names, with the lease rule on (T-STALE-ON)", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     h.deadCellAttempts.mockResolvedValue(
       new Set([cellKeyId({ stepKey: "cell-dead", attempt: 1 })]),
@@ -173,8 +173,10 @@ describe("runCellReconciler isDead wiring (AC-5)", () => {
         { stepKey: "cell-dead", attempt: 1 },
         { stepKey: "cell-live", attempt: 1 },
       ],
-      staleMs: null,
+      // The lease rule is on: 5 minutes, never null (edited from null in PR-E).
+      staleMs: CELL_LEASE_STALE_MS,
     });
+    expect(CELL_LEASE_STALE_MS).toBe(5 * 60 * 1000);
     expect(h.order).toEqual(["revoke:cell-dead", "teardown:dead"]);
     expect(r).toMatchObject({ dead: 1, reaped: 1 });
     // negative control: the unnamed one is kept

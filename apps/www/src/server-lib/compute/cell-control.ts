@@ -10,7 +10,7 @@ import {
   CellProviderError,
   createOpenSandboxCellProvider,
 } from "@terragon/sandbox/opensandbox-cell";
-import type { ICellProvider } from "@terragon/types/cell";
+import { CELL_LEASE_STALE_MS, type ICellProvider } from "@terragon/types/cell";
 
 import { cellBrokerHost, resolveOpenSandboxEnv } from "./cell-gate";
 
@@ -22,11 +22,13 @@ import { cellBrokerHost, resolveOpenSandboxEnv } from "./cell-gate";
  */
 
 /**
- * `null` until PR-D's and PR-E's stamps ship in the same deploy; then
- * `CELL_LEASE_STALE_MS` (PR-A constraint). With `null` the lease rule is off:
- * only revoked, fenced or done attempts count as dead.
+ * The lease rule is ON (#656 PR-E): an attempt unseen for `CELL_LEASE_STALE_MS`
+ * (5 min) is dead, besides revoked, fenced and done ones. It is safe now that
+ * PR-E's worker stamps the lease (the setup heartbeat every 60 s, then the poll
+ * every 7 s) and PR-D retires a finished attempt's token. Deploy www first: no
+ * cell exists before a PR-E worker runs one, so either order is safe.
  */
-const CELL_RECONCILE_STALE_MS: number | null = null;
+const CELL_RECONCILE_STALE_MS: number | null = CELL_LEASE_STALE_MS;
 
 const ACCESS_HEADER_ID = "CF-Access-Client-Id";
 const ACCESS_HEADER_SECRET = "CF-Access-Client-Secret";

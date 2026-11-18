@@ -1274,6 +1274,32 @@ The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
   `automata-worker-safe-restart`. The worker picks up the drop-in's credential only on that
   restart (the installer never restarts it).
 
+What the worker does with them (#656 PR-E):
+
+- **`cells_unconfigured`.** The cell marker follows www's per-user `opensandboxCells` flag,
+  not the worker's box. With the flag on, a marked run on a worker whose three names are unset
+  or invalid (a partial set, a key file that is not exactly one `OPENSANDBOX_API_KEY=<hex>`
+  line, a non-loopback `http:` URL, a tag-only image) fails closed with `cells_unconfigured`
+  before any www or provider call. It **never falls back to the box**. With the flag off there
+  is no marker and the run takes the box path unchanged. The key file is read per marked run,
+  so a rotated key needs no restart, and the boot line reports only which names are present
+  (`cells: off` or `cells: env present (...)`).
+- **Rollout (R7).** Turn `opensandboxCells` on only for users whose org runs on a box with the
+  OpenSandbox server installed and the three names set. A flagged user whose run lands on any
+  other box fails `cells_unconfigured` on every run.
+- **One box per deployment.** Cells are supported on one box per deployment only. On one box
+  the attempts of a run never overlap (systemd stops the old worker before the new one starts,
+  and a redelivery waits in-process). Across two boxes attempt _n_ and _n+1_ can overlap, and
+  only www's `superseded` lease fence and the cell TTL (45 min) cover it. Do not run cells on
+  two boxes of one deployment.
+- **Poll interval.** A marked run refuses with `cell_poll_interval_too_long` when
+  `WORKER_POLL_INTERVAL_MS` is over 75 s (a quarter of the 5-min lease window).
+- **Deploy order: www first, then the worker.** www's `lease: "superseded"` answer and the
+  reconciler's lease rule (`CELL_RECONCILE_STALE_MS` = 5 min) are safe alone: no cell exists
+  until a PR-E worker runs one. A worker against a www without `superseded` would read a real
+  fence as a revocation and fail loudly. The first cell run is also the first retired token
+  (PR-D).
+
 ### Findings every operator must know
 
 - **Metadata values** must match `[A-Za-z0-9._-]`, at most 63 characters, alphanumeric at both

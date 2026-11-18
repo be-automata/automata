@@ -3,7 +3,11 @@ import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { getThreadChat } from "@terragon/shared/model/threads";
-import { finishStep, stampSeen } from "@terragon/shared/model/cell-authority";
+import {
+  finishStep,
+  leaseRefusal,
+  stampSeen,
+} from "@terragon/shared/model/cell-authority";
 import { cellStepKey } from "@terragon/types/cell";
 import { isAgentWorking } from "@/agent/thread-status";
 import {
@@ -167,14 +171,16 @@ async function cellPoll({
 }): Promise<NextResponse> {
   const stepKey = cellStepKey(apiKeyId);
   if (!terminal) {
-    let lease: "renewed" | "refused" | "error";
+    let lease: "renewed" | "refused" | "superseded" | "error";
     try {
       lease = (await stampSeen({ db, stepKey, attempt }))
         ? "renewed"
-        : "refused";
+        : // Only a refused stamp is classified, so a renewed poll costs no read.
+          await leaseRefusal({ db, stepKey, attempt });
     } catch (error) {
       // The poll's job is the status. The lease ages, and only minutes of
-      // failures reap the cell.
+      // failures reap the cell. A classifier outage is `error` too: the worker
+      // ignores it, so it can neither fence nor fail a run.
       console.error("[daemon thread-status] stampSeen failed", {
         threadId,
         stepKey,

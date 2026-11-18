@@ -1,4 +1,5 @@
 import { CONTAINER_HOME } from "./container-argv";
+import { botGitIdentity } from "./daemon-env";
 
 /**
  * Constants of the cell guest image (deploy/images/cell, #656 PR-F). PR-E
@@ -121,4 +122,153 @@ export function cellEntrypoint(brokerHost: string): string[] {
     );
   }
   return [CELL_ENTRY, "--url", `https://${brokerHost}`];
+}
+
+/**
+ * The self-check argv (#656 PR-E): a COPY of the sandbox IT harness's
+ * `SELF_CHECK_ARGV` (`packages/sandbox/src/providers/opensandbox-it/harness.ts`)
+ * with `python3` by absolute path, so the cell's agent-writable PATH head cannot
+ * shadow it. The sandbox package never imports the worker, so the two are kept
+ * equal by a test that reads the harness as text (cell-image-assets.test.ts).
+ * A TLS request to `example.org`, which the policy denies: exit 3 = blocked.
+ */
+export const CELL_SELF_CHECK_ARGV: readonly string[] = [
+  "/usr/bin/python3",
+  "-c",
+  [
+    "import sys, urllib.request, urllib.error",
+    "code = 3",
+    "try:",
+    '    urllib.request.urlopen("https://example.org/", timeout=5)',
+    "    code = 0",
+    "except urllib.error.HTTPError:",
+    "    code = 0",
+    "except Exception:",
+    "    code = 3",
+    "sys.exit(code)",
+  ].join("\n"),
+];
+
+/** The checkout inside the cell. */
+export const CELL_WORKSPACE = "/workspace";
+
+/**
+ * Where a daemon message is staged: the directory cell-entry.sh creates 0700
+ * (its umask-scoped `mkdir`), so no other uid can traverse it while upstream
+ * execd's upload leaves the file at `0777 &^ umask` before its chmod.
+ */
+export const CELL_MESSAGE_DIR = `${CONTAINER_HOME}/.automata-run`;
+
+/**
+ * Writes one staged message file to the daemon socket, then removes it. The
+ * only argument is the file's path, so the prompt never reaches execd's
+ * command log (it logs argv) and no size cap from argv applies. The path must
+ * sit under CELL_MESSAGE_DIR. The file is removed whether or not the write
+ * worked.
+ * `bash -c <script> cell-write <path>`: the path is `$1`.
+ */
+export const CELL_WRITE_MESSAGE_SH = [
+  "set -eu",
+  "PATH=/usr/bin:/bin",
+  'case "$1" in',
+  `  "${CELL_MESSAGE_DIR}/"*) ;;`,
+  '  *) echo "cell-write: path is outside the message dir" >&2; exit 64 ;;',
+  "esac",
+  "rc=0",
+  `${CELL_NODE} ${CELL_DAEMON_BUNDLE} --write --socket-path ${CELL_DAEMON_SOCKET} --timeout 10000 < "$1" || rc=$?`,
+  'rm -f -- "$1"',
+  'exit "$rc"',
+].join("\n");
+
+const REPO_PART = /^[A-Za-z0-9._-]+$/;
+/** A git ref the worker will put in an argv slot: no leading `-`, no whitespace or control characters, no `..`. */
+const REF_NAME = /^[A-Za-z0-9._/@+-]+$/;
+
+function assertRef(label: string, value: string): void {
+  if (!REF_NAME.test(value) || value.startsWith("-") || value.includes("..")) {
+    throw new Error(`cell ${label} is not a safe git ref`);
+  }
+}
+
+/**
+ * The argvs, in order, that put the checkout in the cell (AC-15's worker half):
+ * a clone through the www broker (the vault adds the bearer, so no credential
+ * is in argv or in the git config), then `checkout -B <workBranch>` when the
+ * push branch differs, then `fetch origin <baseBranch>` when it is set.
+ * Throws on an owner, repo or ref it will not put in an argv.
+ */
+export function cellCloneArgv(opts: {
+  brokerHost: string;
+  repoFullName: string;
+  branch: string;
+  workBranch?: string | null;
+  baseBranch?: string | null;
+}): string[][] {
+  if (!CELL_BROKER_HOST_PATTERN.test(opts.brokerHost)) {
+    throw new Error(
+      `cell broker host ${JSON.stringify(opts.brokerHost)} is not a lowercase host[:port]`,
+    );
+  }
+  const parts = opts.repoFullName.split("/");
+  const [owner, repo] = parts;
+  if (
+    parts.length !== 2 ||
+    !owner ||
+    !repo ||
+    !REPO_PART.test(owner) ||
+    !REPO_PART.test(repo) ||
+    owner === "." ||
+    owner === ".." ||
+    repo === "." ||
+    repo === ".."
+  ) {
+    throw new Error("cell repo is not a plain owner/name");
+  }
+  assertRef("branch", opts.branch);
+  const argvs: string[][] = [
+    [
+      "git",
+      "clone",
+      "--no-tags",
+      "--branch",
+      opts.branch,
+      `https://${opts.brokerHost}/api/cell/git/${owner}/${repo}.git`,
+      CELL_WORKSPACE,
+    ],
+  ];
+  if (opts.workBranch) {
+    assertRef("work branch", opts.workBranch);
+    argvs.push([
+      "git",
+      "-C",
+      CELL_WORKSPACE,
+      "checkout",
+      "-B",
+      opts.workBranch,
+    ]);
+  }
+  if (opts.baseBranch) {
+    assertRef("base branch", opts.baseBranch);
+    argvs.push([
+      "git",
+      "-C",
+      CELL_WORKSPACE,
+      "fetch",
+      "origin",
+      opts.baseBranch,
+    ]);
+  }
+  return argvs;
+}
+
+/** The repo-local identity that replaces the box's `GIT_CONFIG_*` env. */
+export function cellGitConfigArgv(botLogin: string): string[][] {
+  return botGitIdentity(botLogin).config.map(([key, value]) => [
+    "git",
+    "-C",
+    CELL_WORKSPACE,
+    "config",
+    key,
+    value,
+  ]);
 }

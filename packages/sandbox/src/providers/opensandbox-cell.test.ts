@@ -81,7 +81,12 @@ function makeServer() {
       const call: Call = {
         method: init?.method ?? "GET",
         path: url.pathname + url.search,
-        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        body:
+          init?.body instanceof FormData
+            ? init.body
+            : init?.body
+              ? JSON.parse(String(init.body))
+              : undefined,
         headers: { ...(init?.headers as Record<string, string>) },
       };
       calls.push(call);
@@ -2250,5 +2255,124 @@ describe("idempotent teardown (#656 PR-C)", () => {
     expect(
       server.calls.every((c) => c.headers["OPEN-SANDBOX-API-KEY"] === API_KEY),
     ).toBe(true);
+  });
+});
+
+describe("copyIn (T-COPYIN)", () => {
+  const OWNER = { owner: "agent", group: "agent" };
+  const UPLOAD = "POST /sandboxes/c1/proxy/44772/files/upload";
+
+  async function readMetadata(form: FormData) {
+    const part = form.get("metadata");
+    expect(part).toBeInstanceOf(Blob);
+    return JSON.parse(await (part as Blob).text()) as Record<string, unknown>;
+  }
+
+  // card: protects=the upload wire format of upstream execd 1.2.1: a metadata FILE part holding JSON with the mode as octal digits, and a file part with the bytes; fails_when=mode is sent as 384, metadata is a plain field, or the filename/bytes are wrong; no_claim=a live server accepting it (IT)
+  it("sends a metadata file part (mode 600 as the literal 600) and a file part", async () => {
+    const { server, provider } = setup();
+    server.on(UPLOAD, () => new Response(null, { status: 200 }));
+    await provider.copyIn(
+      "c1",
+      "/home/agent/.automata-run/m.json",
+      new Uint8Array([1, 2, 3]),
+      {
+        mode: 600,
+        ...OWNER,
+      },
+    );
+    const call = server.calls[0]!;
+    expect(call.headers["content-type"]).toBeUndefined();
+    expect(call.headers["OPEN-SANDBOX-API-KEY"]).toBe(API_KEY);
+    const form = call.body as FormData;
+    const meta = form.get("metadata") as File;
+    expect(meta.name).toBe("metadata.json");
+    expect(meta.type).toBe("application/json");
+    expect(await readMetadata(form)).toEqual({
+      path: "/home/agent/.automata-run/m.json",
+      owner: "agent",
+      group: "agent",
+      mode: 600,
+    });
+    const file = form.get("file") as File;
+    expect(file.name).toBe("m.json");
+    expect(Array.from(new Uint8Array(await file.arrayBuffer()))).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  // card: protects=every bad argument is refused before any HTTP call; fails_when=a decimal-looking 384, a digit above 7, a relative or .. path, a bad owner or an oversize body reaches the network; no_claim=paths upstream refuses on its own
+  it.each([
+    ["mode 384 (decimal of 0600)", "/x/f", 384, "agent", new Uint8Array(1)],
+    ["mode 680", "/x/f", 680, "agent", new Uint8Array(1)],
+    ["mode 7777", "/x/f", 7777, "agent", new Uint8Array(1)],
+    ["mode 6.5", "/x/f", 6.5, "agent", new Uint8Array(1)],
+    ["relative path", "x/f", 600, "agent", new Uint8Array(1)],
+    ["dotdot path", "/x/../f", 600, "agent", new Uint8Array(1)],
+    ["directory path", "/x/", 600, "agent", new Uint8Array(1)],
+    ["bad owner", "/x/f", 600, "Agent;rm", new Uint8Array(1)],
+    ["over 16 MiB", "/x/f", 600, "agent", new Uint8Array(16 * 1024 * 1024 + 1)],
+  ])(
+    "refuses %s before any HTTP call",
+    async (_n, path, mode, owner, bytes) => {
+      const { server, provider } = setup();
+      const err = await rejection(
+        provider.copyIn("c1", path, bytes, { mode, owner, group: "agent" }),
+      );
+      expect(err).toMatchObject({ code: "invalid_argv", op: "copyIn" });
+      expect(server.calls).toHaveLength(0);
+    },
+  );
+
+  // card: protects=the boundary values are accepted; fails_when=exactly 16 MiB, mode 755 or 644 is refused; no_claim=upstream limits
+  it("accepts exactly 16 MiB and the usual modes", async () => {
+    const { server, provider } = setup();
+    server.on(UPLOAD, () => new Response(null, { status: 200 }));
+    for (const mode of [600, 644, 755, 0]) {
+      await provider.copyIn(
+        "c1",
+        "/x/f",
+        new Uint8Array(mode === 600 ? 16 * 1024 * 1024 : 1),
+        {
+          mode,
+          ...OWNER,
+        },
+      );
+    }
+    expect(server.calls).toHaveLength(4);
+  });
+
+  // card: protects=a non-2xx is http_error and neither the response body nor the uploaded content reaches the error or the logs; fails_when=the message carries either; no_claim=execd's own log
+  it("maps a non-2xx to http_error and never exposes the body", async () => {
+    const { server, provider, logs } = setup();
+    server.on(UPLOAD, () => json(500, { message: "BODY-CANARY" }));
+    const err = await rejection(
+      provider.copyIn("c1", "/x/f", new TextEncoder().encode("PROMPT-CANARY"), {
+        mode: 600,
+        ...OWNER,
+      }),
+    );
+    expect(err).toMatchObject({
+      code: "http_error",
+      op: "copyIn",
+      status: 500,
+    });
+    expect(err.message).not.toContain("CANARY");
+    expect(JSON.stringify(logs)).not.toContain("CANARY");
+  });
+
+  // card: protects=a connection-failed 502 is retried (undelivered) and any other 502 is final; fails_when=copyIn retries a delivered 502 or gives up on a connection failure; no_claim=the retry budget
+  it("retries only an undelivered 502", async () => {
+    const { server, provider } = setup();
+    server.on(
+      UPLOAD,
+      () => json(502, { code: "BACKEND_CONNECTION_FAILED" }),
+      () => new Response(null, { status: 200 }),
+    );
+    await provider.copyIn("c1", "/x/f", new Uint8Array(1), {
+      mode: 600,
+      ...OWNER,
+    });
+    expect(server.count(UPLOAD)).toBe(2);
   });
 });

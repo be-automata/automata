@@ -34,12 +34,13 @@
     "@terragon/agent": "workspace:*",
     "@terragon/daemon": "workspace:*",
     "@terragon/knowledge": "workspace:*",
+    "@terragon/sandbox": "workspace:*",
+    "@terragon/types": "workspace:*",
     "@terragon/utils": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
-    "@terragon/types": "workspace:*",
     "@types/node": "^22.15.21",
     "@types/pg": "^8.15.2",
     "tsx": "^4.20.3",

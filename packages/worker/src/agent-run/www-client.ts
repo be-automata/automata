@@ -32,6 +32,14 @@ export interface WwwClientOpts {
    * Undefined → header omitted (the fence fails open on that arm).
    */
   runExternalId?: string;
+  /**
+   * #656 PR-E: the cell attempt the run's cell belongs to (the SERVER-assigned
+   * one from the cell-plan 200). When set, `thread-status` carries it in the
+   * body so www stamps the lease (and, on a terminal read, finishes the step
+   * and retires the token). Undefined, for every box run, leaves the body
+   * exactly `{threadId, threadChatId}`.
+   */
+  cellAttempt?: number;
 }
 
 /**
@@ -556,9 +564,72 @@ export async function postRunCredentialSource(
   }
 }
 
+/** The cell lease answer of a `thread-status` read that carried `cellAttempt` (#656). */
+export type CellLease =
+  | "renewed"
+  | "refused"
+  | "superseded"
+  | "error"
+  | "finished";
+const CELL_LEASES: ReadonlySet<string> = new Set([
+  "renewed",
+  "refused",
+  "superseded",
+  "error",
+  "finished",
+]);
+
 export type ThreadStatusPoll =
-  | { kind: "status"; status: string; terminal: boolean }
+  | { kind: "status"; status: string; terminal: boolean; lease?: CellLease }
   | { kind: "auth-error"; httpStatus: number };
+
+const ERROR_CODE = /^[a-z_]{1,40}$/;
+
+/**
+ * A non-2xx `thread-status` read (other than 401/403). `message` is exactly the
+ * text a bare Error carried before, so box-path logs and assertions do not
+ * change. `code` is the response's `error` field when it matches
+ * `^[a-z_]{1,40}$`, else undefined: nothing else of the body is read.
+ */
+export class ThreadStatusHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    statusText: string,
+    public readonly code?: string,
+  ) {
+    super(`thread-status failed: HTTP ${status} (${statusText})`);
+    this.name = "ThreadStatusHttpError";
+  }
+}
+
+/** The terminal cell read answered 409 `cell_step_conflict`: www deleted the run's token. Never retried. */
+export class CellStepConflictError extends Error {
+  constructor() {
+    super("cell_step_conflict");
+    this.name = "CellStepConflictError";
+  }
+}
+
+/** A terminal cell read could not be confirmed (retries exhausted, or the token is really gone). */
+export class CellTerminalUnconfirmedError extends Error {
+  constructor(detail: string) {
+    super(`cell_terminal_unconfirmed: ${detail}`);
+    this.name = "CellTerminalUnconfirmedError";
+  }
+}
+
+async function errorCodeOf(res: Response): Promise<string | undefined> {
+  try {
+    const body: unknown = await res.json();
+    if (typeof body === "object" && body !== null && "error" in body) {
+      const code = (body as { error: unknown }).error;
+      if (typeof code === "string" && ERROR_CODE.test(code)) return code;
+    }
+  } catch {
+    // An unreadable body has no code.
+  }
+  return undefined;
+}
 
 /**
  * One thread-status poll. A 401/403 is reported as `revoked` — the caller decides
@@ -575,6 +646,9 @@ export async function pollThreadStatus(
     body: JSON.stringify({
       threadId: opts.threadId,
       threadChatId: opts.threadChatId,
+      ...(opts.cellAttempt !== undefined
+        ? { cellAttempt: opts.cellAttempt }
+        : {}),
     }),
     signal,
   });
@@ -582,12 +656,27 @@ export async function pollThreadStatus(
     return { kind: "auth-error", httpStatus: res.status };
   }
   if (!res.ok) {
-    throw new Error(
-      `thread-status failed: HTTP ${res.status} (${res.statusText})`,
+    throw new ThreadStatusHttpError(
+      res.status,
+      res.statusText,
+      opts.cellAttempt !== undefined ? await errorCodeOf(res) : undefined,
     );
   }
-  const body = (await res.json()) as { status: string; terminal: boolean };
-  return { kind: "status", status: body.status, terminal: body.terminal };
+  const body = (await res.json()) as {
+    status: string;
+    terminal: boolean;
+    lease?: unknown;
+  };
+  const lease =
+    typeof body.lease === "string" && CELL_LEASES.has(body.lease)
+      ? (body.lease as CellLease)
+      : undefined;
+  return {
+    kind: "status",
+    status: body.status,
+    terminal: body.terminal,
+    ...(lease !== undefined ? { lease } : {}),
+  };
 }
 
 /** Minimal slice of the Hatchet task Context the poll loop needs. */
@@ -623,6 +712,35 @@ export interface PollContext {
    * Optional: omitted ⇒ this loop behaves exactly as it did before.
    */
   beforeStatusRead?: (signal?: AbortSignal) => Promise<void>;
+  /**
+   * #656: called after each status read that answered a cell `lease` (and with
+   * `"finished"` when a terminal cell read is confirmed through `confirmRetired`).
+   * The cell executor uses it for the fence, the refusal count and the
+   * retired-token record.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  onLease?: (lease: CellLease) => void;
+  /**
+   * #656: the retry budget for a terminal cell read that answers 500
+   * `cell_finish_failed` or `cell_retire_failed` (served only on a terminal
+   * read; both are idempotent to retry): `tries` reads in all, `delayMs` apart,
+   * instead of AUTH_ERROR_CONFIRM_ATTEMPTS. A 409 `cell_step_conflict` throws
+   * CellStepConflictError at once.
+   *
+   * Optional: omitted ⇒ this loop behaves exactly as it did before.
+   */
+  cellTerminalRetry?: { tries: number; delayMs: number };
+  /**
+   * #656: injected. Called only for a 401 that follows a `cell_retire_failed`
+   * (the retire may have committed, and a retired token is refused here). It
+   * asks www's `cell-teardown` route, which accepts a retired token:
+   * `retired` ⇒ the step is finished (the loop returns `completed`), `gone` or
+   * `unknown` ⇒ CellTerminalUnconfirmedError.
+   */
+  confirmRetired?: (
+    signal: AbortSignal,
+  ) => Promise<"retired" | "gone" | "unknown">;
 }
 
 export interface PollResult {
@@ -680,6 +798,9 @@ export async function pollUntilTerminal(
   let lastStatus: string | undefined;
   let agentSeenDead = false;
   let failedPollStreak = 0;
+  // #656: terminal-read 500s, counted apart from the generic streak (own budget).
+  let terminalFailureStreak = 0;
+  let afterRetireFailed = false;
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -713,6 +834,32 @@ export async function pollUntilTerminal(
       if (ctx.cancelled || ctx.signal?.aborted) {
         return { outcome: "cancelled", finalStatus: lastStatus };
       }
+      if (
+        opts.cellAttempt !== undefined &&
+        error instanceof ThreadStatusHttpError
+      ) {
+        if (error.status === 409 && error.code === "cell_step_conflict") {
+          throw new CellStepConflictError();
+        }
+        const retry = ctx.cellTerminalRetry;
+        if (
+          retry !== undefined &&
+          error.status === 500 &&
+          (error.code === "cell_finish_failed" ||
+            error.code === "cell_retire_failed")
+        ) {
+          afterRetireFailed = error.code === "cell_retire_failed";
+          terminalFailureStreak++;
+          if (terminalFailureStreak < retry.tries) {
+            ctx.log(
+              `thread-status: ${error.code} (${terminalFailureStreak}/${retry.tries}) — retrying the terminal read`,
+            );
+            await sleep(retry.delayMs);
+            continue;
+          }
+          throw new CellTerminalUnconfirmedError(error.code);
+        }
+      }
       // A 5xx or a dropped connection is the same blip a 401 can be: the
       // status read is idempotent, so confirm it before failing the run.
       failedPollStreak++;
@@ -726,6 +873,28 @@ export async function pollUntilTerminal(
       throw error;
     }
     if (poll.kind === "auth-error") {
+      // #656: a 401 right after a `cell_retire_failed` may be the retire having
+      // committed (a retired token is refused here). One cell-teardown call
+      // that accepts a retired token settles it, so the generic confirm rule
+      // below does not apply.
+      if (
+        afterRetireFailed &&
+        poll.httpStatus === 401 &&
+        ctx.confirmRetired !== undefined
+      ) {
+        const confirmed = await ctx.confirmRetired(
+          ctx.signal ?? new AbortController().signal,
+        );
+        if (confirmed === "retired") {
+          ctx.onLease?.("finished");
+          return { outcome: "completed", finalStatus: lastStatus };
+        }
+        throw new CellTerminalUnconfirmedError(
+          confirmed === "gone"
+            ? "the token is gone after cell_retire_failed"
+            : "the retire could not be confirmed",
+        );
+      }
       // Confirm before believing it: one 401 can be a verify-time database
       // error on www's side, not a revocation (AUTH_ERROR_CONFIRM_ATTEMPTS).
       failedPollStreak++;
@@ -756,9 +925,11 @@ export async function pollUntilTerminal(
     }
 
     failedPollStreak = 0;
+    terminalFailureStreak = 0;
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);
+    if (poll.lease !== undefined) ctx.onLease?.(poll.lease);
     if (poll.terminal) {
       // The residual window: clean at the check above, starved by the time
       // terminal came back. The token is already being revoked, so the thread
@@ -774,6 +945,12 @@ export async function pollUntilTerminal(
     }
     if (poll.status === "stopping") {
       return { outcome: "stopped", finalStatus: poll.status };
+    }
+
+    // #656: an `onLease` handler (a fence, a revoked attempt) may have aborted
+    // the run's signal: leave now, without probing the agent first.
+    if (poll.lease !== undefined && (ctx.cancelled || ctx.signal?.aborted)) {
+      return { outcome: "cancelled", finalStatus: lastStatus };
     }
 
     // #204 THE MID-RUN DEATH, WHICH IS THE ONE THAT MATTERS. This loop has no
@@ -988,3 +1165,7 @@ export async function postSelfHealFixCheck(
     },
   });
 }
+
+/** The request helpers other www clients of this plane (cell-www-client.ts) share. */
+export const wwwEndpoint = endpoint;
+export const wwwHeaders = headers;

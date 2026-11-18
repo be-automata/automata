@@ -464,6 +464,34 @@ describe(
       }
     });
 
+    it("copyIn: a 1 MiB file with mode 600 round-trips with the right mode (T-COPYIN, live)", async () => {
+      const p = plan("copyin", P_ONE);
+      const id = await create(p);
+      try {
+        const bytes = new Uint8Array(1048576);
+        for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31) & 0xff;
+        // /tmp is world-writable; the live proof is of the metadata, not of a 0700 dir.
+        await provider.copyIn(id, "/tmp/copy-in.bin", bytes, {
+          mode: 600,
+          owner: "root",
+          group: "root",
+        });
+        const back = await provider.copyOut(id, "/tmp/copy-in.bin");
+        expect(sha256Hex(back)).toBe(sha256Hex(bytes));
+        const stat = await provider.exec(id, [
+          "sh",
+          "-c",
+          "stat -c '%a %U' /tmp/copy-in.bin",
+        ]);
+        // The decimal 600 is read as octal by execd: the file is 0600. The
+        // python guest has no `agent` user, so the owner is root here; the
+        // cell image's uid 10001 and `agent` are IT-E1's (worker package).
+        expect(stat.stdout.trim()).toBe("600 root");
+      } finally {
+        await destroy(id);
+      }
+    });
+
     it("peer isolation: one cell cannot reach another", async () => {
       const [a, b] = await Promise.all([
         create(plan("peer-a", P_ONE)),

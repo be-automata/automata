@@ -2,14 +2,26 @@ import {
   describe,
   it,
   expect,
+  afterAll,
   beforeAll,
   beforeEach,
   afterEach,
   vi,
 } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ConcurrencyLimitStrategy } from "@hatchet-dev/typescript-sdk";
+import {
+  generatePlaneKeyPair,
+  sealBindingOf,
+  sealRunSecrets,
+} from "@terragon/utils/payload-seal";
 import { fixBranchName } from "@terragon/utils/fix-branch";
 import { AGENT_RUN_VARIANTS } from "./definition";
+import { resetPlaneKeyRingForTests } from "./payload-seal-keys";
+import type { RunExecutor, RunExecutorInput } from "./run-executor";
+import type { CellConfig } from "./cell-config";
 
 // Defensive: this suite only checks registration shapes and never runs the
 // task fn — but if a future case does, the admission reap and box lock must
@@ -1236,5 +1248,368 @@ describe("#371 sleepAbortable — the real deferral sleep", () => {
     const p = sleepAbortable(50);
     await vi.advanceTimersByTimeAsync(50);
     await expect(p).resolves.toBeUndefined();
+  });
+});
+
+describe("#656 PR-E: the run executor seam (the run fn with a fake injected executor)", () => {
+  const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "wf-seam-"));
+  const RING = path.join(ROOT, "payload-seal.json");
+  const SAVED: Record<string, string | undefined> = {};
+  const ENV_NAMES = [
+    "WORKER_RUN_NAMESPACE_ROOT",
+    "WORKER_PAYLOAD_SEAL_KEY_FILE",
+    "WORKER_BOX_SLOTS",
+  ] as const;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let rawRunFn: any;
+  let plane: Awaited<ReturnType<typeof generatePlaneKeyPair>>;
+  let seq = 0;
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
+
+  const ON: CellConfig = {
+    kind: "on",
+    baseUrl: "http://127.0.0.1:8090",
+    apiKey: "k".repeat(32),
+    image: {
+      repository: "ghcr.io/be-automata/automata-cell",
+      digest: `sha256:${"cd".repeat(32)}`,
+      reference: `ghcr.io/be-automata/automata-cell@sha256:${"cd".repeat(32)}`,
+    },
+  };
+
+  beforeAll(async () => {
+    for (const n of ENV_NAMES) SAVED[n] = process.env[n];
+    process.env.WORKER_RUN_NAMESPACE_ROOT = path.join(ROOT, "ns");
+    process.env.WORKER_PAYLOAD_SEAL_KEY_FILE = RING;
+    plane = await generatePlaneKeyPair("plane-seam");
+    fs.writeFileSync(RING, JSON.stringify({ keys: [plane.privateKey] }), {
+      mode: 0o600,
+    });
+    resetPlaneKeyRingForTests();
+    rawRunFn = workflowDef._tasks[0].fn;
+  });
+
+  afterAll(() => {
+    for (const n of ENV_NAMES) {
+      if (SAVED[n] === undefined) delete process.env[n];
+      else process.env[n] = SAVED[n];
+    }
+    resetPlaneKeyRingForTests();
+    fs.rmSync(ROOT, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    posts.length = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: { body: string }) => {
+        posts.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ applied: true }), { status: 200 });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    wf._setRunExecutorsForTests(undefined);
+  });
+
+  /** A sealed wire input, the way www sends it. */
+  async function wireInput(extra: Record<string, unknown> = {}) {
+    // A self-heal audit plan carries its check token in the envelope, not the plan.
+    const { selfHeal, ...rest } = extra as {
+      selfHeal?: { kind: string; checkToken?: string };
+    };
+    const { checkToken, ...plan } = selfHeal ?? { kind: "audit" };
+    const wire = {
+      threadId: `thr_seam_${++seq}`,
+      threadChatId: "tc_1",
+      repoFullName: "o/r",
+      branch: "main",
+      daemonCallbackUrl: "https://www.example.com",
+      orgId: "org-1",
+      ...rest,
+      ...(selfHeal ? { selfHeal: plan } : {}),
+    };
+    return {
+      ...wire,
+      sealedSecrets: await sealRunSecrets(
+        plane.publicKey,
+        {
+          installationToken: "inst-secret",
+          daemonToken: "daemon-tok",
+          ...(checkToken !== undefined ? { selfHealToken: checkToken } : {}),
+        },
+        sealBindingOf(wire),
+      ),
+    };
+  }
+  const ctx = () => ({
+    cancelled: false,
+    log: vi.fn(),
+    abortController: new AbortController(),
+    workflowRunId: () => `run-seam-${seq}`,
+  });
+  const urls = () => posts.map((p) => new URL(p.url).pathname);
+  const cellCalls = () =>
+    urls().filter((u) => /cell-plan|cell-teardown/.test(u));
+  const terminals = () => urls().filter((u) => u.endsWith("/run-terminal"));
+
+  function fakeExecutor(
+    kind: "box" | "cell",
+    run: (a: RunExecutorInput) =>
+      | Promise<never>
+      | Promise<{
+          threadId: string;
+          threadChatId: string;
+          outcome: "completed" | "fenced";
+        }>,
+  ) {
+    const fn = vi.fn(run);
+    const executor: RunExecutor = {
+      kind,
+      run: fn as unknown as RunExecutor["run"],
+    };
+    return { executor, fn };
+  }
+  const completed = (a: RunExecutorInput) =>
+    Promise.resolve({
+      threadId: a.input.threadId,
+      threadChatId: a.input.threadChatId,
+      outcome: "completed" as const,
+    });
+
+  // card: protects=no marker means the box executor, no config read and no cell request; fails_when=an unmarked run touches the key file, the cell executor or a cell route; no_claim=the real box path (the existing suites, HATCHET_IT)
+  it("T-FLAG-OFF / T-CONFIG-LAZY: no marker selects the box, never loads the cell config", async () => {
+    const box = fakeExecutor("box", completed);
+    const cell = fakeExecutor("cell", completed);
+    const loadCellConfig = vi.fn(() => ON);
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      cell: cell.executor,
+      loadCellConfig,
+    });
+    const out = await rawRunFn(await wireInput(), ctx());
+    expect(out.outcome).toBe("completed");
+    expect(box.fn).toHaveBeenCalledTimes(1);
+    expect(cell.fn).not.toHaveBeenCalled();
+    expect(loadCellConfig).not.toHaveBeenCalled();
+    expect(cellCalls()).toEqual([]);
+  });
+
+  // card: protects=negative control: the same input with the marker selects the cell and reads the config exactly once; fails_when=the marker is ignored or the config is read twice; no_claim=the cell executor
+  it("T-FLAG-OFF control / T-CONFIG-LAZY: the marker selects the cell, one config read", async () => {
+    const box = fakeExecutor("box", completed);
+    const cell = fakeExecutor("cell", completed);
+    const loadCellConfig = vi.fn(() => ON);
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      cell: cell.executor,
+      loadCellConfig,
+    });
+    await rawRunFn(await wireInput({ cell: "opensandbox" }), ctx());
+    expect(cell.fn).toHaveBeenCalledTimes(1);
+    expect(box.fn).not.toHaveBeenCalled();
+    expect(loadCellConfig).toHaveBeenCalledTimes(1);
+  });
+
+  // card: protects=a marked run with the cell config off or invalid fails cells_unconfigured, never on the box, with no cell request; fails_when=it falls back to the box or calls cell-plan; no_claim=the typed terminal's text
+  it.each([
+    ["off", { kind: "off" } as CellConfig],
+    ["partial", { kind: "invalid", reason: "partial" } as CellConfig],
+    ["key_file", { kind: "invalid", reason: "key_file" } as CellConfig],
+  ])(
+    "T-CONFIG: a marked run with config %s fails cells_unconfigured",
+    async (_n, cfg) => {
+      const box = fakeExecutor("box", completed);
+      const cell = fakeExecutor("cell", completed);
+      wf._setRunExecutorsForTests({
+        box: box.executor,
+        cell: cell.executor,
+        loadCellConfig: () => cfg,
+      });
+      await expect(
+        rawRunFn(await wireInput({ cell: "opensandbox" }), ctx()),
+      ).rejects.toMatchObject({
+        name: "CellRunRefusedError",
+        code: "cells_unconfigured",
+      });
+      expect(box.fn).not.toHaveBeenCalled();
+      expect(cell.fn).not.toHaveBeenCalled();
+      expect(cellCalls()).toEqual([]);
+      // A pre-daemon throw of a task run: the outer catch posts its one typed terminal.
+      expect(terminals()).toHaveLength(1);
+    },
+  );
+
+  // card: protects=a marker on a review, self-heal or reviewAgent input fails cell_lane_refused before the config is read; fails_when=any of them reaches the cell or the box; no_claim=how dispatch stamps the marker
+  it.each([
+    ["review", { prKey: "org-1/o/r/7", supersedePolicy: "newest-wins" }],
+    ["pr", { prNumber: 7 }],
+    [
+      "self-heal",
+      { selfHeal: { kind: "audit", attemptId: "a1", checkToken: "chk-tok" } },
+    ],
+    ["reviewAgent", { reviewAgent: { agent: "claude" } }],
+  ])(
+    "T-LANE: a marker on a %s run fails cell_lane_refused",
+    async (_n, extra) => {
+      const cell = fakeExecutor("cell", completed);
+      const loadCellConfig = vi.fn(() => ON);
+      wf._setRunExecutorsForTests({
+        box: fakeExecutor("box", completed).executor,
+        cell: cell.executor,
+        loadCellConfig,
+      });
+      await expect(
+        rawRunFn(await wireInput({ cell: "opensandbox", ...extra }), ctx()),
+      ).rejects.toMatchObject({ code: "cell_lane_refused" });
+      expect(cell.fn).not.toHaveBeenCalled();
+      expect(loadCellConfig).not.toHaveBeenCalled();
+      expect(cellCalls()).toEqual([]);
+    },
+  );
+
+  // card: protects=an executor returning fenced posts nothing: no terminal, no onFailure-visible failure; fails_when=runAgentResolved posts a run-terminal for a fenced return; no_claim=the real cell teardown (cell-run.test.ts)
+  it("T-FENCED-NO-TERMINAL: a fenced return posts nothing and the engine sees a normal return", async () => {
+    const cell = fakeExecutor("cell", async (a) => {
+      // A fenced executor claims the end with nothing to post, as cell-run.ts does.
+      a.abnormal.claimed = true;
+      return {
+        threadId: a.input.threadId,
+        threadChatId: a.input.threadChatId,
+        outcome: "fenced" as const,
+      };
+    });
+    wf._setRunExecutorsForTests({
+      box: fakeExecutor("box", completed).executor,
+      cell: cell.executor,
+      loadCellConfig: () => ON,
+    });
+    const out = await rawRunFn(await wireInput({ cell: "opensandbox" }), ctx());
+    expect(out.outcome).toBe("fenced");
+    expect(terminals()).toEqual([]);
+  });
+
+  // card: protects=negative control: an executor that throws without claiming gets exactly one typed terminal from the outer catch; fails_when=the catch posts nothing or twice; no_claim=the cause chosen
+  it("T-FENCED-NO-TERMINAL control: a throwing executor posts one abnormal end", async () => {
+    const cell = fakeExecutor("cell", async () => {
+      throw new Error("cell_attempt_revoked");
+    });
+    wf._setRunExecutorsForTests({
+      box: fakeExecutor("box", completed).executor,
+      cell: cell.executor,
+      loadCellConfig: () => ON,
+    });
+    await expect(
+      rawRunFn(await wireInput({ cell: "opensandbox" }), ctx()),
+    ).rejects.toThrow("cell_attempt_revoked");
+    expect(terminals()).toHaveLength(1);
+    expect(
+      posts.find((p) => p.url.endsWith("/run-terminal"))?.body,
+    ).toMatchObject({
+      cause: "run-failed-unreported",
+    });
+  });
+
+  // card: protects=an executor that claimed the end itself leaves the outer catch with nothing to post; fails_when=a throw after the claim posts a second terminal; no_claim=the executor's own post
+  it("an executor that claimed the abnormal end leaves the outer catch silent", async () => {
+    const cell = fakeExecutor("cell", async (a) => {
+      a.abnormal.claimed = true; // the cell's finally claims before its teardown
+      throw new Error("cell create failed: not_ready");
+    });
+    wf._setRunExecutorsForTests({
+      box: fakeExecutor("box", completed).executor,
+      cell: cell.executor,
+      loadCellConfig: () => ON,
+    });
+    await expect(
+      rawRunFn(await wireInput({ cell: "opensandbox" }), ctx()),
+    ).rejects.toThrow("not_ready");
+    expect(terminals()).toEqual([]);
+  });
+
+  // card: protects=onFailure skips run-failed for a run whose terminal read retired the token, logging the expected line at info and never as an error; fails_when=it posts, or logs at error level; no_claim=www's side of the 401
+  it("T-POST-TERMINAL: a retired run's onFailure posts nothing and logs at info", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const input = await wireInput();
+    const runId = "run-retired-1";
+    wf._cellRunSetsForTests.retiredRuns.add(runId);
+    await workflowDef.onFailure.fn(input, {
+      errors: () => ({ run: "late failure" }),
+      workflowRunId: () => runId,
+    });
+    expect(posts).toEqual([]);
+    expect(
+      info.mock.calls.some((c) =>
+        String(c[0]).includes("token retired at the terminal read (expected"),
+      ),
+    ).toBe(true);
+    expect(err).not.toHaveBeenCalled();
+    info.mockRestore();
+    err.mockRestore();
+  });
+
+  // card: protects=negative control: a run that is not recorded retired still posts run-failed; fails_when=onFailure skips every cell run; no_claim=the cell path
+  it("T-POST-TERMINAL control: a non-retired failure still posts run-failed", async () => {
+    await workflowDef.onFailure.fn(await wireInput(), {
+      errors: () => ({ run: "boom" }),
+      workflowRunId: () => "run-live-1",
+    });
+    expect(urls()).toEqual(["/api/daemon-event"]);
+  });
+
+  // card: protects=a run whose token www deleted (409 cell_step_conflict) posts no run-failed and logs at info; fails_when=it posts or logs an error; no_claim=www's one alert
+  it("T-409-SKIP (onFailure half): a token-gone run posts nothing and logs at info", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runId = "run-gone-1";
+    wf._cellRunSetsForTests.tokenGoneRuns.add(runId);
+    await workflowDef.onFailure.fn(await wireInput(), {
+      errors: () => ({ run: "cell_step_conflict" }),
+      workflowRunId: () => runId,
+    });
+    expect(posts).toEqual([]);
+    expect(
+      info.mock.calls.some((c) =>
+        String(c[0]).includes("token deleted by www on cell_step_conflict"),
+      ),
+    ).toBe(true);
+    expect(err).not.toHaveBeenCalled();
+    info.mockRestore();
+    err.mockRestore();
+  });
+
+  // card: protects=the real cell executor is wired: a marked run whose plan www refuses with cells_disabled fails with that code and never runs on the box; fails_when=it falls back to the box executor or posts a cell-teardown; no_claim=a live cell
+  it("cell half of T-FLAG-OFF: a marked run with cells_disabled fails closed, never on the box", async () => {
+    wf._setAdmissionControllerForTests(null);
+    const box = fakeExecutor("box", completed);
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      loadCellConfig: () => ON,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: { body: string }) => {
+        posts.push({ url, body: JSON.parse(init.body) });
+        return String(url).endsWith("/cell-plan")
+          ? new Response(JSON.stringify({ error: "cells_disabled" }), {
+              status: 404,
+            })
+          : new Response(JSON.stringify({ applied: true }), { status: 200 });
+      }),
+    );
+    await expect(
+      rawRunFn(await wireInput({ cell: "opensandbox" }), ctx()),
+    ).rejects.toMatchObject({
+      name: "CellPlanRefusedError",
+      code: "cells_disabled",
+    });
+    expect(box.fn).not.toHaveBeenCalled();
+    expect(urls().filter((u) => u.endsWith("/cell-plan"))).toHaveLength(1);
+    expect(urls().filter((u) => u.endsWith("/cell-teardown"))).toEqual([]);
+    // The refusal came before the executor's teardown try: the outer catch posts the one terminal.
+    expect(terminals()).toHaveLength(1);
+    wf._setAdmissionControllerForTests(undefined);
   });
 });
