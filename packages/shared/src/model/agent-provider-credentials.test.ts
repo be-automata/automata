@@ -560,6 +560,20 @@ describe("agent-provider-credentials", () => {
       expect(after.unavailableReason).toBe("subscription_disabled");
     });
 
+    it("a half admin clear (reason only) never blocks a new, shorter mark", async () => {
+      const cred = await connect();
+      await mark(cred.id, new Date(Date.now() + 10 * HOUR));
+      await db
+        .update(schema.agentProviderCredentials)
+        .set({ unavailableReason: null })
+        .where(eq(schema.agentProviderCredentials.id, cred.id));
+      const shorter = new Date(Date.now() + HOUR);
+      expect(await mark(cred.id, shorter)).toBe(true);
+      const after = await row(cred.id);
+      expect(after.unavailableReason).toBe("usage_limit");
+      expect(after.unavailableUntil?.getTime()).toBe(shorter.getTime());
+    });
+
     it("a mark is fenced by user", async () => {
       const cred = await connect();
       const other = (await createTestUser({ db })).user.id;

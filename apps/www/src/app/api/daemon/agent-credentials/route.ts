@@ -99,6 +99,9 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       credentials,
     });
   } catch (error) {
+    // Either way the run ends up on built-in credits (the worker maps the 5xx
+    // below to it too), so no credential row is attributed to it.
+    await recordDelivered(null);
     // A missing/invalid credential is not a server fault: the run falls back to
     // built-in credits, which is what the sandbox path does too.
     if (error instanceof ThreadError) {
@@ -107,7 +110,6 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         org: ctx.organizationId,
         reason: error.type,
       });
-      await recordDelivered(null);
       return NextResponse.json({
         agent: ensureAgent(threadChat.agent),
         credentials: { type: "built-in-credits" },

@@ -617,10 +617,13 @@ export async function handleDaemonEvent({
   // when the stored error is provider-unavailable: the prompt-too-long,
   // auto-compact and OAuth-retry paths above leave it unset. Idempotent and
   // monotonic, so a redelivered event is harmless. Best effort: a failed mark
-  // is logged and never fails the event.
+  // is logged and never fails the event. Worker plane only: the legacy
+  // sandbox plane never pulls through the route, so any id it carries is
+  // another run's.
   if (
     providerUnavailable &&
-    threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR
+    threadChatUpdates.errorMessage === PROVIDER_UNAVAILABLE_ERROR &&
+    !thread.codesandboxId
   ) {
     try {
       await markDeliveredCredentialUnavailable({

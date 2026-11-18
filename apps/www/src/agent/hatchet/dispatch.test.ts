@@ -21,6 +21,10 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import { createOrganization } from "@terragon/shared/model/organizations";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
+import {
+  getThreadChat,
+  setThreadChatDeliveredCredential,
+} from "@terragon/shared/model/threads";
 import { nanoid } from "nanoid";
 import { User } from "@terragon/shared";
 import {
@@ -153,6 +157,43 @@ describe("dispatchAgentRun", () => {
     });
     threadId = t.threadId;
     threadChatId = t.threadChatId;
+  });
+
+  // Card: protects=#442 attribution: a dispatch sheds the previous run's
+  // delivered-credential record BEFORE the run exists, so only a delivery made
+  // during this run can be marked; fails_when=the old id survives the
+  // dispatch, or is cleared only after the trigger (racing the credential
+  // pull); no_claim=the route's recording (route suite).
+  it("clears the previous run's delivered credential before triggering (#442)", async () => {
+    await setThreadChatDeliveredCredential({
+      db,
+      userId: user.id,
+      threadId,
+      threadChatId,
+      credentialId: "cred-of-the-previous-run",
+    });
+    let atTrigger: string | null | undefined;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      atTrigger = (
+        await getThreadChat({ db, userId: user.id, threadId, threadChatId })
+      )?.deliveredCredentialId;
+      return new Response(
+        JSON.stringify({ run: { metadata: { id: "run-1" } } }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await dispatchAgentRun({
+      userId: user.id,
+      threadId,
+      threadChatId,
+      repoFullName: "be-automata/automata",
+      branch: "main",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(atTrigger).toBeNull();
   });
 
   it("triggers agent-run with REFERENCE-ONLY input and NO long-lived secret", async () => {

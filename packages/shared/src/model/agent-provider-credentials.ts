@@ -326,6 +326,7 @@ export async function resolveAgentProviderCredential({
     return { status: "none" };
   }
   const reason = credential.unavailableReason;
+  // `reason !== null` repeats the helper's own check only to narrow the type.
   if (
     reason !== null &&
     isAgentProviderCredentialUnavailable(credential, now)
@@ -373,7 +374,8 @@ export async function markAgentProviderCredentialUnavailable({
   const extendsUntil =
     until === null
       ? undefined
-      : sql`(${table.unavailableUntil} IS NULL OR ${table.unavailableUntil} < ${until.toISOString()}::timestamptz)`;
+      : // An unmarked row (reason NULL, e.g. a half admin clear) always takes it.
+        sql`(${table.unavailableReason} IS NULL OR ${table.unavailableUntil} IS NULL OR ${table.unavailableUntil} < ${until.toISOString()}::timestamptz)`;
   const rows = await db
     .update(table)
     .set({

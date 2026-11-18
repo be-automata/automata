@@ -267,6 +267,15 @@ describe("POST /api/daemon/agent-credentials", () => {
       expect(await deliveredId(user.id, threadId, threadChatId)).toBeNull();
     });
 
+    it("NULL when resolution throws an unexpected error (the worker falls back to credits)", async () => {
+      await POST(req({ threadId, threadChatId }));
+      vi.mocked(getAndVerifyCredentialsWithSource).mockRejectedValue(
+        new Error("decrypt failed"),
+      );
+      await POST(req({ threadId, threadChatId })).catch(() => undefined);
+      expect(await deliveredId(user.id, threadId, threadChatId)).toBeNull();
+    });
+
     // Card: protects=a recording failure still answers 200 with the
     // credential; fails_when=it becomes a 5xx, which the worker reads as
     // "use built-in credits"; no_claim=the worker's own fallback.

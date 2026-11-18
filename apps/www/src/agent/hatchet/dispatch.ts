@@ -57,6 +57,7 @@ import {
 import {
   setThreadActiveRun,
   clearThreadTerminalForResume,
+  setThreadChatDeliveredCredential,
 } from "@terragon/shared/model/threads";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type {
@@ -857,6 +858,32 @@ async function sealWireInput({
   return { ...input, sealedSecrets };
 }
 
+/** #442: see the call site in dispatchAgentRun. Never throws. */
+async function clearDeliveredCredential({
+  userId,
+  threadId,
+  threadChatId,
+}: {
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+}): Promise<void> {
+  try {
+    await setThreadChatDeliveredCredential({
+      db,
+      userId,
+      threadId,
+      threadChatId,
+      credentialId: null,
+    });
+  } catch (error) {
+    console.error("[hatchet] delivered-credential clear failed", {
+      threadId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 /**
  * Mint the short-lived tokens, assemble the reference-only input, and trigger the
  * remote agent-run. The daemon token is named by the per-run key (daemonRunKey) so
@@ -1255,6 +1282,13 @@ export async function dispatchAgentRun({
     // triggerAgentRun derives it from the input when no plan metadata is
     // given, so a self-heal run stamps self-heal-* on either trigger path.
     // Review runs keep their plan's metadata.
+    // #442: shed the previous run's delivered-credential record BEFORE this
+    // run exists, so only a delivery made during THIS run
+    // (/api/daemon/agent-credentials) can attribute a provider-unavailable
+    // mark. A run that never pulls (a shared box) or falls back to built-in
+    // credits then marks nothing. Clearing after the trigger would race the
+    // pull. Best effort: a failure never fails the dispatch.
+    await clearDeliveredCredential({ userId, threadId, threadChatId });
     // Resolved once per dispatch (#374); a resolve failure takes the same
     // failure path as a trigger failure.
     const hatchetTarget = await resolveHatchetConfig({

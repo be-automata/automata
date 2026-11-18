@@ -17,7 +17,21 @@ import { handleDaemonEvent } from "./handle-daemon-event";
 import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
 import { parseProviderUnavailableInfo } from "@/agent/msg/classify-provider-result";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
+import { markDeliveredCredentialUnavailable } from "@/server-lib/credential-unavailability";
 
+// #442: the real mark by default; one test makes it reject.
+vi.mock("@/server-lib/credential-unavailability", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/credential-unavailability")
+    >();
+  return {
+    ...actual,
+    markDeliveredCredentialUnavailable: vi.fn(
+      actual.markDeliveredCredentialUnavailable,
+    ),
+  };
+});
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
 }));
@@ -276,6 +290,7 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
  */
 describe("handleDaemonEvent — marks the delivered credential (#442)", () => {
   let user: User;
+  let lastResponse: Awaited<ReturnType<typeof handleDaemonEvent>> | undefined;
   const KEY = "test-encryption-key-32-chars-long";
 
   beforeEach(async () => {
@@ -329,7 +344,7 @@ describe("handleDaemonEvent — marks the delivered credential (#442)", () => {
       threadChatId,
       credentialId: deliveredId,
     });
-    await handleDaemonEvent({
+    lastResponse = await handleDaemonEvent({
       threadId,
       threadChatId,
       userId: user.id,
@@ -410,14 +425,37 @@ describe("handleDaemonEvent — marks the delivered credential (#442)", () => {
   // Card: protects=epic decision: credit exhaustion is the built-in key's,
   // never a row mark; and an unclassified error marks nothing;
   // fails_when=either marks the delivered row; no_claim=the operator alert (C4).
-  it("credit exhausted and an unclassified error mark nothing", async () => {
+  it("credit exhausted marks nothing", async () => {
     const cred = await connect();
     const credit = await runDelivered(cred.id, [
       result("Credit balance is too low"),
     ]);
     expect(credit.errorMessage).toBe("provider-unavailable");
-    await runDelivered(cred.id, [result("API Error: 500 upstream")]);
     expect((await credential(cred.id)).unavailableReason).toBeNull();
+  });
+
+  it("an unclassified error marks nothing", async () => {
+    const cred = await connect();
+    const chat = await runDelivered(cred.id, [
+      result("API Error: 500 upstream"),
+    ]);
+    expect(chat.errorMessage).toBe("agent-generic-error");
+    expect((await credential(cred.id)).unavailableReason).toBeNull();
+  });
+
+  // Card: protects=a failed mark never fails the event: the chat still ends
+  // provider-unavailable and the finish path runs; fails_when=the mark's
+  // error propagates out of handleDaemonEvent; no_claim=retrying the mark.
+  it("a failed mark is logged and the event still succeeds", async () => {
+    const cred = await connect();
+    vi.mocked(markDeliveredCredentialUnavailable).mockRejectedValueOnce(
+      new Error("db down"),
+    );
+    const chat = await runDelivered(cred.id, weekly());
+    expect(lastResponse?.success).toBe(true);
+    expect(chat.errorMessage).toBe("provider-unavailable");
+    expect(chat.status).toBe("working-error");
+    expect(checkpointThread).toHaveBeenCalledTimes(1);
   });
 
   it("a run with no delivered credential (built-in credits) marks nothing", async () => {
