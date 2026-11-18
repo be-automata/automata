@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CELL_LABEL_MAX_LENGTH,
   CELL_MIN_TTL_MS,
+  cellStepKey,
+  isCellLabelValue,
   CELL_SELF_CHECK_BLOCKED_EXIT,
   CELL_VAULT_HEADER_PATTERN,
   type CellCreatePlan,
@@ -1316,7 +1319,7 @@ describe("delete, revoke, quarantine, copyOut", () => {
     ],
   ] as const)("%s on 404 is done", async (op, key, expected) => {
     const { server, provider } = setup();
-    server.on(key, () => json(404, {}));
+    server.on(key, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
     await expect(provider[op]("c1")).resolves.toBe(expected);
   });
 
@@ -1336,11 +1339,15 @@ describe("delete, revoke, quarantine, copyOut", () => {
 
   it("teardown revokes, quarantines, then deletes, each 404 being done", async () => {
     const { server, provider } = setup();
-    server.on("DELETE /sandboxes/c1/credential-vault", () => json(404, {}));
-    server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
-      json(404, {}),
+    server.on("DELETE /sandboxes/c1/credential-vault", () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
     );
-    server.on("DELETE /sandboxes/c1", () => json(404, {}));
+    server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
+    server.on("DELETE /sandboxes/c1", () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
     await expect(provider.teardown("c1")).resolves.toBeUndefined();
     expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
       "DELETE /sandboxes/c1/credential-vault",
@@ -1367,20 +1374,28 @@ describe("delete, revoke, quarantine, copyOut", () => {
     expect(
       JSON.stringify([agg.message, agg.errors.map((e) => e.message)]),
     ).not.toContain(API_KEY);
-    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+    const l = server.calls.map((c) => `${c.method} ${c.path}`);
+    expect(l.slice(0, 3)).toEqual([
       "DELETE /sandboxes/c1/credential-vault",
       "PUT /sandboxes/c1/networkpolicy?dropEstablished=true",
       "DELETE /sandboxes/c1",
     ]);
+    // every step failed, so teardown polls whether the cell is gone (unrouted: it fails)
+    expect(l.length).toBeGreaterThan(3);
+    expect(l.slice(3).every((x) => x === "GET /sandboxes/c1")).toBe(true);
   });
 
   it("teardown rejects with the one failing step's error and still runs the rest", async () => {
     const { server, provider } = setup();
-    server.on("DELETE /sandboxes/c1/credential-vault", () => json(404, {}));
+    server.on("DELETE /sandboxes/c1/credential-vault", () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
     server.on("PUT /sandboxes/c1/networkpolicy?dropEstablished=true", () =>
       json(500, { key: API_KEY }),
     );
-    server.on("DELETE /sandboxes/c1", () => json(404, {}));
+    server.on("DELETE /sandboxes/c1", () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
     const err = await rejection(provider.teardown("c1"));
     expect(err.op).toBe("quarantine");
     expect(err.status).toBe(500);
@@ -1863,7 +1878,7 @@ describe("an adopted cell's policy is verified (finding 4)", () => {
     ],
     ["a non-deny default", () => policyResponse({ defaultAction: "allow" })],
     ["a non-JSON body", () => new Response("<html>", { status: 200 })],
-    ["a 404", () => json(404, {})],
+    ["a 404", () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" })],
   ])(
     "%s: revokes, tears down and never writes the vault",
     async (_n, policy) => {
@@ -2025,5 +2040,215 @@ describe("fetch binding (workerd)", () => {
     } as unknown as typeof fetch;
     const { provider } = setup({}, { fetch: workerdLikeFetch });
     await expect(provider.listByTags({})).resolves.toEqual([]);
+  });
+});
+
+describe("label guard (#656 PR-C)", () => {
+  const tagsWith = (patch: Record<string, string>) =>
+    ({ ...PLAN_TAGS, ...patch }) as unknown as CellCreatePlan["tags"];
+  it.each([
+    ["a stepKey with a colon", tagsWith({ stepKey: "cell:x" })],
+    ["a 64-char value", tagsWith({ stepKey: "a".repeat(64) })],
+    ["a value ending in a dash", tagsWith({ epoch: "e1-" })],
+    ["a worker with a trailing dash", tagsWith({ worker: "w1-" })],
+    ["an empty value", tagsWith({ deployment: "" })],
+    ["a reserved-prefix extra key", tagsWith({ "opensandbox.io/x": "v" })],
+    ["an extra key with a colon", tagsWith({ "a:b": "v" })],
+  ])("%s is invalid_plan with zero fetches", async (_n, tags) => {
+    const { server, provider, logs } = setup();
+    const err = await rejection(provider.create(plan({ tags })));
+    expect(err.code).toBe("invalid_plan");
+    expect(server.fetchSpy).not.toHaveBeenCalled();
+    const text = JSON.stringify([err.message, logs]);
+    expect(text).not.toContain("cell:x");
+    expect(text).not.toContain("opensandbox.io/x");
+  });
+
+  it("the same plan with a label-safe stepKey creates (negative control)", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    await expect(
+      provider.create(plan({ tags: tagsWith({ stepKey: "cell-x" }) })),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe("cellStepKey and isCellLabelValue (#656 PR-C)", () => {
+  it("derives cell-<id>; a 32-char id passes, a 59-char id gives 64 and fails", () => {
+    expect(cellStepKey("abc")).toBe("cell-abc");
+    expect(isCellLabelValue(cellStepKey("a".repeat(32)))).toBe(true);
+    const long = cellStepKey("a".repeat(59));
+    expect(long).toHaveLength(64);
+    expect(isCellLabelValue(long)).toBe(false);
+  });
+  it("63 passes, 64 fails, inner dots and underscores pass", () => {
+    expect(CELL_LABEL_MAX_LENGTH).toBe(63);
+    expect(isCellLabelValue("a".repeat(63))).toBe(true);
+    expect(isCellLabelValue("a".repeat(64))).toBe(false);
+    expect(isCellLabelValue("a.b_c-d")).toBe(true);
+  });
+  it.each(["", "-a", "a-", ".a", "a.", "_a", "a_", "a:b", "a b", "a/b"])(
+    "refuses %j",
+    (v) => expect(isCellLabelValue(v)).toBe(false),
+  );
+});
+
+describe("idempotent teardown (#656 PR-C)", () => {
+  const REVOKE = "DELETE /sandboxes/c1/credential-vault";
+  const QUARANTINE = "PUT /sandboxes/c1/networkpolicy?dropEstablished=true";
+  const DELETE = "DELETE /sandboxes/c1";
+  const GET = "GET /sandboxes/c1";
+  const lines = (s: ReturnType<typeof setup>["server"]) =>
+    s.calls.map((c) => `${c.method} ${c.path}`);
+  const notFound = () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" });
+
+  it("502, 502, 204 then GET 404 resolves; the calls are the three steps then GET", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(502, {}));
+    server.on(QUARANTINE, () => json(502, {}));
+    server.on(DELETE, () => new Response(null, { status: 204 }));
+    server.on(GET, notFound);
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+    const l = lines(server);
+    expect(l.slice(-1)).toEqual([GET]);
+    expect(l.filter((x) => x === DELETE)).toHaveLength(1);
+    expect(l.indexOf(REVOKE)).toBeLessThan(l.indexOf(QUARANTINE));
+    expect(l.indexOf(QUARANTINE)).toBeLessThan(l.indexOf(DELETE));
+  });
+
+  it("GET 200 keeps the AggregateError of the two 502s (negative control)", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(502, {}));
+    server.on(QUARANTINE, () => json(502, {}));
+    server.on(DELETE, () => new Response(null, { status: 204 }));
+    server.on(GET, () => json(200, {}));
+    const err: unknown = await provider.teardown("c1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AggregateError);
+    expect((err as AggregateError).errors).toHaveLength(2);
+  });
+
+  it("delete 500 with GET 404 resolves (the cell is gone anyway)", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(502, {}));
+    server.on(QUARANTINE, () => json(502, {}));
+    server.on(DELETE, () => json(500, {}));
+    server.on(GET, notFound);
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+  });
+
+  it("a deleted cell (all three 404) resolves with no GET", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+    server.on(QUARANTINE, () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
+    server.on(DELETE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+    expect(lines(server)).not.toContain(GET);
+  });
+
+  it("GET 500 or a transport failure keeps the original error", async () => {
+    for (const get of [
+      () => json(500, {}),
+      () => {
+        throw new Error("boom");
+      },
+    ]) {
+      const { server, provider } = setup();
+      server.on(REVOKE, () => json(500, {}));
+      server.on(QUARANTINE, () =>
+        json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+      );
+      server.on(DELETE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+      server.on(GET, get);
+      const err = await rejection(provider.teardown("c1"));
+      expect(err.op).toBe("revoke");
+      expect(err.status).toBe(500);
+    }
+  });
+
+  it.each([
+    ["an empty body", () => new Response(null, { status: 404 })],
+    ["a non-OpenSandbox body", () => json(404, { message: "not found" })],
+    ["a non-JSON body", () => new Response("404 page", { status: 404 })],
+  ])("GET 404 with %s still rejects (tunnel catch-all)", async (_n, get) => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(500, {}));
+    server.on(QUARANTINE, () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
+    server.on(DELETE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+    server.on(GET, get);
+    await expect(provider.teardown("c1")).rejects.toBeInstanceOf(
+      CellProviderError,
+    );
+  });
+
+  it("a detail.code ending in ::SANDBOX_NOT_FOUND counts", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(500, {}));
+    server.on(QUARANTINE, () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
+    server.on(DELETE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+    server.on(GET, () =>
+      json(404, { detail: { code: "DOCKER::SANDBOX_NOT_FOUND" } }),
+    );
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+  });
+
+  it("three bare 404s are not done: exists is asked (negative control)", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(404, {}));
+    server.on(QUARANTINE, () => json(404, {}));
+    server.on(DELETE, () => json(404, {}));
+    server.on(GET, notFound);
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+    expect(lines(server)).toContain(GET);
+    // and a bare 404 from exists too is a failure
+    const other = setup();
+    other.server.on(REVOKE, () => json(404, {}));
+    other.server.on(QUARANTINE, () => json(404, {}));
+    other.server.on(DELETE, () => json(404, {}));
+    other.server.on(GET, () => json(404, {}));
+    await expect(other.provider.teardown("c1")).rejects.toBeInstanceOf(Error);
+  });
+
+  it("a transient exists failure is retried within the budget, then resolves", async () => {
+    const { server, provider } = setup();
+    server.on(REVOKE, () => json(500, {}));
+    server.on(QUARANTINE, () =>
+      json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }),
+    );
+    server.on(DELETE, () => json(404, { code: "DOCKER::SANDBOX_NOT_FOUND" }));
+    server.on(
+      GET,
+      () => json(500, {}),
+      () => json(500, {}),
+      notFound,
+    );
+    await expect(provider.teardown("c1")).resolves.toBeUndefined();
+    expect(lines(server).filter((x) => x === GET)).toHaveLength(3);
+  });
+
+  it("no error, serialized error or log carries the API key", async () => {
+    const { server, provider, logs } = setup();
+    server.on(REVOKE, () => json(500, { key: API_KEY }));
+    server.on(QUARANTINE, () => json(502, { key: API_KEY }));
+    server.on(DELETE, () => json(500, { key: API_KEY }));
+    server.on(GET, () => json(500, { key: API_KEY }));
+    const err: unknown = await provider.teardown("c1").catch((e: unknown) => e);
+    const agg = err as AggregateError;
+    expect(
+      JSON.stringify([
+        agg.message,
+        agg.errors.map((e) => e.message),
+        logs,
+        err,
+      ]),
+    ).not.toContain(API_KEY);
+    expect(
+      server.calls.every((c) => c.headers["OPEN-SANDBOX-API-KEY"] === API_KEY),
+    ).toBe(true);
   });
 });

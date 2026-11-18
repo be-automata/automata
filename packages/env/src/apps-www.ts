@@ -114,6 +114,13 @@ export const env = envsafe({
   OPENSANDBOX_URL: str({ default: "", allowEmpty: true }),
   OPENSANDBOX_API_KEY: str({ default: "", allowEmpty: true }),
   OPENSANDBOX_GUEST_IMAGE: str({ default: "", allowEmpty: true }),
+  // Cloudflare Access service token for the box's tunnel (#656 PR-C). Secrets:
+  // never logged. OPENSANDBOX_URL is the Access-protected tunnel hostname
+  // (https://<host>, deploy README "OpenSandbox cells" steps 3-8), not the box's
+  // loopback. Both empty = plain fetch (dev); exactly one set keeps the cell
+  // control plane off.
+  OPENSANDBOX_ACCESS_CLIENT_ID: str({ default: "", allowEmpty: true }),
+  OPENSANDBOX_ACCESS_CLIENT_SECRET: str({ default: "", allowEmpty: true }),
   // ADR-036: the single-writer review channel (emit-only agent → control-plane
   // posts exactly once at finish, with the per-repo tolerance floor + a grace-period
   // sweep backstop) is now UNCONDITIONAL — the former REVIEW_SINGLE_WRITER flag was
