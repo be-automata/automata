@@ -254,6 +254,22 @@ describe("retired daemon tokens (#656 PR-D)", () => {
     expect(await row(id)).toEqual(first);
   });
 
+  it("a token with a NULL name is renamed too, so the retire is real (Automata review 5949309184)", async () => {
+    const id = await mint(`${nanoid(8)}:${nanoid(8)}`);
+    await db
+      .update(apikeyTable)
+      .set({ name: null })
+      .where(eq(apikeyTable.id, id));
+    expect(await retireDaemonTokenById({ userId: user.id, apiKeyId: id })).toBe(
+      true,
+    );
+    expect((await row(id))?.name).toBe(":retired");
+    // A second retire matches nothing: the row now carries the suffix.
+    expect(await retireDaemonTokenById({ userId: user.id, apiKeyId: id })).toBe(
+      false,
+    );
+  });
+
   it("an expires_at already earlier than the cap stays earlier", async () => {
     const id = await mint(`${nanoid(8)}:${nanoid(8)}`);
     const early = new Date(Date.now() + 60 * 1000);

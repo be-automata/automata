@@ -158,7 +158,9 @@ export async function retireDaemonTokenById({
   const retired = await db
     .update(apikey)
     .set({
-      name: sql`${apikey.name} || ${RETIRED_TOKEN_SUFFIX}`,
+      // COALESCE matches the WHERE below: NULL || text is NULL in SQL, so a
+      // null name would "retire" without ever carrying the suffix.
+      name: sql`COALESCE(${apikey.name}, '') || ${RETIRED_TOKEN_SUFFIX}`,
       expiresAt: sql`LEAST(COALESCE(${apikey.expiresAt}, ${cap}), ${cap})`,
     })
     .where(
