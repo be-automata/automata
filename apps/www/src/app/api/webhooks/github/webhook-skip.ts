@@ -60,6 +60,19 @@ export function isWebhookSkip(error: unknown): error is WebhookSkip {
 }
 
 /**
+ * #134: true when `error` is nothing but skips — a WebhookSkip, or an octokit
+ * aggregate whose every entry is one. An aggregate that also holds a genuine
+ * error is not, so that error still gets logged.
+ */
+export function isOnlyWebhookSkips(error: unknown): boolean {
+  const errors = (error as { errors?: unknown } | null)?.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors.every(isOnlyWebhookSkips);
+  }
+  return isWebhookSkip(error);
+}
+
+/**
  * Run an installation-client acquisition (or any GitHub-App access step) and
  * convert an auth/not-installed failure into a business skip rather than a 500.
  */

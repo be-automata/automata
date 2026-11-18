@@ -57,7 +57,7 @@ import {
 } from "./handlers";
 import { Webhooks } from "@octokit/webhooks";
 import { env } from "@terragon/env/apps-www";
-import { findWebhookSkip } from "./webhook-skip";
+import { findWebhookSkip, isOnlyWebhookSkips } from "./webhook-skip";
 import { handleSelfHealCiEvent } from "@/server-lib/audit/evaluate-fix-ci";
 import { handleSelfHealPrClosed } from "@/server-lib/audit/fix-pr-lifecycle";
 import {
@@ -284,6 +284,12 @@ export async function POST(request: NextRequest) {
     console.log("[github webhook] event received", name, ...payloadInfo);
   });
   webhooks.onError((error) => {
+    // #134: a WebhookSkip is a business rejection; the catch below logs it as
+    // "skipped" and answers 2xx, so it is not an error here either. A genuine
+    // error from another hook of the same delivery is still logged.
+    if (isOnlyWebhookSkips(error)) {
+      return;
+    }
     console.error("[github webhook] error", error);
   });
   if (!(await isSignedDelivery(webhooks, body, signature))) {

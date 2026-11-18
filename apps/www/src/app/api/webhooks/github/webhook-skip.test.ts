@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   WebhookSkip,
   findWebhookSkip,
+  isOnlyWebhookSkips,
   isWebhookSkip,
   requireAppAccess,
 } from "./webhook-skip";
@@ -28,6 +29,24 @@ describe("webhook-skip (WI-8)", () => {
     expect(findWebhookSkip(wrapped)?.category).toBe("unmapped_installation");
   });
 
+  it("#134: isOnlyWebhookSkips is true only when every entry is a skip", () => {
+    const skip = new WebhookSkip("unmapped_installation", "no org");
+    const aggregate = (...errors: unknown[]) =>
+      Object.assign(new Error("Handler error"), { errors });
+    expect(isOnlyWebhookSkips(skip)).toBe(true);
+    expect(isOnlyWebhookSkips(aggregate(skip))).toBe(true);
+    expect(
+      isOnlyWebhookSkips(
+        aggregate(skip, new WebhookSkip("no_mapped_users", "no users")),
+      ),
+    ).toBe(true);
+    expect(isOnlyWebhookSkips(aggregate(skip, new Error("db down")))).toBe(
+      false,
+    );
+    expect(isOnlyWebhookSkips(aggregate())).toBe(false);
+    expect(isOnlyWebhookSkips(new Error("boom"))).toBe(false);
+  });
+
   it("does NOT match a genuine error (stays a 500)", () => {
     expect(isWebhookSkip(new Error("Database error"))).toBe(false);
     expect(findWebhookSkip(new Error("boom"))).toBeNull();
@@ -36,10 +55,9 @@ describe("webhook-skip (WI-8)", () => {
 
   it("requireAppAccess converts a failure into an app_access_unavailable skip", async () => {
     await expect(
-      requireAppAccess(
-        () => Promise.reject(new Error("Bad credentials")),
-        { repoFullName: "o/r" },
-      ),
+      requireAppAccess(() => Promise.reject(new Error("Bad credentials")), {
+        repoFullName: "o/r",
+      }),
     ).rejects.toSatisfy((e: unknown) => {
       const skip = findWebhookSkip(e);
       return (
