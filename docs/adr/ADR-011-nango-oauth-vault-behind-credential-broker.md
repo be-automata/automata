@@ -1,9 +1,11 @@
 # ADR-011: Nango is the OAuth credential vault behind the credential broker — agents and planes never learn it exists
 
-- **Status:** Proposed (2026-10-18). Not implemented. Open decisions resolved 2026-10-18 by the
-  operator (deployment mode: Nango Cloud; see "Deployment mode"). Stays Proposed until the Phase 1
-  spike report proves the checks listed there; acceptance follows that report. Amendment 1
-  (Nango for every third-party connection) Proposed 2026-11-17, see the end of this record.
+- **Status:** Accepted (2026-11-18, by the TL, with Amendment 1). Not implemented. Proposed
+  2026-10-18; open decisions resolved that day by the operator (deployment mode: Nango Cloud; see
+  "Deployment mode"). Accepted once the Phase 1 checks the TL required passed: check 3, key scope
+  (#696), and check 4, latency from a Worker (#694). Checks 1, 2 and 5 remain conditions on the
+  work that needs them (Amendment 1, "Acceptance path"). Amendment 1 (Nango for every third-party
+  connection) was Proposed 2026-11-17 and is accepted with the body; see the end of this record.
 - **Date:** 2026-10-18
 - **Context source:** anchors are against `main` @ `a50935e`.
   `packages/worker/src/agent-run/gh-broker.ts:128-157` (`startGhBroker` takes `installationToken`
@@ -464,10 +466,10 @@ One integration per org-owned Slack app applies in either mode (see Consequences
 - Phase 1 spike report (the five checks under "Deployment mode") before acceptance and before any
   production change.
 
-## Amendment 1 (Proposed 2026-11-17): Nango is the platform's OAuth vault for every third-party connection
+## Amendment 1 (Accepted 2026-11-18): Nango is the platform's OAuth vault for every third-party connection
 
-- **Status:** Proposed. Accepted together with the body once Phase 1 checks 3 and 4 pass (see
-  "Acceptance path"). Decision §1–§10 stand except where amended below.
+- **Status:** Accepted 2026-11-18 by the TL, together with the body, after Phase 1 checks 3 and
+  4 passed (see "Acceptance path"). Proposed 2026-11-17. Decision §1–§10 stand except where amended below.
 - **Amends:** Decision §1 (scope), §3 "Plane fit", §10 (tenancy trigger), Options "Composio"
   (data-path claim), Consequences "Custody and residency"; corrects §4 (per-box key); adds D-1…D-8
   and I8–I12.
@@ -525,8 +527,8 @@ customer's tokens, and that a Nango outage stops every third-party effect.
 
 ### Acceptance path (decided 2026-11-17)
 
-ADR-011 and this amendment are accepted by the TL once checks 3 and 4 pass. The others become
-conditions on the work that needs them:
+ADR-011 and this amendment were accepted by the TL on 2026-11-18, after checks 3 and 4 passed.
+The others are conditions on the work that needs them:
 
 | Check                            | State                                                                                                  | Gates                             |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------- |
