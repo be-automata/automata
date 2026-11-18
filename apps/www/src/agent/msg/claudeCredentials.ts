@@ -359,7 +359,12 @@ export async function getClaudeCredentialsJSONOrNull({
   // primary credential lookup so the agent uses THIS org's credential. The
   // downstream by-credentialId refresh reads are already gated by that id.
   organizationId?: string | null;
-}): Promise<{ contents: string | null; error: string | null }> {
+}): Promise<{
+  contents: string | null;
+  error: string | null;
+  /** #442: the agent_provider_credentials row `contents` came from (null without contents). */
+  credentialId: string | null;
+}> {
   try {
     // Get the stored tokens
     const credentials = await getAgentProviderCredentialsDecrypted({
@@ -370,17 +375,18 @@ export async function getClaudeCredentialsJSONOrNull({
       encryptionKey: env.ENCRYPTION_MASTER_KEY,
     });
     if (!credentials) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
     // For API keys, just include the API key
     if (credentials.apiKey) {
       return {
         contents: JSON.stringify({ anthropicApiKey: credentials.apiKey }),
         error: null,
+        credentialId: credentials.id,
       };
     }
     if (!credentials.accessToken) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
     // A `claude setup-token` token is a long-lived OAuth bearer with no refresh
     // token and no expiry, so it skips the refresh round-trip entirely and is
@@ -406,6 +412,7 @@ export async function getClaudeCredentialsJSONOrNull({
           },
         }),
         error: null,
+        credentialId: credentials.id,
       };
     }
     // Try to refresh the token
@@ -427,7 +434,7 @@ export async function getClaudeCredentialsJSONOrNull({
       }
     }
     if (!finalCredentials.accessToken) {
-      return { contents: null, error: null };
+      return { contents: null, error: null, credentialId: null };
     }
 
     let organizationType: ClaudeOrganizationType | null = null;
@@ -451,13 +458,21 @@ export async function getClaudeCredentialsJSONOrNull({
         subscriptionType: orgTypeToSubscriptionType(organizationType),
       },
     };
-    return { contents: JSON.stringify(credentialsJson), error: null };
+    return {
+      contents: JSON.stringify(credentialsJson),
+      error: null,
+      credentialId: finalCredentials.id,
+    };
   } catch (error) {
     console.error(
       "[getCredentialsJSONOrNull] Failed to get credentials:",
       error,
     );
-    return { contents: null, error: "Failed to get Claude credentials" };
+    return {
+      contents: null,
+      error: "Failed to get Claude credentials",
+      credentialId: null,
+    };
   }
 }
 

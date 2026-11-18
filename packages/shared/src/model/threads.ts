@@ -809,6 +809,7 @@ type ThreadForThreadChatInfoFull = Pick<
   | "activeRunExternalId"
   | "terminalCause"
   | "queuedAt"
+  | "deliveredCredentialId"
 > & {
   isUnread: boolean;
 };
@@ -852,6 +853,7 @@ function createLegacyThreadChatFull(
     activeRunExternalId: thread.activeRunExternalId,
     terminalCause: thread.terminalCause,
     queuedAt: thread.queuedAt,
+    deliveredCredentialId: thread.deliveredCredentialId,
   };
 }
 
@@ -1048,6 +1050,61 @@ export async function updateThreadChat({
     },
   });
   return null;
+}
+
+/**
+ * #442 (epic #440 C2): record which agent_provider_credentials row
+ * /api/daemon/agent-credentials delivered to this chat's run (NULL = built-in
+ * credits or none), so a classified provider refusal marks THAT row and never
+ * one an operator switched to mid-run. Overwritten at every delivery.
+ *
+ * A legacy chat (every production thread while enableThreadChatCreation is
+ * off) lives on the thread row, so it is written there. Narrow and
+ * broadcast-free like setThreadActiveRun, and it keeps updated_at as it was:
+ * delivery bookkeeping must not move a thread's staleness or sort order.
+ * Returns whether a row was written.
+ */
+export async function setThreadChatDeliveredCredential({
+  db,
+  userId,
+  threadId,
+  threadChatId,
+  credentialId,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  credentialId: string | null;
+}): Promise<boolean> {
+  if (threadChatId === LEGACY_THREAD_CHAT_ID) {
+    const rows = await db
+      .update(schema.thread)
+      .set({
+        deliveredCredentialId: credentialId,
+        updatedAt: sql`${schema.thread.updatedAt}`,
+      })
+      .where(
+        and(eq(schema.thread.id, threadId), eq(schema.thread.userId, userId)),
+      )
+      .returning({ id: schema.thread.id });
+    return rows.length > 0;
+  }
+  const rows = await db
+    .update(schema.threadChat)
+    .set({
+      deliveredCredentialId: credentialId,
+      updatedAt: sql`${schema.threadChat.updatedAt}`,
+    })
+    .where(
+      and(
+        eq(schema.threadChat.id, threadChatId),
+        eq(schema.threadChat.threadId, threadId),
+        eq(schema.threadChat.userId, userId),
+      ),
+    )
+    .returning({ id: schema.threadChat.id });
+  return rows.length > 0;
 }
 
 /**

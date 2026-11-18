@@ -3,12 +3,13 @@ import type {
   AgentProviderCredentials,
   AgentProviderCredentialsInsert,
 } from "../db/types";
-import { eq, and, desc, ne } from "drizzle-orm";
+import { eq, and, desc, ne, sql } from "drizzle-orm";
 import { encryptValue, decryptValue } from "@terragon/utils/encryption";
 import type { DB } from "../db";
 import { publishBroadcastUserMessage } from "../broadcast-server";
 import { AIAgent } from "@terragon/agent/types";
 import { updateUserFlags } from "./user-flags";
+import type { CredentialUnavailableReason } from "./credential-unavailable-reason";
 
 /**
  * Tenant fence for owner-scoped agent-credential access (WI-5). We keep the
@@ -38,6 +39,23 @@ export type AgentProviderCredentialsDecrypted = Omit<
   idToken?: string;
 };
 
+/**
+ * What a caller supplies to store a credential. The #442 availability columns
+ * are excluded: only markAgentProviderCredentialUnavailable (and an admin
+ * clear) writes them, so a connect always starts available.
+ */
+export type AgentProviderCredentialsInput = Omit<
+  AgentProviderCredentialsDecrypted,
+  | "id"
+  | "userId"
+  | "organizationId"
+  | "createdAt"
+  | "updatedAt"
+  | "unavailableUntil"
+  | "unavailableReason"
+  | "unavailableMarkedAt"
+>;
+
 export async function insertAgentProviderCredentials({
   db,
   userId,
@@ -47,10 +65,7 @@ export async function insertAgentProviderCredentials({
 }: {
   db: DB;
   userId: string;
-  credentialData: Omit<
-    AgentProviderCredentialsDecrypted,
-    "id" | "userId" | "organizationId" | "createdAt" | "updatedAt"
-  >;
+  credentialData: AgentProviderCredentialsInput;
   encryptionKey: string;
   // Tenant to stamp on the new credential (WI-5).
   organizationId?: string | null;
@@ -246,6 +261,135 @@ export async function getAgentProviderCredentialsRecord({
     ),
     orderBy: desc(schema.agentProviderCredentials.createdAt),
   });
+}
+
+/**
+ * #442: whether a credential row is marked unavailable at `now`. Marked =
+ * a reason is set and the until is NULL (indefinite) or still ahead. A timed
+ * mark whose until has passed is available again without any write; an admin
+ * clear nulls both columns.
+ */
+export function isAgentProviderCredentialUnavailable<
+  T extends Pick<
+    AgentProviderCredentials,
+    "unavailableReason" | "unavailableUntil"
+  >,
+>(
+  credential: T,
+  now: Date,
+): credential is T & { unavailableReason: CredentialUnavailableReason } {
+  if (credential.unavailableReason === null) {
+    return false;
+  }
+  return (
+    credential.unavailableUntil === null ||
+    credential.unavailableUntil.getTime() > now.getTime()
+  );
+}
+
+export type AgentProviderCredentialResolution =
+  | { status: "available"; credential: AgentProviderCredentials }
+  | {
+      status: "credential-unavailable";
+      credentialId: string;
+      /** NULL = indefinite: only an admin clear (or a reconnect) ends it. */
+      until: Date | null;
+      reason: CredentialUnavailableReason;
+    }
+  | { status: "none" };
+
+/**
+ * #442 (epic #440 C2): the typed resolution the dispatch gate (C3) consumes.
+ * It keeps today's selection exactly (getAgentProviderCredentialsRecord: the
+ * newest active row for user + org + agent) and, when THAT row is marked,
+ * says so. It never steps down to an older or inactive row (epic decision 1:
+ * no automatic fallback between credentials).
+ */
+export async function resolveAgentProviderCredential({
+  db,
+  userId,
+  agent,
+  organizationId,
+  now = new Date(),
+}: {
+  db: DB;
+  userId: string;
+  agent: AIAgent;
+  organizationId?: string | null;
+  now?: Date;
+}): Promise<AgentProviderCredentialResolution> {
+  const credential = await getAgentProviderCredentialsRecord({
+    db,
+    userId,
+    agent,
+    organizationId,
+  });
+  if (!credential) {
+    return { status: "none" };
+  }
+  if (isAgentProviderCredentialUnavailable(credential, now)) {
+    return {
+      status: "credential-unavailable",
+      credentialId: credential.id,
+      until: credential.unavailableUntil,
+      reason: credential.unavailableReason,
+    };
+  }
+  return { status: "available", credential };
+}
+
+/**
+ * #442: mark a credential unavailable after a classified provider refusal.
+ * `until: null` is an indefinite mark (subscription disabled, credential
+ * rejected); a Date is a timed one (a usage limit's reset).
+ *
+ * ONE conditional UPDATE, so it is idempotent and monotonic under concurrency:
+ * Postgres serialises writers on the row lock and, at READ COMMITTED,
+ * re-checks the WHERE against the committed version, so of two racing timed
+ * marks the larger until wins (GREATEST semantics), and:
+ *  - an existing indefinite mark is never changed (not shortened by a timed
+ *    mark, not re-stamped by another indefinite one);
+ *  - a timed mark only ever extends the current until.
+ * Fenced by user_id. Returns whether the row changed; a deleted credential or
+ * a no-op mark returns false.
+ */
+export async function markAgentProviderCredentialUnavailable({
+  db,
+  userId,
+  credentialId,
+  reason,
+  until,
+}: {
+  db: DB;
+  userId: string;
+  credentialId: string;
+  reason: CredentialUnavailableReason;
+  until: Date | null;
+}): Promise<boolean> {
+  const table = schema.agentProviderCredentials;
+  const notIndefinite = sql`NOT (${table.unavailableReason} IS NOT NULL AND ${table.unavailableUntil} IS NULL)`;
+  const extendsUntil =
+    until === null
+      ? undefined
+      : // An unmarked row (reason NULL, e.g. a half admin clear) always takes it.
+        sql`(${table.unavailableReason} IS NULL OR ${table.unavailableUntil} IS NULL OR ${table.unavailableUntil} < ${until.toISOString()}::timestamptz)`;
+  const rows = await db
+    .update(table)
+    .set({
+      unavailableUntil: until,
+      unavailableReason: reason,
+      unavailableMarkedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(table.id, credentialId),
+        eq(table.userId, userId),
+        notIndefinite,
+        extendsUntil,
+      ),
+    )
+    .returning({ id: table.id });
+  return rows.length > 0;
 }
 
 async function getAgentProviderCredentialById({
