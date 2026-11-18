@@ -64,6 +64,29 @@ within that variant (the #69 stacked-GRR family). Not frozen as a case because
 it is intermittent; it is the second reason the box slot, not the engine, is
 the enforcement point for the one-agent budget.
 
+## 6. Concurrent triggers lose no run (#395 verdict, 2026-11-17)
+
+42 trigger POSTs fired at once (`Promise.all`) on `agent-run-strict` at caps 3/2
+with a `slots: 3` worker: every run reaches COMPLETED **and** executes. Measured
+on an idle machine in nine runs (378 concurrent triggers, 378 executions, 0%
+loss); frozen by the `#395` case in `burst.integration.test.ts`, no longer
+skipped.
+
+The 2026-10-19 report ("31 of 42 COMPLETED without executing") was a harness
+artefact, reproduced on demand: two HATCHET_IT processes on one machine shared
+the ONE fixed IT stack (`automata-hatchet-it`, fixed ports, `up -d` silently
+joins, `bootstrapTenant` always resolves the default tenant), so two workers
+served one tenant and one workflow. The engine spread each process's runs over
+both; each suite's stub only sees its own. In the drill, B saw 42/42 terminal
+and 17 executed; A's worker had run the other 25. No trigger-side collapse, no
+OLAP/status artefact, no engine scheduling fault, and no production exposure
+(one worker unit per box, its own tenant). Since #395 the harness holds a
+machine-wide kernel flock for the life of the stack (`hatchet-it-harness.ts`,
+`acquireItStackLock`), so a second process waits instead of joining, and both
+burst cases assert a sole worker on the tenant. No upstream issue matches;
+hatchet-dev/hatchet#4494 (a dropped task left QUEUED with a leaked slot) and
+#4778 (positional GRR capacity) are different symptoms.
+
 ## Also verified (not characterizations — the intended semantics hold)
 
 - `agent-run-newest` (`CANCEL_IN_PROGRESS`): the live run is CANCELLED, the

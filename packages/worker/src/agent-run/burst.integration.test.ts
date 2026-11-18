@@ -139,6 +139,24 @@ describe.skipIf(!itEnabled)(
       }
     };
 
+    /**
+     * #395: the stub only sees ITS process's executions. A second worker on
+     * this tenant (another HATCHET_IT process sharing the stack) would take
+     * some of the burst, and those runs would look COMPLETED without
+     * executing here. The harness lock makes that impossible; this names it
+     * if it ever happens again instead of reporting a lost run.
+     */
+    async function expectSoleWorker(): Promise<void> {
+      const { rows } = await pg.query<{ id: string }>(
+        `SELECT id FROM "Worker" WHERE "tenantId" = $1 AND "isActive"`,
+        [tenantId],
+      );
+      expect(
+        rows.length,
+        "another process's worker shares this IT stack (#395): its runs would look COMPLETED without executing here",
+      ).toBe(1);
+    }
+
     beforeAll(async () => {
       await composeUp();
       pg = await connectPg();
@@ -174,12 +192,10 @@ describe.skipIf(!itEnabled)(
 
     it(`${BURST} dispatches at caps ${CAPS.globalMaxRuns}/${CAPS.perOrgMaxRuns} with ${WORKER_SLOTS} slots: every run COMPLETED (none lost), at most ${WORKER_SLOTS} executing at once, at most ${CAPS.perOrgMaxRuns} per org at once`, async () => {
       const burstId = uid("burst");
-      // Triggered one at a time ON PURPOSE. Observed on hatchet-lite v0.94.10
-      // (2026-10-19): 42 CONCURRENT trigger POSTs left 31 runs COMPLETED on
-      // the engine without ever being dispatched to the worker (11 executed,
-      // serially) — a silently lost run, tracked as #395 with the skipped
-      // concurrent variant below. This case proves AC 6 for sequential
-      // triggers only.
+      await expectSoleWorker();
+      // Triggered one at a time: this case pins the exact-peak shape (caps
+      // used, not merely respected), which concurrent POST latency would blur.
+      // Concurrent triggers lose no run either — the #395 case below.
       const dispatched: Array<{ id: string; label: string; orgId: string }> =
         [];
       for (let i = 0; i < BURST; i++) {
@@ -261,12 +277,14 @@ describe.skipIf(!itEnabled)(
       expect([...executions.values()].some((e) => e.cancelled)).toBe(false);
     });
 
-    // #395: the same burst with every trigger in flight at once. Fails today
-    // on hatchet-lite v0.94.10 (31 of 42 runs reach COMPLETED without ever
-    // executing). Kept skipped so the regression stays visible and
-    // reproducible; unskip to investigate.
-    it.skip(`#395: ${BURST} CONCURRENT triggers — every run that reaches COMPLETED must have executed`, async () => {
+    // #395: the same burst with every trigger in flight at once. The
+    // 2026-10-19 "31 of 42 COMPLETED without executing" was a SECOND process's
+    // worker on the shared IT stack taking those runs, not an engine loss
+    // (verdict: docs/uat/hatchet-lite-v0.94.10-observed.md §6). On a stack of
+    // its own, every concurrently triggered run executes here.
+    it(`#395: ${BURST} CONCURRENT triggers — every run that reaches COMPLETED must have executed`, async () => {
       const burstId = uid("cburst");
+      await expectSoleWorker();
       const dispatched = await Promise.all(
         Array.from({ length: BURST }, async (_, i) => {
           const orgId = orgFor(i);
