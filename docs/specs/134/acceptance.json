@@ -1,0 +1,65 @@
+{
+  "criteria": [
+    {
+      "id": "AC-1",
+      "text": "AC-1: A mirror delivery that raises an `unmapped_installation` WebhookSkip gets a 2xx with `skipped: true`, logs `[github webhook] skipped` with its category, and calls `console.error` zero times.",
+      "tiers": ["local"],
+      "hints": [
+        "tests: AC-1: `apps/www/src/app/api/webhooks/github/route.test.ts` \"an unmapped-installation skip answers"
+      ],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/134/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "apps/www/src/app/api/webhooks/github/route.test.ts",
+          "name": "an unmapped-installation skip answers 2xx and logs 'skipped', with no console.error"
+        }
+      ],
+      "defer": null
+    },
+    {
+      "id": "AC-2",
+      "text": "AC-2: A delivery whose hooks raise a skip AND a genuine error still logs `[github webhook] error`.",
+      "tiers": ["local"],
+      "hints": [
+        "tests: AC-2: `route.test.ts` \"#134: a genuine error from another hook of the same delivery as a skip is"
+      ],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/134/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "apps/www/src/app/api/webhooks/github/route.test.ts",
+          "name": "#134: a genuine error from another hook of the same delivery as a skip is still logged"
+        },
+        {
+          "kind": "test",
+          "path": "apps/www/src/app/api/webhooks/github/webhook-skip.test.ts",
+          "name": "#134: isOnlyWebhookSkips is true only when every entry is a skip"
+        }
+      ],
+      "defer": null
+    },
+    {
+      "id": "AC-3",
+      "text": "AC-3: The gates pass: `pnpm turbo tsc-check`, `pnpm turbo lint`, `pnpm turbo format-check` and the www suite.",
+      "tiers": ["unmapped"],
+      "hints": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/134/gate-log.md"
+        }
+      ],
+      "defer": null
+    }
+  ]
+}
