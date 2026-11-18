@@ -10,6 +10,18 @@
  * Kept dependency-free (no next/db/auth imports) so it is unit-testable and
  * cheap to import from the resolver.
  */
+/**
+ * A cell run's terminal read retires its token: `:retired` is appended to the
+ * apikey `name` (the double-dispatch guard matches the bare run key, so the run
+ * no longer reads as in flight). A retired token is accepted only on
+ * cell-teardown; see verifyDaemonApiKey.
+ */
+export const RETIRED_TOKEN_SUFFIX = ":retired";
+
+export function isRetiredTokenName(name: string | null | undefined): boolean {
+  return typeof name === "string" && name.endsWith(RETIRED_TOKEN_SUFFIX);
+}
+
 export type DaemonTokenContext = {
   userId: string;
   /**
@@ -88,5 +100,12 @@ export function daemonTokenContextFromApiKey(
   const tokenType = key?.metadata?.tokenType === "daemon" ? "daemon" : null;
   const apiKeyId =
     typeof key?.id === "string" && key.id.length > 0 ? key.id : null;
-  return { userId, apiKeyId, organizationId, threadChatId, threadId, tokenType };
+  return {
+    userId,
+    apiKeyId,
+    organizationId,
+    threadChatId,
+    threadId,
+    tokenType,
+  };
 }

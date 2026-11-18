@@ -130,3 +130,16 @@ export async function postOpsAlert(
 ): Promise<OpsAlertResult> {
   return postAlertText(payload, deps);
 }
+
+/**
+ * A failed send that a retry can fix (a timeout, a network error, a non-2xx).
+ * `unconfigured`, `invalid_url` and `redirect` stay failed until someone
+ * changes the configuration.
+ */
+export function isTransientOpsAlertFailure(
+  reason: Extract<OpsAlertResult, { sent: false }>["reason"],
+): boolean {
+  return (
+    reason === "timeout" || reason === "request_failed" || reason === "non_2xx"
+  );
+}

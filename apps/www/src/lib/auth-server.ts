@@ -219,12 +219,13 @@ export async function getUserIdOrRedirect(): Promise<User["id"]> {
  */
 export async function getDaemonTokenContext(
   request: Pick<Request, "headers">,
+  opts?: { allowRetired?: boolean },
 ): Promise<DaemonTokenContext | null> {
   const token = request.headers.get("X-Daemon-Token");
   if (!token) {
     return null;
   }
-  const key = await verifyDaemonApiKey(token);
+  const key = await verifyDaemonApiKey(token, opts);
   if (!key) {
     return null;
   }

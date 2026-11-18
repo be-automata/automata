@@ -73,7 +73,8 @@ const effectKey = (stepKey: string, idempotencyKey: string) =>
 const isRevoked = (attempt: number, revokedThrough: number | null): boolean =>
   revokedThrough !== null && attempt <= revokedThrough;
 
-const CELL_MAX_ATTEMPTS = 1000;
+/** The most attempts one cell step may open. */
+export const CELL_MAX_ATTEMPTS = 1000;
 const DEAD_READ_MAX_KEYS = 1000;
 
 function assertStepShape(step: {

@@ -9,6 +9,8 @@ import { createTestUser } from "@terragon/shared/model/test-helpers";
 import { User } from "@terragon/shared";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
+import { RETIRED_TOKEN_SUFFIX } from "@/lib/daemon-token-context";
 
 /**
  * A drizzle query builder whose every step chains and whose await rejects —
@@ -147,5 +149,76 @@ describe("getDaemonTokenContext: unavailable vs unauthorized", () => {
     await expect(
       getDaemonTokenContext(daemonRequest(token)),
     ).rejects.toBeInstanceOf(DaemonAuthUnavailableError);
+  });
+});
+
+describe("retired daemon tokens: refused unless allowRetired", () => {
+  let token: string;
+  let liveToken: string;
+  let apiKeyId: string;
+
+  async function mint(name: string) {
+    const { user } = await createTestUser({ db });
+    const created = await auth.api.createApiKey({
+      body: {
+        name,
+        userId: user.id,
+        expiresIn: 60 * 60 * 24,
+        metadata: {
+          threadChatId: "tc_1",
+          threadId: "t_1",
+          tokenType: "daemon",
+        },
+      },
+    });
+    return created;
+  }
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    const retired = await mint(`run-${nanoid(8)}`);
+    token = retired.key;
+    apiKeyId = retired.id;
+    await db
+      .update(apikeyTable)
+      .set({ name: `run-${nanoid(8)}${RETIRED_TOKEN_SUFFIX}` })
+      .where(eq(apikeyTable.id, apiKeyId));
+    liveToken = (await mint(`run-${nanoid(8)}`)).key;
+  });
+
+  it("a retired key verifies to null by default, through the real verify", async () => {
+    await expect(verifyDaemonApiKey(token)).resolves.toBe(null);
+    await expect(getDaemonTokenContext(daemonRequest(token))).resolves.toBe(
+      null,
+    );
+  });
+
+  it("allowRetired returns the key, and the context resolves", async () => {
+    await expect(
+      verifyDaemonApiKey(token, { allowRetired: true }),
+    ).resolves.toEqual(expect.objectContaining({ id: apiKeyId }));
+    await expect(
+      getDaemonTokenContext(daemonRequest(token), { allowRetired: true }),
+    ).resolves.toEqual(expect.objectContaining({ apiKeyId }));
+  });
+
+  it("a live key is unaffected either way (control)", async () => {
+    await expect(verifyDaemonApiKey(liveToken)).resolves.not.toBe(null);
+    await expect(
+      verifyDaemonApiKey(liveToken, { allowRetired: true }),
+    ).resolves.not.toBe(null);
+    await expect(
+      getDaemonTokenContext(daemonRequest(liveToken)),
+    ).resolves.not.toBe(null);
+  });
+
+  it("an expired retired key is still null with allowRetired", async () => {
+    await db
+      .update(apikeyTable)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(apikeyTable.id, apiKeyId));
+    await expect(
+      verifyDaemonApiKey(token, { allowRetired: true }),
+    ).resolves.toBe(null);
   });
 });

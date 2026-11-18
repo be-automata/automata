@@ -134,6 +134,12 @@ export const auth = betterAuth({
       ? env.BETTER_AUTH_URL
       : `https://${process.env.NEXT_PUBLIC_VERCEL_BRANCH_URL}`,
   secret: env.BETTER_AUTH_SECRET,
+  // A session user owns their apikey rows, daemon tokens included. The update
+  // endpoint could rename a retired token (`<runKey>:retired`) back to its run
+  // key, extend its expiry or rewrite the metadata that F1/F2 trust
+  // (organizationId, threadId, tokenType). Nothing calls it: refuse it over HTTP
+  // (404). Server code calling auth.api directly is not affected.
+  disabledPaths: ["/api-key/update"],
   database: drizzleAdapter(db, {
     provider: "pg",
     schema,
