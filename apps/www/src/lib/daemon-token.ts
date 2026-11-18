@@ -1,7 +1,16 @@
 import { db } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { apikey, thread as threadTable } from "@terragon/shared/db/schema";
-import { and, eq, like, type SQL } from "drizzle-orm";
+import { and, eq, like, sql, type SQL } from "drizzle-orm";
+import {
+  RETIRED_TOKEN_SUFFIX,
+  isRetiredTokenName,
+} from "@/lib/daemon-token-context";
+
+export { RETIRED_TOKEN_SUFFIX, isRetiredTokenName };
+
+/** A retired token's remaining life: the teardown margin of CELL_RUN_TTL_MS. */
+export const RETIRED_DAEMON_TOKEN_GRACE_MS = 15 * 60 * 1000;
 
 /**
  * Mint the org-scoped, thread-bound, daemon-purpose token a daemon uses to talk
@@ -127,6 +136,72 @@ export async function revokeDaemonTokenById({
     eq(apikey.id, apiKeyId),
     userId,
     "revoked run token on terminal (by id)",
+    { apiKeyId },
+  );
+}
+
+/**
+ * Cell terminal read: retire the run's token instead of deleting it. One
+ * UPDATE, fenced by id and owner, that
+ *  - appends `:retired` to `name`: the double-dispatch guard (which matches
+ *    the bare run key) stops seeing the run as in flight, while sweep rule
+ *    (iii)'s `${threadId}:` prefix still matches it;
+ *  - caps `expires_at` at now + RETIRED_DAEMON_TOKEN_GRACE_MS. LEAST means no
+ *    call can ever move the expiry later. The column is a `timestamp` without
+ *    a time zone that the api-key plugin writes in UTC, so the cap compares
+ *    in UTC.
+ * Idempotent: a second call matches no row and returns false.
+ */
+export async function retireDaemonTokenById({
+  userId,
+  apiKeyId,
+}: {
+  userId: string;
+  apiKeyId: string;
+}): Promise<boolean> {
+  const cap = sql`((now() AT TIME ZONE 'UTC') + make_interval(secs => ${RETIRED_DAEMON_TOKEN_GRACE_MS / 1000}::double precision))`;
+  const retired = await db
+    .update(apikey)
+    .set({
+      name: sql`${apikey.name} || ${RETIRED_TOKEN_SUFFIX}`,
+      expiresAt: sql`LEAST(COALESCE(${apikey.expiresAt}, ${cap}), ${cap})`,
+    })
+    .where(
+      and(
+        eq(apikey.id, apiKeyId),
+        eq(apikey.referenceId, userId),
+        sql`COALESCE(${apikey.name}, '') NOT LIKE ${`%${RETIRED_TOKEN_SUFFIX}`}`,
+      ),
+    )
+    .returning({ id: apikey.id });
+  if (retired.length > 0) {
+    console.log("[daemon-token] retired run token (cell terminal read)", {
+      userId,
+      apiKeyId,
+    });
+  }
+  return retired.length > 0;
+}
+
+/**
+ * cell-teardown `report`: delete the caller's token, but only if it was
+ * retired. A token still live (no terminal read happened) is left alone, and
+ * so is a follow-up run's live token. Returns how many were deleted (0 or 1).
+ */
+export async function revokeRetiredDaemonTokenById({
+  userId,
+  apiKeyId,
+}: {
+  userId: string;
+  apiKeyId: string;
+}): Promise<number> {
+  return deleteDaemonTokens(
+    and(
+      eq(apikey.id, apiKeyId),
+      sql`COALESCE(${apikey.name}, '') LIKE ${`%${RETIRED_TOKEN_SUFFIX}`}`,
+    ) as SQL,
+    userId,
+    "deleted retired run token (cell report)",
     { apiKeyId },
   );
 }

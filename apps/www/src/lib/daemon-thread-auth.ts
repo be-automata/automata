@@ -33,11 +33,14 @@ export async function authorizeDaemonThreadRequest({
   request,
   strictThreadId,
   logLabel,
+  allowRetired = false,
 }: {
   request: NextRequest;
   strictThreadId: boolean;
   /** Prefix of the refusal log lines, e.g. "daemon agent-credentials". */
   logLabel: string;
+  /** Accept a token retired by a cell terminal read. Only cell-teardown sets it. */
+  allowRetired?: boolean;
 }): Promise<DaemonThreadAuthResult> {
   const refuse = (error: string, status: number): DaemonThreadAuthResult => ({
     ok: false,
@@ -52,7 +55,7 @@ export async function authorizeDaemonThreadRequest({
     return refuse("Forbidden", 403);
   };
 
-  const ctx = await getDaemonTokenContext(request);
+  const ctx = await getDaemonTokenContext(request, { allowRetired });
   if (!ctx) return refuse("Unauthorized", 401);
   // F1: daemon-purpose tokens only.
   if (ctx.tokenType !== "daemon") return refuse("Forbidden", 403);

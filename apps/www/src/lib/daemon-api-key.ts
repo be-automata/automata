@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { apikey } from "@terragon/shared/db/schema";
 import { DaemonAuthUnavailableError } from "./daemon-auth-unavailable";
+import { isRetiredTokenName } from "./daemon-token-context";
 
 type VerifyApiKeyResult = Awaited<ReturnType<typeof auth.api.verifyApiKey>>;
 export type VerifiedDaemonApiKey = NonNullable<VerifyApiKeyResult["key"]>;
@@ -36,9 +37,14 @@ async function apiKeyRowExists(token: string): Promise<boolean> {
  * Returns the verified key, or null (→ 401) for an unknown, disabled or
  * expired key. Throws DaemonAuthUnavailableError (→ 503) when the auth store
  * fails, so a database blip never reads as a revoked credential.
+ *
+ * A token retired by a cell run's terminal read (name ends `:retired`) is
+ * refused like an unknown one unless `allowRetired` is set. Only cell-teardown
+ * sets it.
  */
 export async function verifyDaemonApiKey(
   token: string,
+  { allowRetired = false }: { allowRetired?: boolean } = {},
 ): Promise<VerifiedDaemonApiKey | null> {
   // better-auth's verifyApiKey turns ANY non-APIError (a DB timeout included)
   // into `{ valid: false, code: "INVALID_API_KEY" }` — the same answer as an
@@ -68,6 +74,10 @@ export async function verifyDaemonApiKey(
       );
     }
     console.log("Unauthorized", "code", error.code, "valid", valid);
+    return null;
+  }
+  if (key && !allowRetired && isRetiredTokenName(key.name)) {
+    console.log("Unauthorized", "reason", "retired token");
     return null;
   }
   return key ?? null;

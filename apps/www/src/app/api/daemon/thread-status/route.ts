@@ -2,10 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
+import { eq } from "drizzle-orm";
 import { getThreadChat } from "@terragon/shared/model/threads";
+import { cellStep } from "@terragon/shared/db/schema";
+import { finishStep, stampSeen } from "@terragon/shared/model/cell-authority";
+import { runEffect } from "@terragon/shared/model/control-effects";
+import { cellStepKey } from "@terragon/types/cell";
 import { isAgentWorking } from "@/agent/thread-status";
-import { revokeDaemonTokenById } from "@/lib/daemon-token";
+import {
+  retireDaemonTokenById,
+  revokeDaemonTokenById,
+} from "@/lib/daemon-token";
+import { postOpsAlert } from "@/server-lib/knowledge/ops-alert";
 import { waitUntil } from "@/lib/wait-until";
+
+const CELL_ATTEMPT_MAX = 1000;
 
 /**
  * POST /api/daemon/thread-status   body: { threadId, threadChatId }
@@ -17,6 +28,11 @@ import { waitUntil } from "@/lib/wait-until";
  * as the other daemon endpoints. Returns { status, terminal } — terminal true once
  * the agent is no longer working (complete/error/stopped), the worker's cue to
  * tear the daemon down and clean up.
+ *
+ * A cell run (#656) also sends `cellAttempt`: a non-terminal poll renews the
+ * attempt's lease (`lease`), and the terminal read finishes the cell step and
+ * RETIRES the token instead of deleting it (it stays valid on cell-teardown
+ * only, for at most 15 minutes). Without `cellAttempt` nothing changes.
  */
 export const POST = withDaemonAuthUnavailable(async function POST(
   request: NextRequest,
@@ -29,7 +45,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let body: { threadId?: unknown; threadChatId?: unknown };
+  let body: {
+    threadId?: unknown;
+    threadChatId?: unknown;
+    cellAttempt?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -72,6 +92,36 @@ export const POST = withDaemonAuthUnavailable(async function POST(
 
   const terminal = !isAgentWorking(threadChat.status);
 
+  if (body.cellAttempt !== undefined) {
+    const cellAttempt = body.cellAttempt;
+    if (
+      typeof cellAttempt !== "number" ||
+      !Number.isInteger(cellAttempt) ||
+      cellAttempt < 1 ||
+      cellAttempt > CELL_ATTEMPT_MAX
+    ) {
+      return NextResponse.json(
+        { error: "invalid_cell_attempt" },
+        { status: 400 },
+      );
+    }
+    if (ctx.apiKeyId === null) {
+      return NextResponse.json({ error: "no_run_key" }, { status: 403 });
+    }
+    if (!threadChat.organizationId) {
+      return NextResponse.json({ error: "org_required" }, { status: 403 });
+    }
+    return cellPoll({
+      userId: ctx.userId,
+      apiKeyId: ctx.apiKeyId,
+      organizationId: threadChat.organizationId,
+      threadId,
+      attempt: cellAttempt,
+      status: threadChat.status,
+      terminal,
+    });
+  }
+
   // Revoke-on-terminal-READ (ADR-003 F3, S12 fix): revoke THIS token only AFTER we
   // have served terminal=true to it — so the worker is GUARANTEED to observe
   // terminal=true at least once before the token dies. Revoking at thread-finish
@@ -98,3 +148,153 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     terminal,
   });
 });
+
+/**
+ * The cell half of the poll. Not terminal: renew the lease of `attempt`
+ * (a fenced attempt renews nothing). Terminal: finish the step, then retire
+ * the run's token (never delete it: report deletes it later).
+ */
+async function cellPoll({
+  userId,
+  apiKeyId,
+  organizationId,
+  threadId,
+  attempt,
+  status,
+  terminal,
+}: {
+  userId: string;
+  apiKeyId: string;
+  organizationId: string;
+  threadId: string;
+  attempt: number;
+  status: string;
+  terminal: boolean;
+}): Promise<NextResponse> {
+  const stepKey = cellStepKey(apiKeyId);
+  if (!terminal) {
+    let lease: "renewed" | "refused" | "error";
+    try {
+      lease = (await stampSeen({ db, stepKey, attempt }))
+        ? "renewed"
+        : "refused";
+    } catch (error) {
+      // The poll's job is the status. The lease ages, and only minutes of
+      // failures reap the cell.
+      console.error("[daemon thread-status] stampSeen failed", {
+        threadId,
+        stepKey,
+        attempt,
+        error,
+      });
+      lease = "error";
+    }
+    return NextResponse.json({ status, terminal, lease });
+  }
+
+  let finished: boolean;
+  try {
+    finished = await finishStep({ db, stepKey, organizationId, threadId });
+  } catch (error) {
+    // Nothing is retired: the worker retries and finishStep is idempotent.
+    console.error("[daemon thread-status] finishStep failed", {
+      threadId,
+      stepKey,
+      attempt,
+      error,
+    });
+    return NextResponse.json({ error: "cell_finish_failed" }, { status: 500 });
+  }
+  if (!finished) {
+    // The key belongs to another org or thread: www can neither mark the step
+    // done nor vouch for it. Fail closed: no grace-period credential, a plain
+    // revoke, and an alert once per (stepKey, attempt).
+    console.error("[daemon thread-status] cell_step_conflict", {
+      threadId,
+      organizationId,
+      stepKey,
+      attempt,
+    });
+    await alertStepConflictOnce({ organizationId, stepKey, attempt });
+    waitUntil(
+      revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
+        console.error("[daemon-token] revoke-on-terminal-read failed", {
+          apiKeyId,
+          error,
+        }),
+      ),
+    );
+    return NextResponse.json({ error: "cell_step_conflict" }, { status: 409 });
+  }
+  try {
+    await retireDaemonTokenById({ userId, apiKeyId });
+  } catch (error) {
+    // The status is still served; the token keeps its 1-day life.
+    console.error("[daemon-token] retire-on-terminal-read failed", {
+      apiKeyId,
+      error,
+    });
+  }
+  return NextResponse.json({ status, terminal, lease: "finished" });
+}
+
+/**
+ * One ops alert per (stepKey, attempt) through the #652 ledger. Only an
+ * attempt that really opened (attempt <= current_attempt of the step) can
+ * mint a key, so a caller-supplied number cannot grow the ledger. Never throws.
+ */
+async function alertStepConflictOnce({
+  organizationId,
+  stepKey,
+  attempt,
+}: {
+  organizationId: string;
+  stepKey: string;
+  attempt: number;
+}): Promise<void> {
+  try {
+    const [step] = await db
+      .select({ currentAttempt: cellStep.currentAttempt })
+      .from(cellStep)
+      .where(eq(cellStep.stepKey, stepKey))
+      .limit(1);
+    if (!step || attempt > step.currentAttempt) return;
+    await runEffect({
+      db,
+      organizationId,
+      mission: "cell-teardown",
+      step: stepKey,
+      effect: "step-conflict-alert",
+      outputDigest: String(attempt),
+      payload: { stepKey, attempt },
+      target: {
+        // A webhook cannot be read back.
+        findByMarker: async () => false,
+        apply: async (_key, payload) => {
+          const result = await postOpsAlert({
+            text: `cell step conflict: step ${payload.stepKey}, attempt ${payload.attempt}`,
+          });
+          if (result.sent) return;
+          if (
+            result.reason === "timeout" ||
+            result.reason === "request_failed" ||
+            result.reason === "non_2xx"
+          ) {
+            // Transient: the intent stays and the next report retries it.
+            throw new Error(`ops alert not sent: ${result.reason}`);
+          }
+          // unconfigured, invalid_url, redirect: retrying cannot fix those.
+          console.error("[daemon thread-status] ops alert not sent", {
+            reason: result.reason,
+          });
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[daemon thread-status] step conflict alert failed", {
+      stepKey,
+      attempt,
+      error,
+    });
+  }
+}

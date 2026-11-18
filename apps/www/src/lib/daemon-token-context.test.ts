@@ -29,6 +29,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
     });
   });
 
@@ -51,6 +52,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: "thr_1",
       apiKeyId: "apikey_1",
       tokenType: "daemon",
+      retired: false,
     });
   });
 
@@ -77,6 +79,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
     });
   });
 
@@ -93,6 +96,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
     });
   });
 
@@ -109,6 +113,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
     });
   });
 
@@ -125,6 +130,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
     });
   });
 
@@ -147,6 +153,7 @@ describe("daemonTokenContextFromApiKey", () => {
       threadChatId: "tc_1",
       threadId: "t_1",
       tokenType: "daemon",
+      retired: false,
     });
   });
 
@@ -163,6 +170,25 @@ describe("daemonTokenContextFromApiKey", () => {
       threadId: null,
       apiKeyId: null,
       tokenType: null,
+      retired: false,
+    });
+  });
+
+  it("marks a key whose name ends with :retired as retired", () => {
+    expect(
+      daemonTokenContextFromApiKey({
+        id: "k1",
+        referenceId: "user_1",
+        name: "thread_1:chat_1:retired",
+      }),
+    ).toEqual({
+      userId: "user_1",
+      apiKeyId: "k1",
+      organizationId: null,
+      threadChatId: null,
+      threadId: null,
+      tokenType: null,
+      retired: true,
     });
   });
 });
