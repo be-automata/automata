@@ -1724,6 +1724,46 @@ describe("GitHub webhook route", () => {
       ).resolves.toBeUndefined();
     });
   });
+  describe("#134: a mirror-intake skip is not an error", () => {
+    it("an unmapped-installation skip answers 2xx and logs 'skipped', with no console.error", async () => {
+      // mirror-intake.ts throws this for an installation with no org bound;
+      // octokit passes it to webhooks.onError before receive() rejects.
+      vi.mocked(handlePullRequestMirror).mockRejectedValueOnce(
+        new WebhookSkip(
+          "unmapped_installation",
+          "No org bound to installation for owner/repo",
+          { repoFullName: "owner/repo" },
+        ),
+      );
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const body = createPullRequestBody({
+          action: "review_requested",
+          repoFullName: "owner/repo",
+          prNumber: 123,
+        });
+        const response = await POST(await createMockRequest(body));
+        const data = await response.json();
+
+        expect(handlePullRequestMirror).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(200);
+        expect(data).toMatchObject({
+          skipped: true,
+          category: "unmapped_installation",
+        });
+        expect(log).toHaveBeenCalledWith(
+          "[github webhook] skipped",
+          expect.objectContaining({ category: "unmapped_installation" }),
+        );
+        expect(error).not.toHaveBeenCalled();
+      } finally {
+        log.mockRestore();
+        error.mockRestore();
+      }
+    });
+  });
+
   describe("self-heal fix PR lifecycle (R5)", () => {
     it("pull_request.closed reaches the self-heal handler AND both existing closed handlers", async () => {
       const pr = await createTestGitHubPR({ db });

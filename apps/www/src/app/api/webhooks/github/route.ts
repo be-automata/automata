@@ -284,6 +284,11 @@ export async function POST(request: NextRequest) {
     console.log("[github webhook] event received", name, ...payloadInfo);
   });
   webhooks.onError((error) => {
+    // #134: a WebhookSkip is a business rejection; the catch below logs it as
+    // "skipped" and answers 2xx, so it is not an error here either.
+    if (findWebhookSkip(error)) {
+      return;
+    }
     console.error("[github webhook] error", error);
   });
   if (!(await isSignedDelivery(webhooks, body, signature))) {
