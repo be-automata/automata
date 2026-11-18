@@ -11,6 +11,7 @@ import {
   AnyPgColumn,
   numeric,
   bigint,
+  bigserial,
   foreignKey,
   primaryKey,
   check,
@@ -3426,6 +3427,49 @@ export const agentRun = pgTable(
     index("agent_run_organization_id_index").on(table.organizationId),
   ],
 );
+
+/**
+ * A message from one run to another on the agent bus (spec #660). Written by
+ * `sendMessage` under `(from_run, idem_key)`; consumed exactly once by `receiveFor`
+ * (`consumed_at`), which records the delivery in `agent_applied` inside the same
+ * transaction as the apply.
+ */
+export const agentMessages = pgTable(
+  "agent_messages",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    idemKey: text("idem_key").notNull(),
+    fromRun: text("from_run").notNull(),
+    toRun: text("to_run").notNull(),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .defaultNow()
+      .notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "date" }),
+  },
+  (table) => [
+    uniqueIndex("agent_messages_idem").on(table.fromRun, table.idemKey),
+    // The inbox read and the sweeper's "unconsumed" scan.
+    index("agent_messages_inbox")
+      .on(table.toRun, table.id)
+      .where(sql`consumed_at is null`),
+    // The sweeper's re-kick query over recently delivered targets.
+    index("agent_messages_consumed_at_index")
+      .on(table.consumedAt)
+      .where(sql`consumed_at is not null`),
+  ],
+);
+
+/** One row per message applied to its target run: the exactly-once record. */
+export const agentApplied = pgTable("agent_applied", {
+  msgId: bigint("msg_id", { mode: "number" })
+    .primaryKey()
+    .references(() => agentMessages.id),
+  run: text("run").notNull(),
+  appliedAt: timestamp("applied_at", { withTimezone: true, mode: "date" })
+    .defaultNow()
+    .notNull(),
+});
 
 /**
  * A bearer the broker minted for one attempt of one step. Only the sha256 of the

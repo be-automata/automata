@@ -267,6 +267,8 @@ export async function runScheduledTasksCron(): Promise<void> {
     // D-12, PD-7: the knowledge reconcile sweep runs LAST, in a finally, so it
     // can never delay or skip scheduled threads and still runs when they throw.
     await runKnowledgeReconcileSweepSafe();
+    // #660 (D1): the agent-bus sweeper joins the same tick, after it.
+    await runAgentBusSweepSafe();
   }
 }
 
@@ -499,6 +501,21 @@ async function runKnowledgeReconcileSweepSafe(): Promise<void> {
     await runKnowledgeReconcileSweep();
   } catch (error) {
     console.error("[cron:knowledge-reconcile] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * #660: deliver agent-bus messages whose receive never ran and re-kick recent
+ * targets. Dynamic import, fail-soft: every failure is logged and swallowed.
+ */
+async function runAgentBusSweepSafe(): Promise<void> {
+  try {
+    const { runAgentBusSweep } = await import(
+      "@/server-lib/agent-bus/delivery"
+    );
+    await runAgentBusSweep();
+  } catch (error) {
+    console.error("[cron:agent-bus] sweep failed (non-fatal)", error);
   }
 }
 
