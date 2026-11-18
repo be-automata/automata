@@ -79,6 +79,24 @@ but `packages/r2` must be refactored to use `env.<BINDING>` instead of the S3 cl
 | `R2_PUBLIC_URL`                   | **[deploy-config]**   | secret         | Public bucket base URL (r2.dev or custom domain).                            |
 | _(follow-up)_ `R2_BUCKET` binding | **[CF-binding]**      | wrangler.jsonc | Native path: `"r2_buckets":[{ "binding":"R2_BUCKET","bucket_name":"..." }]`. |
 
+### Shared state (Upstash Redis)
+
+Set on 2026-11-18 (#134). Before that the pair was unset: `apps/www/src/lib/redis.ts`
+fell back to an in-memory stand-in that is **per-isolate on Workers**, so the
+sandbox-creation limiter (`apps/www/src/lib/rate-limit.ts`, 20 per hour) and the
+Redis locks and caches were effectively off. Verified live: page renders read the
+banner key through Upstash, the database's command count rose, and `wrangler tail`
+showed no Redis errors.
+
+| Var           | Class                 | Mechanism | Notes                                                                                                          |
+| ------------- | --------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| `REDIS_URL`   | **[deploy-config]**   | secret    | The Upstash **REST** URL (`https://<name>.upstash.io`), not the `redis://` TCP URL: www uses `@upstash/redis`. |
+| `REDIS_TOKEN` | **[operator-secret]** | secret    | The Upstash REST token (read-write; the limiter and locks write). Never the read-only token.                   |
+
+An empty `REDIS_URL` still boots (self-host), but puts the limiter and locks back
+into per-isolate mode. Set it with `wrangler secret put` from an interactive
+terminal: run without a TTY, wrangler reads stdin and can store an empty value.
+
 ### GitHub App (from current VPS — reused per pilot plan)
 
 | Var                           | Class                 | Mechanism             | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -95,7 +113,6 @@ but `packages/r2` must be refactored to use `env.<BINDING>` instead of the S3 cl
 
 | Var(s)                                                           | Class               | Behavior when unset                                                                                                                                                                                                              |
 | ---------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`, `REDIS_TOKEN`                                       | [unset-by-design]   | In-memory fail-open stand-in (`apps/www/src/lib/redis.ts`). **On Workers this is PER-ISOLATE** — locks/rate-limits are effectively off (not shared across isolates). Acceptable for the pilot; Upstash later for shared state.   |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*`   | [unset-by-design]   | Billing disabled; lifecycle never blocks on credits.                                                                                                                                                                             |
 | `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`            | [unset-by-design]   | Analytics no-op (client `disabled`).                                                                                                                                                                                             |
 | `E2B_API_KEY`, `DAYTONA_API_KEY`                                 | [unset-by-design]   | Execution plane is OFF-Workers (ADR-002 rev 2, customer boxes).                                                                                                                                                                  |
@@ -141,6 +158,7 @@ AUTH_EMAIL_PASSWORD_ENABLED # "true"
 ANTHROPIC_API_KEY OPENAI_API_KEY
 R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_ENDPOINT \
   R2_BUCKET_NAME R2_PRIVATE_BUCKET_NAME R2_PUBLIC_URL
+REDIS_URL REDIS_TOKEN       # Upstash REST URL + token (shared limiter/locks)
 GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET \
   GITHUB_WEBHOOK_SECRET   # fresh
 
