@@ -18,7 +18,9 @@ Branch `feat/656-d-run-end`, stacked on `feat/656-c-cell-plan` (d9e7acbc). Run f
 | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism` |        |
 | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism`    |        |
 
-## Deviations from spec-d
+## Deviations
+
+> Items 1 (`retired?: boolean`) and 2 (the re-export) were removed by the `/simplify` pass. Item 3 (the inlined alert helper) became `alertCellStepOnce`. from spec-d
 
 - `DaemonTokenContext.retired` is optional (`retired?: boolean`): a required field broke hand-built contexts in route tests this PR does not own.
 - `RETIRED_TOKEN_SUFFIX` and `isRetiredTokenName` live in `daemon-token-context.ts` and are re-exported from `daemon-token.ts`.
@@ -79,3 +81,14 @@ No High findings: 1 Medium and 3 Low.
 - www: 4584, including the real-auth refusal matrix
 - shared: 1737
 - tsc, `tsc-check --force`, `lint --force`
+
+## Rebase onto main `39a663fa` (PR-C #685 and #688)
+
+The rebase was clean. Gates after it, outside the Claude sandbox, all exit 0:
+
+- frozen install, build, `tsc-check --force` (21/21), `lint --force`, prettier on the changed files;
+- suites: shared 1752, www 4609.
+
+## Roborev job 1268 (final range `39a663f..0fd3279`)
+
+**Pass**, with one Low: spec-d's contract and this log's deviations still described pre-refinement behaviour. Fixed with a superseded block at the top of the contract, and notes on the deviations.

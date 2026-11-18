@@ -80,6 +80,14 @@ Until PR-E, no caller sends `cellAttempt` or calls the endpoint, and nothing is 
 
 ## Contract
 
+> **Superseded in part by refinement, `/simplify` and roborev 1268. The code is the source of truth. Read this before building PR-E on it.**
+>
+> - **A failed retire answers 500 `cell_retire_failed`**, and the worker retries; `finishStep` is idempotent. It is no longer logged and served as 200.
+> - **There is no `DaemonTokenContext.retired` field.** The key's name is the only signal: `isRetiredTokenName` in `verifyDaemonApiKey`, with `allowRetired` for `cell-teardown` only.
+> - **The `cell-teardown` body uses `z.union`**, not a `discriminatedUnion`.
+> - **An unknown attempt** (above `current_attempt`) writes its own `skipped_unknown_attempt` log line from `alertCellStepOnce` (`server-lib/cell-ops-alert.ts`). The event carries no `alert` field.
+> - **better-auth's `/api-key/update` is disabled** (`disabledPaths`), so an owner cannot rename a retired token back.
+
 ### 1. Token custody (`apps/www/src/lib/daemon-token.ts`, `daemon-api-key.ts`, `daemon-token-context.ts`, `auth-server.ts`)
 
 ```ts
