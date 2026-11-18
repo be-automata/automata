@@ -29,6 +29,7 @@ import {
   CELL_SEND_MAX_BYTES,
   CELL_MESSAGE_DIR,
   CELL_SELF_CHECK_ARGV,
+  CELL_CHECKOUT_WORK_BRANCH_SH,
   CELL_WORKSPACE,
   CELL_WRITE_MESSAGE_SH,
   cellCloneArgv,
@@ -1057,16 +1058,68 @@ describe("cellCloneArgv and cellGitConfigArgv (T-CLONE, argv half)", () => {
     expect(JSON.stringify(cellCloneArgv(base))).not.toMatch(/@|token|bearer/i);
   });
 
-  // card: protects=a work branch and a base branch add exactly the two fixed argvs; fails_when=the order changes or either is dropped; no_claim=push behaviour
-  it("adds checkout -B for a work branch and fetch for a base branch", () => {
+  // card: protects=a work branch and a base branch add exactly the two fixed argvs, the checkout as a fixed script with the ref positional; fails_when=the order changes, either is dropped or the ref is spliced into the script; no_claim=git's behaviour (the next test runs the script)
+  it("adds the work-branch checkout script and fetch for a base branch", () => {
     expect(
       cellCloneArgv({ ...base, workBranch: "fix/x", baseBranch: "dev" }).slice(
         1,
       ),
     ).toEqual([
-      ["git", "-C", CELL_WORKSPACE, "checkout", "-B", "fix/x"],
+      ["/bin/bash", "-c", CELL_CHECKOUT_WORK_BRANCH_SH, "workbranch", "fix/x"],
       ["git", "-C", CELL_WORKSPACE, "fetch", "origin", "dev"],
     ]);
+    expect(CELL_CHECKOUT_WORK_BRANCH_SH).not.toContain("fix/x");
+    expect(cellCloneArgv({ ...base }).length).toBe(1);
+  });
+
+  // card: protects=an existing remote work branch is continued and a missing one starts from the checkout, like the box; fails_when=either case checks out the wrong commit; no_claim=the broker or the dind's git
+  it("the checkout script continues origin/<ref> when it exists, else branches from head", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cell-checkout-"));
+    try {
+      const git = (cwd: string, ...a: string[]) =>
+        spawnSync("git", a, { cwd, encoding: "utf8" });
+      const seed = path.join(dir, "seed");
+      fs.mkdirSync(seed);
+      const g = (...a: string[]) =>
+        git(seed, "-c", "user.name=t", "-c", "user.email=t@t", ...a);
+      g("init", "-q", "-b", "main");
+      fs.writeFileSync(path.join(seed, "f"), "1");
+      g("add", "f");
+      g("commit", "-qm", "base");
+      g("checkout", "-qb", "fix/x");
+      fs.writeFileSync(path.join(seed, "f"), "2");
+      g("commit", "-qam", "earlier push");
+      g("checkout", "-q", "main");
+      const remote = path.join(dir, "remote.git");
+      git(dir, "clone", "-q", "--bare", seed, remote);
+      const head = (cwd: string) => git(cwd, "rev-parse", "HEAD").stdout.trim();
+      const run = (ref: string) => {
+        const ws = path.join(dir, `ws-${ref.replace(/\W/g, "_")}`);
+        git(dir, "clone", "-q", "--no-tags", "--branch", "main", remote, ws);
+        const script =
+          CELL_CHECKOUT_WORK_BRANCH_SH.split(CELL_WORKSPACE).join(ws);
+        const r = spawnSync("/bin/bash", ["-c", script, "workbranch", ref], {
+          encoding: "utf8",
+        });
+        expect(r.status, r.stderr).toBe(0);
+        return {
+          ws,
+          branch: git(ws, "branch", "--show-current").stdout.trim(),
+        };
+      };
+      const existing = run("fix/x");
+      expect(existing.branch).toBe("fix/x");
+      expect(head(existing.ws)).toBe(
+        git(remote, "rev-parse", "fix/x").stdout.trim(),
+      );
+      const fresh = run("fix/new");
+      expect(fresh.branch).toBe("fix/new");
+      expect(head(fresh.ws)).toBe(
+        git(remote, "rev-parse", "main").stdout.trim(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // card: protects=an owner with a slash, an option-shaped ref and a bad host are refused before any exec; fails_when=any of them reaches an argv; no_claim=refs git itself would reject

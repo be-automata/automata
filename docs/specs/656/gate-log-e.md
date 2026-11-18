@@ -113,3 +113,22 @@ a dead daemon is detected.
 - `HATCHET_IT=1` list: 65 passed, 1 skipped;
 - IT-E1 on the amd64 box: 5/5;
 - worker tsc, `tsc-check --force`, `lint --force`.
+
+## Roborev
+
+- **Job 1275 on `96c2890..f61528d`: Fail**, with one Medium and one Low. Both are fixed.
+  - **Medium:** the cell's bootstrap always ran `checkout -B <workBranch>` from the cloned branch.
+    That ignored a work branch already pushed by an earlier run, so the agent's push would be
+    non-fast-forward and orphan that work. The box path continues it (`provision.ts:192-230`).
+    The fix is `CELL_CHECKOUT_WORK_BRANCH_SH`, a fixed bash script with the validated ref as `$1`.
+    It continues `origin/<workBranch>` when that exists, and otherwise starts from the cloned
+    branch. Unit tests cover both argv cases, and one runs the script against a real local git
+    remote with both branches.
+  - **Low:** a Stop or fence that landed while `next-message` was in flight surfaced as a raw
+    `AbortError`. It is now rethrown as `SetupAbortedError`, so the exit decision picks
+    `stopped`, fenced or cancelled. A real error on a live signal keeps today's handling: a 4xx
+    is NonRetryable. A test and a control cover it.
+- **Gates after the fixes**, all exit 0:
+  - worker vitest: 2201 passed;
+  - IT-E1 on the amd64 box: 5/5;
+  - worker tsc, `tsc-check --force`, `lint --force`.

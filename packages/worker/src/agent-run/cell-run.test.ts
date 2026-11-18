@@ -18,6 +18,7 @@ import {
 import type { RunExecutorInput } from "./run-executor";
 import {
   CellStepConflictError,
+  NextMessageHttpError,
   ThreadStatusHttpError,
   type CellLease,
   type PollContext,
@@ -89,7 +90,7 @@ function setup(
     fetchPlan?: CellExecutorDeps["www"]["fetchPlan"];
     create?: () => Promise<{ cellId: string }>;
     listByTags?: () => Promise<unknown>;
-    nextMessage?: () => Promise<typeof pulled | null>;
+    nextMessage?: (signal?: AbortSignal) => Promise<typeof pulled | null>;
     pollThreadStatus?: () => Promise<ThreadStatusPoll>;
     pollUntilTerminal?: (ctx: PollContext) => Promise<unknown>;
     execExit?: (argv: string[]) => number;
@@ -187,9 +188,9 @@ function setup(
         www.reportBodies.push(outcome);
         return "ok";
       },
-      nextMessage: async () => {
+      nextMessage: async (_o, signal) => {
         calls.push("www.nextMessage");
-        return over.nextMessage ? over.nextMessage() : pulled;
+        return over.nextMessage ? over.nextMessage(signal) : pulled;
       },
       pollThreadStatus: async () => {
         calls.push("www.heartbeat");
@@ -474,9 +475,12 @@ describe("the cell run: bootstrap and message", () => {
     expect(clone).toContain(
       "https://www.example.org/api/cell/git/acme/widgets.git",
     );
-    expect(s.execs.some((a) => a.join(" ").includes("checkout -B fix/x"))).toBe(
-      true,
-    );
+    expect(
+      s.execs.some(
+        (a) =>
+          a[0] === "/bin/bash" && a[3] === "workbranch" && a[4] === "fix/x",
+      ),
+    ).toBe(true);
     expect(JSON.stringify(s.execs)).not.toMatch(/token|bearer|CANARY/i);
     const login = s.files.find((f) => f.path.endsWith("/.credentials.json"));
     expect(login?.text).not.toContain(VAULT);
@@ -1097,5 +1101,41 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     });
     await expect(c.executor.run(c.args)).rejects.toThrow("git clone failed");
     expect(c.logs.join("\n")).toContain(canary);
+  });
+
+  // card: protects=an abort (here a heartbeat Stop) that rejects the pending next-message read ends the run as stopped, not as a thrown error; fails_when=the AbortError is classified and thrown; no_claim=the real fetch's abort
+  it("L2: a Stop while next-message is pending is the stopped outcome", async () => {
+    const s = setup({
+      nextMessage: (signal) =>
+        new Promise<never>((_, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                Object.assign(new Error("aborted"), { name: "AbortError" }),
+              ),
+            { once: true },
+          );
+        }),
+      pollThreadStatus: async () => status({ status: "stopping" }),
+    });
+    const run = s.executor.run(s.args);
+    await flush();
+    await flush();
+    await s.tick();
+    const out = await run;
+    expect(out.outcome).toBe("stopped");
+    expect(s.calls[s.calls.length - 1]).toBe("www.report");
+  });
+
+  // card: protects=control: a real 4xx on a live signal stays NonRetryable; fails_when=it is swallowed or retried; no_claim=5xx handling (retry-classification.test.ts)
+  it("L2 control: a 4xx next-message on a live signal stays NonRetryable", async () => {
+    const s = setup({
+      nextMessage: async () => {
+        throw new NextMessageHttpError(404, "next-message failed: HTTP 404");
+      },
+    });
+    await expect(s.executor.run(s.args)).rejects.toThrow(/non-retryable/);
+    expect(s.www.abnormalPosts).toBe(1);
   });
 });

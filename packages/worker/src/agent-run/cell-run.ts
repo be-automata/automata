@@ -416,6 +416,10 @@ async function runCell(
     try {
       pulled = await deps.www.nextMessage(r.cellOpts, live);
     } catch (error) {
+      // An abort (a Stop, a fence, a terminal read, the run's cancel) rejects the
+      // pending read: let decideExit pick that outcome. A real error on a live
+      // signal keeps its classification (4xx NonRetryable, 5xx/network retryable).
+      if (r.live.aborted) throw new SetupAbortedError();
       throw classifyNextMessageError(error);
     }
     if (!pulled) {

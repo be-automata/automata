@@ -153,6 +153,19 @@ export const CELL_SELF_CHECK_ARGV: readonly string[] = [
 export const CELL_WORKSPACE = "/workspace";
 
 /**
+ * Checks out the work branch (`$1`, validated by `assertRef`) in the clone:
+ * `origin/$1` when the remote has it, else a new branch from the current head.
+ * A fixed script with the ref as a positional argument: argv has no shell.
+ */
+export const CELL_CHECKOUT_WORK_BRANCH_SH = [
+  `if git -C ${CELL_WORKSPACE} rev-parse --verify -q "refs/remotes/origin/$1" >/dev/null; then`,
+  `  git -C ${CELL_WORKSPACE} checkout -B "$1" "origin/$1"`,
+  "else",
+  `  git -C ${CELL_WORKSPACE} checkout -B "$1"`,
+  "fi",
+].join("\n");
+
+/**
  * Where a daemon message is staged: the directory cell-entry.sh creates 0700
  * (its umask-scoped `mkdir`), so no other uid can traverse it while upstream
  * execd's upload leaves the file at `0777 &^ umask` before its chmod.
@@ -193,8 +206,8 @@ function assertRef(label: string, value: string): void {
 /**
  * The argvs, in order, that put the checkout in the cell (AC-15's worker half):
  * a clone through the www broker (the vault adds the bearer, so no credential
- * is in argv or in the git config), then `checkout -B <workBranch>` when the
- * push branch differs, then `fetch origin <baseBranch>` when it is set.
+ * is in argv or in the git config), then the work-branch checkout (continuing
+ * `origin/<workBranch>` when it exists) when the push branch differs, then `fetch origin <baseBranch>` when it is set.
  * Throws on an owner, repo or ref it will not put in an argv.
  */
 export function cellCloneArgv(opts: {
@@ -238,12 +251,14 @@ export function cellCloneArgv(opts: {
   ];
   if (opts.workBranch) {
     assertRef("work branch", opts.workBranch);
+    // As on the box (provision.ts): a work branch that already exists on the
+    // remote is continued, else it starts from the checkout. The clone fetched
+    // every head (no --single-branch, no --depth), so origin/<ref> is local.
     argvs.push([
-      "git",
-      "-C",
-      CELL_WORKSPACE,
-      "checkout",
-      "-B",
+      "/bin/bash",
+      "-c",
+      CELL_CHECKOUT_WORK_BRANCH_SH,
+      "workbranch",
       opts.workBranch,
     ]);
   }
