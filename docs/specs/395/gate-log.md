@@ -78,3 +78,16 @@ On the branch, 18 of 18 pass.
 - roborev:
   - job 1259, verdict F: one Medium (a timed-out setup joining the next holder's stack) and one Low (a racing grant leaked). Both fixed in `a6232742`.
   - job 1260: Pass, no findings.
+
+## Re-run after `git merge --no-ff origin/main` (`a6996533`, #685)
+
+Merge head `5d394744`. #685 touches none of the #395 files. Every gate exited 0 again:
+
+- install: 0
+- docs-mdx: 0
+- tsc-check: 0 (21/21)
+- lint: 0 (2/2)
+- format-check: 0 (18/18)
+- worker vitest: 0 (2068 passed, 42 skipped)
+- the HATCHET_IT command: 0 (10 files; 65 passed, 1 skipped)
+- teardown: 0
