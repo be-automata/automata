@@ -195,6 +195,34 @@ describe("teardownCellRun", () => {
     expect(h.reports[0]).toMatchObject({ outcome: "incomplete" });
   });
 
+  // card: protects=P keeps at least the grace when the steps end just under the deadline; fails_when=P reuses the deadline's own signal and is aborted at the 70 s mark; no_claim=www receiving it
+  it("T-DEADLINE-P: steps ending 1 s before the deadline still give an in-flight report a live signal past it", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const slowList = h.deps.provider.listByTags;
+    h.deps.provider.listByTags = async (...args) => {
+      await new Promise((r) =>
+        setTimeout(r, CELL_TEARDOWN_DEADLINE_MS - 1_000),
+      );
+      return slowList(...args);
+    };
+    let abortedMidFlight: boolean | undefined;
+    h.deps.report = async (_attempt, _outcome, signal) => {
+      // Still in flight when the 70 s mark passes (1 s left + 2 s here).
+      await new Promise((r) => setTimeout(r, 2_000));
+      abortedMidFlight = signal?.aborted;
+      return "ok";
+    };
+    const done = teardownCellRun(KEY, h.deps);
+    await vi.advanceTimersByTimeAsync(CELL_TEARDOWN_DEADLINE_MS + 2_000);
+    const out = await done;
+    expect(abortedMidFlight).toBe(false);
+    expect(out.failedSteps).toEqual([]);
+    expect(h.logs.some((l) => l.startsWith("cell_teardown_incomplete "))).toBe(
+      false,
+    );
+  });
+
   // card: protects=skipWww sends nothing to www and runs only the local steps and the readback; fails_when=R, A or P goes out after www deleted the token; no_claim=the 409 detection
   it("T-409-SKIP: skipWww runs the local steps only", async () => {
     const h = harness();

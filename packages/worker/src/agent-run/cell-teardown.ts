@@ -176,9 +176,14 @@ export async function teardownCellRun(
     // P
     const failedSteps = FAILED_ORDER.filter((s) => failed.has(s));
     if (!key.skipWww) {
-      const signal = expired
-        ? AbortSignal.timeout(EXPIRED_GRACE_MS)
-        : deadline.signal;
+      // From the time actually left, never under the grace. The deadline's own
+      // signal fires at the 70 s mark, so steps that end just under it would
+      // hand P an almost-aborted signal and lose a possibly clean report
+      // (roborev 1278, Automata review 5956567897). An expired deadline is the
+      // case where nothing is left, so the grace alone applies.
+      const signal = AbortSignal.timeout(
+        Math.max(deadlineAt - deps.now(), EXPIRED_GRACE_MS),
+      );
       const body =
         failedSteps.length === 0
           ? ({ outcome: "clean" } as const)
