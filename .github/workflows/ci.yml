@@ -85,7 +85,11 @@ jobs:
       # deploy/ has no package.json: its scripts run on Node's own type
       # stripping. node --test takes a glob, not a directory, so quote it.
       - name: Deploy script tests (node --test)
-        run: node --test 'deploy/*.test.ts'
+        run: node --test 'deploy/*.test.ts' 'deploy/github/*.test.ts'
+      # shellcheck ships on ubuntu-latest. Branch protection and the agent App
+      # token mint (#697) live in these scripts.
+      - name: Shellcheck (deploy/github)
+        run: shellcheck deploy/github/*.sh
       - name: Migration lint
         run: node deploy/lint-migrations.ts deploy/migrations
       # ADR-014: the allow_cell Rego (fmt, check --strict, opa test) and the
@@ -295,3 +299,21 @@ jobs:
             apps/www/test-results
             apps/www/playwright-report
           retention-days: 7
+
+  # ── The one required check (#697) ────────────────────────────────────────────
+  # The `main` ruleset (deploy/github/ruleset-main.json) requires only this job,
+  # so adding or renaming a CI job never needs a ruleset change: list it in
+  # `needs:` here (deploy/github/branch-protection.test.ts checks that it is).
+  # `always()` makes it report even when a job it needs failed or was skipped.
+  ci-gate:
+    if: always()
+    needs: [audit, check, test, schema-drift, worker-e2e, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every CI job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'all(.[]; .result == "success")' > /dev/null

@@ -1,0 +1,48 @@
+# Sensitive paths: a change here needs a code owner's approval once the `main`
+# ruleset (deploy/github/ruleset-main.json, #697) is applied. Until then this
+# file only requests the review.
+#
+# Every pattern is anchored (leading `/`) and must match a tracked file:
+# deploy/github/branch-protection.test.ts fails on one that matches nothing,
+# because a wrong path silently drops the protection. Runbook:
+# docs/runbooks/agent-github-app.md.
+
+# Migrations, the migration runner, the schema, deploy/ and the execution box
+/deploy/                                             @espinozasenior
+/packages/migrate/                                   @espinozasenior
+/packages/shared/src/db/                             @espinozasenior
+/packages/worker/deploy/                             @espinozasenior
+
+# Auth and daemon tokens
+/apps/www/src/lib/auth.ts                            @espinozasenior
+/apps/www/src/lib/auth-server.ts                     @espinozasenior
+/apps/www/src/lib/auth-session-config.ts             @espinozasenior
+/apps/www/src/lib/daemon-*.ts                        @espinozasenior
+/apps/www/src/app/api/auth/                          @espinozasenior
+/apps/www/src/app/api/internal/daemon-token/         @espinozasenior
+/apps/broadcast/src/auth.ts                          @espinozasenior
+
+# Cell broker (ADR-014)
+/packages/cell-broker/                               @espinozasenior
+
+# Credential broker and provider credentials
+/apps/www/src/server-lib/credential-broker/          @espinozasenior
+/packages/sandbox/src/providers/docker-cred-broker.ts @espinozasenior
+/packages/sandbox/src/cred-broker-standalone.*       @espinozasenior
+/packages/shared/src/model/agent-provider-credentials.ts @espinozasenior
+/apps/www/src/agent/credentials.ts                   @espinozasenior
+/apps/www/src/server-lib/credentials.ts              @espinozasenior
+/apps/www/src/app/api/daemon/agent-credentials/      @espinozasenior
+/apps/www/src/app/api/daemon/run-credential-source/  @espinozasenior
+/packages/worker/src/agent-run/agent-credentials.ts  @espinozasenior
+/packages/utils/src/encryption.ts                    @espinozasenior
+/packages/utils/src/payload-seal.ts                  @espinozasenior
+/packages/shared/src/github-app.ts                   @espinozasenior
+
+# CI, the agents' own guardrails, Workers config, and this file
+/.github/workflows/                                  @espinozasenior
+/.github/actions/                                    @espinozasenior
+/.claude/settings.json                               @espinozasenior
+/.claude/hooks/                                      @espinozasenior
+/.github/CODEOWNERS                                  @espinozasenior
+/apps/*/wrangler.jsonc                               @espinozasenior
