@@ -39,7 +39,7 @@ The decision extends ADR-003 F1/F2 and applies ADR-014 Amendment §4 "Narrowest 
 
 **Upstream: OpenSandbox `release-1.2.1`, `components/egress/mitmscripts/system.py`, read via `gh api`.** The order is what matters.
 
-1. **Authority gate.** Before any binding is selected, HTTP/1 `Host` is validated strictly, and an absolute-form target must agree with it (`_live_h1_authority` :1693). The authority must equal the connection SNI and the admission token's SNI, or the request gets 403 (:2003-2021). This covers a `Host` that differs from SNI and an absolute-form target that names another authority.
+1. **Authority gate.** Before any binding is selected, HTTP/1 `Host` is validated strictly (`_live_h1_authority` :1693). The authority must equal the connection SNI and the admission token's SNI, or the request gets 403 (:2003-2021). This covers a `Host` that differs from SNI and an absolute-form target that names another authority. **Live correction (2026-11-18, see the gate log):** an absolute-form target naming another authority than `Host` is not refused; it is injected and still answered by the bound host.
 2. **Binding selection.** `_select_binding` matches the raw `flow.request.path` with the query removed (`_request_path` :1187). A non-wildcard pattern needs string equality (`_path_matches` :1326). A request that matches no binding is "ordinary egress traffic … left untouched, including paths whose encoding would be ambiguous" (`_apply_vault_binding` :2112-2124).
 3. **Ambiguity rejection.** Only for a request that did match a binding, `_reject_ambiguous_binding_path` (:2085) refuses two kinds of path:
    - a path with a `..` segment, a backslash or `%5c` at any decode depth (`_path_is_ambiguous` :1195);
@@ -47,7 +47,7 @@ The decision extends ADR-003 F1/F2 and applies ADR-014 Amendment §4 "Narrowest 
 
 Two bindings that can match one request are refused at vault load (`components/egress/pkg/credentialvault/vault.go:1358-1380`). The sidecar adds the header even when the guest omits the placeholder (`docs/specs/656/gate-log-b.md`).
 
-What follows: with one exact-path daemon binding, every confused path whose raw form is not literally the bound path passes through **untouched** (no token), and the authority variants get 403. Only two forms are injected, by design: the bound path with a query, and a same-authority absolute-form target. www routes both to `daemon-event`. HTTP/2 has its own identity gate (`_live_h2_authority`); the raw probe is HTTP/1.1 only, so h2 stays uncovered by the live gate, and the gate log says so.
+What follows: with one exact-path daemon binding, every confused path whose raw form is not literally the bound path passes through **untouched** (no token), a `Host` that differs from SNI gets 403, and a foreign absolute-form target is injected but answered by the bound host (live, 2026-11-18). Only two forms are injected, by design: the bound path with a query, and a same-authority absolute-form target. www routes both to `daemon-event`. HTTP/2 has its own identity gate (`_live_h2_authority`); the raw probe is HTTP/1.1 only, so h2 stays uncovered by the live gate, and the gate log says so.
 
 ## Design
 
@@ -103,19 +103,19 @@ What follows: with one exact-path daemon binding, every confused path whose raw 
   - Variants marked _echo_ must also answer 200 with the placeholder present. httpbin.org answers 200 to those raw targets with the request echoed, as measured on 2026-11-18 from a host with no sidecar.
   - The others answer 404 or 400 at httpbin, so for them only the canary's absence is asserted.
 
-  | Variant                      | Targets (echo?)                                                                                                                                        |
-  | :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | dot segments, raw            | `/anything/./daemon-event` (y), `/anything/x/../daemon-event` (y), `P/../../anything/daemon/cell-plan` (y)                                             |
-  | dot segments, encoded        | `/anything/x/%2e%2e/daemon-event` (y), `P/%2e%2e/cell-plan` (y), `/anything/x/%252e%252e/daemon-event` (y)                                             |
-  | encoded `/`                  | `/anything%2Fdaemon-event` (n), `/anything%2fdaemon-event` (n), `P%2F..%2Fcell-plan` (n)                                                               |
-  | encoded `-`                  | `/anything/daemon%2Devent` (y), `/anything/daemon%2devent` (y), `/anything/daemon%252Devent` (y)                                                       |
-  | double slash, trailing slash | `//anything/daemon-event` (y), `/anything//daemon-event` (y), `P//` (y), `P/` (y)                                                                      |
-  | `;`                          | `P;x` (y), `/anything;x/daemon-event` (n)                                                                                                              |
-  | fragment                     | `P#frag` (n), `/anything#/daemon-event` (n)                                                                                                            |
-  | case                         | `/ANYTHING/daemon-event` (n), `/anything/DAEMON-EVENT` (y)                                                                                             |
-  | backslash                    | `/anything\daemon-event` (y)                                                                                                                           |
-  | the path behind a query      | `/anything?/daemon-event` (y)                                                                                                                          |
-  | authority                    | absolute-form `https://example.org` + `P` with `Host: httpbin.org`; `Host: example.org` with SNI `httpbin.org` (canary absent; expected 403, recorded) |
+  | Variant                      | Targets (echo?)                                                                                                                                                                                                                                                  |
+  | :--------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | dot segments, raw            | `/anything/./daemon-event` (y), `/anything/x/../daemon-event` (y), `P/../../anything/daemon/cell-plan` (y)                                                                                                                                                       |
+  | dot segments, encoded        | `/anything/x/%2e%2e/daemon-event` (y), `P/%2e%2e/cell-plan` (y), `/anything/x/%252e%252e/daemon-event` (y)                                                                                                                                                       |
+  | encoded `/`                  | `/anything%2Fdaemon-event` (n), `/anything%2fdaemon-event` (n), `P%2F..%2Fcell-plan` (n)                                                                                                                                                                         |
+  | encoded `-`                  | `/anything/daemon%2Devent` (y), `/anything/daemon%2devent` (y), `/anything/daemon%252Devent` (y)                                                                                                                                                                 |
+  | double slash, trailing slash | `//anything/daemon-event` (y), `/anything//daemon-event` (y), `P//` (y), `P/` (y)                                                                                                                                                                                |
+  | `;`                          | `P;x` (y), `/anything;x/daemon-event` (n)                                                                                                                                                                                                                        |
+  | fragment                     | `P#frag` (n), `/anything#/daemon-event` (n)                                                                                                                                                                                                                      |
+  | case                         | `/ANYTHING/daemon-event` (n), `/anything/DAEMON-EVENT` (y)                                                                                                                                                                                                       |
+  | backslash                    | `/anything\daemon-event` (y)                                                                                                                                                                                                                                     |
+  | the path behind a query      | `/anything?/daemon-event` (y)                                                                                                                                                                                                                                    |
+  | authority                    | `Host: example.org` with SNI `httpbin.org` (canary absent; refused). Foreign absolute-form `https://example.org` + `P` with `Host: httpbin.org`: injected, asserted answered by the bound host (canary echoed, no example.org page), per the 2026-11-18 live run |
 
   Recorded, not asserted: `P?x=1` and absolute-form `https://httpbin.org` + `P`. Upstream injects into these by design.
 

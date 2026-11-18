@@ -86,3 +86,4 @@ Review:
   - same route (`?x=1`, `https://<allowed>/…`): injected by design;
   - foreign absolute-form: `[true, false, false]`, so injected but answered by the bound host, with no example.org page.
 - Teardown ran both times; no `osbit` containers left.
+- **Upstream proposal:** refuse an HTTP/1 absolute-form target whose authority differs from `Host` (and from SNI) before any vault binding is applied, the way a `Host` that differs from SNI is already refused. To be reported privately to the OpenSandbox maintainers (opensandbox-group/OpenSandbox) as a security advisory, at the TL's decision.

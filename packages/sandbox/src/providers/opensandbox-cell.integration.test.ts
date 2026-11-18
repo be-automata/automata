@@ -913,8 +913,8 @@ describe(
         // still goes to the bound host on the bound path (recorded, like the
         // same-route cases). The assertion proves the token never left: the
         // canary comes back only from the bound host's echo, and example.org's
-        // page text ("Example Domain") never appears. Upstream proposal to
-        // refuse the mismatch: see the PR body.
+        // page text ("Example Domain") never appears. The upstream proposal to
+        // refuse the mismatch is recorded in docs/specs/693/gate-log.md.
         const foreignAbsolute: ProbeSpec = {
           ...raw(`https://example.org${P}`),
           markers: [...markers, "Example Domain"],
