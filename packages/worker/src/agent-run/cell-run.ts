@@ -12,6 +12,7 @@ import {
   claimAbnormalEnd,
   postAbnormalEnd,
   type AbnormalEnd,
+  type AbnormalEndState,
 } from "./abnormal-end";
 import {
   CELL_DAEMON_BUNDLE,
@@ -29,7 +30,7 @@ import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
   CELL_PLAN_UNAVAILABLE_CODES,
-  abortableSleep,
+  withTimeout,
   type CellPlanResult,
   type FailedStep,
   type TeardownCallResult,
@@ -42,10 +43,12 @@ import { classifyNextMessageError } from "./retry-classification";
 import { getProcessWorkerId } from "./run-namespace";
 import type { RunExecutor, RunExecutorInput } from "./run-executor";
 import type { AgentRunOutput, PulledDaemonMessage } from "./types";
+import type { RunEndMark } from "./run-end-marks";
 import {
   CellStepConflictError,
   CellTerminalUnconfirmedError,
   ThreadStatusHttpError,
+  createTerminalReadRetry,
   type CellLease,
   type EgressEventWire,
   type PollContext,
@@ -137,15 +140,13 @@ export interface CellExecutorDeps {
   now: () => number;
   /** A fresh 24-char base64url id (18 random bytes) for one plan fetch. */
   randomId: () => string;
-  /** H7: runs whose terminal read retired the daemon token (onFailure must not post `run-failed`). */
-  retiredRuns: Set<string>;
-  /** E16-409: runs whose token www deleted on `cell_step_conflict`. */
-  tokenGoneRuns: Set<string>;
-  /** Runs a newer attempt fenced: onFailure must post nothing for them (the thread is the newer attempt's). */
-  fencedRuns: Set<string>;
+  /**
+   * How the run ended, for onFailure (run-end-marks.ts): `retired` (the terminal
+   * read retired the token, H7), `tokenGone` (E16-409) or `fenced` (a newer
+   * attempt owns the thread). The registry keeps the strongest mark per run.
+   */
+  marks: { mark: (runId: string, kind: RunEndMark) => void };
 }
-
-export { abortableSleep };
 
 /**
  * The daemon message for a cell (H11): the pulled body with the PLACEHOLDER
@@ -174,15 +175,48 @@ class SetupAbortedError extends Error {
   }
 }
 
-function isTerminalWriteCode(code: string | undefined): boolean {
-  return code === "cell_finish_failed" || code === "cell_retire_failed";
-}
-
 export function createCellExecutor(deps: CellExecutorDeps): RunExecutor {
   const epoch = String(deps.now());
   return {
     kind: "cell",
     run: (args) => runCell(deps, epoch, args),
+  };
+}
+
+/** What the run knows, shared by the heartbeat, the bootstrap, the exit decision and the teardown. */
+interface CellRunState {
+  deps: CellExecutorDeps;
+  args: RunExecutorInput;
+  step: (msg: string) => void;
+  runId: string;
+  ids: { threadId: string; threadChatId: string };
+  runSignal: AbortSignal | undefined;
+  /** Internal abort: a fence, a Stop, a terminal read, a failure ends setup. */
+  inner: AbortController;
+  /** The run's signal and the internal one. */
+  live: AbortSignal;
+  /** Rejects the moment `live` aborts (see raceLive). */
+  abortedLive: Promise<never>;
+  heartbeatStop: AbortController;
+  cellOpts: WwwClientOpts;
+  attempt: number;
+  stepKey: string;
+  deployment: string;
+  abnormal: AbnormalEndState;
+  provider: ICellProvider | null;
+  cellId: string | null;
+  st: {
+    fenced: boolean;
+    stopRequested: boolean;
+    terminal: boolean;
+    terminalStatus: string | undefined;
+    conflict: boolean;
+    /** This run's terminal read retired the token (the report's `retired` flag). */
+    retired: boolean;
+    refusedStreak: number;
+    failure: Error | null;
+    /** A heartbeat saw a terminal-write 500: settled in decideExit, before teardown (M1). */
+    pendingSettle: ThreadStatusHttpError | null;
   };
 }
 
@@ -194,7 +228,6 @@ async function runCell(
   const { input, ctx, config, wwwOpts, runKey, abnormal, cellConfig } = args;
   const runSignal = ctx.abortController?.signal;
   const step = (msg: string) => ctx.log(`[agent-run ${input.threadId}] ${msg}`);
-  const runId = wwwOpts.runExternalId ?? "";
   const ids = { threadId: input.threadId, threadChatId: input.threadChatId };
 
   // A poll slower than a quarter of the stale window could let a healthy
@@ -253,201 +286,10 @@ async function runCell(
   }
 
   // From here the attempt is open: every exit runs the teardown.
-  const cellOpts: WwwClientOpts = { ...wwwOpts, cellAttempt: attempt };
-  const deployment = plan.tags.deployment;
-  const stepKey = plan.tags.stepKey;
-  // The run's state, set by the lease handler and the heartbeat.
-  const st = {
-    fenced: false,
-    stopRequested: false,
-    terminal: false,
-    terminalStatus: undefined as string | undefined,
-    conflict: false,
-    refusedStreak: 0,
-    failure: null as Error | null,
-    /** A heartbeat saw a terminal-write 500: settled in the main catch, before teardown (M1). */
-    pendingSettle: null as ThreadStatusHttpError | null,
-  };
   const inner = new AbortController();
   const live = runSignal
     ? AbortSignal.any([runSignal, inner.signal])
     : inner.signal;
-  const markRetired = () => {
-    if (runId) deps.retiredRuns.add(runId);
-  };
-
-  const onLease = (lease: CellLease): void => {
-    switch (lease) {
-      case "renewed":
-        st.refusedStreak = 0;
-        return;
-      case "refused":
-        st.refusedStreak += 1;
-        if (st.refusedStreak >= REFUSED_LIMIT && st.failure === null) {
-          abnormal.daemonStarted = true;
-          st.failure = new NonRetryableError("cell_attempt_revoked");
-          inner.abort();
-        }
-        return;
-      case "superseded":
-        // A database fact in www: one read is enough (Decision 12).
-        st.fenced = true;
-        if (runId) deps.fencedRuns.add(runId);
-        inner.abort();
-        return;
-      case "finished":
-        st.terminal = true;
-        markRetired();
-        return;
-      case "error":
-        step("cell.lease_error (ignored)");
-        return;
-    }
-  };
-
-  /** Settles a terminal read that answered a 500/401 the way the poll loop does (Contract 5, Decision 11). */
-  const confirmRetired = async (
-    signal: AbortSignal,
-  ): Promise<"retired" | "gone" | "unknown"> => {
-    const out = await deps.www.revoke(cellOpts, attempt, signal, CONFIRM_RETRY);
-    if (out.result === "ok") return "retired";
-    return out.result === "unauthorized" ? "gone" : "unknown";
-  };
-
-  /** After a terminal-read error code: the same retry budget as the poll (E16). */
-  const settleTerminalError = async (
-    first: ThreadStatusHttpError,
-  ): Promise<void> => {
-    let code = first.code;
-    for (let tries = 1; ; tries++) {
-      if (tries >= CELL_TERMINAL_RETRY.tries) {
-        throw new CellTerminalUnconfirmedError(code ?? "unknown");
-      }
-      await deps.sleep(CELL_TERMINAL_RETRY.delayMs, runSignal);
-      if (runSignal?.aborted) throw new SetupAbortedError();
-      let poll: ThreadStatusPoll;
-      try {
-        poll = await deps.www.pollThreadStatus(
-          cellOpts,
-          runSignal
-            ? AbortSignal.any([
-                AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
-                runSignal,
-              ])
-            : AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
-        );
-      } catch (error) {
-        if (error instanceof ThreadStatusHttpError) {
-          if (error.status === 409 && error.code === "cell_step_conflict") {
-            throw new CellStepConflictError();
-          }
-          if (error.status === 500 && isTerminalWriteCode(error.code)) {
-            code = error.code;
-            continue;
-          }
-        }
-        continue;
-      }
-      if (poll.kind === "auth-error") {
-        if (poll.httpStatus === 401 && code === "cell_retire_failed") {
-          const confirmed = await confirmRetired(
-            AbortSignal.timeout(CELL_TERMINAL_RETRY.delayMs * 4),
-          );
-          if (confirmed === "retired") {
-            st.terminal = true;
-            markRetired();
-            return;
-          }
-        }
-        throw new CellTerminalUnconfirmedError(code ?? "unknown");
-      }
-      if (poll.terminal) {
-        onLease("finished");
-        st.terminal = true;
-        st.terminalStatus = poll.status;
-        return;
-      }
-    }
-  };
-
-  // 3. The setup heartbeat: a lease stamp every CELL_SETUP_STAMP_MS.
-  const heartbeatStop = new AbortController();
-  let heartbeatFailures = 0;
-  const failHeartbeat = () => {
-    heartbeatFailures += 1;
-    step(`cell.heartbeat_failed ${heartbeatFailures}/${HEARTBEAT_FAILURES}`);
-    if (heartbeatFailures >= HEARTBEAT_FAILURES && st.failure === null) {
-      abnormal.daemonStarted = true;
-      st.failure = new Error("cell_heartbeat_lost");
-      inner.abort();
-    }
-  };
-  const beat = async (): Promise<void> => {
-    try {
-      const poll = await deps.www.pollThreadStatus(
-        cellOpts,
-        AbortSignal.any([
-          AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
-          heartbeatStop.signal,
-          live,
-        ]),
-      );
-      if (poll.kind === "auth-error") {
-        failHeartbeat();
-        return;
-      }
-      heartbeatFailures = 0;
-      if (poll.lease !== undefined) onLease(poll.lease);
-      if (poll.terminal) {
-        // A finished step during setup (E12): nothing is sent to the daemon.
-        st.terminal = true;
-        st.terminalStatus = poll.status;
-        if (poll.lease === undefined) markRetired();
-        inner.abort();
-      } else if (poll.status === "stopping") {
-        st.stopRequested = true;
-        inner.abort();
-      }
-    } catch (error) {
-      if (heartbeatStop.signal.aborted || live.aborted) return;
-      if (error instanceof ThreadStatusHttpError) {
-        if (error.status === 409 && error.code === "cell_step_conflict") {
-          st.conflict = true;
-          st.failure = new CellStepConflictError();
-          inner.abort();
-          return;
-        }
-        if (error.status === 500 && isTerminalWriteCode(error.code)) {
-          // Setup is aborted at once (Decision 7); the retry budget and the
-          // retired-token confirmation run in the main catch, BEFORE teardown.
-          st.pendingSettle = error;
-          inner.abort();
-          return;
-        }
-      }
-      failHeartbeat();
-    }
-  };
-  void (async () => {
-    while (!heartbeatStop.signal.aborted && !live.aborted) {
-      await deps.sleep(CELL_SETUP_STAMP_MS, heartbeatStop.signal);
-      if (heartbeatStop.signal.aborted || live.aborted) break;
-      await beat();
-    }
-  })();
-
-  let provider: ICellProvider | null = null;
-  let cellId: string | null = null;
-  let vaultRevoked = false;
-  let result: AgentRunOutput | undefined;
-  let thrown: { error: unknown } | null = null;
-
-  const ensureLive = () => {
-    if (live.aborted) throw new SetupAbortedError();
-  };
-  // Rejects the moment `live` aborts (a fence, a Stop, a lost heartbeat, the
-  // run's timeout), so the teardown starts at once even while a provider call
-  // is still in flight: the cell is deleted anyway (M2).
   const abortedLive = new Promise<never>((_, reject) => {
     if (live.aborted) reject(new SetupAbortedError());
     else {
@@ -456,86 +298,84 @@ async function runCell(
       });
     }
   });
-  abortedLive.catch(() => undefined); // read by the races below; never unhandled
-  const raceLive = async <T>(call: Promise<T>): Promise<T> => {
-    call.catch(() => undefined); // a call that loses the race must not become unhandled
-    return Promise.race([call, abortedLive]);
+  abortedLive.catch(() => undefined); // read by raceLive; never unhandled
+  const r: CellRunState = {
+    deps,
+    args,
+    step,
+    runId: wwwOpts.runExternalId ?? "",
+    ids,
+    runSignal,
+    inner,
+    live,
+    abortedLive,
+    heartbeatStop: new AbortController(),
+    cellOpts: { ...wwwOpts, cellAttempt: attempt },
+    attempt,
+    stepKey: plan.tags.stepKey,
+    deployment: plan.tags.deployment,
+    abnormal,
+    provider: null,
+    cellId: null,
+    st: {
+      fenced: false,
+      stopRequested: false,
+      terminal: false,
+      terminalStatus: undefined,
+      conflict: false,
+      retired: false,
+      refusedStreak: 0,
+      failure: null,
+      pendingSettle: null,
+    },
   };
-  const execOk = async (
-    argv: string[],
-    label: string,
-    timeoutMs?: number,
-    logStderr = true,
-  ): Promise<void> => {
-    ensureLive();
-    const out = await raceLive(
-      (provider as ICellProvider).exec(
-        cellId as string,
-        argv,
-        timeoutMs !== undefined ? { timeoutMs } : undefined,
-      ),
-    );
-    if (out.exitCode !== 0) {
-      // The message write's stderr is never logged: it may echo the staged message.
-      step(
-        logStderr
-          ? `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`
-          : `cell setup: ${label} failed (exit ${out.exitCode})`,
-      );
-      throw new Error(`cell setup: ${label} failed (exit ${out.exitCode})`);
-    }
-  };
-  const putFile = async (
-    path: string,
-    text: string,
-    mode: number,
-  ): Promise<void> => {
-    ensureLive();
-    await raceLive(
-      (provider as ICellProvider).copyIn(
-        cellId as string,
-        path,
-        new TextEncoder().encode(text),
-        { mode, ...CELL_USER },
-      ),
-    );
-  };
+  const { st } = r;
 
+  // 3. The setup heartbeat: a lease stamp every CELL_SETUP_STAMP_MS.
+  startHeartbeat(r);
+
+  let result: AgentRunOutput | undefined;
+  let thrown: { error: unknown } | null = null;
   try {
     // 4. The provider, per run (the entrypoint depends on the plan's host).
-    // The config selectRunExecutor read, passed through: read once per run.
-    const cfg = cellConfig;
-    if (cfg === undefined || cfg.kind !== "on") {
+    // The config selectRunExecutor read is passed through: read once per run.
+    if (cellConfig === undefined || cellConfig.kind !== "on") {
       throw new CellPlanRefusedError("cells_unconfigured", 0);
     }
     let entrypoint: string[];
     try {
-      entrypoint = cellEntrypoint(deployment);
+      entrypoint = cellEntrypoint(r.deployment);
     } catch {
       throw new NonRetryableError("cell_bad_deployment_host");
     }
-    provider = deps.makeProvider({
-      baseUrl: cfg.baseUrl,
-      apiKey: cfg.apiKey,
-      image: cfg.image.reference,
+    const provider = deps.makeProvider({
+      baseUrl: cellConfig.baseUrl,
+      apiKey: cellConfig.apiKey,
+      image: cellConfig.image.reference,
       entrypoint,
       selfCheck: { argv: CELL_SELF_CHECK_ARGV },
     });
+    r.provider = provider;
     step(
-      `cell: image=${cfg.image.digest} attempt=${attempt} deployment=${deployment}`,
+      `cell: image=${cellConfig.image.digest} attempt=${attempt} deployment=${r.deployment}`,
     );
 
     // Before the create, a newer attempt removes its predecessors' cells on
     // this server (Decision 13): vault first, then quarantine, then delete.
     await raceLive(
-      reapPriorAttempts(provider, { stepKey, deployment, attempt }, step),
+      r,
+      reapPriorAttempts(
+        provider,
+        { stepKey: r.stepKey, deployment: r.deployment, attempt },
+        step,
+      ),
     );
-    ensureLive();
+    ensureLive(r);
 
     // 5. Create. Once it has been sent the plan is never fetched again.
     const creating = provider.create(plan);
     try {
-      ({ cellId } = await raceLive(creating));
+      ({ cellId: r.cellId } = await raceLive(r, creating));
     } catch (error) {
       if (error instanceof SetupAbortedError) {
         // Aborted while the create was in flight: the teardown's readback finds
@@ -549,11 +389,11 @@ async function runCell(
           : "unknown";
       throw new Error(`cell create failed: ${code}`);
     }
-    ensureLive();
+    ensureLive(r);
 
     // 6. The self-check's measured block is the one egress row a cell posts.
     try {
-      await deps.www.postEgress(cellOpts, [
+      await deps.www.postEgress(r.cellOpts, [
         {
           destinationHost: "example.org",
           destinationPort: 443,
@@ -568,97 +408,13 @@ async function runCell(
     }
 
     // 7. Bootstrap: the clone, the git identity, HOME, and the entry's socket.
-    for (const argv of cellCloneArgv({
-      brokerHost: deployment,
-      repoFullName: input.repoFullName,
-      branch: input.branch,
-      workBranch: input.workBranch,
-      baseBranch:
-        input.baseBranch && input.baseBranch !== input.branch
-          ? input.baseBranch
-          : undefined,
-    })) {
-      await execOk(argv, `git ${argv[1] ?? ""}`, CLONE_TIMEOUT_MS);
-    }
-    step("cell: clone complete");
-    for (const argv of cellGitConfigArgv(config.botLogin)) {
-      await execOk(argv, "git config");
-    }
-    await execOk(
-      ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR],
-      "mkdir home",
-    );
-    let batteries: unknown = null;
-    try {
-      const raw = await raceLive(
-        provider.copyOut(cellId, `${HOME_CLAUDE_DIR}/settings.batteries.json`),
-      );
-      batteries = JSON.parse(new TextDecoder().decode(raw));
-    } catch {
-      // Absent or unparseable: the hooks are simply not merged (as on the box).
-    }
-    await putFile(
-      `${HOME_CLAUDE_DIR}/settings.json`,
-      JSON.stringify(
-        composeContainerSettings(containerLanePolicy("task"), batteries),
-        null,
-        2,
-      ),
-      600,
-    );
-    await putFile(
-      "/home/agent/.claude.json",
-      JSON.stringify({
-        hasCompletedOnboarding: true,
-        projects: {
-          [CELL_WORKSPACE]: {
-            hasTrustDialogAccepted: true,
-            hasCompletedProjectOnboarding: true,
-          },
-        },
-      }),
-      600,
-    );
-    // A placeholder login: the CLI needs a login to attempt a call, and the
-    // vault's model binding sets the real bearer on api.anthropic.com. No real
-    // token is ever written into the guest (R3).
-    await putFile(
-      `${HOME_CLAUDE_DIR}/.credentials.json`,
-      JSON.stringify({
-        claudeAiOauth: {
-          accessToken: MODEL_PLACEHOLDER,
-          refreshToken: MODEL_PLACEHOLDER,
-          expiresAt: PLACEHOLDER_LOGIN_EXPIRY_MS,
-          scopes: ["user:inference", "user:profile"],
-        },
-      }),
-      600,
-    );
-    // The entry is the create entrypoint: only wait for the daemon's socket.
-    const socketDeadline = deps.now() + SOCKET_WAIT_MS;
-    for (;;) {
-      ensureLive();
-      const probe = await raceLive(
-        provider.exec(cellId, ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET], {
-          timeoutMs: PGREP_TIMEOUT_MS,
-        }),
-      );
-      if (probe.exitCode === 0) break;
-      if (deps.now() >= socketDeadline) {
-        throw new Error(
-          `cell daemon socket not ready after ${SOCKET_WAIT_MS}ms`,
-        );
-      }
-      await deps.sleep(SOCKET_POLL_MS, live);
-    }
-    abnormal.daemonStarted = true;
-    step("cell: daemon socket ready");
+    await bootstrap(r);
 
     // 8. The next message, with the real token, from the worker.
-    ensureLive();
+    ensureLive(r);
     let pulled: PulledDaemonMessage | null;
     try {
-      pulled = await deps.www.nextMessage(cellOpts, live);
+      pulled = await deps.www.nextMessage(r.cellOpts, live);
     } catch (error) {
       throw classifyNextMessageError(error);
     }
@@ -672,11 +428,13 @@ async function runCell(
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
       await putFile(
+        r,
         messagePath,
         JSON.stringify(buildCellMessage(pulled, ids)),
         600,
       );
       await execOk(
+        r,
         ["/bin/bash", "-c", CELL_WRITE_MESSAGE_SH, "cell-write", messagePath],
         "message write",
         undefined,
@@ -685,110 +443,24 @@ async function runCell(
       step("cell: message written to the daemon");
 
       // 10. The poll loop takes over from the heartbeat.
-      heartbeatStop.abort();
-      let daemonGone = false;
-      const cellProvider = provider;
-      const liveCellId = cellId;
+      r.heartbeatStop.abort();
       const poll = await deps.www.pollUntilTerminal(
-        {
-          get cancelled() {
-            return ctx.cancelled;
-          },
-          log: step,
-          signal: live,
-          agentFailure: () =>
-            daemonGone
-              ? new Error(
-                  "the cell's daemon process exited mid-run without the thread reaching a terminal status",
-                )
-              : null,
-          // The pgrep runs at most once per poll, before the read, with its own timeout.
-          beforeStatusRead: async () => {
-            try {
-              const out = await raceLive(
-                cellProvider.exec(
-                  liveCellId,
-                  [
-                    "/usr/bin/pgrep",
-                    "-f",
-                    `[${CELL_DAEMON_BUNDLE[0]}]${CELL_DAEMON_BUNDLE.slice(1)}`,
-                  ],
-                  { timeoutMs: PGREP_TIMEOUT_MS },
-                ),
-              );
-              daemonGone = out.exitCode === 1;
-            } catch {
-              // Unknown is not dead.
-              daemonGone = false;
-            }
-          },
-          onLease,
-          cellTerminalRetry: { ...CELL_TERMINAL_RETRY },
-          confirmRetired,
-        },
-        cellOpts,
+        pollContext(r, provider, r.cellId),
+        r.cellOpts,
         config.pollIntervalMs,
       );
       if (st.fenced || st.failure !== null || st.pendingSettle !== null) {
         throw new SetupAbortedError();
       }
-      if (poll.outcome === "completed") {
-        st.terminal = true;
-        result = {
-          ...ids,
-          outcome: "completed",
-          finalStatus: poll.finalStatus,
-        };
-      } else if (poll.outcome === "stopped") {
-        result = { ...ids, outcome: "stopped", finalStatus: poll.finalStatus };
-      } else {
-        result = {
-          ...ids,
-          outcome: "cancelled",
-          finalStatus: poll.finalStatus,
-        };
-      }
+      if (poll.outcome === "completed") st.terminal = true;
+      result = { ...ids, outcome: poll.outcome, finalStatus: poll.finalStatus };
     }
   } catch (error) {
-    if (error instanceof CellStepConflictError) st.conflict = true;
-    if (st.pendingSettle !== null && !st.fenced && st.failure === null) {
-      // A heartbeat saw a terminal-write 500: the same retry budget and the
-      // retired-token confirmation as the poll, each read under its own 10 s
-      // timeout, and BEFORE the teardown so its report lands on a settled token.
-      const first = st.pendingSettle;
-      st.pendingSettle = null;
-      try {
-        await settleTerminalError(first);
-      } catch (settled) {
-        if (settled instanceof CellStepConflictError) st.conflict = true;
-        if (!(settled instanceof SetupAbortedError)) {
-          abnormal.daemonStarted = true;
-          st.failure =
-            settled instanceof Error ? settled : new Error(String(settled));
-        }
-      }
-    }
-    if (st.fenced) {
-      result = { ...ids, outcome: "fenced" };
-    } else if (error instanceof SetupAbortedError) {
-      if (st.failure !== null) thrown = { error: st.failure };
-      else if (st.terminal) {
-        result = {
-          ...ids,
-          outcome: "completed",
-          finalStatus: st.terminalStatus,
-        };
-      } else if (st.stopRequested) {
-        result = { ...ids, outcome: "stopped" };
-      } else {
-        // The run's own signal aborted (cancel or timeout).
-        result = { ...ids, outcome: "cancelled" };
-      }
-    } else {
-      thrown = { error };
-    }
+    const exit = await decideExit(r, error);
+    result = exit.result ?? result;
+    thrown = exit.thrown ?? null;
   } finally {
-    heartbeatStop.abort();
+    r.heartbeatStop.abort();
   }
   // A terminal read that confirmed the retire, while the poll loop was running.
   if (st.conflict && thrown === null && st.failure !== null) {
@@ -797,85 +469,516 @@ async function runCell(
 
   // The finally: claim the end, then R -> T -> B -> A -> P, then give the slot back.
   try {
-    if (st.fenced) {
-      // The fence is a database fact: the vault goes FIRST, before anything
-      // else is stopped or any www call is made, to shut the window in which
-      // this cell's daemon can still post daemon-events (R9).
-      if (provider !== null && cellId !== null) {
-        try {
-          await provider.revoke(cellId);
-          vaultRevoked = true;
-        } catch {
-          vaultRevoked = false;
-        }
-      }
-      abnormal.claimed = true; // no end: the outer catch posts nothing
-    }
-    let end: AbnormalEnd | null = null;
-    if (!st.fenced && !st.conflict) {
-      end = claimAbnormalEnd(abnormal, {
-        thrown: thrown ?? undefined,
-        cancelled:
-          ctx.cancelled || ctx.abortController?.signal.aborted === true,
-        starvation: null,
-      });
-    } else {
-      abnormal.claimed = true;
-    }
-    if (st.conflict && runId) deps.tokenGoneRuns.add(runId);
-    const teardownProvider = provider;
-    if (teardownProvider !== null || attempt > 0) {
-      const noProvider: Pick<
-        ICellProvider,
-        "revoke" | "quarantine" | "delete" | "listByTags"
-      > = {
-        revoke: async () => {},
-        quarantine: async () => {},
-        delete: async () => "gone",
-        listByTags: async () => [] as never,
-      };
-      const finalEnd = end;
-      await teardownCellRun(
-        {
-          stepKey,
-          attempt,
-          deployment,
-          cellId,
-          skipWww: st.conflict,
-          vaultRevoked,
-        },
-        {
-          // Each www call has its OWN signal: the run's may already be aborted.
-          revoke: async (a, signal) => {
-            const out = await deps.www.revoke(cellOpts, a, signal);
-            return {
-              result: out.result === "unauthorized" ? "failed" : out.result,
-            };
-          },
-          report: (a, outcome, signal) =>
-            deps.www.report(cellOpts, a, outcome, signal, {
-              retired: runId !== "" && deps.retiredRuns.has(runId),
-            }),
-          provider: teardownProvider ?? noProvider,
-          postAbnormal: async () => {
-            if (finalEnd) {
-              await deps.www.postAbnormal(abnormal, finalEnd, {
-                wwwOpts,
-                log: step,
-              });
-            }
-          },
-          now: deps.now,
-          log: step,
-        },
-      );
-    }
+    await tearDown(r, thrown);
   } finally {
     await releaseAdmission();
   }
 
   if (thrown !== null) throw thrown.error;
   return result ?? { ...ids, outcome: "cancelled" };
+}
+
+// ---- shared state helpers ---------------------------------------------------
+
+function ensureLive(r: CellRunState): void {
+  if (r.live.aborted) throw new SetupAbortedError();
+}
+
+/**
+ * Races a provider call against `live`, so a fence, a Stop, a lost heartbeat or
+ * the run's timeout starts the teardown at once even while the call is still in
+ * flight: the cell is deleted anyway (M2).
+ */
+async function raceLive<T>(r: CellRunState, call: Promise<T>): Promise<T> {
+  call.catch(() => undefined); // a call that loses the race must not become unhandled
+  return Promise.race([call, r.abortedLive]);
+}
+
+function markRetired(r: CellRunState): void {
+  r.st.retired = true;
+  r.deps.marks.mark(r.runId, "retired");
+}
+
+function onLease(r: CellRunState, lease: CellLease): void {
+  const { st } = r;
+  switch (lease) {
+    case "renewed":
+      st.refusedStreak = 0;
+      return;
+    case "refused":
+      st.refusedStreak += 1;
+      if (st.refusedStreak >= REFUSED_LIMIT && st.failure === null) {
+        r.abnormal.daemonStarted = true;
+        st.failure = new NonRetryableError("cell_attempt_revoked");
+        r.inner.abort();
+      }
+      return;
+    case "superseded":
+      // A database fact in www: one read is enough (Decision 12).
+      st.fenced = true;
+      r.deps.marks.mark(r.runId, "fenced");
+      r.inner.abort();
+      return;
+    case "finished":
+      st.terminal = true;
+      markRetired(r);
+      return;
+    case "error":
+      r.step("cell.lease_error (ignored)");
+      return;
+  }
+}
+
+/** Settles a terminal read that answered a 500/401 the way the poll loop does (Contract 5, Decision 11). */
+async function confirmRetired(
+  r: CellRunState,
+  signal: AbortSignal,
+): Promise<"retired" | "gone" | "unknown"> {
+  const out = await r.deps.www.revoke(
+    r.cellOpts,
+    r.attempt,
+    signal,
+    CONFIRM_RETRY,
+  );
+  if (out.result === "ok") return "retired";
+  return out.result === "unauthorized" ? "gone" : "unknown";
+}
+
+/** After a terminal-read error code: the same retry rule and budget as the poll (E16). */
+async function settleTerminalError(
+  r: CellRunState,
+  first: ThreadStatusHttpError,
+): Promise<void> {
+  const retry = createTerminalReadRetry(CELL_TERMINAL_RETRY);
+  let code = retry.onFailure(first)?.code ?? first.code;
+  for (let pass = 1; pass < CELL_TERMINAL_RETRY.tries; pass++) {
+    await r.deps.sleep(CELL_TERMINAL_RETRY.delayMs, r.runSignal);
+    if (r.runSignal?.aborted) throw new SetupAbortedError();
+    let poll: ThreadStatusPoll;
+    try {
+      poll = await r.deps.www.pollThreadStatus(
+        r.cellOpts,
+        withTimeout(HEARTBEAT_TIMEOUT_MS, r.runSignal),
+      );
+    } catch (error) {
+      code = retry.onFailure(error)?.code ?? code;
+      continue;
+    }
+    if (poll.kind === "auth-error") {
+      const retired = await retry.onUnauthorized(
+        poll.httpStatus,
+        (signal) => confirmRetired(r, signal),
+        AbortSignal.timeout(CELL_TERMINAL_RETRY.delayMs * 4),
+      );
+      if (retired) {
+        r.st.terminal = true;
+        markRetired(r);
+        return;
+      }
+      throw new CellTerminalUnconfirmedError(code ?? "unknown");
+    }
+    if (poll.terminal) {
+      onLease(r, "finished");
+      r.st.terminal = true;
+      r.st.terminalStatus = poll.status;
+      return;
+    }
+  }
+  throw new CellTerminalUnconfirmedError(code ?? "unknown");
+}
+
+// ---- the heartbeat -----------------------------------------------------------
+
+/** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
+function startHeartbeat(r: CellRunState): void {
+  const { st, live } = r;
+  let failures = 0;
+  const fail = () => {
+    failures += 1;
+    r.step(`cell.heartbeat_failed ${failures}/${HEARTBEAT_FAILURES}`);
+    if (failures >= HEARTBEAT_FAILURES && st.failure === null) {
+      r.abnormal.daemonStarted = true;
+      st.failure = new Error("cell_heartbeat_lost");
+      r.inner.abort();
+    }
+  };
+  const beat = async (): Promise<void> => {
+    try {
+      const poll = await r.deps.www.pollThreadStatus(
+        r.cellOpts,
+        withTimeout(HEARTBEAT_TIMEOUT_MS, r.heartbeatStop.signal, live),
+      );
+      if (poll.kind === "auth-error") {
+        fail();
+        return;
+      }
+      failures = 0;
+      if (poll.lease !== undefined) onLease(r, poll.lease);
+      if (poll.terminal) {
+        // A finished step during setup (E12): nothing is sent to the daemon.
+        st.terminal = true;
+        st.terminalStatus = poll.status;
+        if (poll.lease === undefined) markRetired(r);
+        r.inner.abort();
+      } else if (poll.status === "stopping") {
+        st.stopRequested = true;
+        r.inner.abort();
+      }
+    } catch (error) {
+      if (r.heartbeatStop.signal.aborted || live.aborted) return;
+      if (error instanceof ThreadStatusHttpError) {
+        if (error.status === 409 && error.code === "cell_step_conflict") {
+          st.conflict = true;
+          st.failure = new CellStepConflictError();
+          r.inner.abort();
+          return;
+        }
+        if (
+          error.status === 500 &&
+          (error.code === "cell_finish_failed" ||
+            error.code === "cell_retire_failed")
+        ) {
+          // Setup is aborted at once (Decision 7); the retry budget and the
+          // retired-token confirmation run in decideExit, BEFORE teardown.
+          st.pendingSettle = error;
+          r.inner.abort();
+          return;
+        }
+      }
+      fail();
+    }
+  };
+  void (async () => {
+    while (!r.heartbeatStop.signal.aborted && !live.aborted) {
+      await r.deps.sleep(CELL_SETUP_STAMP_MS, r.heartbeatStop.signal);
+      if (r.heartbeatStop.signal.aborted || live.aborted) break;
+      await beat();
+    }
+  })();
+}
+
+// ---- the bootstrap -----------------------------------------------------------
+
+async function execOk(
+  r: CellRunState,
+  argv: string[],
+  label: string,
+  timeoutMs?: number,
+  logStderr = true,
+): Promise<void> {
+  ensureLive(r);
+  const out = await raceLive(
+    r,
+    (r.provider as ICellProvider).exec(
+      r.cellId as string,
+      argv,
+      timeoutMs !== undefined ? { timeoutMs } : undefined,
+    ),
+  );
+  if (out.exitCode !== 0) {
+    // The message write's stderr is never logged: it may echo the staged message.
+    r.step(
+      logStderr
+        ? `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`
+        : `cell setup: ${label} failed (exit ${out.exitCode})`,
+    );
+    throw new Error(`cell setup: ${label} failed (exit ${out.exitCode})`);
+  }
+}
+
+async function putFile(
+  r: CellRunState,
+  path: string,
+  text: string,
+  mode: number,
+): Promise<void> {
+  ensureLive(r);
+  await raceLive(
+    r,
+    (r.provider as ICellProvider).copyIn(
+      r.cellId as string,
+      path,
+      new TextEncoder().encode(text),
+      { mode, ...CELL_USER },
+    ),
+  );
+}
+
+/** The clone, the git identity, HOME (settings, trust seed, placeholder login), and the entry's socket. */
+async function bootstrap(r: CellRunState): Promise<void> {
+  const { input, config } = r.args;
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  for (const argv of cellCloneArgv({
+    brokerHost: r.deployment,
+    repoFullName: input.repoFullName,
+    branch: input.branch,
+    workBranch: input.workBranch,
+    baseBranch:
+      input.baseBranch && input.baseBranch !== input.branch
+        ? input.baseBranch
+        : undefined,
+  })) {
+    await execOk(r, argv, `git ${argv[1] ?? ""}`, CLONE_TIMEOUT_MS);
+  }
+  r.step("cell: clone complete");
+  for (const argv of cellGitConfigArgv(config.botLogin)) {
+    await execOk(r, argv, "git config");
+  }
+  await execOk(
+    r,
+    ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR],
+    "mkdir home",
+  );
+  let batteries: unknown = null;
+  try {
+    const raw = await raceLive(
+      r,
+      provider.copyOut(cellId, `${HOME_CLAUDE_DIR}/settings.batteries.json`),
+    );
+    batteries = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    // Absent or unparseable: the hooks are simply not merged (as on the box).
+  }
+  await putFile(
+    r,
+    `${HOME_CLAUDE_DIR}/settings.json`,
+    JSON.stringify(
+      composeContainerSettings(containerLanePolicy("task"), batteries),
+      null,
+      2,
+    ),
+    600,
+  );
+  await putFile(
+    r,
+    "/home/agent/.claude.json",
+    JSON.stringify({
+      hasCompletedOnboarding: true,
+      projects: {
+        [CELL_WORKSPACE]: {
+          hasTrustDialogAccepted: true,
+          hasCompletedProjectOnboarding: true,
+        },
+      },
+    }),
+    600,
+  );
+  // A placeholder login: the CLI needs a login to attempt a call, and the
+  // vault's model binding sets the real bearer on api.anthropic.com. No real
+  // token is ever written into the guest (R3).
+  await putFile(
+    r,
+    `${HOME_CLAUDE_DIR}/.credentials.json`,
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: MODEL_PLACEHOLDER,
+        refreshToken: MODEL_PLACEHOLDER,
+        expiresAt: PLACEHOLDER_LOGIN_EXPIRY_MS,
+        scopes: ["user:inference", "user:profile"],
+      },
+    }),
+    600,
+  );
+  // The entry is the create entrypoint: only wait for the daemon's socket.
+  const socketDeadline = r.deps.now() + SOCKET_WAIT_MS;
+  for (;;) {
+    ensureLive(r);
+    const probe = await raceLive(
+      r,
+      provider.exec(cellId, ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET], {
+        timeoutMs: PGREP_TIMEOUT_MS,
+      }),
+    );
+    if (probe.exitCode === 0) break;
+    if (r.deps.now() >= socketDeadline) {
+      throw new Error(`cell daemon socket not ready after ${SOCKET_WAIT_MS}ms`);
+    }
+    await r.deps.sleep(SOCKET_POLL_MS, r.live);
+  }
+  r.abnormal.daemonStarted = true;
+  r.step("cell: daemon socket ready");
+}
+
+/** The poll loop's context: the lease handler, the retry budget, and the once-per-poll daemon probe. */
+function pollContext(
+  r: CellRunState,
+  provider: ICellProvider,
+  cellId: string | null,
+): PollContext {
+  let daemonGone = false;
+  return {
+    get cancelled() {
+      return r.args.ctx.cancelled;
+    },
+    log: r.step,
+    signal: r.live,
+    agentFailure: () =>
+      daemonGone
+        ? new Error(
+            "the cell's daemon process exited mid-run without the thread reaching a terminal status",
+          )
+        : null,
+    // The pgrep runs at most once per poll, before the read, with its own timeout.
+    beforeStatusRead: async () => {
+      try {
+        const out = await raceLive(
+          r,
+          provider.exec(
+            cellId as string,
+            [
+              "/usr/bin/pgrep",
+              "-f",
+              `[${CELL_DAEMON_BUNDLE[0]}]${CELL_DAEMON_BUNDLE.slice(1)}`,
+            ],
+            { timeoutMs: PGREP_TIMEOUT_MS },
+          ),
+        );
+        daemonGone = out.exitCode === 1;
+      } catch {
+        // Unknown is not dead.
+        daemonGone = false;
+      }
+    },
+    onLease: (lease) => onLease(r, lease),
+    cellTerminalRetry: { ...CELL_TERMINAL_RETRY },
+    confirmRetired: (signal) => confirmRetired(r, signal),
+  };
+}
+
+// ---- the exit decision ---------------------------------------------------------
+
+/**
+ * What a run's main try ended in, as a result or a throw: the pending terminal
+ * settle first (before any teardown), then the fence, the internal aborts
+ * (failure, terminal, Stop) and the run's own cancel.
+ */
+async function decideExit(
+  r: CellRunState,
+  error: unknown,
+): Promise<{ result?: AgentRunOutput; thrown?: { error: unknown } }> {
+  const { st, ids } = r;
+  if (error instanceof CellStepConflictError) st.conflict = true;
+  if (st.pendingSettle !== null && !st.fenced && st.failure === null) {
+    // A heartbeat saw a terminal-write 500: the same retry budget and the
+    // retired-token confirmation as the poll, each read under its own 10 s
+    // timeout, and BEFORE the teardown so its report lands on a settled token.
+    const first = st.pendingSettle;
+    st.pendingSettle = null;
+    try {
+      await settleTerminalError(r, first);
+    } catch (settled) {
+      if (settled instanceof CellStepConflictError) st.conflict = true;
+      if (!(settled instanceof SetupAbortedError)) {
+        r.abnormal.daemonStarted = true;
+        st.failure =
+          settled instanceof Error ? settled : new Error(String(settled));
+      }
+    }
+  }
+  if (st.fenced) return { result: { ...ids, outcome: "fenced" } };
+  if (!(error instanceof SetupAbortedError)) return { thrown: { error } };
+  if (st.failure !== null) return { thrown: { error: st.failure } };
+  if (st.terminal) {
+    return {
+      result: { ...ids, outcome: "completed", finalStatus: st.terminalStatus },
+    };
+  }
+  if (st.stopRequested) return { result: { ...ids, outcome: "stopped" } };
+  // The run's own signal aborted (cancel or timeout).
+  return { result: { ...ids, outcome: "cancelled" } };
+}
+
+// ---- the teardown --------------------------------------------------------------
+
+const NO_PROVIDER: Pick<
+  ICellProvider,
+  "revoke" | "quarantine" | "delete" | "listByTags"
+> = {
+  revoke: async () => {},
+  quarantine: async () => {},
+  delete: async () => "gone",
+  listByTags: async () => [] as never,
+};
+
+/** Claims the end, then R -> T -> B -> A -> P (cell-teardown.ts). Never throws. */
+async function tearDown(
+  r: CellRunState,
+  thrown: { error: unknown } | null,
+): Promise<void> {
+  const { st, provider, args, deps } = r;
+  const { ctx, wwwOpts, abnormal } = args;
+  let vaultRevoked = false;
+  if (st.fenced) {
+    // The fence is a database fact: the vault goes FIRST, before anything
+    // else is stopped or any www call is made, to shut the window in which
+    // this cell's daemon can still post daemon-events (R9).
+    if (provider !== null && r.cellId !== null) {
+      try {
+        await provider.revoke(r.cellId);
+        vaultRevoked = true;
+      } catch {
+        vaultRevoked = false;
+      }
+    }
+    abnormal.claimed = true; // no end: the outer catch posts nothing
+  }
+  let end: AbnormalEnd | null = null;
+  if (!st.fenced && !st.conflict) {
+    end = claimAbnormalEnd(abnormal, {
+      thrown: thrown ?? undefined,
+      cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
+      starvation: null,
+    });
+  } else {
+    abnormal.claimed = true;
+  }
+  if (st.conflict) deps.marks.mark(r.runId, "tokenGone");
+  const finalEnd = end;
+  await teardownCellRun(
+    {
+      stepKey: r.stepKey,
+      attempt: r.attempt,
+      deployment: r.deployment,
+      cellId: r.cellId,
+      skipWww: st.conflict,
+      vaultRevoked,
+    },
+    {
+      // Each www call has its OWN signal: the run's may already be aborted.
+      revoke: async (a, signal) => {
+        const out = await deps.www.revoke(r.cellOpts, a, signal);
+        return {
+          result: out.result === "unauthorized" ? "failed" : out.result,
+        };
+      },
+      report: (a, outcome, signal) =>
+        deps.www.report(r.cellOpts, a, outcome, signal, {
+          retired: st.retired,
+        }),
+      provider: provider ?? NO_PROVIDER,
+      postAbnormal: async () => {
+        if (finalEnd) {
+          await deps.www.postAbnormal(abnormal, finalEnd, {
+            wwwOpts,
+            log: r.step,
+          });
+        }
+      },
+      now: deps.now,
+      log: r.step,
+    },
+  );
+}
+
+/** Best effort, in the adapter's order and stopping at the first failure: the vault, quarantine, delete. */
+async function removeCell(
+  provider: ICellProvider,
+  cellId: string,
+): Promise<void> {
+  await provider.revoke(cellId);
+  await provider.quarantine(cellId);
+  await provider.delete(cellId);
 }
 
 /**
@@ -907,9 +1010,7 @@ async function reapPriorAttempts(
     const old = Number(entry.tags.attempt);
     if (!Number.isInteger(old) || old >= key.attempt) continue;
     try {
-      await provider.revoke(entry.cellId);
-      await provider.quarantine(entry.cellId);
-      await provider.delete(entry.cellId);
+      await removeCell(provider, entry.cellId);
     } catch {
       log(
         `cell.prior_reap_failed ${JSON.stringify({ stepKey: key.stepKey, attempt: old })}`,
@@ -929,9 +1030,7 @@ async function removeLateCell(
 ): Promise<void> {
   try {
     const { cellId } = await creating;
-    await provider.revoke(cellId);
-    await provider.quarantine(cellId);
-    await provider.delete(cellId);
+    await removeCell(provider, cellId);
   } catch {
     log("cell.late_create_cleanup_failed");
   }

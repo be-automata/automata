@@ -1,6 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { createOpenSandboxCellProvider } from "@terragon/sandbox/opensandbox-cell";
 import { FIX_BRANCH_PREFIX } from "@terragon/utils/fix-branch";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
@@ -13,13 +11,7 @@ import {
   DEFAULT_ENGINE_CAPS,
   type EngineCaps,
 } from "./definition";
-import { loadCellConfig, type CellConfig } from "./cell-config";
-import { abortableSleep, createCellExecutor } from "./cell-run";
-import {
-  fetchCellPlan,
-  postCellReport,
-  postCellRevoke,
-} from "./cell-www-client";
+import type { CellConfig } from "./cell-config";
 import { loadWorkerConfig } from "./config";
 import type { BoxLock } from "./box-lock";
 import { admitRunSlot, staleSkip, type RunCtx } from "./run-admission";
@@ -67,7 +59,6 @@ import {
 } from "./retry-classification";
 import type { Reservation } from "./headroom";
 import {
-  pollThreadStatus,
   pollUntilTerminal,
   postEgressEvents,
   postRunCredentialSource,
@@ -95,6 +86,7 @@ import {
   type BrokerHandoff,
 } from "./daemon-env";
 import { runPathsForRepo } from "./run-owned-paths";
+import { RUN_END_MARK_MESSAGES, runEndMarks } from "./run-end-marks";
 import { guardRunTerminal } from "./run-terminal-ledger";
 import {
   claimAbnormalEnd,
@@ -449,77 +441,25 @@ const boxExecutor: RunExecutor = {
     ),
 };
 
-/** A Set that forgets its oldest entry past `max`: a run id that never reaches onFailure must not leak. */
-class BoundedRunSet extends Set<string> {
-  constructor(private readonly max: number) {
-    super();
-  }
-  override add(value: string): this {
-    super.add(value);
-    if (this.size > this.max) {
-      const oldest = this.values().next().value;
-      if (oldest !== undefined) this.delete(oldest);
-    }
-    return this;
-  }
-}
-
 /**
- * #656 H7: runs whose terminal cell read retired the daemon token. Their
- * onFailure `run-failed` post would 401 (the documented loss), so it is skipped.
+ * The cell executor, loaded on its first marked run: this module imports no
+ * cell module at runtime (run-executor.ts's rule), so a box-only worker never
+ * loads the sandbox adapter. The wiring is cell-executor-default.ts.
  */
-const retiredRuns = new BoundedRunSet(4096);
-/** #656 E16-409: runs whose token www deleted on `cell_step_conflict`. */
-const tokenGoneRuns = new BoundedRunSet(4096);
-/** #656 E13: runs a newer attempt fenced; onFailure posts nothing for them (the thread is the newer attempt's). */
-const fencedRuns = new BoundedRunSet(4096);
-
-/** Test seam: the process-wide cell run registries onFailure consults. */
-export const _cellRunSetsForTests = {
-  retiredRuns,
-  tokenGoneRuns,
-  fencedRuns,
+const cellExecutor: RunExecutor = {
+  kind: "cell",
+  run: async (args) =>
+    (await import("./cell-executor-default")).cellExecutor.run(args),
 };
 
-/** The cell executor, wired with the real www clients and the OpenSandbox adapter. */
-const cellExecutor: RunExecutor = createCellExecutor({
-  www: {
-    fetchPlan: (opts, body, signal) => fetchCellPlan(opts, body, { signal }),
-    revoke: (opts, attempt, signal, retry) =>
-      postCellRevoke(opts, attempt, signal, retry ? { retry } : {}),
-    report: (opts, attempt, outcome, signal, flags) =>
-      postCellReport(opts, attempt, outcome, signal, flags),
-    nextMessage: (opts, signal) => pullNextMessage(opts, signal),
-    pollThreadStatus: (opts, signal) => pollThreadStatus(opts, signal),
-    pollUntilTerminal: (ctx, opts, pollIntervalMs) =>
-      pollUntilTerminal(ctx, opts, pollIntervalMs),
-    postEgress: (opts, events) => postEgressEvents(opts, events),
-    postAbnormal: (state, end, deps) => postAbnormalEnd(state, end, deps),
-  },
-  makeProvider: (cfg) =>
-    createOpenSandboxCellProvider(cfg, {
-      fetch: (input, init) => fetch(input, init),
-      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      now: () => Date.now(),
-      // Field values are dropped: a cell log line never carries a tag or a vault.
-      logger: {
-        info: (msg) => console.info(`[cell] ${msg}`),
-        warn: (msg) => console.warn(`[cell] ${msg}`),
-      },
-    }),
-  sleep: abortableSleep,
-  now: () => Date.now(),
-  randomId: () => randomBytes(18).toString("base64url"),
-  retiredRuns,
-  tokenGoneRuns,
-  fencedRuns,
-});
+/** Test seam: the registry of how cell runs ended, which onFailure consults. */
+export const _runEndMarksForTests = runEndMarks;
 
 let executorOverrides:
   | {
       box?: RunExecutor;
       cell?: RunExecutor;
-      loadCellConfig?: () => CellConfig;
+      loadCellConfig?: () => CellConfig | Promise<CellConfig>;
     }
   | undefined;
 
@@ -533,7 +473,7 @@ export function _setRunExecutorsForTests(
     | {
         box?: RunExecutor;
         cell?: RunExecutor;
-        loadCellConfig?: () => CellConfig;
+        loadCellConfig?: () => CellConfig | Promise<CellConfig>;
       }
     | undefined,
 ): void {
@@ -546,7 +486,8 @@ function currentRunExecutors(): RunExecutorDeps {
     cell: executorOverrides?.cell ?? cellExecutor,
     loadCellConfig:
       executorOverrides?.loadCellConfig ??
-      (() => loadCellConfig(process.env, (p) => readFileSync(p, "utf8"))),
+      (async () =>
+        (await import("./cell-executor-default")).loadCellConfigFromEnv()),
   };
 }
 
@@ -724,9 +665,10 @@ async function runAgentResolved(
     // The cell config is read ONCE per run (for a marked run only) and handed on.
     const executors = currentRunExecutors();
     let cellConfig: CellConfig | undefined;
-    const executor = selectRunExecutor(input, {
+    const executor = await selectRunExecutor(input, {
       ...executors,
-      loadCellConfig: () => (cellConfig ??= executors.loadCellConfig()),
+      loadCellConfig: async () =>
+        (cellConfig ??= await executors.loadCellConfig()),
     });
     const output = await executor.run({
       cellConfig,
@@ -1938,24 +1880,13 @@ async function onAgentRunFailure(
       );
     }
   }
-  // #656: a cell run whose terminal read retired the token (H7), or whose token
-  // www deleted on a step conflict, cannot post: the 401 is the documented,
-  // expected loss, so it is neither attempted nor escalated.
-  if (runId && retiredRuns.delete(runId)) {
+  // #656: a cell run that ended with a retired token (H7), a token www deleted
+  // on a step conflict, or a newer attempt owning the thread cannot, or must
+  // not, post: that is expected, so it is neither attempted nor escalated.
+  const endMark = runId ? runEndMarks.take(runId) : undefined;
+  if (endMark !== undefined) {
     console.info(
-      `[agent-run ${input.threadId}] run-failed not posted: token retired at the terminal read (expected, #656)`,
-    );
-    return;
-  }
-  if (runId && fencedRuns.delete(runId)) {
-    console.info(
-      `[agent-run ${input.threadId}] run-failed not posted: a newer attempt fenced this run and owns the thread (expected, #656)`,
-    );
-    return;
-  }
-  if (runId && tokenGoneRuns.delete(runId)) {
-    console.info(
-      `[agent-run ${input.threadId}] run-failed not posted: token deleted by www on cell_step_conflict (expected)`,
+      `[agent-run ${input.threadId}] ${RUN_END_MARK_MESSAGES[endMark]}`,
     );
     return;
   }

@@ -62,7 +62,7 @@ export interface RunExecutorDeps {
   box: RunExecutor;
   cell: RunExecutor;
   /** Read ONLY for a marked run, so an unmarked run never touches the key file. */
-  loadCellConfig: () => CellConfig;
+  loadCellConfig: () => CellConfig | Promise<CellConfig>;
 }
 
 /**
@@ -71,10 +71,10 @@ export interface RunExecutorDeps {
  * only switch, and the worker never runs an unmarked run in a cell nor a
  * marked one on the box.
  */
-export function selectRunExecutor(
+export async function selectRunExecutor(
   input: AgentRunInput,
   deps: RunExecutorDeps,
-): RunExecutor {
+): Promise<RunExecutor> {
   if (input.cell === undefined) return deps.box;
   if (
     resolveRunLane(input) !== "task" ||
@@ -83,7 +83,7 @@ export function selectRunExecutor(
   ) {
     throw new CellRunRefusedError("cell_lane_refused");
   }
-  if (deps.loadCellConfig().kind !== "on") {
+  if ((await deps.loadCellConfig()).kind !== "on") {
     throw new CellRunRefusedError("cells_unconfigured");
   }
   return deps.cell;

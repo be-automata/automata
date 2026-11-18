@@ -1,3 +1,4 @@
+import { abortableSleep } from "./abort-sleep";
 import type { DaemonEventAPIBody } from "@terragon/daemon/shared";
 import { redactSecrets } from "@terragon/utils/redact";
 import type { FixCheckReport } from "./self-heal-fix-check";
@@ -63,10 +64,6 @@ function isRefusedBeforeHandler(status: number): boolean {
   return status === 401 || status === 403 || status === 503;
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function endpoint(baseUrl: string, pathname: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathname}`;
 }
@@ -111,7 +108,7 @@ export class NextMessageHttpError extends Error {
 export async function pullNextMessage(
   opts: WwwClientOpts,
   signal?: AbortSignal,
-  sleep: (ms: number) => Promise<void> = defaultSleep,
+  sleep: (ms: number) => Promise<void> = abortableSleep,
 ): Promise<PulledDaemonMessage | null> {
   let res: Response;
   for (let attempt = 1; ; attempt++) {
@@ -474,7 +471,7 @@ export const EGRESS_POST_TIMEOUT_MS = 10_000;
 export async function postEgressEvents(
   opts: WwwClientOpts,
   events: EgressEventWire[],
-  sleep: (ms: number) => Promise<void> = defaultSleep,
+  sleep: (ms: number) => Promise<void> = abortableSleep,
 ): Promise<void> {
   if (events.length === 0) {
     return;
@@ -585,6 +582,15 @@ export type ThreadStatusPoll =
 
 const ERROR_CODE = /^[a-z_]{1,40}$/;
 
+/** The `error` field of a route's JSON body when it is a `^[a-z_]{1,40}$` code; nothing else of the body is read. */
+export function readErrorCode(body: unknown): string | undefined {
+  if (typeof body === "object" && body !== null && "error" in body) {
+    const code = (body as { error: unknown }).error;
+    if (typeof code === "string" && ERROR_CODE.test(code)) return code;
+  }
+  return undefined;
+}
+
 /**
  * A non-2xx `thread-status` read (other than 401/403). `message` is exactly the
  * text a bare Error carried before, so box-path logs and assertions do not
@@ -618,17 +624,83 @@ export class CellTerminalUnconfirmedError extends Error {
   }
 }
 
+export type TerminalWriteCode = "cell_finish_failed" | "cell_retire_failed";
+
+/**
+ * The ONE terminal-read retry rule of a cell run (#656, Contract 5, Decision 11),
+ * shared by the poll loop and the heartbeat's settle (cell-run.ts):
+ *
+ * - a 409 `cell_step_conflict` throws CellStepConflictError at once (www deleted
+ *   the token and alerted; never retried);
+ * - a 500 `cell_finish_failed` / `cell_retire_failed` is retried: `onFailure`
+ *   returns the code while the budget lasts and throws CellTerminalUnconfirmedError
+ *   when `retry.tries` reads have failed;
+ * - a 401 right after a `cell_retire_failed` may be the retire having committed
+ *   (a retired token is refused on this route): `onUnauthorized` settles it with
+ *   one `cell-teardown` call that accepts a retired token.
+ *
+ * Without `retry` only the 409 rule applies (the box path never sees one).
+ */
+export function createTerminalReadRetry(
+  retry: { tries: number; delayMs: number } | undefined,
+) {
+  let streak = 0;
+  let afterRetireFailed = false;
+  return {
+    /** Decides a failed read: the retry code, or null when it is not a terminal-read failure. */
+    onFailure(
+      error: unknown,
+    ): { code: TerminalWriteCode; streak: number } | null {
+      if (!(error instanceof ThreadStatusHttpError)) return null;
+      if (error.status === 409 && error.code === "cell_step_conflict") {
+        throw new CellStepConflictError();
+      }
+      if (
+        retry === undefined ||
+        error.status !== 500 ||
+        (error.code !== "cell_finish_failed" &&
+          error.code !== "cell_retire_failed")
+      ) {
+        return null;
+      }
+      afterRetireFailed = error.code === "cell_retire_failed";
+      streak += 1;
+      if (streak >= retry.tries)
+        throw new CellTerminalUnconfirmedError(error.code);
+      return { code: error.code, streak };
+    },
+    /** A read that answered: the streak starts over. */
+    onSuccess(): void {
+      streak = 0;
+    },
+    /** `true`: the retire had committed (the step is finished). null: not this rule's case. Throws when unconfirmed. */
+    async onUnauthorized(
+      httpStatus: number,
+      confirmRetired:
+        | ((signal: AbortSignal) => Promise<"retired" | "gone" | "unknown">)
+        | undefined,
+      signal: AbortSignal,
+    ): Promise<true | null> {
+      if (!afterRetireFailed || httpStatus !== 401 || !confirmRetired) {
+        return null;
+      }
+      const confirmed = await confirmRetired(signal);
+      if (confirmed === "retired") return true;
+      throw new CellTerminalUnconfirmedError(
+        confirmed === "gone"
+          ? "the token is gone after cell_retire_failed"
+          : "the retire could not be confirmed",
+      );
+    },
+  };
+}
+
 async function errorCodeOf(res: Response): Promise<string | undefined> {
   try {
-    const body: unknown = await res.json();
-    if (typeof body === "object" && body !== null && "error" in body) {
-      const code = (body as { error: unknown }).error;
-      if (typeof code === "string" && ERROR_CODE.test(code)) return code;
-    }
+    return readErrorCode(await res.json());
   } catch {
-    // An unreadable body has no code.
+    return undefined; // An unreadable body has no code.
   }
-  return undefined;
 }
 
 /**
@@ -757,25 +829,6 @@ export interface PollResult {
 }
 
 /**
- * Sleep that returns EARLY the moment the run is cancelled, so the poll loop reacts
- * to a Hatchet cancel within ~250ms instead of a full poll interval — the daemon
- * teardown must not wait out a 7s sleep after cancellation.
- */
-async function cancellableSleep(ms: number, ctx: PollContext): Promise<void> {
-  const step = 250;
-  let elapsed = 0;
-  while (elapsed < ms) {
-    if (ctx.cancelled || ctx.signal?.aborted) {
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.min(step, ms - elapsed)),
-    );
-    elapsed += step;
-  }
-}
-
-/**
  * Poll thread-status until terminal. Completion is observed directly: www revokes the
  * daemon token only on the terminal-READ (ADR-003 revoke-on-terminal-read) — i.e. right
  * after serving {terminal:true} — so the worker reliably sees terminal=true and returns
@@ -792,15 +845,17 @@ export async function pollUntilTerminal(
   ctx: PollContext,
   opts: WwwClientOpts,
   pollIntervalMs: number,
-  sleep: (ms: number) => Promise<void> = (ms) => cancellableSleep(ms, ctx),
+  // Returns EARLY the moment the run is cancelled, so the daemon teardown
+  // never waits out a poll interval after a cancel.
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    ctx.cancelled ? Promise.resolve() : abortableSleep(ms, ctx.signal),
 ): Promise<PollResult> {
   let hadSuccessfulPoll = false;
   let lastStatus: string | undefined;
   let agentSeenDead = false;
   let failedPollStreak = 0;
-  // #656: terminal-read 500s, counted apart from the generic streak (own budget).
-  let terminalFailureStreak = 0;
-  let afterRetireFailed = false;
+  // #656: terminal-read failures, counted apart from the generic streak (own budget).
+  const terminalRead = createTerminalReadRetry(ctx.cellTerminalRetry);
 
   for (;;) {
     if (ctx.cancelled || ctx.signal?.aborted) {
@@ -834,31 +889,14 @@ export async function pollUntilTerminal(
       if (ctx.cancelled || ctx.signal?.aborted) {
         return { outcome: "cancelled", finalStatus: lastStatus };
       }
-      if (
-        opts.cellAttempt !== undefined &&
-        error instanceof ThreadStatusHttpError
-      ) {
-        if (error.status === 409 && error.code === "cell_step_conflict") {
-          throw new CellStepConflictError();
-        }
-        const retry = ctx.cellTerminalRetry;
-        if (
-          retry !== undefined &&
-          error.status === 500 &&
-          (error.code === "cell_finish_failed" ||
-            error.code === "cell_retire_failed")
-        ) {
-          afterRetireFailed = error.code === "cell_retire_failed";
-          terminalFailureStreak++;
-          if (terminalFailureStreak < retry.tries) {
-            ctx.log(
-              `thread-status: ${error.code} (${terminalFailureStreak}/${retry.tries}) — retrying the terminal read`,
-            );
-            await sleep(retry.delayMs);
-            continue;
-          }
-          throw new CellTerminalUnconfirmedError(error.code);
-        }
+      const terminalFailure =
+        opts.cellAttempt !== undefined ? terminalRead.onFailure(error) : null;
+      if (terminalFailure !== null && ctx.cellTerminalRetry !== undefined) {
+        ctx.log(
+          `thread-status: ${terminalFailure.code} (${terminalFailure.streak}/${ctx.cellTerminalRetry.tries}) — retrying the terminal read`,
+        );
+        await sleep(ctx.cellTerminalRetry.delayMs);
+        continue;
       }
       // A 5xx or a dropped connection is the same blip a 401 can be: the
       // status read is idempotent, so confirm it before failing the run.
@@ -877,23 +915,14 @@ export async function pollUntilTerminal(
       // committed (a retired token is refused here). One cell-teardown call
       // that accepts a retired token settles it, so the generic confirm rule
       // below does not apply.
-      if (
-        afterRetireFailed &&
-        poll.httpStatus === 401 &&
-        ctx.confirmRetired !== undefined
-      ) {
-        const confirmed = await ctx.confirmRetired(
-          ctx.signal ?? new AbortController().signal,
-        );
-        if (confirmed === "retired") {
-          ctx.onLease?.("finished");
-          return { outcome: "completed", finalStatus: lastStatus };
-        }
-        throw new CellTerminalUnconfirmedError(
-          confirmed === "gone"
-            ? "the token is gone after cell_retire_failed"
-            : "the retire could not be confirmed",
-        );
+      const retired = await terminalRead.onUnauthorized(
+        poll.httpStatus,
+        ctx.confirmRetired,
+        ctx.signal ?? new AbortController().signal,
+      );
+      if (retired) {
+        ctx.onLease?.("finished");
+        return { outcome: "completed", finalStatus: lastStatus };
       }
       // Confirm before believing it: one 401 can be a verify-time database
       // error on www's side, not a revocation (AUTH_ERROR_CONFIRM_ATTEMPTS).
@@ -925,7 +954,7 @@ export async function pollUntilTerminal(
     }
 
     failedPollStreak = 0;
-    terminalFailureStreak = 0;
+    terminalRead.onSuccess();
     hadSuccessfulPoll = true;
     lastStatus = poll.status;
     ctx.log(`thread-status: ${poll.status} (terminal=${poll.terminal})`);

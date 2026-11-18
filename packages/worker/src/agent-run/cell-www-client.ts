@@ -1,9 +1,11 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { CellCreatePlan } from "@terragon/types/cell";
 
+import { abortableSleep } from "./abort-sleep";
 import {
   AUTH_ERROR_CONFIRM_ATTEMPTS,
   AUTH_ERROR_RETRY_MS,
+  readErrorCode,
   wwwEndpoint,
   wwwHeaders,
   type WwwClientOpts,
@@ -23,7 +25,6 @@ const PLAN_REQUEST_TIMEOUT_MS = 30_000;
 const PLAN_BACKOFF_MS = [1_000, 2_000] as const;
 const TEARDOWN_CALL_TIMEOUT_MS = 10_000;
 const MAX_ATTEMPT = 1_000;
-const ERROR_CODE = /^[a-z_]{1,40}$/;
 
 export type CellPlanResult =
   | { ok: true; attempt: number; plan: CellCreatePlan }
@@ -72,33 +73,7 @@ export interface CellWwwDeps {
   log?: (line: string) => void;
 }
 
-/** `setTimeout` that resolves early, and never rejects, when `signal` aborts. */
-export function abortableSleep(
-  ms: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal?.aborted) {
-      resolve();
-      return;
-    }
-    const done = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
-}
-
-function codeOf(body: unknown): string {
-  if (typeof body === "object" && body !== null && "error" in body) {
-    const code = (body as { error: unknown }).error;
-    if (typeof code === "string" && ERROR_CODE.test(code)) return code;
-  }
-  return "unknown";
-}
+const codeOf = (body: unknown): string => readErrorCode(body) ?? "unknown";
 
 /** Reads a response body as JSON under a byte cap; `undefined` when unreadable or over the cap. */
 async function readCappedJson(
@@ -127,7 +102,8 @@ async function readCappedJson(
   }
 }
 
-function withTimeout(
+/** `signal`s plus a timeout, as one signal. */
+export function withTimeout(
   timeoutMs: number,
   ...signals: (AbortSignal | undefined)[]
 ): AbortSignal {

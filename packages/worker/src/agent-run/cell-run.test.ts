@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { newAbnormalEndState } from "./abnormal-end";
+import { BoundedRunMap } from "./run-end-marks";
 import {
   buildCellMessage,
   createCellExecutor,
@@ -112,9 +113,7 @@ function setup(
   };
   let hbWaiters: (() => void)[] = [];
   let clock = 0;
-  const retiredRuns = new Set<string>();
-  const tokenGoneRuns = new Set<string>();
-  const fencedRuns = new Set<string>();
+  const marks = new BoundedRunMap(16);
   const provider = {
     create: vi.fn(async () => {
       calls.push("provider.create");
@@ -233,9 +232,7 @@ function setup(
     },
     now: () => clock,
     randomId: () => "rid0123456789abcdefghijkl",
-    retiredRuns,
-    tokenGoneRuns,
-    fencedRuns,
+    marks,
   };
   const abnormal = newAbnormalEndState({
     owns: true,
@@ -305,9 +302,7 @@ function setup(
     provider,
     makeProvider,
     fetchPlan,
-    retiredRuns,
-    tokenGoneRuns,
-    fencedRuns,
+    marks,
     abnormal,
     ac,
     tick,
@@ -771,7 +766,7 @@ describe("the cell run: the heartbeat and the lease", () => {
     const out = await run;
     expect(out.outcome).toBe("completed");
     expect(s.calls).not.toContain("www.nextMessage");
-    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("retired");
     expectTeardownOrder(s.calls);
   });
 
@@ -806,7 +801,7 @@ describe("the cell run: terminal outcomes and aborts", () => {
       },
     });
     await s.executor.run(s.args);
-    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("retired");
   });
 
   // card: protects=a 409 cell_step_conflict sends no www teardown call and no terminal, runs the local steps and records the token as gone; fails_when=R, A or P goes out; no_claim=www's alert
@@ -824,7 +819,7 @@ describe("the cell run: terminal outcomes and aborts", () => {
     expect(s.calls).not.toContain("www.abnormal");
     expect(s.calls).toContain("provider.delete");
     expect(s.calls).toContain("provider.listByTags");
-    expect(s.tokenGoneRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("tokenGone");
   });
 
   // card: protects=an agent that died (poll throws) posts one abnormal end and tears down in order; fails_when=two posts; no_claim=the poll's own 2-strike
@@ -958,7 +953,7 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     expect(s.calls.filter((c) => c === "www.heartbeat")).toHaveLength(2);
     const lastRead = s.calls.lastIndexOf("www.heartbeat");
     expect(s.calls.indexOf("www.revoke")).toBeGreaterThan(lastRead);
-    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("retired");
     expect(s.calls[s.calls.length - 1]).toBe("www.report");
     expect(s.calls).not.toContain("www.nextMessage");
   });
@@ -989,7 +984,7 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     expect(revokes).toHaveLength(2);
     expect(revokes[0]).toBeGreaterThan(s.calls.lastIndexOf("www.heartbeat"));
     expect(revokes[1]).toBeLessThan(s.calls.indexOf("www.report"));
-    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("retired");
   });
 
   // card: protects=a revoke that also 401s after cell_retire_failed fails cell_terminal_unconfirmed with one abnormal end; fails_when=it completes or hangs; no_claim=the 3x backoff
@@ -1032,7 +1027,7 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     await settled;
     expect(s.calls).not.toContain("www.revoke");
     expect(s.calls).not.toContain("www.report");
-    expect(s.tokenGoneRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("tokenGone");
   });
 
   // card: protects=a fence seen while an exec hangs starts the vault revoke at once, without waiting for the exec; fails_when=the run waits on the in-flight call; no_claim=real time (the race is on the abort, not a clock)
@@ -1050,7 +1045,7 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     ]);
     expect(out).toMatchObject({ outcome: "fenced" });
     expect(s.calls).toContain("provider.revoke");
-    expect(s.fencedRuns.has(RUN_ID)).toBe(true);
+    expect(s.marks.get(RUN_ID)).toBe("fenced");
     expect(s.calls).not.toContain("www.abnormal");
   });
 

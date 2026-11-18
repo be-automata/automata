@@ -85,3 +85,31 @@ Gates after the fixes, outside the Claude sandbox, all exit 0:
 - `HATCHET_IT=1` list: 65 passed, 1 skipped;
 - IT-E1 on the amd64 box: 5/5 (its `teardownCellRun` path changed);
 - worker tsc, `tsc-check --force`, `lint --force`.
+
+## `/simplify`
+
+**Applied** (quality only; behaviour unchanged, tests unchanged apart from replaced internals):
+
+- one shared terminal-read retry (`createTerminalReadRetry`) for the poll loop and the heartbeat;
+- two sleeps (`abort-sleep.ts`: resolve on abort, reject on abort). The 250 ms wake loop is
+  replaced by an abort listener. The SDK's `ctx.cancelled` is `controller.signal.aborted`, the
+  same signal, and `PollContext.cancelled` is a snapshot, so the box path reacts to a cancel as
+  before;
+- one error-code reader, and `withTimeout` used where it exists;
+- one best-effort teardown helper;
+- one bounded run-end map (`run-end-marks.ts`, precedence fenced > tokenGone > retired) instead of
+  three sets;
+- one result assignment;
+- the heartbeat, bootstrap and exit decision as named functions;
+- the cell executor's default wiring in `cell-executor-default.ts`, loaded with `import()` on the
+  first marked run, so `workflow.ts` imports no cell module at runtime.
+
+**Skipped:** running `pgrep` and the status read in parallel. That would change the order in which
+a dead daemon is detected.
+
+**Gates after the pass**, all exit 0:
+
+- worker vitest: 2198 passed;
+- `HATCHET_IT=1` list: 65 passed, 1 skipped;
+- IT-E1 on the amd64 box: 5/5;
+- worker tsc, `tsc-check --force`, `lint --force`.

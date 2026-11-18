@@ -3,6 +3,7 @@ import {
   backoffSeconds,
   sumBackoffSeconds,
 } from "./admission-retry";
+import { sleepAbortable } from "./abort-sleep";
 import { acquireBoxSlot, type BoxLock } from "./box-lock";
 import { configForSlot, type loadWorkerConfig } from "./config";
 import {
@@ -98,33 +99,7 @@ export function headroomBootLine(
     : `memory headroom check OFF: ${gate.reason}`;
 }
 
-/** Abortable sleep for the deferral wait: resolves after `ms`, rejects with AbortError on the run's cancel. */
-export function sleepAbortable(
-  ms: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    // Declared BEFORE abort(): an already-aborted signal calls abort() before
-    // any timer exists (a `const` here would be a temporal-dead-zone error, not
-    // an AbortError — caught by the sleepAbortable unit test).
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const abort = () => {
-      if (timer !== undefined) clearTimeout(timer);
-      const err = new Error("admission wait aborted");
-      err.name = "AbortError";
-      reject(err);
-    };
-    if (signal?.aborted) {
-      abort();
-      return;
-    }
-    timer = setTimeout(() => {
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", abort, { once: true });
-  });
-}
+export { sleepAbortable };
 let admissionSleep: typeof sleepAbortable = sleepAbortable;
 /** Test seam: replace the deferral wait (undefined restores the real sleep). */
 export function _setAdmissionSleepForTests(

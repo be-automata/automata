@@ -1534,7 +1534,7 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const input = await wireInput();
     const runId = "run-retired-1";
-    wf._cellRunSetsForTests.retiredRuns.add(runId);
+    wf._runEndMarksForTests.mark(runId, "retired");
     await workflowDef.onFailure.fn(input, {
       errors: () => ({ run: "late failure" }),
       workflowRunId: () => runId,
@@ -1564,7 +1564,7 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const runId = "run-gone-1";
-    wf._cellRunSetsForTests.tokenGoneRuns.add(runId);
+    wf._runEndMarksForTests.mark(runId, "tokenGone");
     await workflowDef.onFailure.fn(await wireInput(), {
       errors: () => ({ run: "cell_step_conflict" }),
       workflowRunId: () => runId,
@@ -1585,7 +1585,7 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const runId = "run-fenced-1";
-    wf._cellRunSetsForTests.fencedRuns.add(runId);
+    wf._runEndMarksForTests.mark(runId, "fenced");
     await workflowDef.onFailure.fn(await wireInput(), {
       errors: () => ({ run: "timeout" }),
       workflowRunId: () => runId,
