@@ -35,6 +35,7 @@ import { containerRunsBoot } from "../agent-run/container-boot";
 import { buildWorkflows } from "../registry";
 import { startKnowledgeWorker } from "../knowledge/knowledge-worker";
 import { headroomBootLine, headroomBootWarning } from "../agent-run/workflow";
+import { describeCellEnv } from "../agent-run/cell-config";
 
 /**
  * Claim this worker process's namespaced run dir and remove the dirs left by DEAD
@@ -214,6 +215,10 @@ async function main() {
   if (ledgerBoot.warning) {
     console.warn(`[worker-boot] WARNING: ${ledgerBoot.warning}`);
   }
+
+  // #656: the cell env's presence, by NAME only. The key file is never opened at
+  // boot; it is read for a marked run (selectRunExecutor).
+  console.log(`[worker-boot] ${describeCellEnv(process.env)}`);
 
   // #371: decide the memory-headroom gate once and say so — armed with its
   // thresholds, or OFF and why (inert rollback values, a platform without

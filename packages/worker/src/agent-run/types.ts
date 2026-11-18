@@ -310,7 +310,14 @@ export type AgentRunOutput = {
     /** www put the thread in `stopping` (user Stop): daemon torn down, `user-cancelled` posted. */
     | "stopped"
     /** #386: a redelivery of a run that already returned on this box; nothing re-executed. */
-    | "already-terminal";
+    | "already-terminal"
+    /**
+     * #656: a cell attempt that a NEWER attempt of the same run fenced (www answered
+     * `lease: "superseded"`). It tore down its own cell and posts nothing: a terminal
+     * from it would hit the live thread (same runExternalId). The engine records
+     * COMPLETED, so onFailure never runs.
+     */
+    | "fenced";
   /** Final thread status observed from www, when known. */
   finalStatus?: string;
 };

@@ -6,6 +6,7 @@
  */
 import {
   isCellLabelValue,
+  type CellCopyInOptions,
   type CellCreatePlan,
   type CellExecOptions,
   type CellExecResult,
@@ -39,6 +40,10 @@ const MAX_LIST_PAGE_BYTES = 1024 * 1024;
 const MAX_POLICY_BODY_BYTES = 64 * 1024;
 const MAX_CREATE_REPLY_BYTES = 64 * 1024;
 const DEFAULT_COPY_OUT_TIMEOUT_MS = 120_000;
+/** Largest `copyIn` payload. */
+export const OPENSANDBOX_MAX_COPY_IN_BYTES = 16 * 1024 * 1024;
+const COPY_IN_NAME = /^[a-z_][a-z0-9_-]{0,31}$/;
+const COPY_IN_MODE = /^[0-7]{1,3}$/;
 /** Kept equal to `CELL_MIN_TTL_MS` in @terragon/types (a test asserts it). */
 export const OPENSANDBOX_MIN_TTL_MS = 60_000;
 const MIN_TTL_SECONDS = OPENSANDBOX_MIN_TTL_MS / 1000;
@@ -99,6 +104,8 @@ type RetryMode = "idempotent" | "undelivered";
 
 interface SendOptions {
   body?: unknown;
+  /** A multipart body (copyIn). Sent as is, with no JSON content type. */
+  form?: FormData;
   retry: RetryMode;
   timeoutMs?: number;
 }
@@ -457,7 +464,7 @@ export function createOpenSandboxCellProvider(
   async function once(
     method: string,
     path: string,
-    o: { body?: unknown; timeoutMs: number },
+    o: { body?: unknown; form?: FormData; timeoutMs: number },
   ): Promise<Response> {
     const hasBody = o.body !== undefined;
     return doFetch(`${base}${path}`, {
@@ -467,6 +474,7 @@ export function createOpenSandboxCellProvider(
         ...(hasBody ? { "content-type": "application/json" } : {}),
       },
       ...(hasBody ? { body: JSON.stringify(o.body) } : {}),
+      ...(o.form ? { body: o.form } : {}),
       signal: AbortSignal.timeout(o.timeoutMs),
     });
   }
@@ -518,6 +526,7 @@ export function createOpenSandboxCellProvider(
     try {
       res = await once(method, path, {
         body: o.body,
+        form: o.form,
         timeoutMs: o.timeoutMs ?? requestTimeoutMs,
       });
     } catch (error) {
@@ -740,6 +749,73 @@ export function createOpenSandboxCellProvider(
     );
     await requireOk("copyOut", res);
     return readCappedBytes("copyOut", res, maxCopyOutBytes);
+  }
+
+  /**
+   * Upstream execd 1.2.1 `POST /files/upload`: a multipart form with a
+   * `metadata` FILE part (JSON of `{path, owner, group, mode}`, `mode` an
+   * octal-digit integer) and a `file` part with the bytes. Every argument is
+   * checked before any HTTP call. A non-2xx is `http_error`; neither the body
+   * nor the multipart content is read into an error or a log.
+   */
+  async function copyIn(
+    cellId: string,
+    path: string,
+    bytes: Uint8Array,
+    opts: CellCopyInOptions,
+  ): Promise<void> {
+    if (
+      !path.startsWith("/") ||
+      path.endsWith("/") ||
+      path.split("/").includes("..") ||
+      /[\u0000-\u001f]/.test(path)
+    ) {
+      throw new CellProviderError("invalid_argv", "copyIn");
+    }
+    if (bytes.byteLength > OPENSANDBOX_MAX_COPY_IN_BYTES) {
+      throw new CellProviderError("invalid_argv", "copyIn");
+    }
+    if (
+      !Number.isInteger(opts.mode) ||
+      !COPY_IN_MODE.test(String(opts.mode)) ||
+      !COPY_IN_NAME.test(opts.owner) ||
+      !COPY_IN_NAME.test(opts.group)
+    ) {
+      throw new CellProviderError("invalid_argv", "copyIn");
+    }
+    const form = new FormData();
+    form.append(
+      "metadata",
+      new Blob(
+        [
+          JSON.stringify({
+            path,
+            owner: opts.owner,
+            group: opts.group,
+            mode: opts.mode,
+          }),
+        ],
+        { type: "application/json" },
+      ),
+      "metadata.json",
+    );
+    form.append(
+      "file",
+      new Blob([bytes as unknown as ArrayBuffer]),
+      path.slice(path.lastIndexOf("/") + 1),
+    );
+    const { res } = await send(
+      "copyIn",
+      "POST",
+      execd(cellId, "files/upload"),
+      {
+        form,
+        retry: "undelivered",
+        timeoutMs: copyOutTimeoutMs,
+      },
+    );
+    await requireOk("copyIn", res);
+    await discard(res);
   }
 
   function createBody(plan: CellCreatePlan): unknown {
@@ -1081,6 +1157,7 @@ export function createOpenSandboxCellProvider(
     create,
     exec,
     copyOut,
+    copyIn,
     revoke,
     quarantine,
     delete: del,

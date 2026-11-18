@@ -27,7 +27,14 @@ import {
   CELL_SEND,
   CELL_SEND_EXIT,
   CELL_SEND_MAX_BYTES,
+  CELL_MESSAGE_DIR,
+  CELL_SELF_CHECK_ARGV,
+  CELL_CHECKOUT_WORK_BRANCH_SH,
+  CELL_WORKSPACE,
+  CELL_WRITE_MESSAGE_SH,
+  cellCloneArgv,
   cellEntrypoint,
+  cellGitConfigArgv,
   isForbiddenCellEnvName,
 } from "./cell-image";
 
@@ -928,5 +935,225 @@ describe("cell-image.yml and its build action", () => {
       '--build-arg "REVISION',
     ]);
     expect(action).not.toContain("secrets.");
+  });
+});
+
+// ---- #656 PR-E: the constants the cell executor consumes -----------------------
+
+const HARNESS = "packages/sandbox/src/providers/opensandbox-it/harness.ts";
+
+describe("CELL_SELF_CHECK_ARGV (the copy of the harness's argv)", () => {
+  /** The harness's SELF_CHECK_ARGV array, read as TEXT (no import: sandbox never loads worker code). */
+  function harnessArgv(): string[] {
+    const text = read(HARNESS);
+    const start = text.indexOf("export const SELF_CHECK_ARGV");
+    expect(start).toBeGreaterThan(-1);
+    const open = text.indexOf("= [", start);
+    const end = text.indexOf("\n];", open);
+    const body = text.slice(open + 2, end + 3);
+    // The literal is a plain array of strings and one `[...].join("\n")`.
+    // eslint-disable-next-line no-new-func -- evaluates the repo's own constant literal, in a test
+    return new Function(`return ${body};`)() as string[];
+  }
+
+  // card: protects=the worker's self-check argv equals the harness's after python3 is made absolute; fails_when=either side's probe text drifts; no_claim=the probe's behaviour in a live cell (IT-E1)
+  it("equals the harness's argv once argv[0] is normalised", () => {
+    const theirs = harnessArgv();
+    expect(theirs[0]).toBe("python3");
+    const normalised = [
+      theirs[0] === "python3" ? "/usr/bin/python3" : (theirs[0] ?? ""),
+      ...theirs.slice(1),
+    ];
+    expect([...CELL_SELF_CHECK_ARGV]).toEqual(normalised);
+  });
+
+  // card: protects=the sync test can fail; fails_when=a changed probe text still compares equal; no_claim=anything about the harness
+  it("negative control: a different probe text does not compare equal", () => {
+    const changed = [...CELL_SELF_CHECK_ARGV];
+    changed[2] = (changed[2] ?? "").replace("example.org", "example.com");
+    expect(changed).not.toEqual([...CELL_SELF_CHECK_ARGV]);
+    expect(harnessArgv()[2]).toBe(CELL_SELF_CHECK_ARGV[2]);
+  });
+});
+
+describe("CELL_WRITE_MESSAGE_SH", () => {
+  const sb = useSandbox();
+
+  // card: protects=the message goes to the daemon on stdin from a staged file and the file is removed; fails_when=the argv carries more than the path, the file stays, or stdin is not the file; no_claim=the real daemon's socket write
+  it("feeds the file to the daemon bundle's --write and removes it", () => {
+    const dir = path.join(sb.dir, "run");
+    fs.mkdirSync(dir);
+    const script = CELL_WRITE_MESSAGE_SH.split(CELL_NODE)
+      .join(sb.fakeNode)
+      .split(CELL_MESSAGE_DIR)
+      .join(dir);
+    const file = path.join(dir, "msg.json");
+    fs.writeFileSync(file, '{"type":"ping"}');
+    const r = spawnSync("/bin/bash", ["-c", script, "cell-write", file], {
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+    const out = parseFake(r.stdout);
+    expect(out.argv).toEqual([
+      CELL_DAEMON_BUNDLE,
+      "--write",
+      "--socket-path",
+      CELL_DAEMON_SOCKET.split(CELL_MESSAGE_DIR).join(dir),
+      "--timeout",
+      "10000",
+    ]);
+    expect(out.stdin).toBe('{"type":"ping"}');
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  // card: protects=a path outside the message dir is refused and nothing is removed; fails_when=the script writes or deletes a file it was not staged; no_claim=symlink races inside the dir
+  it("refuses a path outside the message dir (exit 64) and keeps the file", () => {
+    const outside = path.join(sb.dir, "victim");
+    fs.writeFileSync(outside, "keep");
+    const r = spawnSync(
+      "/bin/bash",
+      [
+        "-c",
+        CELL_WRITE_MESSAGE_SH.split(CELL_NODE).join(sb.fakeNode),
+        "cell-write",
+        outside,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(r.status).toBe(64);
+    expect(fs.readFileSync(outside, "utf8")).toBe("keep");
+  });
+
+  // card: protects=the script names no credential and is bash-clean; fails_when=a token env or a bare command word appears; no_claim=runtime
+  it("has no credential and resolves node by absolute path", () => {
+    expect(CELL_WRITE_MESSAGE_SH).toContain(CELL_NODE);
+    expect(CELL_WRITE_MESSAGE_SH).not.toMatch(CELL_FORBIDDEN_ENV_PATTERN);
+    const r = spawnSync("/bin/bash", ["-n", "-c", CELL_WRITE_MESSAGE_SH], {
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+  });
+});
+
+describe("cellCloneArgv and cellGitConfigArgv (T-CLONE, argv half)", () => {
+  const base = {
+    brokerHost: "automata.example.org",
+    repoFullName: "acme/widgets",
+    branch: "main",
+  };
+
+  // card: protects=the clone goes through the broker route with no credential and checks out the run's branch; fails_when=the URL carries userinfo or a token, or the branch flag is lost; no_claim=git's behaviour against the broker (UAT)
+  it("clones through the broker route with no credential", () => {
+    expect(cellCloneArgv(base)).toEqual([
+      [
+        "git",
+        "clone",
+        "--no-tags",
+        "--branch",
+        "main",
+        "https://automata.example.org/api/cell/git/acme/widgets.git",
+        CELL_WORKSPACE,
+      ],
+    ]);
+    expect(JSON.stringify(cellCloneArgv(base))).not.toMatch(/@|token|bearer/i);
+  });
+
+  // card: protects=a work branch and a base branch add exactly the two fixed argvs, the checkout as a fixed script with the ref positional; fails_when=the order changes, either is dropped or the ref is spliced into the script; no_claim=git's behaviour (the next test runs the script)
+  it("adds the work-branch checkout script and fetch for a base branch", () => {
+    expect(
+      cellCloneArgv({ ...base, workBranch: "fix/x", baseBranch: "dev" }).slice(
+        1,
+      ),
+    ).toEqual([
+      ["/bin/bash", "-c", CELL_CHECKOUT_WORK_BRANCH_SH, "workbranch", "fix/x"],
+      ["git", "-C", CELL_WORKSPACE, "fetch", "origin", "dev"],
+    ]);
+    expect(CELL_CHECKOUT_WORK_BRANCH_SH).not.toContain("fix/x");
+    expect(cellCloneArgv({ ...base }).length).toBe(1);
+  });
+
+  // card: protects=an existing remote work branch is continued and a missing one starts from the checkout, like the box; fails_when=either case checks out the wrong commit; no_claim=the broker or the dind's git
+  it("the checkout script continues origin/<ref> when it exists, else branches from head", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cell-checkout-"));
+    try {
+      const git = (cwd: string, ...a: string[]) =>
+        spawnSync("git", a, { cwd, encoding: "utf8" });
+      const seed = path.join(dir, "seed");
+      fs.mkdirSync(seed);
+      const g = (...a: string[]) =>
+        git(seed, "-c", "user.name=t", "-c", "user.email=t@t", ...a);
+      g("init", "-q", "-b", "main");
+      fs.writeFileSync(path.join(seed, "f"), "1");
+      g("add", "f");
+      g("commit", "-qm", "base");
+      g("checkout", "-qb", "fix/x");
+      fs.writeFileSync(path.join(seed, "f"), "2");
+      g("commit", "-qam", "earlier push");
+      g("checkout", "-q", "main");
+      const remote = path.join(dir, "remote.git");
+      git(dir, "clone", "-q", "--bare", seed, remote);
+      const head = (cwd: string) => git(cwd, "rev-parse", "HEAD").stdout.trim();
+      const run = (ref: string) => {
+        const ws = path.join(dir, `ws-${ref.replace(/\W/g, "_")}`);
+        git(dir, "clone", "-q", "--no-tags", "--branch", "main", remote, ws);
+        const script =
+          CELL_CHECKOUT_WORK_BRANCH_SH.split(CELL_WORKSPACE).join(ws);
+        const r = spawnSync("/bin/bash", ["-c", script, "workbranch", ref], {
+          encoding: "utf8",
+        });
+        expect(r.status, r.stderr).toBe(0);
+        return {
+          ws,
+          branch: git(ws, "branch", "--show-current").stdout.trim(),
+        };
+      };
+      const existing = run("fix/x");
+      expect(existing.branch).toBe("fix/x");
+      expect(head(existing.ws)).toBe(
+        git(remote, "rev-parse", "fix/x").stdout.trim(),
+      );
+      const fresh = run("fix/new");
+      expect(fresh.branch).toBe("fix/new");
+      expect(head(fresh.ws)).toBe(
+        git(remote, "rev-parse", "main").stdout.trim(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // card: protects=an owner with a slash, an option-shaped ref and a bad host are refused before any exec; fails_when=any of them reaches an argv; no_claim=refs git itself would reject
+  it("refuses an unsafe owner, repo, ref or host", () => {
+    for (const repoFullName of [
+      "a/b/c",
+      "a/../b",
+      "../x",
+      "acme",
+      "ac me/w",
+      "/w",
+    ]) {
+      expect(() => cellCloneArgv({ ...base, repoFullName })).toThrow();
+    }
+    expect(() =>
+      cellCloneArgv({ ...base, branch: "--upload-pack=x" }),
+    ).toThrow();
+    expect(() => cellCloneArgv({ ...base, workBranch: "-B" })).toThrow();
+    expect(() => cellCloneArgv({ ...base, baseBranch: "a..b" })).toThrow();
+    expect(() => cellCloneArgv({ ...base, brokerHost: "Evil;host" })).toThrow();
+  });
+
+  // card: protects=the repo-local bot identity replaces the box's GIT_CONFIG env; fails_when=the identity differs from botGitIdentity or the config is global; no_claim=commit authorship in a live cell
+  it("sets the repo-local bot identity", () => {
+    expect(cellGitConfigArgv("automata-bot")).toEqual([
+      ["git", "-C", CELL_WORKSPACE, "config", "user.name", "automata-bot"],
+      [
+        "git",
+        "-C",
+        CELL_WORKSPACE,
+        "config",
+        "user.email",
+        "automata-bot@users.noreply.github.com",
+      ],
+    ]);
   });
 });

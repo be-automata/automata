@@ -12,6 +12,7 @@ import {
   completeEffect,
   deadCellAttempts,
   finishStep,
+  leaseRefusal,
   markStepDone,
   mintBearer,
   openNextAttempt,
@@ -1301,5 +1302,37 @@ describe("#656 PR-C openNextAttempt nonce", () => {
       if (!next.ok) throw new Error(next.reason);
       expect((await mintReplacing(s, next)).ok).toBe(true);
     });
+  });
+});
+
+describe("#656 PR-E leaseRefusal", () => {
+  // card: protects=only a newer attempt is "superseded"; revoked, done, equal and unknown steps are "refused"; fails_when=a revoked or finished attempt with no newer one reads as superseded; no_claim=stampSeen's boolean callers
+  it("classifies a refused stamp: superseded only when a newer attempt exists", async () => {
+    const s = await newStep(null, null);
+    await s.next();
+    await s.next();
+    expect(await leaseRefusal({ db, stepKey: s.stepKey, attempt: 1 })).toBe(
+      "superseded",
+    );
+    expect(await leaseRefusal({ db, stepKey: s.stepKey, attempt: 2 })).toBe(
+      "refused",
+    );
+
+    const r = await newStep(null, null);
+    await r.next();
+    await revokeAttempt({ db, stepKey: r.stepKey, attempt: 1 });
+    expect(await leaseRefusal({ db, stepKey: r.stepKey, attempt: 1 })).toBe(
+      "refused",
+    );
+
+    const d = await newStep(null, null);
+    await d.next();
+    await finishStep({ db, ...d.owner });
+    expect(await leaseRefusal({ db, stepKey: d.stepKey, attempt: 1 })).toBe(
+      "refused",
+    );
+    expect(
+      await leaseRefusal({ db, stepKey: `nope-${randomUUID()}`, attempt: 1 }),
+    ).toBe("refused");
   });
 });

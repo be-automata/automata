@@ -15,6 +15,9 @@ import {
   AUTH_ERROR_CONFIRM_ATTEMPTS,
   AUTH_ERROR_RETRY_MS,
   pullNextMessage,
+  CellStepConflictError,
+  CellTerminalUnconfirmedError,
+  ThreadStatusHttpError,
   type PollContext,
   type WwwClientOpts,
 } from "./www-client";
@@ -1521,5 +1524,233 @@ describe("postSelfHealFixCheck (GATE-01 / TMO-01)", () => {
     ]);
     expect(logged).not.toContain(TOKEN);
     expect(err).toHaveBeenCalled();
+  });
+});
+
+describe("cell thread-status: the body, the message, the terminal-read retry (#656 PR-E)", () => {
+  const cellOpts: WwwClientOpts = { ...opts, cellAttempt: 7 };
+  const noSleep = async () => {};
+  function ctx(extra: Partial<PollContext> = {}): PollContext & {
+    logs: string[];
+  } {
+    const logs: string[] = [];
+    return {
+      cancelled: false,
+      log: (m: string) => logs.push(m),
+      logs,
+      ...extra,
+    };
+  }
+  const bodies: string[] = [];
+  function stubFetch(responses: Response[]) {
+    bodies.length = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        bodies.push(init.body);
+        return responses.shift()!;
+      }),
+    );
+  }
+
+  // card: protects=a box poll body is byte-identical to today's and a cell poll adds cellAttempt; fails_when=the box body gains a cellAttempt key (even undefined) or the cell body lacks it; no_claim=www's reading of it
+  it("T-POLL-BODY: the box body has no cellAttempt, a cell body has the attempt", async () => {
+    stubFetch([
+      jsonResponse(200, { status: "working", terminal: false }),
+      jsonResponse(200, { status: "working", terminal: false }),
+    ]);
+    await pollThreadStatus(opts);
+    await pollThreadStatus(cellOpts);
+    expect(bodies[0]).toBe(
+      JSON.stringify({ threadId: "thread-1", threadChatId: "chat-1" }),
+    );
+    expect(JSON.parse(bodies[1]!)).toEqual({
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+      cellAttempt: 7,
+    });
+  });
+
+  // card: protects=the lease is parsed only from the known set; fails_when=an unknown string or a non-string lease is surfaced; no_claim=www's lease semantics
+  it("parses the lease only when it is a known value", async () => {
+    stubFetch([
+      jsonResponse(200, {
+        status: "working",
+        terminal: false,
+        lease: "superseded",
+      }),
+      jsonResponse(200, { status: "working", terminal: false, lease: "bogus" }),
+      jsonResponse(200, { status: "working", terminal: false, lease: 3 }),
+    ]);
+    expect(await pollThreadStatus(cellOpts)).toMatchObject({
+      lease: "superseded",
+    });
+    expect(await pollThreadStatus(cellOpts)).not.toHaveProperty("lease");
+    expect(await pollThreadStatus(cellOpts)).not.toHaveProperty("lease");
+  });
+
+  // card: protects=the box path's non-2xx error text is unchanged; fails_when=the message differs from `thread-status failed: HTTP <status> (<statusText>)` or carries a code; no_claim=logs elsewhere
+  it("T-POLL-MSG: the message is today's text; the code rides on a typed field, cell only", async () => {
+    stubFetch([jsonResponse(500, { error: "cell_retire_failed" })]);
+    const box = await pollThreadStatus(opts).catch((e) => e);
+    expect(box).toBeInstanceOf(ThreadStatusHttpError);
+    expect(box.message).toBe(
+      "thread-status failed: HTTP 500 (Internal Server Error)".replace(
+        "Internal Server Error",
+        box.message.match(/\((.*)\)$/)?.[1] ?? "",
+      ),
+    );
+    expect(box.code).toBeUndefined();
+    stubFetch([jsonResponse(500, { error: "cell_retire_failed" })]);
+    const cell = await pollThreadStatus(cellOpts).catch((e) => e);
+    expect(cell.message).toBe(box.message);
+    expect(cell.code).toBe("cell_retire_failed");
+    stubFetch([jsonResponse(500, { error: "Not A Code!" })]);
+    expect(
+      (await pollThreadStatus(cellOpts).catch((e) => e)).code,
+    ).toBeUndefined();
+  });
+
+  // card: protects=500 cell_retire_failed x4 then a finished read completes with 5 s sleeps; 6 failures fail cell_terminal_unconfirmed; fails_when=the budget is 3, the sleep is not delayMs, or the lease callback is skipped; no_claim=www
+  it("T-TERMINAL-RETRY: the longer budget, and the box loop is unchanged", async () => {
+    const sleeps: number[] = [];
+    const leases: string[] = [];
+    const fail = () => jsonResponse(500, { error: "cell_retire_failed" });
+    stubFetch([
+      fail(),
+      fail(),
+      fail(),
+      fail(),
+      jsonResponse(200, {
+        status: "complete",
+        terminal: true,
+        lease: "finished",
+      }),
+    ]);
+    const done = await pollUntilTerminal(
+      ctx({
+        cellTerminalRetry: { tries: 6, delayMs: 5000 },
+        onLease: (l) => leases.push(l),
+      }),
+      cellOpts,
+      1,
+      async (ms) => void sleeps.push(ms),
+    );
+    expect(done).toEqual({ outcome: "completed", finalStatus: "complete" });
+    expect(sleeps).toEqual([5000, 5000, 5000, 5000]);
+    expect(leases).toEqual(["finished"]);
+
+    stubFetch([fail(), fail(), fail(), fail(), fail(), fail()]);
+    await expect(
+      pollUntilTerminal(
+        ctx({ cellTerminalRetry: { tries: 6, delayMs: 5000 } }),
+        cellOpts,
+        1,
+        noSleep,
+      ),
+    ).rejects.toBeInstanceOf(CellTerminalUnconfirmedError);
+    expect(bodies).toHaveLength(6);
+  });
+
+  // card: protects=a 409 cell_step_conflict ends the loop at once with one request; fails_when=it is retried or becomes a generic failure; no_claim=www's alert
+  it("T-TERMINAL-RETRY: 409 cell_step_conflict throws at once", async () => {
+    stubFetch([jsonResponse(409, { error: "cell_step_conflict" })]);
+    await expect(
+      pollUntilTerminal(
+        ctx({ cellTerminalRetry: { tries: 6, delayMs: 5000 } }),
+        cellOpts,
+        1,
+        noSleep,
+      ),
+    ).rejects.toBeInstanceOf(CellStepConflictError);
+    expect(bodies).toHaveLength(1);
+  });
+
+  // card: protects=negative control: with no cellTerminalRetry the box loop still fails after 3 reads, 2 s apart; fails_when=the cell budget leaks into the box loop; no_claim=the cell path
+  it("T-TERMINAL-RETRY (control): the box loop fails after 3 reads, 2 s apart", async () => {
+    const sleeps: number[] = [];
+    stubFetch([
+      jsonResponse(500, {}),
+      jsonResponse(500, {}),
+      jsonResponse(500, {}),
+    ]);
+    await expect(
+      pollUntilTerminal(ctx(), opts, 1, async (ms) => void sleeps.push(ms)),
+    ).rejects.toThrow(/HTTP 500/);
+    expect(sleeps).toEqual([AUTH_ERROR_RETRY_MS, AUTH_ERROR_RETRY_MS]);
+  });
+
+  // card: protects=a 401 after cell_retire_failed is settled by confirmRetired: retired completes, gone fails; fails_when=the generic 3x confirm runs first or a retired answer fails the run; no_claim=the hook's own retries (cell-www-client.test.ts)
+  it("T-RETIRE-COMMITTED: 500 cell_retire_failed, 401, confirm retired -> completed; gone -> unconfirmed", async () => {
+    const leases: string[] = [];
+    stubFetch([
+      jsonResponse(500, { error: "cell_retire_failed" }),
+      jsonResponse(401, { error: "x" }),
+    ]);
+    const confirm = vi.fn(async () => "retired" as const);
+    const done = await pollUntilTerminal(
+      ctx({
+        cellTerminalRetry: { tries: 6, delayMs: 1 },
+        confirmRetired: confirm,
+        onLease: (l) => leases.push(l),
+      }),
+      cellOpts,
+      1,
+      noSleep,
+    );
+    expect(done.outcome).toBe("completed");
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(leases).toEqual(["finished"]);
+
+    stubFetch([
+      jsonResponse(500, { error: "cell_retire_failed" }),
+      jsonResponse(401, { error: "x" }),
+    ]);
+    await expect(
+      pollUntilTerminal(
+        ctx({
+          cellTerminalRetry: { tries: 6, delayMs: 1 },
+          confirmRetired: async () => "gone",
+        }),
+        cellOpts,
+        1,
+        noSleep,
+      ),
+    ).rejects.toBeInstanceOf(CellTerminalUnconfirmedError);
+  });
+
+  // card: protects=a 401 with no preceding cell_retire_failed keeps the generic confirm-then-fail rule; fails_when=confirmRetired is consulted for an ordinary 401; no_claim=the cell path
+  it("a plain 401 never consults confirmRetired", async () => {
+    stubFetch([
+      jsonResponse(401, {}),
+      jsonResponse(401, {}),
+      jsonResponse(401, {}),
+    ]);
+    const confirm = vi.fn(async () => "retired" as const);
+    await expect(
+      pollUntilTerminal(ctx({ confirmRetired: confirm }), cellOpts, 1, noSleep),
+    ).rejects.toThrow(/first poll/);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  // card: protects=onLease sees every lease and an abort from it ends the loop as cancelled without probing the agent; fails_when=agentFailure is called after a superseded read or the loop keeps polling; no_claim=the executor's reaction
+  it("onLease can fence: an abort inside it returns cancelled before the agent probe", async () => {
+    stubFetch([
+      jsonResponse(200, {
+        status: "working",
+        terminal: false,
+        lease: "superseded",
+      }),
+    ]);
+    const ac = new AbortController();
+    const agentFailure = vi.fn(() => null);
+    const res = await pollUntilTerminal(
+      ctx({ signal: ac.signal, agentFailure, onLease: () => ac.abort() }),
+      cellOpts,
+      1,
+      noSleep,
+    );
+    expect(res.outcome).toBe("cancelled");
+    expect(agentFailure).not.toHaveBeenCalled();
   });
 });

@@ -376,6 +376,33 @@ export async function stampSeen({
   return rows.length > 0;
 }
 
+/**
+ * Why a stamp was refused (#656 PR-E, Decision 12): `"superseded"` only when a
+ * NEWER attempt exists (`current_attempt` > `attempt`), the one fact that fences
+ * a worker; anything else (revoked through this attempt, done, no lease, an
+ * unknown step) is `"refused"`. One read of `cell_step` by key, run only after
+ * `stampSeen` returned false. `stampSeen`'s boolean contract is unchanged.
+ */
+export async function leaseRefusal({
+  db,
+  stepKey,
+  attempt,
+}: {
+  db: DB;
+  stepKey: string;
+  attempt: number;
+}): Promise<"superseded" | "refused"> {
+  assertPositiveInt("attempt", attempt);
+  const [row] = await db
+    .select({ currentAttempt: cellStep.currentAttempt })
+    .from(cellStep)
+    .where(eq(cellStep.stepKey, stepKey))
+    .limit(1);
+  return row !== undefined && row.currentAttempt > attempt
+    ? "superseded"
+    : "refused";
+}
+
 /** Placeholder timeout of a done tombstone: it is never minted against. */
 const TOMBSTONE_TIMEOUT_MS = 1;
 
