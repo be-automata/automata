@@ -32,7 +32,7 @@ import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
-import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
+import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
   ThreadSourceMetadata,
@@ -1193,12 +1193,14 @@ export async function dispatchAgentRun({
     }
     // A task run that starts on its base branch works on its own branch, so
     // the finish hook can turn what it pushed into a pull request.
+    const push = taskRunPushBranch({
+      threadId,
+      prNumber,
+      branch,
+      baseBranch: thread?.repoBaseBranchName,
+    });
     const workBranch =
-      isPlainTaskRun &&
-      prNumber === undefined &&
-      branch === thread?.repoBaseBranchName
-        ? remoteTaskBranchName(threadId)
-        : undefined;
+      isPlainTaskRun && push !== null && push !== branch ? push : undefined;
     // #380: the self-heal plan's single-use token is split off here — the
     // wire shape carries the plan, the envelope carries the token.
     const selfHealSplit =

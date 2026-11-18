@@ -60,6 +60,33 @@ export function remoteTaskBranchName(threadId: string): string {
   return `automata/task-${threadId.slice(0, 8).toLowerCase()}`;
 }
 
+/**
+ * The one branch a task run may push, shared by dispatch (the worker's work
+ * branch) and `cell-plan` (the step's `allowedRef`):
+ * - no PR and `branch` is the base → the thread's own task branch;
+ * - otherwise (an existing PR or a non-base branch) → `branch`;
+ * - the base branch with a PR, or a blank branch → null: a run never gets its
+ *   base branch as a push target.
+ */
+export function taskRunPushBranch({
+  threadId,
+  prNumber,
+  branch,
+  baseBranch,
+}: {
+  threadId: string;
+  prNumber: number | undefined;
+  branch: string | null | undefined;
+  baseBranch: string | null | undefined;
+}): string | null {
+  if (!branch || branch.trim() === "") return null;
+  const isBase = branch === baseBranch;
+  if (isBase) {
+    return prNumber === undefined ? remoteTaskBranchName(threadId) : null;
+  }
+  return branch;
+}
+
 export type RemoteTaskPrOutcome =
   | { status: "opened" | "adopted"; prNumber: number }
   | {

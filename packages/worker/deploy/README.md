@@ -1249,7 +1249,7 @@ Every value goes through `wrangler secret put … --name automata-www` on stdin,
 command line. `opensandboxConfigured()` turns the cell plane on once both URL and key are
 non-empty, so set them in this order:
 
-1. PR-C's two Access secrets (the service token's id and secret);
+1. the two Access secrets, `OPENSANDBOX_ACCESS_CLIENT_ID` and `OPENSANDBOX_ACCESS_CLIENT_SECRET` (the service token's id and secret). Both must be set before `OPENSANDBOX_URL`: a half-set pair keeps the reconciler off, with one `[cell] OpenSandbox Access config is incomplete or the URL is not https` warn line;
 2. `OPENSANDBOX_GUEST_IMAGE` (the cell image digest);
 3. `OPENSANDBOX_API_KEY`, streamed from the box:
    `ssh <box> sudo sed -n 's/^OPENSANDBOX_API_KEY=//p' /etc/automata/opensandbox.env | npx wrangler secret put OPENSANDBOX_API_KEY --name automata-www`;

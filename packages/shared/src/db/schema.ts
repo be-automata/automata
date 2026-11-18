@@ -3339,6 +3339,16 @@ export const cellStep = pgTable(
      * by openStep or before the column existed): judged by revocation, fence and done only.
      */
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "date" }),
+    /**
+     * The request nonce of the open that made the current attempt (#656 PR-C); null =
+     * opened without one. A repeat of the same nonce is a replay of that attempt.
+     */
+    openNonce: text("open_nonce"),
+    /**
+     * Open sequence fence (#656 PR-C): incremented by every openNextAttempt (advance or
+     * replay) under the step lock; a replacing mint must carry the value its own open got.
+     */
+    openSeq: integer("open_seq").notNull().default(0),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" })
       .notNull()
