@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Mint a short-lived (one hour) installation token for the `automata-agent`
+# Mint a short-lived (one hour) installation token for the `automata-pr-agent`
 # GitHub App and print ONLY the token, for agent sessions that open PRs (#697):
 #
 #   GH_TOKEN=$(deploy/github/agent-app-token.sh) gh pr create --repo be-automata/automata ...
 #
 # Inputs (none of the ids is a secret):
 #   AUTOMATA_AGENT_APP_ID, AUTOMATA_AGENT_INSTALLATION_ID, else the APP_ID= and
-#   INSTALLATION_ID= lines of ${AUTOMATA_AGENT_CONFIG:-~/.config/automata-agent/app.env}
+#   INSTALLATION_ID= lines of ${AUTOMATA_AGENT_CONFIG:-~/.config/automata-pr-agent/app.env}
 #   (read line by line, never sourced).
 #   The App's private key comes from the macOS keychain:
-#     security find-generic-password -s automata-agent-app-key -a automata -w
+#     security find-generic-password -s automata-pr-agent-app-key -a automata -w
 #   stored base64-encoded on one line (a raw PEM, or the hex that `security -w`
 #   prints for a multi-line value, also work). AUTOMATA_AGENT_APP_KEY_FILE
 #   replaces the keychain (tests, Linux).
@@ -28,7 +28,7 @@
 # Runbook: docs/runbooks/agent-github-app.md.
 set -euo pipefail
 
-readonly KEYCHAIN_SERVICE="automata-agent-app-key"
+readonly KEYCHAIN_SERVICE="automata-pr-agent-app-key"
 readonly KEYCHAIN_ACCOUNT="automata"
 readonly PERMISSIONS='{"contents":"write","pull_requests":"write","issues":"write","checks":"read","metadata":"read"}'
 # base64url('{"alg":"RS256","typ":"JWT"}')
@@ -67,7 +67,7 @@ config_value() {
   done <"$file"
 }
 
-config_file=${AUTOMATA_AGENT_CONFIG:-$HOME/.config/automata-agent/app.env}
+config_file=${AUTOMATA_AGENT_CONFIG:-$HOME/.config/automata-pr-agent/app.env}
 app_id=${AUTOMATA_AGENT_APP_ID:-$(config_value APP_ID "$config_file")}
 installation_id=${AUTOMATA_AGENT_INSTALLATION_ID:-$(config_value INSTALLATION_ID "$config_file")}
 

@@ -1,4 +1,4 @@
-# Agent GitHub App (`automata-agent`) and the `main` ruleset
+# Agent GitHub App (`automata-pr-agent`) and the `main` ruleset
 
 Issue: #697. Decision: #674 (AC 3, TL, 2026-11-18). Spec: `docs/specs/697/spec.md`.
 
@@ -10,7 +10,7 @@ requires a code owner's approval on sensitive paths (`.github/CODEOWNERS`).
 
 GitHub never counts an approval from a PR's own author. Agent PRs are opened as the TL
 (`espinozasenior`), so the TL could never approve them. Agent PRs therefore move to a GitHub App,
-`automata-agent`, **before** the ruleset is applied.
+`automata-pr-agent`, **before** the ruleset is applied.
 
 ## The order
 
@@ -26,11 +26,17 @@ it: CODEOWNERS on its own only requests reviews.
 
 ## 1. Create the App (TL, GitHub settings)
 
+**Done 2026-11-18.** `automata-pr-agent`, App ID **5819826**, owned by `be-automata`, private
+(only this account). Installation **183384385** on `be-automata/automata` only. Permissions
+(verified through `GET /apps/automata-pr-agent`): contents write, pull requests write, issues
+write, metadata read, checks read; no workflows, no events, webhook off. The private key has not been
+generated yet: that is the TL's (section 2).
+
 Open <https://github.com/organizations/be-automata/settings/apps/new>.
 
 | Field                              | Value                                                                                                                                                       |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GitHub App name                    | `automata-agent` (if the name is taken, pick another; the bot login is `<slug>[bot]`)                                                                       |
+| GitHub App name                    | `automata-pr-agent` (`automata-agent` is reserved by an existing account; the bot login is `automata-pr-agent[bot]`)                                        |
 | Homepage URL                       | `https://github.com/be-automata/automata`                                                                                                                   |
 | Webhook                            | **Active: off** (no webhook URL, no secret)                                                                                                                 |
 | Repository permissions             | Contents: **Read and write** · Pull requests: **Read and write** · Issues: **Read and write** · Metadata: **Read-only** (mandatory) · Checks: **Read-only** |
@@ -52,12 +58,12 @@ Run this in your own terminal, not in an agent session. The key is stored base64
 because `security -w` prints a multi-line value as hex.
 
 ```bash
-pem=$(ls ~/Downloads/automata-agent.*.private-key.pem)
+pem=$(ls ~/Downloads/automata-pr-agent.*.private-key.pem)
 key_b64=$(base64 -i "$pem" | tr -d '\n')
-printf 'add-generic-password -U -s automata-agent-app-key -a automata -w %s\n' "$key_b64" | security -i
+printf 'add-generic-password -U -s automata-pr-agent-app-key -a automata -w %s\n' "$key_b64" | security -i
 # check the whole value landed (the two numbers must be equal), then delete the file:
 printf '%s' "$key_b64" | wc -c
-security find-generic-password -s automata-agent-app-key -a automata -w | tr -d '\n' | wc -c
+security find-generic-password -s automata-pr-agent-app-key -a automata -w | tr -d '\n' | wc -c
 unset key_b64
 rm -P "$pem"
 ```
@@ -65,13 +71,13 @@ rm -P "$pem"
 `printf` is a shell builtin and `security -i` reads its command from stdin, so the key never appears
 in the process list or the shell history. Do not paste it at the `-w` prompt instead: the password
 prompt may keep only the first 128 characters, and the base64 key is several KB. If the two counts
-differ, the item is truncated: delete it (`security delete-generic-password -s automata-agent-app-key
+differ, the item is truncated: delete it (`security delete-generic-password -s automata-pr-agent-app-key
 -a automata`) and store it again; `agent-app-token.sh` also refuses a key with no `END` line.
 The ids are not secret:
 
 ```bash
-mkdir -p ~/.config/automata-agent
-printf 'APP_ID=%s\nINSTALLATION_ID=%s\n' '<app id>' '<installation id>' > ~/.config/automata-agent/app.env
+mkdir -p ~/.config/automata-pr-agent
+printf 'APP_ID=%s\nINSTALLATION_ID=%s\n' '5819826' '183384385' > ~/.config/automata-pr-agent/app.env
 ```
 
 Check (the first run may show a keychain prompt for `security`; allow it):
@@ -103,7 +109,7 @@ GH_TOKEN=$(deploy/github/agent-app-token.sh) gh pr ready <n> --repo be-automata/
   `GH_TOKEN` would also reach `gh auth git-credential` and push as the App: keep it per command.
 - **The author filter.** Unless the review automation for this repo matches all authors, it reviews
   only PRs whose author is its user or is listed in `otherAuthors` (`handlers.ts:355-380`). Add
-  `automata-agent[bot]` there, or confirm all-authors. The throwaway PR (section 4) proves it.
+  `automata-pr-agent[bot]` there, or confirm all-authors. The throwaway PR (section 4) proves it.
 - **Never merge.** The person merges. Agents never use `--admin`.
 
 Where agent PRs are opened today, all with the session's `gh` token:
@@ -112,7 +118,7 @@ the somnio plugin's `dev-execution` Step 5 (gstack `/ship`), `scripts/pr-opened.
 section 4 passes, add this to the hand-written part of `AGENTS.md` (or to your global `CLAUDE.md`):
 
 ```markdown
-- **Agent PRs open as the `automata-agent` App** (#697): run `gh pr create`, `gh pr ready` and PR
+- **Agent PRs open as the `automata-pr-agent` App** (#697): run `gh pr create`, `gh pr ready` and PR
   comments with `GH_TOKEN=$(deploy/github/agent-app-token.sh)` set on that command only, open as a
   draft, then mark it ready. `git push` stays on your normal credential. Never merge, never `--admin`.
 ```
@@ -138,7 +144,7 @@ approval the ruleset asks for. An agent running `gh pr review --approve` (or an 
 
 The durable fix is an agent session whose `gh` holds only the App token (a separate `GH_CONFIG_DIR`,
 pushes through the App with the Workflows permission, and the review automation's `excludeBotSenders`
-turned off for `automata-agent[bot]`). That is a follow-up, not part of #697.
+turned off for `automata-pr-agent[bot]`). That is a follow-up, not part of #697.
 
 **Check the other installed Apps.** `vercel` holds `administration: write` (which can edit or delete
 rulesets) and `workflows: write` on its selected repositories. In org settings → GitHub Apps → Vercel
@@ -149,12 +155,12 @@ rulesets) and `workflows: write` on its selected repositories. In org settings �
 ```bash
 git switch -c chore/697-app-smoke origin/main
 echo "" >> docs/runbooks/agent-github-app.md
-git commit -am "chore: automata-agent smoke (#697), do not merge"
+git commit -am "chore: automata-pr-agent smoke (#697), do not merge"
 git push -u origin chore/697-app-smoke          # your credential
 GH_TOKEN=$(deploy/github/agent-app-token.sh) gh pr create --repo be-automata/automata --draft \
-  --title "chore: automata-agent smoke (#697), do not merge" --body "Throwaway, #697 section 4."
+  --title "chore: automata-pr-agent smoke (#697), do not merge" --body "Throwaway, #697 section 4."
 GH_TOKEN=$(deploy/github/agent-app-token.sh) gh pr ready <n> --repo be-automata/automata
-gh pr view <n> --repo be-automata/automata --json author --jq .author   # → login app/automata-agent, is_bot true
+gh pr view <n> --repo be-automata/automata --json author --jq .author   # → login app/automata-pr-agent, is_bot true
 ```
 
 Pass when: the author is the App, Automata reviews it, and you can submit an **Approve** review
@@ -220,7 +226,7 @@ Automata's approval must then count, or every PR will need a human approval.
   `main` is back to today's state at once.
 - **App:** stop setting `GH_TOKEN`; agent PRs fall back to your login. Then suspend or uninstall the
   App (org settings → GitHub Apps), revoke its key on the App page, and
-  `security delete-generic-password -s automata-agent-app-key -a automata`.
+  `security delete-generic-password -s automata-pr-agent-app-key -a automata`.
 - **CODEOWNERS:** harmless without the ruleset (it only requests reviews); keep it.
 
 **Key rotation:** generate a new key on the App page, store it (section 2, `-U` replaces the item),
