@@ -9,6 +9,12 @@ import {
   hatchetAdminTokenArgs,
   parseMintedToken,
 } from "../provision/hatchet-tenant";
+import {
+  acquireBoxLock,
+  boxLockPath,
+  tryAcquireBoxLock,
+  type BoxLock,
+} from "./box-lock";
 
 /**
  * Test-support harness for the ISOLATED hatchet-lite stack the integration
@@ -79,14 +85,142 @@ export async function compose(args: string[]): Promise<string> {
   return stdout;
 }
 
+/**
+ * #395: ONE stack per machine at a time. The project name and ports above are
+ * fixed, `up -d` silently JOINS a stack another process already brought up,
+ * and `bootstrapTenant` always resolves the default tenant — so two HATCHET_IT
+ * processes (agents in different worktrees) used to put two workers on one
+ * tenant and one workflow. The engine then spread each process's runs across
+ * both workers, and each suite saw the other's executions as runs "COMPLETED
+ * without executing" (the false engine-loss report of #395); whichever process
+ * finished first then `down -v`'d the stack under the other.
+ *
+ * The lock is the worker's own kernel flock(2) (box-lock.ts): released by
+ * `composeDownV`, or by the kernel when the holder dies — no owner file, no
+ * staleness, no cleanup. The path is machine-wide ON PURPOSE, never
+ * `os.tmpdir()`: sandboxed and unsandboxed shells get different TMPDIRs and
+ * would each lock their own file. A shell that cannot write /tmp, or a second
+ * Unix user (the lock file is owner-only), fails loudly; HATCHET_IT_LOCK_DIR
+ * overrides the path.
+ */
+export const IT_LOCK_ROOT =
+  process.env.HATCHET_IT_LOCK_DIR ?? "/tmp/automata-hatchet-it";
+
+export async function acquireItStackLock({
+  root = IT_LOCK_ROOT,
+  log = console.log,
+  signal,
+}: {
+  root?: string;
+  log?: (line: string) => void;
+  signal?: AbortSignal;
+} = {}): Promise<BoxLock> {
+  const holder = `hatchet-it pid ${process.pid}`;
+  const free = await tryAcquireBoxLock({ root, holder });
+  if (free) return free;
+  log(
+    `hatchet IT stack is held by another process (${boxLockPath(root)}); waiting`,
+  );
+  return acquireBoxLock({ root, holder, signal });
+}
+
+export interface StackGuard {
+  /** Take the stack lock (one acquire per hold, however many callers). */
+  enter(): Promise<void>;
+  /**
+   * Run `teardown` only while holding the lock, then release it. Without the
+   * lock (still waiting — e.g. a `beforeAll` that timed out — or the acquire
+   * failed) it aborts the wait and NEVER runs `teardown`: that stack is
+   * another process's.
+   */
+  exit(teardown: () => Promise<void>): Promise<void>;
+  /**
+   * Throw unless this process holds the stack right now. A `beforeAll` that
+   * timed out keeps running after its `afterAll` released the stack; this
+   * stops it from minting a token (and starting a worker) on whichever stack
+   * the next holder brings up on the same fixed ports.
+   */
+  assertHeld(): void;
+}
+
+/** The stack is not (or no longer) this process's — see `StackGuard.assertHeld`. */
+export class ItStackNotHeldError extends Error {
+  constructor() {
+    super(
+      "hatchet IT stack lock is not held by this process (#395): its hold was released — a timed-out setup must not join the next holder's stack",
+    );
+    this.name = "ItStackNotHeldError";
+  }
+}
+
+export function createStackGuard(
+  acquire: (signal: AbortSignal) => Promise<BoxLock>,
+): StackGuard {
+  // One record per hold: a late grant can only mark its OWN record held.
+  interface Hold {
+    controller: AbortController;
+    acquired: Promise<void>;
+    lock?: BoxLock;
+  }
+  let hold: Hold | null = null;
+  return {
+    async enter() {
+      if (!hold) {
+        const controller = new AbortController();
+        const take = async (h: Hold) => {
+          const lock = await acquire(controller.signal);
+          if (controller.signal.aborted) {
+            // exit() already dropped this hold (e.g. a grant from the
+            // signal-less try path racing the abort): nobody else would ever
+            // release it, and the next file would park behind its own process.
+            await lock.release();
+            throw new ItStackNotHeldError();
+          }
+          h.lock = lock;
+        };
+        const h: Hold = { controller, acquired: Promise.resolve() };
+        h.acquired = take(h);
+        hold = h;
+      }
+      await hold.acquired;
+    },
+    async exit(teardown) {
+      const h = hold;
+      hold = null;
+      if (!h) return;
+      if (!h.lock) {
+        // A grant racing this abort is released by acquireBoxLock itself (its
+        // post-ack abort check), so there is nothing to release here.
+        h.controller.abort();
+        await h.acquired.catch(() => {});
+        return;
+      }
+      try {
+        await teardown();
+      } finally {
+        await h.lock.release();
+      }
+    },
+    assertHeld() {
+      if (!hold?.lock) throw new ItStackNotHeldError();
+    },
+  };
+}
+
+const stack = createStackGuard((signal) => acquireItStackLock({ signal }));
+
 export async function composeUp(): Promise<void> {
+  await stack.enter();
   await writeFile(OVERRIDE_FILE, OVERRIDE_YAML, "utf8");
   await compose(["up", "-d", "postgres", "hatchet-lite"]);
+  stack.assertHeld();
 }
 
 export async function composeDownV(): Promise<void> {
-  await compose(["down", "-v"]).catch(() => {});
-  await rm(OVERRIDE_FILE, { force: true }).catch(() => {});
+  await stack.exit(async () => {
+    await compose(["down", "-v"]).catch(() => {});
+    await rm(OVERRIDE_FILE, { force: true }).catch(() => {});
+  });
 }
 
 /**
@@ -235,6 +369,10 @@ export async function bootstrapTenant(
     500,
   );
   await waitForEngineReady();
+  // #395: no token (so no worker) for a setup whose stack hold was released
+  // while it was still polling — the engine on these ports may be the next
+  // holder's.
+  stack.assertHeld();
   const token = parseMintedToken(
     await compose([
       "exec",
