@@ -1493,6 +1493,32 @@ describe("GitHub webhook route", () => {
       expect(handleIssueEvent).toHaveBeenCalledTimes(1);
       expect(handleIssueLabeledMirror).not.toHaveBeenCalled();
     });
+
+    it("#134: a genuine error from another hook of the same delivery as a skip is still logged", async () => {
+      // issues.labeled has two hooks: the mirror skips, the automations fail.
+      vi.mocked(handleIssueLabeledMirror).mockRejectedValueOnce(
+        new WebhookSkip("unmapped_installation", "No org bound", {
+          repoFullName: "owner/repo",
+        }),
+      );
+      vi.mocked(handleIssueEvent).mockRejectedValueOnce(new Error("db down"));
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const request = await createMockRequest(createIssueBody("labeled"), {
+          "x-github-event": "issues",
+        });
+        await POST(request);
+
+        expect(handleIssueLabeledMirror).toHaveBeenCalledTimes(1);
+        expect(handleIssueEvent).toHaveBeenCalledTimes(1);
+        expect(error).toHaveBeenCalledWith(
+          "[github webhook] error",
+          expect.anything(),
+        );
+      } finally {
+        error.mockRestore();
+      }
+    });
   });
   describe("self-heal CI completion (GATE-01)", () => {
     const SHA = "c".repeat(40);

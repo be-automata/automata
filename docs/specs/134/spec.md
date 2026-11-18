@@ -26,8 +26,13 @@ shows up as an error.
 
 ## Change
 
-In `webhooks.onError`, return early when `findWebhookSkip(error)` matches. A genuine error is still
-logged there and again in the catch, as today.
+In `webhooks.onError`, return early when the error is nothing but skips: a new
+`isOnlyWebhookSkips(error)` in `webhook-skip.ts` is true for a WebhookSkip, or for an octokit aggregate
+whose every entry is one. Validate cycle 1 found that `findWebhookSkip` alone would also silence a
+genuine error raised by another hook of the same delivery (`issues.labeled` and
+`pull_request_review.submitted` have several hooks), so `onError` keys on "only skips", not "any
+skip". A genuine error is still logged there, and again in the catch when no skip is present, as
+today.
 
 Not changed: the limiter, the 2xx/5xx answers, the `skipped` log, and the per-handler
 `console.error("Error handling … event:")` lines in `handlers.ts` (see the open question).
@@ -37,13 +42,18 @@ Not changed: the limiter, the 2xx/5xx answers, the `skipped` log, and the per-ha
 - AC-1: A mirror delivery that raises an `unmapped_installation` WebhookSkip gets a 2xx with
   `skipped: true`, logs `[github webhook] skipped` with its category, and calls `console.error` zero
   times.
-- AC-2: The gates pass: `pnpm turbo tsc-check`, `pnpm turbo lint`, `pnpm turbo format-check` and the
+- AC-2: A delivery whose hooks raise a skip AND a genuine error still logs
+  `[github webhook] error`.
+- AC-3: The gates pass: `pnpm turbo tsc-check`, `pnpm turbo lint`, `pnpm turbo format-check` and the
   www suite.
 
 ## Tests
 
 - AC-1: `apps/www/src/app/api/webhooks/github/route.test.ts` "an unmapped-installation skip answers
   2xx and logs 'skipped', with no console.error" (red before the change: one `console.error`).
+- AC-2: `route.test.ts` "#134: a genuine error from another hook of the same delivery as a skip is
+  still logged", and `webhook-skip.test.ts` "#134: isOnlyWebhookSkips is true only when every entry
+  is a skip".
 - The existing "should return 500 for unexpected errors" and "WI-8: fast-acks 2xx" cases keep the
   error path and the skip answer covered.
 
@@ -51,8 +61,13 @@ Not changed: the limiter, the 2xx/5xx answers, the `skipped` log, and the per-ha
 
 None for behaviour: only a log line goes. Rollback: revert the commit.
 
-## Open question
+## Open questions
 
-The mention lane can raise the same skip (`handle-app-mention.ts:109`). Its comment and review
-handlers (`handlers.ts:469`, `:564`, `:625`) log `console.error("Error handling … event:", error)`
-before rethrowing, so a mention skip still prints one error line from the handler. Out of scope here.
+- A mixed aggregate (a skip plus a genuine error) still answers 2xx `skipped` in the `receive()`
+  catch, because the catch uses `findWebhookSkip`. That predates this PR; making it 500 changes the
+  delivery answer and is left out of this log-only fix.
+
+- The mention lane can raise the same skip (`handle-app-mention.ts:109`). Its comment and review
+  handlers (`handlers.ts:469`, `:564`, `:625`) log `console.error("Error handling … event:", error)`
+  before rethrowing, so a mention skip still prints one error line from the handler. Out of scope
+  here.
