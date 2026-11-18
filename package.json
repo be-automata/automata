@@ -19,7 +19,7 @@
   "keywords": [],
   "packageManager": "pnpm@10.14.0",
   "devDependencies": {
-    "concurrently": "^9.1.2",
+    "concurrently": "^10.0.7",
     "dotenv-cli": "^8.0.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.1.0",
