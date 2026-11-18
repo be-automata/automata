@@ -210,7 +210,7 @@ describe("agent-app-token.sh", () => {
     assert.throws(() => readFileSync(join(dir, "curl.args")));
   });
 
-  test("reads the key from the keychain item automata-agent-app-key / automata", () => {
+  test("reads the key from the keychain item automata-pr-agent-app-key / automata", () => {
     const result = run([], ids);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `${FAKE_TOKEN}\n`);
@@ -220,7 +220,7 @@ describe("agent-app-token.sh", () => {
       [
         "find-generic-password",
         "-s",
-        "automata-agent-app-key",
+        "automata-pr-agent-app-key",
         "-a",
         "automata",
         "-w",
@@ -246,7 +246,7 @@ describe("agent-app-token.sh", () => {
     writeFileSync(
       config,
       // No final newline: the last line must still be read.
-      '# automata-agent\nAPP_ID = "555"\nINSTALLATION_ID=666 # repo only',
+      '# automata-pr-agent\nAPP_ID = "555"\nINSTALLATION_ID=666 # repo only',
     );
     const result = run([], {
       AUTOMATA_AGENT_CONFIG: config,

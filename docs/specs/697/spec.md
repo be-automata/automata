@@ -6,11 +6,11 @@ The ticket body is the contract (scope, ACs 1-4, UAT, risks). This file adds the
 
 ## Decision (TL, 2026-11-18)
 
-Agent-opened PRs move to a **GitHub App**, working name `automata-agent`, installed on
+Agent-opened PRs move to a **GitHub App**, `automata-pr-agent` (`automata-agent` is reserved by an existing account; created 2026-11-18, App ID 5819826), installed on
 `be-automata/automata` only. Two steps belong to the TL and never to an agent:
 
 1. creating the App in GitHub settings;
-2. putting its private key in the macOS keychain (service `automata-agent-app-key`, account `automata`).
+2. putting its private key in the macOS keychain (service `automata-pr-agent-app-key`, account `automata`).
 
 This PR prepares everything else and applies nothing to the live repo: no ruleset, no branch
 protection, no App, no account.
@@ -107,12 +107,12 @@ before a write. It is not run for real in this PR.
 
 ### 4. `deploy/github/agent-app-token.sh`
 
-Mints a one-hour installation token for `automata-agent` and prints only the token.
+Mints a one-hour installation token for `automata-pr-agent` and prints only the token.
 
 - App id and installation id: `AUTOMATA_AGENT_APP_ID` / `AUTOMATA_AGENT_INSTALLATION_ID`, else
-  `APP_ID=` / `INSTALLATION_ID=` lines in `~/.config/automata-agent/app.env` (read, never sourced).
+  `APP_ID=` / `INSTALLATION_ID=` lines in `~/.config/automata-pr-agent/app.env` (read, never sourced).
   Neither id is a secret.
-- Private key: `security find-generic-password -s automata-agent-app-key -a automata -w`. The key is
+- Private key: `security find-generic-password -s automata-pr-agent-app-key -a automata -w`. The key is
   stored base64-encoded (one line); a raw PEM and the hex form `security -w` prints for a multi-line
   value are also accepted. `AUTOMATA_AGENT_APP_KEY_FILE` replaces the keychain (tests, Linux).
 - JWT: RS256, `iat = now - 60`, `exp = now + 540`, `iss = <app id>`, signed by `openssl dgst
@@ -144,7 +144,7 @@ throwaway PR → ruleset → UAT), break-glass and rollback, and the Automata re
 an App-authored PR is opened by a Bot sender, so Automata may skip `opened`; the agent opens it as a
 draft and marks it ready (`ready_for_review` is always reviewed), and keeps `git push` on the
 person's git credential so `synchronize` events are not Bot-sent. The automation's author filter
-must include `automata-agent[bot]` (or all authors); the throwaway PR proves it.
+must include `automata-pr-agent[bot]` (or all authors); the throwaway PR proves it.
 
 Where agent PRs are opened (no change here): the somnio plugin's `dev-execution` Step 5 (gstack
 `/ship`), `scripts/pr-opened.sh`, `loop-mode` and `pr-sync`, and the `pr-manager` agent. They run
