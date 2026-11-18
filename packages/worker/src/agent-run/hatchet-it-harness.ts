@@ -139,43 +139,42 @@ export interface StackGuard {
 export function createStackGuard(
   acquire: (signal: AbortSignal) => Promise<BoxLock>,
 ): StackGuard {
-  let controller: AbortController | null = null;
-  let pending: Promise<BoxLock> | null = null;
-  let held: BoxLock | null = null;
-  const reset = () => {
-    controller = null;
-    pending = null;
-    held = null;
-  };
+  // One record per hold: a late grant can only mark its OWN record held.
+  interface Hold {
+    controller: AbortController;
+    acquired: Promise<void>;
+    lock?: BoxLock;
+  }
+  let hold: Hold | null = null;
   return {
     async enter() {
-      if (!pending) {
-        const c = new AbortController();
-        controller = c;
-        const p = (async () => {
-          const lock = await acquire(c.signal);
-          held = lock;
-          return lock;
-        })();
-        pending = p;
+      if (!hold) {
+        const controller = new AbortController();
+        const take = async (h: Hold) => {
+          const lock = await acquire(controller.signal);
+          h.lock = lock;
+        };
+        const h: Hold = { controller, acquired: Promise.resolve() };
+        h.acquired = take(h);
+        hold = h;
       }
-      await pending;
+      await hold.acquired;
     },
     async exit(teardown) {
-      const lock = held;
-      if (!lock) {
+      const h = hold;
+      hold = null;
+      if (!h) return;
+      if (!h.lock) {
         // A grant racing this abort is released by acquireBoxLock itself (its
         // post-ack abort check), so there is nothing to release here.
-        controller?.abort();
-        await pending?.catch(() => {});
-        reset();
+        h.controller.abort();
+        await h.acquired.catch(() => {});
         return;
       }
       try {
         await teardown();
       } finally {
-        await lock.release();
-        reset();
+        await h.lock.release();
       }
     },
   };

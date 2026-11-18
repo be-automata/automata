@@ -132,17 +132,9 @@ describe("acquireItStackLock — one IT stack per machine (#395)", () => {
   it("a second acquirer parks (and says so) instead of joining the live stack", async () => {
     held.push(await acquireItStackLock({ root, log: () => {} }));
     const log = vi.fn();
-    let err: unknown = null;
-    try {
-      await acquireItStackLock({
-        root,
-        log,
-        signal: AbortSignal.timeout(300),
-      });
-    } catch (e) {
-      err = e;
-    }
-    expect(err instanceof Error && err.name).toBe("AbortError");
+    await expect(
+      acquireItStackLock({ root, log, signal: AbortSignal.timeout(300) }),
+    ).rejects.toMatchObject({ name: "AbortError" });
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("held by another process"),
     );
@@ -158,11 +150,11 @@ describe("acquireItStackLock — one IT stack per machine (#395)", () => {
 });
 
 describe("createStackGuard — teardown only by the holder (#395)", () => {
-  const fakeLock = () => {
-    const release = vi.fn(async () => {});
-    const lock: BoxLock = { release, lost: false, slot: 0 };
-    return { lock, release };
-  };
+  const fakeLock = () => ({
+    release: vi.fn(async () => {}),
+    lost: false,
+    slot: 0,
+  });
 
   it("an exit while still waiting aborts the wait and never tears down the other process's stack", async () => {
     let seen: AbortSignal | undefined;
@@ -177,17 +169,16 @@ describe("createStackGuard — teardown only by the holder (#395)", () => {
           });
         }),
     );
-    const entering = guard.enter().catch((e: unknown) => e);
+    const entering = guard.enter();
     const teardown = vi.fn(async () => {});
     await guard.exit(teardown);
     expect(seen?.aborted).toBe(true);
     expect(teardown).not.toHaveBeenCalled();
-    const err = await entering;
-    expect(err instanceof Error && err.name).toBe("AbortError");
+    await expect(entering).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("after an exit without the lock, the next enter acquires afresh", async () => {
-    const { lock, release } = fakeLock();
+    const lock = fakeLock();
     const acquire = vi
       .fn<(signal: AbortSignal) => Promise<BoxLock>>()
       .mockRejectedValueOnce(new Error("unavailable"))
@@ -200,11 +191,11 @@ describe("createStackGuard — teardown only by the holder (#395)", () => {
     const teardown = vi.fn(async () => {});
     await guard.exit(teardown);
     expect(teardown).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
+    expect(lock.release).toHaveBeenCalledOnce();
   });
 
   it("the holder tears down, then releases — even when the teardown throws", async () => {
-    const { lock, release } = fakeLock();
+    const lock = fakeLock();
     const guard = createStackGuard(async () => lock);
     await guard.enter();
     await expect(
@@ -212,11 +203,11 @@ describe("createStackGuard — teardown only by the holder (#395)", () => {
         throw new Error("down failed");
       }),
     ).rejects.toThrow("down failed");
-    expect(release).toHaveBeenCalledOnce();
+    expect(lock.release).toHaveBeenCalledOnce();
   });
 
   it("concurrent enters share ONE acquire (a second helper would park behind its own process)", async () => {
-    const acquire = vi.fn(async () => fakeLock().lock);
+    const acquire = vi.fn(async () => fakeLock());
     const guard = createStackGuard(acquire);
     await Promise.all([guard.enter(), guard.enter()]);
     expect(acquire).toHaveBeenCalledOnce();
