@@ -91,3 +91,13 @@ Skipped, with reasons:
 - **Job 1205 on `2b8409e..2b9147b` (the final range):** **Pass**, with two Lows.
   - **Low, follow-up:** with more than 5 pages and a server that lists in a stable order, cells after page 5 are never reached. Fix: rotate the start page, or list until `limit` reapable cells are found. No deployment has a cell today, and the new warning shows when it happens. Listed in the PR.
   - **Low, fixed (doc only):** `spec-b.md` still described the removed `wasTruncated`; it now describes `CellList.truncated`.
+
+## Addendum (2026-11-18, #693): what the sidecar matches on
+
+By the upstream code, the exact-path result above also holds under path confusion. The live run of the new variants is deferred (see #693). The rule is in `docs/specs/693/gate-log.md` and `docs/specs/693/spec.md`:
+
+- the authority gate runs first;
+- then the raw path, with the query stripped, is matched for string equality;
+- a request that matches no binding passes through untouched.
+
+The new live-gate scenario is `daemon apiKey under path confusion (#693)`. Since #693, the token in the daemon binding is the cell's own event-only token. www refuses it everywhere except `/api/daemon-event`.

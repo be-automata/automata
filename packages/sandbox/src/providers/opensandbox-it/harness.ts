@@ -236,6 +236,22 @@ export type ProbeSpec =
       headers: Record<string, string>;
       markers: string[];
     }
+  /**
+   * One raw HTTP/1.1 POST over TLS to `host:443` (SNI = `host`), for the
+   * path-confusion matrix (#693). The request target goes on the wire verbatim
+   * (urllib would normalize nothing but cannot send an absolute-form target or
+   * a `Host` that differs from SNI), with `Host: hostHeader ?? host`, the given
+   * headers and an empty body. Only the status and one boolean per marker
+   * (searched in the whole response) come back.
+   */
+  | {
+      kind: "https_raw";
+      host: string;
+      target: string;
+      hostHeader?: string;
+      headers: Record<string, string>;
+      markers: string[];
+    }
   /** Status only, no body. `@gateway` in the host or url is the default gateway. */
   | { kind: "http"; url: string }
   | { kind: "gateway" }
@@ -414,12 +430,13 @@ def fetch(url, marker):
     return out
 
 
-def fetch_headers(url, headers, markers_b64):
+def retry_markers(send, markers_b64):
     # A public echo rate-limits concurrent probes (429) or briefly 503s; retry
     # those only, a bounded number of times, with jitter so parallel probes do
-    # not come back together. Any other status is the result.
+    # not come back together. Any other status is the result. send() returns
+    # (body, status) or an error result dict.
     for attempt in range(4):
-        got = request(url, "POST", headers)
+        got = send()
         if isinstance(got, dict):
             return got
         body, status = got
@@ -428,6 +445,47 @@ def fetch_headers(url, headers, markers_b64):
         time.sleep(1.5 * (attempt + 1) * (0.5 + random.random()))
     found = [base64.b64decode(m) in body for m in markers_b64]
     return {"ok": True, "status": status, "markersFound": found}
+
+
+def fetch_headers(url, headers, markers_b64):
+    return retry_markers(lambda: request(url, "POST", headers), markers_b64)
+
+
+def raw_post(target, host_header, headers):
+    lines = ["POST " + target + " HTTP/1.1", "Host: " + host_header, "user-agent: osbit-probe"]
+    lines += [k + ": " + v for k, v in headers.items()]
+    lines += ["Content-Length: 0", "Connection: close", "", ""]
+    return "\r\n".join(lines).encode("latin1")
+
+
+def status_of(data):
+    line = data.split(b"\r\n", 1)[0].decode("latin1").split()
+    return int(line[1]) if len(line) > 1 and line[1].isdigit() else 0
+
+
+def raw_once(host, target, host_header, headers):
+    # The target goes on the wire verbatim; the whole response is the body.
+    try:
+        raw = socket.create_connection((host, 443), timeout=10)
+        s = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+        try:
+            s.settimeout(10)
+            s.sendall(raw_post(target, host_header, headers))
+            data = b""
+            while len(data) < 200000:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            s.close()
+    except Exception as e:
+        return {"ok": False, "err": kind_of(e)}
+    return data, status_of(data)
+
+
+def fetch_raw(host, target, host_header, headers, markers_b64):
+    return retry_markers(lambda: raw_once(host, target, host_header, headers), markers_b64)
 
 
 def canary_scan(canaries_b64, pattern):
@@ -475,6 +533,8 @@ def run(spec):
         return fetch(spec["url"], base64.b64decode(m) if m else None)
     if k == "https_headers":
         return fetch_headers(spec["url"], spec["headers"], spec["markers_b64"])
+    if k == "https_raw":
+        return fetch_raw(spec["host"], spec["target"], spec.get("host_header") or spec["host"], spec["headers"], spec["markers_b64"])
     if k == "http":
         return fetch(spec["url"], None)
     if k == "gateway":
@@ -593,6 +653,17 @@ export function probeArgv(probes: readonly ProbeSpec[]): string[] {
         return {
           kind: probe.kind,
           url: probe.url,
+          headers: probe.headers,
+          markers_b64: probe.markers.map(encodeSecret),
+        };
+      case "https_raw":
+        return {
+          kind: probe.kind,
+          host: probe.host,
+          target: probe.target,
+          ...(probe.hostHeader === undefined
+            ? {}
+            : { host_header: probe.hostHeader }),
           headers: probe.headers,
           markers_b64: probe.markers.map(encodeSecret),
         };

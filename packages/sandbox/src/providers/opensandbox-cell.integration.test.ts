@@ -873,6 +873,153 @@ describe(
       }
     });
 
+    it("daemon apiKey under path confusion (#693): no confused request carries the token", async () => {
+      const id = await create(plan("daemon-confusion", P_CRED, [DAEMON_ENTRY]));
+      try {
+        const markers = [CANARY_C, DAEMON_PLACEHOLDER];
+        const headers = { [DAEMON_HEADER]: DAEMON_PLACEHOLDER };
+        const P = DAEMON_PATH;
+        // `echo`: httpbin.org answers the raw target 200 with the request
+        // echoed (measured from a host with no sidecar on 2026-11-18), so the
+        // placeholder MUST come back. The others answer 404/400 there, and only
+        // the canary's absence is asserted. Each variant sits both in front of
+        // and behind the bound path where its shape allows.
+        const confused: { target: string; echo: boolean }[] = [
+          // dot segments, raw
+          { target: "/anything/./daemon-event", echo: true },
+          { target: "/anything/x/../daemon-event", echo: true },
+          { target: `${P}/../../anything/daemon/cell-plan`, echo: true },
+          // dot segments, encoded and double-encoded
+          { target: "/anything/x/%2e%2e/daemon-event", echo: true },
+          { target: `${P}/%2e%2e/cell-plan`, echo: true },
+          { target: "/anything/x/%252e%252e/daemon-event", echo: true },
+          // encoded slash, both cases
+          { target: "/anything%2Fdaemon-event", echo: false },
+          { target: "/anything%2fdaemon-event", echo: false },
+          { target: `${P}%2F..%2Fcell-plan`, echo: false },
+          // encoded and double-encoded dash (decodes to the bound path)
+          { target: "/anything/daemon%2Devent", echo: true },
+          { target: "/anything/daemon%2devent", echo: true },
+          { target: "/anything/daemon%252Devent", echo: true },
+          // double slash, trailing slash
+          { target: "//anything/daemon-event", echo: true },
+          { target: "/anything//daemon-event", echo: true },
+          { target: `${P}//`, echo: true },
+          { target: `${P}/`, echo: true },
+          // `;` parameters
+          { target: `${P};x`, echo: true },
+          { target: "/anything;x/daemon-event", echo: false },
+          // fragment on the wire
+          { target: `${P}#frag`, echo: false },
+          { target: "/anything#/daemon-event", echo: false },
+          // case
+          { target: "/ANYTHING/daemon-event", echo: false },
+          { target: "/anything/DAEMON-EVENT", echo: true },
+          // backslash
+          { target: "/anything\\daemon-event", echo: true },
+          // the bound path behind a query
+          { target: "/anything?/daemon-event", echo: true },
+        ];
+        const raw = (
+          target: string,
+          hostHeader?: string,
+        ): Extract<ProbeSpec, { kind: "https_raw" }> => ({
+          kind: "https_raw",
+          host: ALLOWED,
+          target,
+          ...(hostHeader === undefined ? {} : { hostHeader }),
+          headers,
+          markers,
+        });
+        const authority: ProbeSpec[] = [
+          // Host different from SNI: refused.
+          raw(P, "example.org"),
+        ];
+        // An absolute-form target naming another authority than Host, over TLS
+        // to the allowed host. Measured live 2026-11-18 (#700): OpenSandbox 1.2.1
+        // does NOT refuse the mismatch and injects the token, but the request
+        // still goes to the bound host on the bound path (recorded, like the
+        // same-route cases). The assertion proves the token never left: the
+        // canary comes back only from the bound host's echo, and example.org's
+        // page text ("Example Domain") never appears. The upstream proposal to
+        // refuse the mismatch is recorded in docs/specs/693/gate-log.md.
+        const foreignAbsolute: ProbeSpec = {
+          ...raw(`https://example.org${P}`),
+          markers: [...markers, "Example Domain"],
+        };
+        // Same route as the bound path: injected by design (recorded only).
+        const sameRoute: ProbeSpec[] = [
+          raw(`${P}?x=1`),
+          raw(`https://${ALLOWED}${P}`),
+        ];
+        const r = await probe(id, [
+          raw(P),
+          ...confused.map((c) => raw(c.target)),
+          ...authority,
+          ...sameRoute,
+          foreignAbsolute,
+        ]);
+        const row = (x: ProbeResult | undefined) => ({
+          ...brief(x),
+          markersFound: x?.markersFound,
+        });
+        const control = r[0];
+        const confusedResults = r.slice(1, 1 + confused.length);
+        const authorityResults = r.slice(
+          1 + confused.length,
+          1 + confused.length + authority.length,
+        );
+        const sameRouteResults = r.slice(
+          1 + confused.length + authority.length,
+          1 + confused.length + authority.length + sameRoute.length,
+        );
+        const foreignAbsoluteResult = r[r.length - 1];
+        NOTES.daemon_confusion_control = row(control);
+        NOTES.daemon_confusion = confused.map((c, i) => ({
+          target: c.target,
+          ...row(confusedResults[i]),
+        }));
+        NOTES.daemon_confusion_authority = authorityResults.map(row);
+        NOTES.daemon_confusion_same_route = sameRouteResults.map(row);
+        NOTES.daemon_confusion_foreign_absolute = row(foreignAbsoluteResult);
+
+        // Control: the raw probe does get the token on the literal path.
+        const [cc, cp] = control?.markersFound ?? [];
+        expect(
+          control?.status === 200 && cc === true && cp === false,
+          `control ${JSON.stringify(NOTES.daemon_confusion_control)}`,
+        ).toBe(true);
+        confused.forEach((c, i) => {
+          const x = confusedResults[i];
+          const [canary, placeholder] = x?.markersFound ?? [];
+          expect(x?.ok && canary === false, `canary ${c.target}`).toBe(true);
+          if (c.echo) {
+            expect(
+              x?.status === 200 && placeholder === true,
+              `untouched ${c.target} ${JSON.stringify(row(x))}`,
+            ).toBe(true);
+          }
+        });
+        authorityResults.forEach((x, i) => {
+          expect(
+            x.markersFound?.[0] === false,
+            `authority ${i} ${JSON.stringify(row(x))}`,
+          ).toBe(true);
+        });
+        // Injected, but only to the bound host: its echo returned the canary,
+        // and nothing came from example.org.
+        const [fc, , foreignPage] = foreignAbsoluteResult?.markersFound ?? [];
+        expect(
+          foreignAbsoluteResult?.status === 200 &&
+            fc === true &&
+            foreignPage === false,
+          `foreign absolute ${JSON.stringify(row(foreignAbsoluteResult))}`,
+        ).toBe(true);
+      } finally {
+        await destroy(id);
+      }
+    });
+
     it("AC-8 negative control: a cell with no policy reaches the internet", async () => {
       const created = await rawApi("POST", "/sandboxes", {
         image: { uri: GUEST_IMAGE },

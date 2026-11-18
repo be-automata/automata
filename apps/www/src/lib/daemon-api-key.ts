@@ -4,10 +4,18 @@ import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { apikey } from "@terragon/shared/db/schema";
 import { DaemonAuthUnavailableError } from "./daemon-auth-unavailable";
-import { isRetiredTokenName } from "./daemon-token-context";
+import { isEventScopedKey, isRetiredTokenName } from "./daemon-token-context";
 
 type VerifyApiKeyResult = Awaited<ReturnType<typeof auth.api.verifyApiKey>>;
 export type VerifiedDaemonApiKey = NonNullable<VerifyApiKeyResult["key"]>;
+
+/** Token classes a caller accepts beyond a live run token. Both default off. */
+export interface DaemonApiKeyOptions {
+  /** A token retired by a cell terminal read. Only cell-teardown. */
+  allowRetired?: boolean;
+  /** A cell's event-scoped token (#693). Only `/api/daemon-event`. */
+  allowEventScoped?: boolean;
+}
 
 /**
  * Whether an apikey row exists for the raw token. Hashes exactly as the
@@ -41,10 +49,13 @@ async function apiKeyRowExists(token: string): Promise<boolean> {
  * A token retired by a cell run's terminal read (name ends `:retired`) is
  * refused like an unknown one unless `allowRetired` is set. Only cell-teardown
  * sets it.
+ *
+ * A cell's event-scoped token (#693, `isEventScopedKey`) is refused the same
+ * way unless `allowEventScoped` is set. Only `/api/daemon-event` sets it.
  */
 export async function verifyDaemonApiKey(
   token: string,
-  { allowRetired = false }: { allowRetired?: boolean } = {},
+  { allowRetired = false, allowEventScoped = false }: DaemonApiKeyOptions = {},
 ): Promise<VerifiedDaemonApiKey | null> {
   // better-auth's verifyApiKey turns ANY non-APIError (a DB timeout included)
   // into `{ valid: false, code: "INVALID_API_KEY" }` — the same answer as an
@@ -78,6 +89,10 @@ export async function verifyDaemonApiKey(
   }
   if (key && !allowRetired && isRetiredTokenName(key.name)) {
     console.log("Unauthorized", "reason", "retired token");
+    return null;
+  }
+  if (key && !allowEventScoped && isEventScopedKey(key)) {
+    console.log("Unauthorized", "reason", "event-scoped token");
     return null;
   }
   return key ?? null;

@@ -2,7 +2,12 @@ import { db } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { apikey, thread as threadTable } from "@terragon/shared/db/schema";
 import { and, eq, like, sql, type SQL } from "drizzle-orm";
-import { RETIRED_TOKEN_SUFFIX } from "@/lib/daemon-token-context";
+import {
+  CELL_EVENT_TOKEN_INFIX,
+  DAEMON_EVENT_SCOPE,
+  RETIRED_TOKEN_SUFFIX,
+} from "@/lib/daemon-token-context";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 
 /** A retired token's remaining life: the teardown margin of CELL_RUN_TTL_MS. */
 export const RETIRED_DAEMON_TOKEN_GRACE_MS = 15 * 60 * 1000;
@@ -54,6 +59,28 @@ export async function mintDaemonToken({
   threadChatId: string;
   name: string;
 }): Promise<string> {
+  return (await createDaemonApiKey({ userId, threadId, threadChatId, name }))
+    .key;
+}
+
+/**
+ * The one createApiKey every daemon token goes through: the thread's org, the
+ * F1/F2 metadata and the plugin-minimum 1-day expiry. `scope` adds the #693
+ * event-only marker.
+ */
+async function createDaemonApiKey({
+  userId,
+  threadId,
+  threadChatId,
+  name,
+  scope,
+}: {
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  name?: string;
+  scope?: typeof DAEMON_EVENT_SCOPE;
+}): Promise<{ id: string; key: string }> {
   const [threadRow] = await db
     .select({ organizationId: threadTable.organizationId })
     .from(threadTable)
@@ -62,7 +89,7 @@ export async function mintDaemonToken({
   const organizationId = threadRow?.organizationId ?? null;
   const apiKey = await auth.api.createApiKey({
     body: {
-      name,
+      ...(name === undefined ? {} : { name }),
       expiresIn: 60 * 60 * 24 * 1, // 1 day (plugin minimum) — backstop only
       userId,
       metadata: {
@@ -73,10 +100,134 @@ export async function mintDaemonToken({
         // threadId is unique per thread, so endpoints bind on it too.
         threadId,
         tokenType: "daemon",
+        ...(scope === undefined ? {} : { scope }),
       },
     },
   });
-  return apiKey.key;
+  return { id: apiKey.id, key: apiKey.key };
+}
+
+/**
+ * Which cell tokens a call acts on (#693). `stepKey` is the cell step of the
+ * worker's run token (`cellStepKey(apiKeyId)`), so two runs of one thread never
+ * touch each other's tokens, even though `attempt` restarts at 1 per step.
+ */
+export interface CellTokenStep {
+  userId: string;
+  threadId: string;
+  threadChatId: string;
+  stepKey: string;
+}
+
+/** `${daemonRunKey}:cell-event:${stepKey}:${attempt}`. */
+export function cellEventTokenName(
+  step: Omit<CellTokenStep, "userId"> & { attempt: number },
+): string {
+  return `${cellEventTokenPrefix(step)}${step.attempt}`;
+}
+
+function cellEventTokenPrefix(step: Omit<CellTokenStep, "userId">): string {
+  return `${daemonRunKey(step)}${CELL_EVENT_TOKEN_INFIX}${step.stepKey}:`;
+}
+
+function stepTokensPredicate(step: Omit<CellTokenStep, "userId">): SQL {
+  return like(apikey.name, `${escapeLikePattern(cellEventTokenPrefix(step))}%`);
+}
+
+/**
+ * Mint the cell's own daemon credential for one attempt (#693): an
+ * event-scoped token that only `POST /api/daemon-event` accepts
+ * (verifyDaemonApiKey refuses it everywhere else), so a cell's vault never
+ * holds the worker's run token.
+ *
+ *  1. Creates the key with the F1/F2 metadata plus `scope: "daemon-event"`,
+ *     unnamed, because the name is longer than the plugin's 64-character cap.
+ *  2. One UPDATE fenced by id and owner sets the name and caps `expires_at`
+ *     at now + CELL_RUN_TTL_MS (UTC, as retire does). A failure deletes the
+ *     new row and rethrows. A row a failed delete leaves behind is inert: its
+ *     value was never returned, and it is still event-scoped.
+ *
+ * Earlier tokens are NOT deleted here: the caller supersedes them only once
+ * its plan has won (supersedeCellEventTokens), so a lost or failed replay never
+ * kills the token of the response the worker kept.
+ */
+export async function mintCellEventToken({
+  attempt,
+  stepKey,
+  ...run
+}: CellTokenStep & { attempt: number }): Promise<{
+  token: string;
+  apiKeyId: string;
+}> {
+  const { userId } = run;
+  const created = await createDaemonApiKey({
+    ...run,
+    scope: DAEMON_EVENT_SCOPE,
+  });
+  try {
+    const named = await db
+      .update(apikey)
+      .set({
+        name: cellEventTokenName({ ...run, stepKey, attempt }),
+        expiresAt: cappedExpiresAt(CELL_RUN_TTL_MS),
+      })
+      .where(and(eq(apikey.id, created.id), eq(apikey.referenceId, userId)))
+      .returning({ id: apikey.id });
+    if (named.length !== 1) {
+      throw new Error("cell event token row not found after create");
+    }
+  } catch (error) {
+    await revokeDaemonTokenById({ userId, apiKeyId: created.id });
+    throw error;
+  }
+  return { token: created.key, apiKeyId: created.id };
+}
+
+/**
+ * After a plan wins (its bearer was minted), delete the step's cell tokens
+ * created BEFORE `keepApiKeyId`: earlier attempts and earlier responses of a
+ * replay. "Older than mine", not "every other", so two racing replays converge
+ * on the newest token instead of deleting each other's. A same-millisecond tie
+ * leaves both, each event-only and capped at CELL_RUN_TTL_MS.
+ */
+export async function supersedeCellEventTokens({
+  keepApiKeyId,
+  ...step
+}: CellTokenStep & { keepApiKeyId: string }): Promise<number> {
+  const keptCreatedAt = sql`(SELECT ${apikey.createdAt} FROM ${apikey} WHERE ${apikey.id} = ${keepApiKeyId})`;
+  return deleteDaemonTokens(
+    and(
+      stepTokensPredicate(step),
+      sql`${apikey.createdAt} < ${keptCreatedAt}`,
+    ) as SQL,
+    step.userId,
+    "superseded cell event token(s)",
+    { threadId: step.threadId, stepKey: step.stepKey },
+  );
+}
+
+/**
+ * Delete a step's cell tokens: one attempt's (teardown), or every attempt's
+ * when `attempt` is omitted (terminal read). Owner-fenced; returns the count.
+ */
+export async function revokeCellEventTokens({
+  attempt,
+  ...step
+}: CellTokenStep & { attempt?: number }): Promise<number> {
+  const predicate =
+    attempt === undefined
+      ? stepTokensPredicate(step)
+      : eq(apikey.name, cellEventTokenName({ ...step, attempt }));
+  return deleteDaemonTokens(
+    predicate,
+    step.userId,
+    "revoked cell event token(s)",
+    {
+      threadId: step.threadId,
+      stepKey: step.stepKey,
+      ...(attempt === undefined ? {} : { attempt: String(attempt) }),
+    },
+  );
 }
 
 /**
@@ -141,10 +292,8 @@ export async function revokeDaemonTokenById({
  *  - appends `:retired` to `name`: the double-dispatch guard (which matches
  *    the bare run key) stops seeing the run as in flight, while sweep rule
  *    (iii)'s `${threadId}:` prefix still matches it;
- *  - caps `expires_at` at now + RETIRED_DAEMON_TOKEN_GRACE_MS. LEAST means no
- *    call can ever move the expiry later. The column is a `timestamp` without
- *    a time zone that the api-key plugin writes in UTC, so the cap compares
- *    in UTC.
+ *  - caps `expires_at` at now + RETIRED_DAEMON_TOKEN_GRACE_MS
+ *    (cappedExpiresAt: never later, compared in UTC).
  * Idempotent: a second call matches no row and returns false.
  */
 export async function retireDaemonTokenById({
@@ -154,14 +303,13 @@ export async function retireDaemonTokenById({
   userId: string;
   apiKeyId: string;
 }): Promise<boolean> {
-  const cap = sql`((now() AT TIME ZONE 'UTC') + make_interval(secs => ${RETIRED_DAEMON_TOKEN_GRACE_MS / 1000}::double precision))`;
   const retired = await db
     .update(apikey)
     .set({
       // COALESCE matches the WHERE below: NULL || text is NULL in SQL, so a
       // null name would "retire" without ever carrying the suffix.
       name: sql`COALESCE(${apikey.name}, '') || ${RETIRED_TOKEN_SUFFIX}`,
-      expiresAt: sql`LEAST(COALESCE(${apikey.expiresAt}, ${cap}), ${cap})`,
+      expiresAt: cappedExpiresAt(RETIRED_DAEMON_TOKEN_GRACE_MS),
     })
     .where(
       and(
@@ -249,6 +397,16 @@ async function deleteDaemonTokens(
     });
   }
   return deleted.length;
+}
+
+/**
+ * `expires_at` capped at now + `ms`. LEAST means no call can ever move the
+ * expiry later. The column is a `timestamp` without a time zone that the
+ * api-key plugin writes in UTC, so the cap compares in UTC.
+ */
+function cappedExpiresAt(ms: number): SQL {
+  const cap = sql`((now() AT TIME ZONE 'UTC') + make_interval(secs => ${ms / 1000}::double precision))`;
+  return sql`LEAST(COALESCE(${apikey.expiresAt}, ${cap}), ${cap})`;
 }
 
 /** `%`, `_` and `\` are LIKE metacharacters; a thread id never holds them, but escape anyway. */

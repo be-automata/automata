@@ -29,7 +29,7 @@ import {
   DaemonTokenContext,
   daemonTokenContextFromApiKey,
 } from "./daemon-token-context";
-import { verifyDaemonApiKey } from "./daemon-api-key";
+import { type DaemonApiKeyOptions, verifyDaemonApiKey } from "./daemon-api-key";
 
 export const getSessionOrNull = cache(
   async (): Promise<{
@@ -213,13 +213,14 @@ export async function getUserIdOrRedirect(): Promise<User["id"]> {
  * daemon-token-context.ts); it is null for personal keys. Downstream code can
  * read the org directly instead of inferring it from the user's active org.
  *
- * Null (→ 401) only for a missing, unknown, disabled or expired key. Throws
+ * Null (→ 401) for a missing, unknown, disabled or expired key, and for a
+ * retired or event-scoped one the caller did not opt into (verifyDaemonApiKey). Throws
  * DaemonAuthUnavailableError when the auth store fails; callers answer 503
  * (withDaemonAuthUnavailable / daemonAuthUnavailableResponse).
  */
 export async function getDaemonTokenContext(
   request: Pick<Request, "headers">,
-  opts?: { allowRetired?: boolean },
+  opts?: DaemonApiKeyOptions,
 ): Promise<DaemonTokenContext | null> {
   const token = request.headers.get("X-Daemon-Token");
   if (!token) {

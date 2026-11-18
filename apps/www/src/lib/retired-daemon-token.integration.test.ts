@@ -1,25 +1,8 @@
-import { createRouterClient, ORPCError } from "@orpc/server";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { POST as agentCredentials } from "@/app/api/daemon/agent-credentials/route";
-import { POST as cellPlan } from "@/app/api/daemon/cell-plan/route";
-import { POST as egressEvent } from "@/app/api/daemon/egress-event/route";
-import { POST as runCredentialSource } from "@/app/api/daemon/run-credential-source/route";
-import { POST as runStaleness } from "@/app/api/daemon/run-staleness/route";
-import { POST as nextMessage } from "@/app/api/daemon/next-message/route";
-import { POST as runTerminal } from "@/app/api/daemon/run-terminal/route";
-import { POST as threadStatus } from "@/app/api/daemon/thread-status/route";
 import { POST as daemonEvent } from "@/app/api/daemon-event/route";
-import { GET as broadcast } from "@/app/api/internal/broadcast/route";
-import { POST as broadcastSandboxEnv } from "@/app/api/internal/broadcast/sandbox/env/route";
-import { POST as broadcastSandboxKeepalive } from "@/app/api/internal/broadcast/sandbox/keepalive/route";
-import { POST as anthropicProxy } from "@/app/api/proxy/anthropic/[[...path]]/route";
-import { POST as googleProxy } from "@/app/api/proxy/google/[[...path]]/route";
-import { POST as openaiProxy } from "@/app/api/proxy/openai/[[...path]]/route";
-import { POST as openrouterProxy } from "@/app/api/proxy/openrouter/[[...path]]/route";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import {
@@ -27,7 +10,11 @@ import {
   retireDaemonTokenById,
   daemonRunKey,
 } from "@/lib/daemon-token";
-import { cliRouter } from "@/server/orpc/cli-router";
+import {
+  daemonRouteMatrix,
+  jsonRequest,
+  refusedFor,
+} from "@/test-helpers/daemon-route-matrix";
 import { mockLoggedOutUser, mockWaitUntil } from "@/test-helpers/mock-next";
 import {
   apikey as apikeyTable,
@@ -74,15 +61,6 @@ vi.mock("@terragon/sandbox", async (importOriginal) => {
   return { ...actual, extendSandboxLife: vi.fn().mockResolvedValue(undefined) };
 });
 
-interface Outcome {
-  status: number;
-  body: string;
-}
-
-async function outcomeOf(res: Response): Promise<Outcome> {
-  return { status: res.status, body: await res.text() };
-}
-
 describe("a retired daemon token is refused everywhere but cell-teardown", () => {
   let userId: string;
   let sessionToken: string;
@@ -126,14 +104,7 @@ describe("a retired daemon token is refused everywhere but cell-teardown", () =>
   }
 
   /** Whether verifyDaemonApiKey refused a retired token since the last clear. */
-  function refusedAsRetired(): boolean {
-    return logSpy.mock.calls.some(
-      (call: unknown[]) =>
-        call[0] === "Unauthorized" &&
-        call[1] === "reason" &&
-        call[2] === "retired token",
-    );
-  }
+  const refusedAsRetired = (): boolean => refusedFor(logSpy, "retired token");
 
   beforeEach(async () => {
     await mockWaitUntil();
@@ -166,261 +137,7 @@ describe("a retired daemon token is refused everywhere but cell-teardown", () =>
     vi.restoreAllMocks();
   });
 
-  function jsonRequest(
-    url: string,
-    token: string,
-    body: unknown,
-    extraHeaders: Record<string, string> = {},
-  ): NextRequest {
-    return new NextRequest(url, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: {
-        "X-Daemon-Token": token,
-        "content-type": "application/json",
-        ...extraHeaders,
-      },
-    });
-  }
-
-  /**
-   * A body the route refuses AFTER auth (a foreign threadChatId: 403) so a live
-   * token's control never mutates anything.
-   */
-  const foreignChat = () => ({ threadId, threadChatId: "tc_other" });
-
-  const daemonRoutes: {
-    name: string;
-    call: (token: string) => Promise<Outcome>;
-    /** The live token's answer is itself not 401 (else the log reason is the control). */
-    liveIsNot401: boolean;
-  }[] = [
-    {
-      name: "daemon-event (ordinary batch)",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await daemonEvent(
-            jsonRequest("http://localhost/api/daemon-event", token, {
-              messages: [],
-              ...foreignChat(),
-            }),
-          ),
-        ),
-    },
-    {
-      name: "next-message",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await nextMessage(
-            jsonRequest(
-              "http://localhost/api/daemon/next-message",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "agent-credentials",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await agentCredentials(
-            jsonRequest(
-              "http://localhost/api/daemon/agent-credentials",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "run-terminal",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await runTerminal(
-            // No cause: refused by the body schema after auth.
-            jsonRequest(
-              "http://localhost/api/daemon/run-terminal",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "egress-event",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await egressEvent(
-            jsonRequest(
-              "http://localhost/api/daemon/egress-event",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "run-staleness",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await runStaleness(
-            jsonRequest(
-              "http://localhost/api/daemon/run-staleness",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "run-credential-source",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await runCredentialSource(
-            jsonRequest(
-              "http://localhost/api/daemon/run-credential-source",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "thread-status",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await threadStatus(
-            jsonRequest(
-              "http://localhost/api/daemon/thread-status",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "cell-plan",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await cellPlan(
-            jsonRequest(
-              "http://localhost/api/daemon/cell-plan",
-              token,
-              foreignChat(),
-            ),
-          ),
-        ),
-    },
-    {
-      name: "internal/broadcast",
-      liveIsNot401: true,
-      call: async (token) =>
-        outcomeOf(
-          await broadcast(
-            new Request(
-              `http://localhost/api/internal/broadcast?channel=user:${userId}`,
-              { headers: { "X-Daemon-Token": token } },
-            ),
-          ),
-        ),
-    },
-    {
-      // A live token reaches the thread lookup, which answers 401 for an
-      // unknown thread too, so the log reason is this route's control.
-      name: "internal/broadcast/sandbox/env",
-      liveIsNot401: false,
-      call: async (token) =>
-        outcomeOf(
-          await broadcastSandboxEnv(
-            jsonRequest(
-              "http://localhost/api/internal/broadcast/sandbox/env",
-              token,
-              { threadId: "no-such-thread", sandboxId: "sbx" },
-            ),
-          ),
-        ),
-    },
-    {
-      name: "internal/broadcast/sandbox/keepalive",
-      liveIsNot401: false,
-      call: async (token) =>
-        outcomeOf(
-          await broadcastSandboxKeepalive(
-            jsonRequest(
-              "http://localhost/api/internal/broadcast/sandbox/keepalive",
-              token,
-              { threadId: "no-such-thread", sandboxId: "sbx" },
-            ),
-          ),
-        ),
-    },
-  ];
-
-  // Promise-shaped params satisfy every proxy at runtime (they all `await` it).
-  const proxyArgs = { params: Promise.resolve({ path: ["v1", "messages"] }) };
-  const proxies: {
-    name: string;
-    post: (request: NextRequest, args: never) => Promise<Response>;
-  }[] = [
-    { name: "anthropic proxy", post: anthropicProxy },
-    { name: "google proxy", post: googleProxy },
-    { name: "openai proxy", post: openaiProxy },
-    { name: "openrouter proxy", post: openrouterProxy },
-  ];
-  const proxyRoutes = proxies.map((p) => ({
-    name: p.name,
-    liveIsNot401: true,
-    call: async (token: string): Promise<Outcome> => {
-      // The upstream call is stubbed: nothing leaves the process.
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockResolvedValue(new Response("{}", { status: 200 })),
-      );
-      return outcomeOf(
-        await p.post(
-          jsonRequest(
-            `http://localhost/api/proxy/${p.name.split(" ")[0]}/v1/messages`,
-            token,
-            {},
-          ),
-          proxyArgs as never,
-        ),
-      );
-    },
-  }));
-
-  const cliRoute = {
-    // A live daemon token is already refused by F1, so its control is the log
-    // reason: "not reached past auth" versus "401 from verify".
-    name: "cli-router",
-    liveIsNot401: false,
-    call: async (token: string): Promise<Outcome> => {
-      const client = createRouterClient(cliRouter, {
-        context: {
-          headers: new Headers({ "X-Daemon-Token": token }),
-          userId: null as unknown as string,
-          organizationId: null,
-        },
-      });
-      const error = await client.auth.whoami().catch((e: unknown) => e);
-      if (!(error instanceof ORPCError)) {
-        return { status: 200, body: JSON.stringify(error) };
-      }
-      return { status: error.status, body: error.code };
-    },
-  };
-
-  it.each([...daemonRoutes, ...proxyRoutes, cliRoute])(
+  it.each(daemonRouteMatrix(() => ({ userId, threadId })))(
     "$name: the retired token gets the unknown token's 401; the live token does not",
     async ({ call, liveIsNot401 }) => {
       const unknown = await call(`unknown-${nanoid(32)}`);

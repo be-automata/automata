@@ -22,6 +22,36 @@ export function isRetiredTokenName(name: string | null | undefined): boolean {
   return typeof name === "string" && name.endsWith(RETIRED_TOKEN_SUFFIX);
 }
 
+/**
+ * The cell's own daemon credential (#693): `metadata.scope` on a token that
+ * only `POST /api/daemon-event` accepts. A cell's vault carries this token,
+ * never the worker's, so a guest that slipped past the sidecar's path match
+ * still cannot open cell-plan, thread-status, the proxies or the CLI.
+ */
+export const DAEMON_EVENT_SCOPE = "daemon-event";
+
+/** In a cell token's name, `${daemonRunKey}:cell-event:${stepKey}:${attempt}` (cellEventTokenName). */
+export const CELL_EVENT_TOKEN_INFIX = ":cell-event:";
+
+/**
+ * Whether a verified key is event-scoped: by its metadata, or by its name, so
+ * the refusal fails closed if the metadata ever stops round-tripping.
+ */
+export function isEventScopedKey(key: {
+  name?: string | null;
+  metadata?: unknown;
+}): boolean {
+  const metadata = key.metadata;
+  const scope =
+    typeof metadata === "object" && metadata !== null
+      ? (metadata as Record<string, unknown>).scope
+      : undefined;
+  return (
+    scope === DAEMON_EVENT_SCOPE ||
+    (typeof key.name === "string" && key.name.includes(CELL_EVENT_TOKEN_INFIX))
+  );
+}
+
 export type DaemonTokenContext = {
   userId: string;
   /**

@@ -15,7 +15,8 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     // Old clients don't send the timezone, so we fallback to UTC
     timezone = "UTC",
   } = json;
-  const ctx = await getDaemonTokenContext(request);
+  // The one route a cell's event-scoped token opens (#693).
+  const ctx = await getDaemonTokenContext(request, { allowEventScoped: true });
   if (!ctx) {
     return new Response("Unauthorized", { status: 401 });
   }

@@ -12,6 +12,7 @@ import { cellStepKey } from "@terragon/types/cell";
 import { isAgentWorking } from "@/agent/thread-status";
 import {
   retireDaemonTokenById,
+  revokeCellEventTokens,
   revokeDaemonTokenById,
 } from "@/lib/daemon-token";
 import {
@@ -32,9 +33,10 @@ import { waitUntil } from "@/lib/wait-until";
  * tear the daemon down and clean up.
  *
  * A cell run (#656) also sends `cellAttempt`: a non-terminal poll renews the
- * attempt's lease (`lease`), and the terminal read finishes the cell step and
- * RETIRES the token instead of deleting it (it stays valid on cell-teardown
- * only, for at most 15 minutes). Without `cellAttempt` nothing changes.
+ * attempt's lease (`lease`), and the terminal read finishes the cell step,
+ * deletes the cell's event-only tokens (#693), and RETIRES the run token
+ * instead of deleting it (it stays valid on cell-teardown only, for at most 15
+ * minutes). Without `cellAttempt` nothing changes.
  */
 export const POST = withDaemonAuthUnavailable(async function POST(
   request: NextRequest,
@@ -114,6 +116,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       apiKeyId: ctx.apiKeyId,
       organizationId: threadChat.organizationId,
       threadId,
+      threadChatId,
       attempt: cellAttempt,
       status: threadChat.status,
       terminal,
@@ -157,6 +160,7 @@ async function cellPoll({
   apiKeyId,
   organizationId,
   threadId,
+  threadChatId,
   attempt,
   status,
   terminal,
@@ -165,11 +169,14 @@ async function cellPoll({
   apiKeyId: string;
   organizationId: string;
   threadId: string;
+  threadChatId: string;
   attempt: number;
   status: string;
   terminal: boolean;
 }): Promise<NextResponse> {
   const stepKey = cellStepKey(apiKeyId);
+  /** The step's event-only cell tokens (#693). */
+  const cellTokens = { userId, threadId, threadChatId, stepKey };
   if (!terminal) {
     let lease: "renewed" | "refused" | "superseded" | "error";
     try {
@@ -224,7 +231,10 @@ async function cellPoll({
       logLabel: "daemon thread-status",
     });
     waitUntil(
-      revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
+      Promise.all([
+        revokeDaemonTokenById({ userId, apiKeyId }),
+        revokeCellEventTokens(cellTokens),
+      ]).catch((error) =>
         console.error("[daemon-token] revoke-on-terminal-read failed", {
           apiKeyId,
           error,
@@ -232,6 +242,18 @@ async function cellPoll({
       ),
     );
     return NextResponse.json({ error: "cell_step_conflict" }, { status: 409 });
+  }
+  // The cell's event-only tokens (#693) die BEFORE the retire: once retired,
+  // this token 401s here, so a failed revoke could never be retried.
+  try {
+    await revokeCellEventTokens(cellTokens);
+  } catch (error) {
+    console.error("[daemon-token] cell token revoke on terminal read failed", {
+      threadId,
+      stepKey,
+      errorName: error instanceof Error ? error.name : "unknown",
+    });
+    return NextResponse.json({ error: "cell_revoke_failed" }, { status: 500 });
   }
   try {
     await retireDaemonTokenById({ userId, apiKeyId });
