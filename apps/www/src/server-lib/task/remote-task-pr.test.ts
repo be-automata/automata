@@ -18,6 +18,7 @@ import { db } from "@/lib/db";
 import {
   openRemoteTaskPullRequest,
   remoteTaskBranchName,
+  taskRunPushBranch,
 } from "./remote-task-pr";
 
 const generateContent = vi.fn(async () => ({
@@ -305,5 +306,36 @@ describe("remoteTaskBranchName", () => {
     expect(remoteTaskBranchName("ABCDEF1234-5678")).toBe(
       "automata/task-abcdef12",
     );
+  });
+});
+
+describe("taskRunPushBranch", () => {
+  const threadId = "abcdef12-0000-0000-0000-000000000000";
+  const push = (patch: {
+    prNumber?: number;
+    branch?: string | null;
+    baseBranch?: string | null;
+  }) =>
+    taskRunPushBranch({
+      threadId,
+      prNumber: undefined,
+      branch: "main",
+      baseBranch: "main",
+      ...patch,
+    });
+
+  it("a base-branch run with no PR pushes the thread's task branch", () => {
+    expect(push({})).toBe(remoteTaskBranchName(threadId));
+  });
+  it("an existing PR on a non-base branch pushes that branch", () => {
+    expect(push({ prNumber: 7, branch: "feat/x" })).toBe("feat/x");
+  });
+  it("a non-base branch with no PR pushes that branch", () => {
+    expect(push({ branch: "feat/x" })).toBe("feat/x");
+  });
+  it("the base branch with a PR, or a blank branch, is null", () => {
+    expect(push({ prNumber: 7 })).toBeNull();
+    expect(push({ branch: null })).toBeNull();
+    expect(push({ branch: "  " })).toBeNull();
   });
 });

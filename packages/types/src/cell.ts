@@ -96,6 +96,33 @@ export const CELL_RUN_TTL_MS = 45 * 60 * 1000;
 /** A cell attempt unseen this long is dead (#656 R2): ≥ 30 polls at the worker's 5-10 s cadence. */
 export const CELL_LEASE_STALE_MS = 5 * 60 * 1000;
 
+/**
+ * OpenSandbox 1.2.1 metadata label value: empty or alphanumeric at both ends with
+ * `-_.` inside, at most 63 chars (upstream `validators.py:51-54,88-91`). A create
+ * with any other tag value is a 400 whose body quotes the value.
+ */
+export const CELL_LABEL_VALUE_PATTERN =
+  /^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$/;
+export const CELL_LABEL_MAX_LENGTH = 63;
+
+/** True for a non-empty value the upstream label rule accepts. */
+export function isCellLabelValue(v: string): boolean {
+  return (
+    v.length > 0 &&
+    v.length <= CELL_LABEL_MAX_LENGTH &&
+    CELL_LABEL_VALUE_PATTERN.test(v)
+  );
+}
+
+/**
+ * The one derivation of a cell run's `cell_step.step_key` and its `stepKey` tag
+ * (byte-equal). It does not validate: callers check `isCellLabelValue` on the
+ * result, so the refusal code stays theirs.
+ */
+export function cellStepKey(apiKeyId: string): string {
+  return `cell-${apiKeyId}`;
+}
+
 export interface CellKey {
   stepKey: string;
   attempt: number;
@@ -132,6 +159,7 @@ export type CellProviderErrorCode =
   | "invalid_config"
   | "not_ready"
   | "egress_not_enforced"
+  | "origin_refused"
   | "http_error";
 
 /**

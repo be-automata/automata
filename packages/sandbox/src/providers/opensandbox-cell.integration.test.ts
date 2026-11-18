@@ -887,6 +887,16 @@ describe(
           timeoutMs: EXEC_TIMEOUT_MS,
         });
         expect(selfCheck.exitCode, "self-check reports reachable").toBe(0);
+        // #656 PR-C: a cell with no policy has no sidecar, so revoke and
+        // quarantine answer 502 (retried for the whole budget); teardown still
+        // resolves once GET /sandboxes/{id} says SANDBOX_NOT_FOUND. A second
+        // teardown of the deleted cell resolves on the three 404s.
+        const started = Date.now();
+        await expect(provider.teardown(id)).resolves.toBeUndefined();
+        NOTES.no_policy_teardown_ms = Date.now() - started;
+        const again = Date.now();
+        await expect(provider.teardown(id)).resolves.toBeUndefined();
+        NOTES.no_policy_second_teardown_ms = Date.now() - again;
       } finally {
         await rawApi("DELETE", `/sandboxes/${id}`);
         NOTES.no_policy_netns_after_delete = (await snapshot()).netns.length;
