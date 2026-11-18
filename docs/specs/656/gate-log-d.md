@@ -60,3 +60,22 @@ No High findings: 1 Medium and 3 Low.
 - www: 4585
 - shared: 1737
 - tsc, `tsc-check --force`, `lint --force`
+
+## `/simplify`
+
+**Applied:**
+
+- One never-throwing `alertCellStepOnce` (`server-lib/cell-ops-alert.ts`) serves both routes. Both now log `skipped_unknown_attempt` for an unknown attempt.
+- `isTransientOpsAlertFailure` is exported from `ops-alert.ts`.
+- `CELL_MAX_ATTEMPTS` is exported and used in place of the three copies.
+- One zod `cellAttemptSchema` validates the attempt in both routes.
+- The dead `DaemonTokenContext.retired` field is deleted, so `isRetiredTokenName` in `verifyDaemonApiKey` is the only place the name is interpreted.
+- An unused re-export and an unreachable fallback are deleted.
+
+**Skipped:** moving the shared env and `extendSandboxLife` mocks into the test helpers, because that would edit other PRs' test files.
+
+**Gates after the pass** (outside the Claude sandbox), all exit 0:
+
+- www: 4584, including the real-auth refusal matrix
+- shared: 1737
+- tsc, `tsc-check --force`, `lint --force`

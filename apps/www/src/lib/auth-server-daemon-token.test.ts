@@ -193,13 +193,13 @@ describe("retired daemon tokens: refused unless allowRetired", () => {
     );
   });
 
-  it("allowRetired returns the key, and the context says retired", async () => {
+  it("allowRetired returns the key, and the context resolves", async () => {
     await expect(
       verifyDaemonApiKey(token, { allowRetired: true }),
     ).resolves.toEqual(expect.objectContaining({ id: apiKeyId }));
     await expect(
       getDaemonTokenContext(daemonRequest(token), { allowRetired: true }),
-    ).resolves.toEqual(expect.objectContaining({ apiKeyId, retired: true }));
+    ).resolves.toEqual(expect.objectContaining({ apiKeyId }));
   });
 
   it("a live key is unaffected either way (control)", async () => {
@@ -209,7 +209,7 @@ describe("retired daemon tokens: refused unless allowRetired", () => {
     ).resolves.not.toBe(null);
     await expect(
       getDaemonTokenContext(daemonRequest(liveToken)),
-    ).resolves.toEqual(expect.objectContaining({ retired: false }));
+    ).resolves.not.toBe(null);
   });
 
   it("an expired retired key is still null with allowRetired", async () => {

@@ -77,7 +77,6 @@ describe("POST /api/daemon/thread-status", () => {
       threadChatId,
       threadId,
       tokenType: "daemon",
-      retired: false,
       ...over,
     };
   }

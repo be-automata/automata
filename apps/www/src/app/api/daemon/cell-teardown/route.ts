@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/lib/db";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { authorizeDaemonThreadRequest } from "@/lib/daemon-thread-auth";
 import { revokeRetiredDaemonTokenById } from "@/lib/daemon-token";
-import { postOpsAlert } from "@/server-lib/knowledge/ops-alert";
+import {
+  alertCellStepOnce,
+  cellAttemptSchema,
+} from "@/server-lib/cell-ops-alert";
 import { waitUntil } from "@/lib/wait-until";
-import { cellStep } from "@terragon/shared/db/schema";
 import { revokeAttempt } from "@terragon/shared/model/cell-authority";
-import { runEffect } from "@terragon/shared/model/control-effects";
 import { cellStepKey } from "@terragon/types/cell";
 
 /**
@@ -41,7 +41,6 @@ const FAILED_STEPS = [
 ] as const;
 type FailedStep = (typeof FAILED_STEPS)[number];
 
-const attemptSchema = z.number().int().min(1).max(1000);
 const idsShape = {
   threadId: z.string().min(1),
   threadChatId: z.string().min(1),
@@ -52,14 +51,14 @@ const bodySchema = z.union([
     .object({
       ...idsShape,
       action: z.literal("revoke"),
-      attempt: attemptSchema,
+      attempt: cellAttemptSchema,
     })
     .strict(),
   z
     .object({
       ...idsShape,
       action: z.literal("report"),
-      attempt: attemptSchema,
+      attempt: cellAttemptSchema,
       outcome: z.literal("clean"),
     })
     .strict(),
@@ -67,7 +66,7 @@ const bodySchema = z.union([
     .object({
       ...idsShape,
       action: z.literal("report"),
-      attempt: attemptSchema,
+      attempt: cellAttemptSchema,
       outcome: z.literal("incomplete"),
       failedSteps: z
         .array(z.enum(FAILED_STEPS))
@@ -164,22 +163,7 @@ async function reportIncomplete({
   failedSteps: FailedStep[];
   organizationId: string | null;
 }): Promise<void> {
-  const failedStep =
-    FAILED_STEPS.find((step) => failedSteps.includes(step)) ?? failedSteps[0];
-
-  // `attempt` is caller-supplied: only an attempt that really opened can mint
-  // a ledger key.
-  let known = false;
-  try {
-    const [step] = await db
-      .select({ currentAttempt: cellStep.currentAttempt })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, stepKey))
-      .limit(1);
-    known = step !== undefined && attempt <= step.currentAttempt;
-  } catch (error) {
-    console.error("[cell] cell-teardown step read failed", { stepKey, error });
-  }
+  const failedStep = FAILED_STEPS.find((step) => failedSteps.includes(step));
 
   console.error("[cell] cell_teardown_incomplete", {
     event: "cell_teardown_incomplete",
@@ -187,47 +171,15 @@ async function reportIncomplete({
     attempt,
     failedStep,
     failedSteps,
-    ...(known ? {} : { alert: "skipped_unknown_attempt" }),
   });
-  if (!known || organizationId === null) return;
-
-  try {
-    await runEffect({
-      db,
-      organizationId,
-      mission: "cell-teardown",
-      step: stepKey,
-      effect: "incomplete-alert",
-      outputDigest: String(attempt),
-      payload: { stepKey, attempt, failedStep },
-      target: {
-        // A webhook cannot be read back.
-        findByMarker: async () => false,
-        apply: async (_key, payload) => {
-          const result = await postOpsAlert({
-            text: `cell teardown incomplete: step ${payload.stepKey}, attempt ${payload.attempt}, failed ${payload.failedStep}`,
-          });
-          if (result.sent) return;
-          if (
-            result.reason === "timeout" ||
-            result.reason === "request_failed" ||
-            result.reason === "non_2xx"
-          ) {
-            // Transient: the intent stays and the next report retries it.
-            throw new Error(`ops alert not sent: ${result.reason}`);
-          }
-          // unconfigured, invalid_url, redirect: retrying cannot fix those.
-          console.error("[cell] cell-teardown ops alert not sent", {
-            reason: result.reason,
-          });
-        },
-      },
-    });
-  } catch (error) {
-    console.error("[cell] cell-teardown alert failed", {
-      stepKey,
-      attempt,
-      error,
-    });
-  }
+  // An org-less thread logs the event and sends no alert.
+  if (organizationId === null) return;
+  await alertCellStepOnce({
+    organizationId,
+    stepKey,
+    attempt,
+    effect: "incomplete-alert",
+    text: `cell teardown incomplete: step ${stepKey}, attempt ${attempt}, failed ${failedStep}`,
+    logLabel: "cell-teardown",
+  });
 }

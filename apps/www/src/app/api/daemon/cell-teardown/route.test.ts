@@ -455,9 +455,7 @@ describe("POST /api/daemon/cell-teardown", () => {
       expect(await ledgerRows()).toHaveLength(0);
       expect(
         errorSpy.mock.calls.some(
-          (c) =>
-            c[0] === "[cell] cell_teardown_incomplete" &&
-            (c[1] as { alert?: string }).alert === "skipped_unknown_attempt",
+          (c) => c[0] === "[cell-teardown] skipped_unknown_attempt",
         ),
       ).toBe(true);
 

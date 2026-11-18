@@ -53,8 +53,6 @@ export type DaemonTokenContext = {
    * REJECTS 'daemon' tokens; daemon endpoints REQUIRE them.
    */
   tokenType: "daemon" | null;
-  /** The token was retired by a cell run's terminal read (name ends `:retired`). Optional so a hand-built context stays valid. */
-  retired?: boolean;
 };
 
 /**
@@ -72,7 +70,6 @@ type VerifiedApiKeyLike = {
   /** better-auth <= 1.4. Retained so a mixed-version rollout can't 401 everyone. */
   userId?: string | null;
   metadata?: Record<string, unknown> | null;
-  name?: string | null;
 } | null;
 
 /**
@@ -110,6 +107,5 @@ export function daemonTokenContextFromApiKey(
     threadChatId,
     threadId,
     tokenType,
-    retired: isRetiredTokenName(key?.name),
   };
 }

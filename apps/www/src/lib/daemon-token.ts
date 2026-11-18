@@ -2,12 +2,7 @@ import { db } from "@/lib/db";
 import { auth } from "@/lib/auth";
 import { apikey, thread as threadTable } from "@terragon/shared/db/schema";
 import { and, eq, like, sql, type SQL } from "drizzle-orm";
-import {
-  RETIRED_TOKEN_SUFFIX,
-  isRetiredTokenName,
-} from "@/lib/daemon-token-context";
-
-export { RETIRED_TOKEN_SUFFIX, isRetiredTokenName };
+import { RETIRED_TOKEN_SUFFIX } from "@/lib/daemon-token-context";
 
 /** A retired token's remaining life: the teardown margin of CELL_RUN_TTL_MS. */
 export const RETIRED_DAEMON_TOKEN_GRACE_MS = 15 * 60 * 1000;

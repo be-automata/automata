@@ -2,21 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
-import { eq } from "drizzle-orm";
 import { getThreadChat } from "@terragon/shared/model/threads";
-import { cellStep } from "@terragon/shared/db/schema";
 import { finishStep, stampSeen } from "@terragon/shared/model/cell-authority";
-import { runEffect } from "@terragon/shared/model/control-effects";
 import { cellStepKey } from "@terragon/types/cell";
 import { isAgentWorking } from "@/agent/thread-status";
 import {
   retireDaemonTokenById,
   revokeDaemonTokenById,
 } from "@/lib/daemon-token";
-import { postOpsAlert } from "@/server-lib/knowledge/ops-alert";
+import {
+  alertCellStepOnce,
+  cellAttemptSchema,
+} from "@/server-lib/cell-ops-alert";
 import { waitUntil } from "@/lib/wait-until";
-
-const CELL_ATTEMPT_MAX = 1000;
 
 /**
  * POST /api/daemon/thread-status   body: { threadId, threadChatId }
@@ -93,18 +91,14 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   const terminal = !isAgentWorking(threadChat.status);
 
   if (body.cellAttempt !== undefined) {
-    const cellAttempt = body.cellAttempt;
-    if (
-      typeof cellAttempt !== "number" ||
-      !Number.isInteger(cellAttempt) ||
-      cellAttempt < 1 ||
-      cellAttempt > CELL_ATTEMPT_MAX
-    ) {
+    const parsedAttempt = cellAttemptSchema.safeParse(body.cellAttempt);
+    if (!parsedAttempt.success) {
       return NextResponse.json(
         { error: "invalid_cell_attempt" },
         { status: 400 },
       );
     }
+    const cellAttempt = parsedAttempt.data;
     if (ctx.apiKeyId === null) {
       return NextResponse.json({ error: "no_run_key" }, { status: 403 });
     }
@@ -215,7 +209,14 @@ async function cellPoll({
       stepKey,
       attempt,
     });
-    await alertStepConflictOnce({ organizationId, stepKey, attempt });
+    await alertCellStepOnce({
+      organizationId,
+      stepKey,
+      attempt,
+      effect: "step-conflict-alert",
+      text: `cell step conflict: step ${stepKey}, attempt ${attempt}`,
+      logLabel: "daemon thread-status",
+    });
     waitUntil(
       revokeDaemonTokenById({ userId, apiKeyId }).catch((error) =>
         console.error("[daemon-token] revoke-on-terminal-read failed", {
@@ -240,65 +241,4 @@ async function cellPoll({
     return NextResponse.json({ error: "cell_retire_failed" }, { status: 500 });
   }
   return NextResponse.json({ status, terminal, lease: "finished" });
-}
-
-/**
- * One ops alert per (stepKey, attempt) through the #652 ledger. Only an
- * attempt that really opened (attempt <= current_attempt of the step) can
- * mint a key, so a caller-supplied number cannot grow the ledger. Never throws.
- */
-async function alertStepConflictOnce({
-  organizationId,
-  stepKey,
-  attempt,
-}: {
-  organizationId: string;
-  stepKey: string;
-  attempt: number;
-}): Promise<void> {
-  try {
-    const [step] = await db
-      .select({ currentAttempt: cellStep.currentAttempt })
-      .from(cellStep)
-      .where(eq(cellStep.stepKey, stepKey))
-      .limit(1);
-    if (!step || attempt > step.currentAttempt) return;
-    await runEffect({
-      db,
-      organizationId,
-      mission: "cell-teardown",
-      step: stepKey,
-      effect: "step-conflict-alert",
-      outputDigest: String(attempt),
-      payload: { stepKey, attempt },
-      target: {
-        // A webhook cannot be read back.
-        findByMarker: async () => false,
-        apply: async (_key, payload) => {
-          const result = await postOpsAlert({
-            text: `cell step conflict: step ${payload.stepKey}, attempt ${payload.attempt}`,
-          });
-          if (result.sent) return;
-          if (
-            result.reason === "timeout" ||
-            result.reason === "request_failed" ||
-            result.reason === "non_2xx"
-          ) {
-            // Transient: the intent stays and the next report retries it.
-            throw new Error(`ops alert not sent: ${result.reason}`);
-          }
-          // unconfigured, invalid_url, redirect: retrying cannot fix those.
-          console.error("[daemon thread-status] ops alert not sent", {
-            reason: result.reason,
-          });
-        },
-      },
-    });
-  } catch (error) {
-    console.error("[daemon thread-status] step conflict alert failed", {
-      stepKey,
-      attempt,
-      error,
-    });
-  }
 }
