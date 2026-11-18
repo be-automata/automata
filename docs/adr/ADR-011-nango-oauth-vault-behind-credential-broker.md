@@ -512,7 +512,32 @@ If check 3 fails, §2 is reopened before any acceptance.
 in Nango Cloud before acceptance (Testing: the report comes "before any production change"). It
 is kept under a written risk acceptance owned by the operator, limited to the #650 pilot, with an
 end date; it is revoked and re-consented through our own OAuth client (D-2) when that client
-exists.
+exists. The acceptance is recorded below (#673).
+
+#### Risk acceptance: the customer Google connection in Nango (OD-0c, #673)
+
+- **Owner:** the TL/operator (repository owner, GitHub `espinozasenior`). Decided 2026-11-17;
+  recorded 2026-11-18.
+- **What it covers:** the single customer connection on the `google-drive` integration (provider
+  `google-drive`, created 2026-11-13) in the same Nango Cloud environment as the Phase 1 key.
+- **Issuing app: Nango's shared developer app, not ours.** Checked 2026-11-18 with
+  `GET /integrations/google-drive`: no custom OAuth client id or secret is configured, and no
+  field is reported missing. The integration's scope is Google's restricted `drive` scope, not the
+  `drive.file` that D-2 targets. Only names and yes/no answers were read; the connection's
+  credentials were not.
+- **Scope:** the #650 pilot only, which delivers the weekly KPI reports to the customer's Drive
+  folder. No other use, run or provider effect. The token is never injected into a cell (D-6).
+- **Known gaps:**
+  - Nango holds the token (Cloud custody, Consequences "Custody and residency").
+  - A token issued through Nango's shared developer app cannot be exported: after an exit it
+    cannot refresh, because the OAuth client belongs to Nango (D-2).
+  - The `drive` scope is broader than the D-2 target.
+  - The connection predates acceptance and the check 3 scoped key.
+- **End date:** 2026-12-31, or earlier when Automata's own Google OAuth client (D-2) exists,
+  whichever comes first.
+- **End action:** the connection is revoked (deleted in Nango, and the grant revoked), and the
+  customer re-consents through Automata's own client. The operator sets a calendar reminder for
+  2026-12-31 (#673).
 
 ### New invariants
 
