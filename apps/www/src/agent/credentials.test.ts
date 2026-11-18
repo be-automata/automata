@@ -9,7 +9,10 @@ import {
 } from "@terragon/shared/model/organizations";
 import { insertAgentProviderCredentials } from "@terragon/shared/model/agent-provider-credentials";
 import { nanoid } from "nanoid";
-import { getAndVerifyCredentials } from "./credentials";
+import {
+  getAndVerifyCredentials,
+  getAndVerifyCredentialsWithSource,
+} from "./credentials";
 
 async function createOrg(userId: string) {
   const org = await createOrganization({
@@ -226,5 +229,105 @@ describe("getAndVerifyCredentials — org fence (WI-5 batch 3a)", () => {
     await expect(
       getAndVerifyCredentials({ agent: "amp", model: null, userId: other.id }),
     ).rejects.toThrow(/No Amp API key configured\./);
+  });
+});
+
+/**
+ * #442: the source row id each real resolution branch reports, which the
+ * delivery route records and a classified refusal later marks.
+ * Card: protects=every delivering branch (Claude API key, OAuth, setup-token;
+ * Amp) returns ITS row's id, and built-in credits / codex return null;
+ * fails_when=a branch returns no id or another row's, so runs on it would
+ * silently never be marked; no_claim=the refreshed-OAuth reload path (needs
+ * a live token endpoint).
+ */
+describe("getAndVerifyCredentialsWithSource — source row id (#442)", () => {
+  let userId: string;
+  let orgId: string;
+
+  beforeEach(async () => {
+    userId = (await createTestUser({ db })).user.id;
+    orgId = await createOrg(userId);
+  });
+
+  async function connect(
+    credentialData: Parameters<
+      typeof insertAgentProviderCredentials
+    >[0]["credentialData"],
+  ) {
+    return insertAgentProviderCredentials({
+      db,
+      userId,
+      organizationId: orgId,
+      credentialData,
+      encryptionKey: env.ENCRYPTION_MASTER_KEY,
+    });
+  }
+
+  function resolve(agent: "claudeCode" | "amp" | "codex") {
+    return getAndVerifyCredentialsWithSource({
+      agent,
+      model: null,
+      userId,
+      organizationId: orgId,
+    });
+  }
+
+  const BASE = { isActive: true, lastRefreshedAt: null, metadata: null };
+
+  it("Claude API key", async () => {
+    const row = await connect({
+      ...BASE,
+      agent: "claudeCode",
+      type: "api-key",
+      apiKey: "sk-ant-test",
+      expiresAt: null,
+    });
+    expect((await resolve("claudeCode")).credentialId).toBe(row.id);
+  });
+
+  it("Claude OAuth (no refresh needed)", async () => {
+    const row = await connect({
+      ...BASE,
+      agent: "claudeCode",
+      type: "oauth",
+      accessToken: "at",
+      refreshToken: "rt",
+      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000),
+      lastRefreshedAt: new Date(),
+    });
+    const resolved = await resolve("claudeCode");
+    expect(resolved.credentials.type).toBe("json-file");
+    expect(resolved.credentialId).toBe(row.id);
+  });
+
+  it("Claude setup-token", async () => {
+    const row = await connect({
+      ...BASE,
+      agent: "claudeCode",
+      type: "setup-token",
+      accessToken: "sk-ant-oat-test",
+      expiresAt: null,
+    });
+    expect((await resolve("claudeCode")).credentialId).toBe(row.id);
+  });
+
+  it("Amp", async () => {
+    const row = await connect({
+      ...BASE,
+      agent: "amp",
+      type: "api-key",
+      apiKey: "sgamp_test",
+      expiresAt: null,
+    });
+    expect((await resolve("amp")).credentialId).toBe(row.id);
+  });
+
+  it("built-in credits and codex report no source row", async () => {
+    expect(await resolve("claudeCode")).toEqual({
+      credentials: { type: "built-in-credits" },
+      credentialId: null,
+    });
+    expect((await resolve("codex")).credentialId).toBeNull();
   });
 });

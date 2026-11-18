@@ -72,7 +72,7 @@ Already done (do NOT redo): S1 ledger and capabilities, its migration, its expec
 
 ## Contract
 
-### Schema (`packages/shared/src/db/schema.ts`, after `agentRun`) and migration `deploy/migrations/2026-11-20-agent-messages.sql`
+### Schema (`packages/shared/src/db/schema.ts`, after `agentRun`) and migration `deploy/migrations/2026-11-21-agent-messages.sql`
 
 ```sql
 -- migrate:expand
@@ -92,7 +92,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 Names/types in the SQL file must match drizzle exactly (`schema-drift` CI job). drizzle:
 `bigserial("id", { mode: "number" })`, `bigint("msg_id", { mode: "number" }).primaryKey().references(() => agentMessages.id)` (schema-drift compares conname + pg_get_constraintdef: `packages/migrate/src/drift/catalog.ts:108-118`), `uniqueIndex("agent_messages_idem")`,
 `index("agent_messages_inbox").on(t.toRun, t.id).where(sql\`consumed_at is null\`)`. Append
-`"2026-11-20-agent-messages"`to`EXPECTED_MIGRATION_IDS`(it must sort LAST:`packages/migrate/src/files.test.ts:108`). Migration must pass
+`"2026-11-21-agent-messages"`to`EXPECTED_MIGRATION_IDS`(it must sort LAST:`packages/migrate/src/files.test.ts:108`). Migration must pass
 `node deploy/lint-migrations.ts`.
 
 ### Module `packages/shared/src/model/agent-bus/messages.ts` (never imports www) — as shipped
@@ -210,7 +210,7 @@ delivered as a user follow-up and treated as data. Rollback = revert; unconsumed
 
 ## Phases (from the validator)
 
-1. Schema and migration — `schema.ts`, `deploy/migrations/2026-11-20-agent-messages.sql`, `expected-migrations.ts`.
+1. Schema and migration — `schema.ts`, `deploy/migrations/2026-11-21-agent-messages.sql`, `expected-migrations.ts`.
 2. Bus module + DB tests — `agent-bus/messages.ts`, `agent-bus/messages.test.ts`.
 3. Crash drills — `agent-bus/__fixtures__/messages-crash-child.ts`, `agent-bus/messages.crash.test.ts`.
 4. www binding + cron — `server-lib/agent-bus/delivery.ts`, `delivery.test.ts`, `cron.ts`, `cron.test.ts`.
@@ -229,5 +229,5 @@ delivered as a user follow-up and treated as data. Rollback = revert; unconsumed
   the target thread row before claiming (per-target id order); sweep kicks `recentlyDeliveredTargets()`
   only; `recentlyDeliveredTargets` bounded (limit 200, newest first); broadcast asserted in skip cases.
 - Merge of `origin/main` @ `85b07e6c` (2026-11-17): main gained `2026-11-18-control-effects` (#652) and
-  `2026-11-19-cell-step-last-seen` (#656 PR-A); this migration was renamed `2026-11-20-agent-messages` so it still
+  `2026-11-19-cell-step-last-seen` (#656 PR-A); this migration was renamed (now `2026-11-21-agent-messages`, after a second merge of main brought `2026-11-20-cell-step-open-nonce` and `2026-11-20-credential-unavailable`) so it still
   sorts last (`packages/migrate/src/files.test.ts`). Not applied anywhere yet, so the rename is safe.

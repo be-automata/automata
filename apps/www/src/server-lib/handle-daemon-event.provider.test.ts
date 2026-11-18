@@ -6,12 +6,32 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import type { User } from "@terragon/shared";
 import type { ClaudeMessage } from "@terragon/daemon/shared";
-import { getThreadChat } from "@terragon/shared/model/threads";
+import {
+  getThreadChat,
+  setThreadChatDeliveredCredential,
+} from "@terragon/shared/model/threads";
+import { insertAgentProviderCredentials } from "@terragon/shared/model/agent-provider-credentials";
+import * as schema from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
 import { handleDaemonEvent } from "./handle-daemon-event";
 import { mockWaitUntil, waitUntilResolved } from "@/test-helpers/mock-next";
 import { parseProviderUnavailableInfo } from "@/agent/msg/classify-provider-result";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
+import { markDeliveredCredentialUnavailable } from "@/server-lib/credential-unavailability";
 
+// #442: the real mark by default; one test makes it reject.
+vi.mock("@/server-lib/credential-unavailability", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/credential-unavailability")
+    >();
+  return {
+    ...actual,
+    markDeliveredCredentialUnavailable: vi.fn(
+      actual.markDeliveredCredentialUnavailable,
+    ),
+  };
+});
 vi.mock("@/server-lib/checkpoint-thread", () => ({
   checkpointThread: vi.fn().mockResolvedValue(undefined),
 }));
@@ -261,5 +281,204 @@ describe("handleDaemonEvent — provider-unavailable (#441)", () => {
       },
     ]);
     expect(chat.errorMessage).toBe("agent-generic-error");
+  });
+});
+
+/**
+ * #442 (epic #440 C2): a classified result marks the credential the run was
+ * DELIVERED, on both chat shapes (a legacy thread is production's shape).
+ */
+describe("handleDaemonEvent — marks the delivered credential (#442)", () => {
+  let user: User;
+  let lastResponse: Awaited<ReturnType<typeof handleDaemonEvent>> | undefined;
+  const KEY = "test-encryption-key-32-chars-long";
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    user = (await createTestUser({ db })).user;
+    await mockWaitUntil();
+  });
+
+  async function connect() {
+    return insertAgentProviderCredentials({
+      db,
+      userId: user.id,
+      credentialData: {
+        agent: "claudeCode",
+        type: "oauth",
+        accessToken: "at",
+        refreshToken: "rt",
+        lastRefreshedAt: null,
+        expiresAt: null,
+        metadata: null,
+        isActive: true,
+      },
+      encryptionKey: KEY,
+    });
+  }
+
+  async function credential(id: string) {
+    const found = await db.query.agentProviderCredentials.findFirst({
+      where: eq(schema.agentProviderCredentials.id, id),
+    });
+    return found!;
+  }
+
+  /** A worker-plane run delivered `deliveredId`, then finishing with `messages`. */
+  async function runDelivered(
+    deliveredId: string | null,
+    messages: ClaudeMessage[],
+    enableThreadChatCreation = false,
+  ) {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+      enableThreadChatCreation,
+    });
+    await setThreadChatDeliveredCredential({
+      db,
+      userId: user.id,
+      threadId,
+      threadChatId,
+      credentialId: deliveredId,
+    });
+    lastResponse = await handleDaemonEvent({
+      threadId,
+      threadChatId,
+      userId: user.id,
+      timezone: "UTC",
+      contextUsage: null,
+      messages,
+    });
+    await waitUntilResolved();
+    const chat = await getThreadChat({
+      db,
+      userId: user.id,
+      threadId,
+      threadChatId,
+    });
+    return chat!;
+  }
+
+  const WEEKLY_RESET_S = Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60;
+  const weekly = (): ClaudeMessage[] => [
+    {
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "rejected",
+        rateLimitType: "seven_day",
+        resetsAt: WEEKLY_RESET_S,
+      },
+      session_id: SESSION,
+    },
+    result("You've hit your weekly limit · resets 5pm (UTC)"),
+  ];
+
+  // Card: protects=AC6 on production's (legacy) shape: a weekly limit marks
+  // the delivered row until the reset; fails_when=nothing is marked, the
+  // until is not the reset, or the chat is not provider-unavailable;
+  // no_claim=dispatch (C3).
+  it("a weekly limit marks the delivered credential until its reset (legacy thread)", async () => {
+    const cred = await connect();
+    const chat = await runDelivered(cred.id, weekly());
+    expect(chat.errorMessage).toBe("provider-unavailable");
+    const after = await credential(cred.id);
+    expect(after.unavailableReason).toBe("usage_limit");
+    expect(after.unavailableUntil?.getTime()).toBe(WEEKLY_RESET_S * 1000);
+  });
+
+  it("the same on a chat-mode thread", async () => {
+    const cred = await connect();
+    await runDelivered(cred.id, weekly(), true);
+    expect((await credential(cred.id)).unavailableReason).toBe("usage_limit");
+  });
+
+  // Card: protects=indefinite kinds (subscription disabled, rejected
+  // credential) mark with no until; fails_when=either is timed or skipped;
+  // no_claim=the admin clear (shared model suite).
+  it("subscription disabled and a rejected credential mark indefinitely", async () => {
+    const disabled = await connect();
+    await runDelivered(disabled.id, [
+      result(
+        "Your organization has disabled Claude subscription access for Claude Code · Contact your admin",
+      ),
+    ]);
+    const a = await credential(disabled.id);
+    expect(a.unavailableReason).toBe("subscription_disabled");
+    expect(a.unavailableUntil).toBeNull();
+
+    const rejected = await connect();
+    // The CLI's 401 text, NOT "OAuth token revoked" (that one takes the
+    // retry path, which clears the error and so never marks).
+    await runDelivered(rejected.id, [
+      result(
+        "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+      ),
+    ]);
+    const b = await credential(rejected.id);
+    expect(b.unavailableReason).toBe("auth_rejected");
+    expect(b.unavailableUntil).toBeNull();
+  });
+
+  // Card: protects=epic decision: credit exhaustion is the built-in key's,
+  // never a row mark; and an unclassified error marks nothing;
+  // fails_when=either marks the delivered row; no_claim=the operator alert (C4).
+  it("credit exhausted marks nothing", async () => {
+    const cred = await connect();
+    const credit = await runDelivered(cred.id, [
+      result("Credit balance is too low"),
+    ]);
+    expect(credit.errorMessage).toBe("provider-unavailable");
+    expect((await credential(cred.id)).unavailableReason).toBeNull();
+  });
+
+  it("an unclassified error marks nothing", async () => {
+    const cred = await connect();
+    const chat = await runDelivered(cred.id, [
+      result("API Error: 500 upstream"),
+    ]);
+    expect(chat.errorMessage).toBe("agent-generic-error");
+    expect((await credential(cred.id)).unavailableReason).toBeNull();
+  });
+
+  // Card: protects=a failed mark never fails the event: the chat still ends
+  // provider-unavailable and the finish path runs; fails_when=the mark's
+  // error propagates out of handleDaemonEvent; no_claim=retrying the mark.
+  it("a failed mark is logged and the event still succeeds", async () => {
+    const cred = await connect();
+    vi.mocked(markDeliveredCredentialUnavailable).mockRejectedValueOnce(
+      new Error("db down"),
+    );
+    const chat = await runDelivered(cred.id, weekly());
+    expect(lastResponse?.success).toBe(true);
+    expect(chat.errorMessage).toBe("provider-unavailable");
+    expect(chat.status).toBe("working-error");
+    expect(checkpointThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("a run with no delivered credential (built-in credits) marks nothing", async () => {
+    const cred = await connect();
+    const chat = await runDelivered(null, weekly());
+    expect(chat.errorMessage).toBe("provider-unavailable");
+    expect((await credential(cred.id)).unavailableReason).toBeNull();
+  });
+
+  // Card: protects=epic decision 3, attribution by delivered id: an operator
+  // switching credentials mid-run never marks the new row;
+  // fails_when=the newly active row is marked or the delivered one is not;
+  // no_claim=what the next run is delivered (C3).
+  it("a mid-run credential switch marks the delivered row, not the new one", async () => {
+    const delivered = await connect();
+    // The operator connects a new credential during the run: it becomes the
+    // active one and the delivered row is deactivated.
+    const switched = await connect();
+    expect((await credential(delivered.id)).isActive).toBe(false);
+    await runDelivered(delivered.id, weekly());
+    expect((await credential(delivered.id)).unavailableReason).toBe(
+      "usage_limit",
+    );
+    expect((await credential(switched.id)).unavailableReason).toBeNull();
   });
 });

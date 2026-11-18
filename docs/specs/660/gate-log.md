@@ -91,7 +91,7 @@ delivered target is kicked once with 0 broadcasts) · `pnpm turbo tsc-check lint
 ## Merged tree (`caf12bdb` = this branch + `origin/main` @ `85b07e6c`)
 
 main gained `2026-11-18-control-effects` (#652) and `2026-11-19-cell-step-last-seen` (#656 PR-A); this branch's
-migration was renamed `2026-11-20-agent-messages` to keep sorting last. Every gate rerun on the merged tree,
+migration was renamed `2026-11-21-agent-messages` to keep sorting last. Every gate rerun on the merged tree,
 each command's own exit code captured:
 
 | Gate | Exit | Output |

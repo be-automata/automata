@@ -32,7 +32,7 @@ import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
-import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
+import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
   ThreadSourceMetadata,
@@ -58,6 +58,7 @@ import {
   setThreadActiveRun,
   clearThreadTerminalForResume,
 } from "@terragon/shared/model/threads";
+import { recordDeliveredCredential } from "@/server-lib/credential-unavailability";
 import { buildPrKey } from "@terragon/shared/model/supersede-recheck";
 import type {
   SelfHealAuditRunInput,
@@ -1193,12 +1194,14 @@ export async function dispatchAgentRun({
     }
     // A task run that starts on its base branch works on its own branch, so
     // the finish hook can turn what it pushed into a pull request.
+    const push = taskRunPushBranch({
+      threadId,
+      prNumber,
+      branch,
+      baseBranch: thread?.repoBaseBranchName,
+    });
     const workBranch =
-      isPlainTaskRun &&
-      prNumber === undefined &&
-      branch === thread?.repoBaseBranchName
-        ? remoteTaskBranchName(threadId)
-        : undefined;
+      isPlainTaskRun && push !== null && push !== branch ? push : undefined;
     // #380: the self-heal plan's single-use token is split off here — the
     // wire shape carries the plan, the envelope carries the token.
     const selfHealSplit =
@@ -1255,13 +1258,26 @@ export async function dispatchAgentRun({
     // triggerAgentRun derives it from the input when no plan metadata is
     // given, so a self-heal run stamps self-heal-* on either trigger path.
     // Review runs keep their plan's metadata.
-    // Resolved once per dispatch (#374); a resolve failure takes the same
-    // failure path as a trigger failure.
-    const hatchetTarget = await resolveHatchetConfig({
-      db,
-      organizationId: thread?.organizationId ?? null,
-      repoFullName,
-    });
+    // #442: shed the previous run's delivered-credential record BEFORE the
+    // run exists (after the trigger it would race the run's credential pull),
+    // so only a delivery made during THIS run can attribute a mark. Never
+    // throws. The hatchet target is resolved once per dispatch (#374); a
+    // resolve failure takes the same failure path as a trigger failure.
+    const [, hatchetTarget] = await Promise.all([
+      recordDeliveredCredential({
+        db,
+        userId,
+        threadId,
+        threadChatId,
+        credentialId: null,
+        logLabel: "hatchet",
+      }),
+      resolveHatchetConfig({
+        db,
+        organizationId: thread?.organizationId ?? null,
+        repoFullName,
+      }),
+    ]);
     const { externalId } =
       selfHealPlan.selfHeal !== undefined && selfHealOrgId !== null
         ? await triggerSelfHealBounded({

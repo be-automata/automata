@@ -1,21 +1,22 @@
 /**
  * OpenSandbox cell adapter (#634 S2): `ICellProvider` over the OpenSandbox 1.2.1
  * lifecycle API and execd. A pure HTTP adapter: no env reads, no DB, no wiring.
- * Imports only the cell contract (type-only) and Node built-ins, so it never
+ * Imports only the cell contract (types, plus the label rule) and Node built-ins, so it never
  * pulls e2b or Daytona.
  */
-import type {
-  CellCreatePlan,
-  CellExecOptions,
-  CellExecResult,
-  CellList,
-  CellListEntry,
-  CellListOptions,
-  CellLogger,
-  CellProviderErrorCode,
-  CellTags,
-  CellVaultEntry,
-  ICellProvider,
+import {
+  isCellLabelValue,
+  type CellCreatePlan,
+  type CellExecOptions,
+  type CellExecResult,
+  type CellList,
+  type CellListEntry,
+  type CellListOptions,
+  type CellLogger,
+  type CellProviderErrorCode,
+  type CellTags,
+  type CellVaultEntry,
+  type ICellProvider,
 } from "@terragon/types/cell";
 
 /**
@@ -52,6 +53,7 @@ const BACKOFF_CAP_MS = 2_000;
  * it): this file imports the contract type-only.
  */
 export const OPENSANDBOX_HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
+const SANDBOX_NOT_FOUND_SUFFIX = "::SANDBOX_NOT_FOUND";
 const CONNECTION_FAILED = "BACKEND_CONNECTION_FAILED";
 
 /** The message carries the op, code and status only: never a body or header. */
@@ -234,7 +236,16 @@ function assertPlanFields(plan: CellCreatePlan): void {
     ["worker", "epoch", "stepKey", "attempt", "expiresAt", "deployment"].every(
       (k) => isNonBlank(tags[k]),
     );
-  if (!tagsOk || !isPositive(res.cpu) || !isPositive(res.memoryMiB)) {
+  const labelsOk = Object.entries(tags).every(
+    ([k, v]) =>
+      isCellLabelValue(k) && typeof v === "string" && isCellLabelValue(v),
+  );
+  if (
+    !tagsOk ||
+    !labelsOk ||
+    !isPositive(res.cpu) ||
+    !isPositive(res.memoryMiB)
+  ) {
     throw new CellProviderError("invalid_plan", "create");
   }
 }
@@ -509,7 +520,9 @@ export function createOpenSandboxCellProvider(
         body: o.body,
         timeoutMs: o.timeoutMs ?? requestTimeoutMs,
       });
-    } catch {
+    } catch (error) {
+      // A refusal the injected fetch raised itself (a fenced origin) keeps its code.
+      if (error instanceof CellProviderError) throw error;
       throw new CellProviderError("http_error", op); // no cause: it may echo a request
     }
     if (res.status !== 502) return { done: { res } };
@@ -538,7 +551,11 @@ export function createOpenSandboxCellProvider(
     );
   }
 
-  /** For an idempotent call where 404 means the work is already done; true when it was 404. */
+  /**
+   * For an idempotent call where a SANDBOX_NOT_FOUND 404 means the work is already
+   * done; true when it was. A bare 404 (the tunnel catch-all) is not proof: it
+   * fails, and teardown then asks `exists`.
+   */
   async function send404AsDone(
     op: string,
     method: string,
@@ -547,8 +564,8 @@ export function createOpenSandboxCellProvider(
   ): Promise<boolean> {
     const { res } = await send(op, method, path, { body, retry: "idempotent" });
     if (res.status === 404) {
-      await discard(res);
-      return true;
+      if (await isSandboxNotFound(res, op)) return true;
+      throw new CellProviderError("http_error", op, 404);
     }
     await requireOk(op, res);
     await discard(res);
@@ -645,6 +662,10 @@ export function createOpenSandboxCellProvider(
     return gone ? "gone" : "deleted";
   }
 
+  /**
+   * Deny-all is refused while the vault holds a binding, so callers revoke first;
+   * `teardown` already does (gate-log-g run 3).
+   */
   async function quarantine(cellId: string): Promise<void> {
     await send404AsDone(
       "quarantine",
@@ -652,6 +673,29 @@ export function createOpenSandboxCellProvider(
       cellPath(cellId, "/networkpolicy?dropEstablished=true"),
       { defaultAction: "deny", egress: [] },
     );
+  }
+
+  /** Upstream's not-found code only: a bare 404 is the tunnel catch-all, not proof. */
+  async function isSandboxNotFound(
+    res: Response,
+    op: string,
+  ): Promise<boolean> {
+    try {
+      const text = await readCappedText(op, res, MAX_ERROR_BODY_BYTES);
+      const parsed: unknown = JSON.parse(text);
+      if (!isRecord(parsed)) return false;
+      const detail = isRecord(parsed.detail) ? parsed.detail.code : undefined;
+      return [parsed.code, detail].some(
+        (c) => typeof c === "string" && c.endsWith(SANDBOX_NOT_FOUND_SUFFIX),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** True while the cell is there; false only for upstream's SANDBOX_NOT_FOUND 404. */
+  async function exists(cellId: string): Promise<boolean> {
+    return !(await send404AsDone("exists", "GET", cellPath(cellId)));
   }
 
   async function revoke(cellId: string): Promise<void> {
@@ -746,11 +790,33 @@ export function createOpenSandboxCellProvider(
     }
   }
 
-  /** Public teardown: every step runs, then one error or an AggregateError. */
+  /**
+   * Public teardown: every step runs. If any failed, the cell may be gone anyway
+   * (a no-policy cell has no sidecar, so revoke and quarantine answer 502): poll
+   * `exists` within the retry budget and resolve once it is false. Otherwise one
+   * error or an AggregateError, unchanged.
+   */
   async function teardownStrict(cellId: string): Promise<void> {
     const failures = await runTeardown(cellId, [revoke, quarantine, del]);
     const [first] = failures;
     if (!first) return;
+    const gone = await withinBudget<boolean, undefined>(
+      retryBudgetMs,
+      async () => {
+        let present: boolean;
+        try {
+          present = await exists(cellId);
+        } catch {
+          // Transient (or a bare 404): ask again until the budget is spent.
+          return { retryInMs: BACKOFF_BASE_MS, last: undefined };
+        }
+        return present
+          ? { retryInMs: BACKOFF_BASE_MS, last: undefined }
+          : { done: true };
+      },
+      () => false,
+    );
+    if (gone) return;
     if (failures.length === 1) throw first;
     throw new AggregateError(failures, "teardown");
   }
