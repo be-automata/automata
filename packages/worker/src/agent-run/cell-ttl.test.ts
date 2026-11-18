@@ -2,6 +2,11 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 
 import { buildAgentRunDefinition } from "./definition";
+import {
+  CELL_ABNORMAL_POST_MAX_MS,
+  CELL_TEARDOWN_DEADLINE_MS,
+  CELL_TEARDOWN_WORST_CASE_MS,
+} from "./cell-teardown";
 
 // The workflow module runs Hatchet.init() at import: give it a syntactically
 // valid unsigned token (no network), as workflow.test.ts does.
@@ -53,5 +58,19 @@ describe("cell TTL pin (T-TTL, AC-16)", () => {
   // card: protects=the parser reads the definition's own string, so a changed timeout would fail the pin; fails_when=parseDuration ignores its input; no_claim=anything about the engine
   it("negative control: a 40m timeout would not satisfy the pin", () => {
     expect(parseDuration("40m") + TEARDOWN_MARGIN_MS).not.toBe(CELL_RUN_TTL_MS);
+  });
+
+  // card: protects=the cell teardown's worst case (deadline, then A and P on their grace) stays well under onFailure's wait for the run's own teardown; fails_when=the deadline or the A cap grows until onFailure posts run-failed first; no_claim=real wall time
+  it("M3: the teardown budget fits inside onFailure's typed-terminal wait", async () => {
+    const wf = await import("./workflow");
+    expect(CELL_TEARDOWN_DEADLINE_MS).toBeLessThanOrEqual(70_000);
+    expect(CELL_ABNORMAL_POST_MAX_MS).toBeLessThanOrEqual(30_000);
+    expect(CELL_TEARDOWN_WORST_CASE_MS).toBeLessThan(
+      wf.ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    );
+    // and leaves at least 30 s of margin
+    expect(CELL_TEARDOWN_WORST_CASE_MS + 30_000).toBeLessThanOrEqual(
+      wf.ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    );
   });
 });

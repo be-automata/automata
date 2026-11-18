@@ -181,7 +181,7 @@ describe("teardownCellRun", () => {
   });
 
   // card: protects=a hanging provider step ends the teardown within the 90 s deadline and P is still sent; fails_when=the teardown waits on the hang or P is skipped; no_claim=wall time on a real box
-  it("T-DEADLINE: a hung step ends the teardown by 90 s, B counts as survivor, P is sent", async () => {
+  it("T-DEADLINE: a hung step ends the teardown by the deadline, B counts as survivor, P is sent", async () => {
     vi.useFakeTimers();
     const h = harness({ quarantine: () => new Promise<void>(() => {}) });
     const done = teardownCellRun(KEY, h.deps);

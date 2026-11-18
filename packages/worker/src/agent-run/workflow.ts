@@ -471,9 +471,15 @@ class BoundedRunSet extends Set<string> {
 const retiredRuns = new BoundedRunSet(4096);
 /** #656 E16-409: runs whose token www deleted on `cell_step_conflict`. */
 const tokenGoneRuns = new BoundedRunSet(4096);
+/** #656 E13: runs a newer attempt fenced; onFailure posts nothing for them (the thread is the newer attempt's). */
+const fencedRuns = new BoundedRunSet(4096);
 
 /** Test seam: the process-wide cell run registries onFailure consults. */
-export const _cellRunSetsForTests = { retiredRuns, tokenGoneRuns };
+export const _cellRunSetsForTests = {
+  retiredRuns,
+  tokenGoneRuns,
+  fencedRuns,
+};
 
 /** The cell executor, wired with the real www clients and the OpenSandbox adapter. */
 const cellExecutor: RunExecutor = createCellExecutor({
@@ -490,7 +496,6 @@ const cellExecutor: RunExecutor = createCellExecutor({
     postEgress: (opts, events) => postEgressEvents(opts, events),
     postAbnormal: (state, end, deps) => postAbnormalEnd(state, end, deps),
   },
-  loadCellConfig: () => currentRunExecutors().loadCellConfig(),
   makeProvider: (cfg) =>
     createOpenSandboxCellProvider(cfg, {
       fetch: (input, init) => fetch(input, init),
@@ -507,6 +512,7 @@ const cellExecutor: RunExecutor = createCellExecutor({
   randomId: () => randomBytes(18).toString("base64url"),
   retiredRuns,
   tokenGoneRuns,
+  fencedRuns,
 });
 
 let executorOverrides:
@@ -715,8 +721,15 @@ async function runAgentResolved(
     // #656 PR-E: where this run executes, chosen once, here, so a refusal
     // (an unconfigured or wrong-lane marked run) is a pre-daemon throw the catch
     // below posts, with nothing admitted.
-    const executor = selectRunExecutor(input, currentRunExecutors());
+    // The cell config is read ONCE per run (for a marked run only) and handed on.
+    const executors = currentRunExecutors();
+    let cellConfig: CellConfig | undefined;
+    const executor = selectRunExecutor(input, {
+      ...executors,
+      loadCellConfig: () => (cellConfig ??= executors.loadCellConfig()),
+    });
     const output = await executor.run({
+      cellConfig,
       input,
       secrets,
       revoker,
@@ -1931,6 +1944,12 @@ async function onAgentRunFailure(
   if (runId && retiredRuns.delete(runId)) {
     console.info(
       `[agent-run ${input.threadId}] run-failed not posted: token retired at the terminal read (expected, #656)`,
+    );
+    return;
+  }
+  if (runId && fencedRuns.delete(runId)) {
+    console.info(
+      `[agent-run ${input.threadId}] run-failed not posted: a newer attempt fenced this run and owns the thread (expected, #656)`,
     );
     return;
   }

@@ -13,7 +13,6 @@ import {
   postAbnormalEnd,
   type AbnormalEnd,
 } from "./abnormal-end";
-import type { CellConfig } from "./cell-config";
 import {
   CELL_DAEMON_BUNDLE,
   CELL_DAEMON_SOCKET,
@@ -30,6 +29,7 @@ import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
   CELL_PLAN_UNAVAILABLE_CODES,
+  abortableSleep,
   type CellPlanResult,
   type FailedStep,
   type TeardownCallResult,
@@ -130,8 +130,6 @@ export interface CellExecutorDeps {
     ) => Promise<void>;
     postAbnormal: typeof postAbnormalEnd;
   };
-  /** The worker's cell config, read for a marked run (`selectRunExecutor` has already checked it is `on`). */
-  loadCellConfig: () => CellConfig;
   /** `createOpenSandboxCellProvider` in production. A closure with no I/O. */
   makeProvider: (cfg: OpenSandboxCellConfig) => ICellProvider;
   /** Resolves early (never rejects) when `signal` aborts. */
@@ -143,27 +141,11 @@ export interface CellExecutorDeps {
   retiredRuns: Set<string>;
   /** E16-409: runs whose token www deleted on `cell_step_conflict`. */
   tokenGoneRuns: Set<string>;
+  /** Runs a newer attempt fenced: onFailure must post nothing for them (the thread is the newer attempt's). */
+  fencedRuns: Set<string>;
 }
 
-/** `setTimeout` that resolves early, and never rejects, when `signal` aborts. */
-export function abortableSleep(
-  ms: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal?.aborted) {
-      resolve();
-      return;
-    }
-    const done = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
-}
+export { abortableSleep };
 
 /**
  * The daemon message for a cell (H11): the pulled body with the PLACEHOLDER
@@ -209,7 +191,7 @@ async function runCell(
   epoch: string,
   args: RunExecutorInput,
 ): Promise<AgentRunOutput> {
-  const { input, ctx, config, wwwOpts, runKey, abnormal } = args;
+  const { input, ctx, config, wwwOpts, runKey, abnormal, cellConfig } = args;
   const runSignal = ctx.abortController?.signal;
   const step = (msg: string) => ctx.log(`[agent-run ${input.threadId}] ${msg}`);
   const runId = wwwOpts.runExternalId ?? "";
@@ -283,6 +265,8 @@ async function runCell(
     conflict: false,
     refusedStreak: 0,
     failure: null as Error | null,
+    /** A heartbeat saw a terminal-write 500: settled in the main catch, before teardown (M1). */
+    pendingSettle: null as ThreadStatusHttpError | null,
   };
   const inner = new AbortController();
   const live = runSignal
@@ -308,6 +292,7 @@ async function runCell(
       case "superseded":
         // A database fact in www: one read is enough (Decision 12).
         st.fenced = true;
+        if (runId) deps.fencedRuns.add(runId);
         inner.abort();
         return;
       case "finished":
@@ -342,7 +327,15 @@ async function runCell(
       if (runSignal?.aborted) throw new SetupAbortedError();
       let poll: ThreadStatusPoll;
       try {
-        poll = await deps.www.pollThreadStatus(cellOpts, runSignal);
+        poll = await deps.www.pollThreadStatus(
+          cellOpts,
+          runSignal
+            ? AbortSignal.any([
+                AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
+                runSignal,
+              ])
+            : AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
+        );
       } catch (error) {
         if (error instanceof ThreadStatusHttpError) {
           if (error.status === 409 && error.code === "cell_step_conflict") {
@@ -425,21 +418,10 @@ async function runCell(
           return;
         }
         if (error.status === 500 && isTerminalWriteCode(error.code)) {
-          try {
-            await settleTerminalError(error);
-            inner.abort();
-          } catch (settled) {
-            if (settled instanceof CellStepConflictError) st.conflict = true;
-            if (
-              st.failure === null &&
-              !(settled instanceof SetupAbortedError)
-            ) {
-              abnormal.daemonStarted = true;
-              st.failure =
-                settled instanceof Error ? settled : new Error(String(settled));
-            }
-            inner.abort();
-          }
+          // Setup is aborted at once (Decision 7); the retry budget and the
+          // retired-token confirmation run in the main catch, BEFORE teardown.
+          st.pendingSettle = error;
+          inner.abort();
           return;
         }
       }
@@ -463,20 +445,42 @@ async function runCell(
   const ensureLive = () => {
     if (live.aborted) throw new SetupAbortedError();
   };
+  // Rejects the moment `live` aborts (a fence, a Stop, a lost heartbeat, the
+  // run's timeout), so the teardown starts at once even while a provider call
+  // is still in flight: the cell is deleted anyway (M2).
+  const abortedLive = new Promise<never>((_, reject) => {
+    if (live.aborted) reject(new SetupAbortedError());
+    else {
+      live.addEventListener("abort", () => reject(new SetupAbortedError()), {
+        once: true,
+      });
+    }
+  });
+  abortedLive.catch(() => undefined); // read by the races below; never unhandled
+  const raceLive = async <T>(call: Promise<T>): Promise<T> => {
+    call.catch(() => undefined); // a call that loses the race must not become unhandled
+    return Promise.race([call, abortedLive]);
+  };
   const execOk = async (
     argv: string[],
     label: string,
     timeoutMs?: number,
+    logStderr = true,
   ): Promise<void> => {
     ensureLive();
-    const out = await (provider as ICellProvider).exec(
-      cellId as string,
-      argv,
-      timeoutMs !== undefined ? { timeoutMs } : undefined,
+    const out = await raceLive(
+      (provider as ICellProvider).exec(
+        cellId as string,
+        argv,
+        timeoutMs !== undefined ? { timeoutMs } : undefined,
+      ),
     );
     if (out.exitCode !== 0) {
+      // The message write's stderr is never logged: it may echo the staged message.
       step(
-        `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`,
+        logStderr
+          ? `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`
+          : `cell setup: ${label} failed (exit ${out.exitCode})`,
       );
       throw new Error(`cell setup: ${label} failed (exit ${out.exitCode})`);
     }
@@ -487,19 +491,23 @@ async function runCell(
     mode: number,
   ): Promise<void> => {
     ensureLive();
-    await (provider as ICellProvider).copyIn(
-      cellId as string,
-      path,
-      new TextEncoder().encode(text),
-      { mode, ...CELL_USER },
+    await raceLive(
+      (provider as ICellProvider).copyIn(
+        cellId as string,
+        path,
+        new TextEncoder().encode(text),
+        { mode, ...CELL_USER },
+      ),
     );
   };
 
   try {
     // 4. The provider, per run (the entrypoint depends on the plan's host).
-    const cfg = deps.loadCellConfig();
-    if (cfg.kind !== "on")
+    // The config selectRunExecutor read, passed through: read once per run.
+    const cfg = cellConfig;
+    if (cfg === undefined || cfg.kind !== "on") {
       throw new CellPlanRefusedError("cells_unconfigured", 0);
+    }
     let entrypoint: string[];
     try {
       entrypoint = cellEntrypoint(deployment);
@@ -519,13 +527,22 @@ async function runCell(
 
     // Before the create, a newer attempt removes its predecessors' cells on
     // this server (Decision 13): vault first, then quarantine, then delete.
-    await reapPriorAttempts(provider, { stepKey, deployment, attempt }, step);
+    await raceLive(
+      reapPriorAttempts(provider, { stepKey, deployment, attempt }, step),
+    );
     ensureLive();
 
     // 5. Create. Once it has been sent the plan is never fetched again.
+    const creating = provider.create(plan);
     try {
-      ({ cellId } = await provider.create(plan));
+      ({ cellId } = await raceLive(creating));
     } catch (error) {
+      if (error instanceof SetupAbortedError) {
+        // Aborted while the create was in flight: the teardown's readback finds
+        // a cell that already exists, and one that appears later is removed here.
+        void removeLateCell(provider, creating, step);
+        throw error;
+      }
       const code =
         typeof (error as { code?: unknown })?.code === "string"
           ? (error as { code: string }).code
@@ -573,9 +590,8 @@ async function runCell(
     );
     let batteries: unknown = null;
     try {
-      const raw = await provider.copyOut(
-        cellId,
-        `${HOME_CLAUDE_DIR}/settings.batteries.json`,
+      const raw = await raceLive(
+        provider.copyOut(cellId, `${HOME_CLAUDE_DIR}/settings.batteries.json`),
       );
       batteries = JSON.parse(new TextDecoder().decode(raw));
     } catch {
@@ -622,10 +638,10 @@ async function runCell(
     const socketDeadline = deps.now() + SOCKET_WAIT_MS;
     for (;;) {
       ensureLive();
-      const probe = await provider.exec(
-        cellId,
-        ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET],
-        { timeoutMs: PGREP_TIMEOUT_MS },
+      const probe = await raceLive(
+        provider.exec(cellId, ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET], {
+          timeoutMs: PGREP_TIMEOUT_MS,
+        }),
       );
       if (probe.exitCode === 0) break;
       if (deps.now() >= socketDeadline) {
@@ -663,6 +679,8 @@ async function runCell(
       await execOk(
         ["/bin/bash", "-c", CELL_WRITE_MESSAGE_SH, "cell-write", messagePath],
         "message write",
+        undefined,
+        false,
       );
       step("cell: message written to the daemon");
 
@@ -687,14 +705,16 @@ async function runCell(
           // The pgrep runs at most once per poll, before the read, with its own timeout.
           beforeStatusRead: async () => {
             try {
-              const out = await cellProvider.exec(
-                liveCellId,
-                [
-                  "/usr/bin/pgrep",
-                  "-f",
-                  `[${CELL_DAEMON_BUNDLE[0]}]${CELL_DAEMON_BUNDLE.slice(1)}`,
-                ],
-                { timeoutMs: PGREP_TIMEOUT_MS },
+              const out = await raceLive(
+                cellProvider.exec(
+                  liveCellId,
+                  [
+                    "/usr/bin/pgrep",
+                    "-f",
+                    `[${CELL_DAEMON_BUNDLE[0]}]${CELL_DAEMON_BUNDLE.slice(1)}`,
+                  ],
+                  { timeoutMs: PGREP_TIMEOUT_MS },
+                ),
               );
               daemonGone = out.exitCode === 1;
             } catch {
@@ -709,7 +729,7 @@ async function runCell(
         cellOpts,
         config.pollIntervalMs,
       );
-      if (st.fenced || st.failure !== null) {
+      if (st.fenced || st.failure !== null || st.pendingSettle !== null) {
         throw new SetupAbortedError();
       }
       if (poll.outcome === "completed") {
@@ -731,6 +751,23 @@ async function runCell(
     }
   } catch (error) {
     if (error instanceof CellStepConflictError) st.conflict = true;
+    if (st.pendingSettle !== null && !st.fenced && st.failure === null) {
+      // A heartbeat saw a terminal-write 500: the same retry budget and the
+      // retired-token confirmation as the poll, each read under its own 10 s
+      // timeout, and BEFORE the teardown so its report lands on a settled token.
+      const first = st.pendingSettle;
+      st.pendingSettle = null;
+      try {
+        await settleTerminalError(first);
+      } catch (settled) {
+        if (settled instanceof CellStepConflictError) st.conflict = true;
+        if (!(settled instanceof SetupAbortedError)) {
+          abnormal.daemonStarted = true;
+          st.failure =
+            settled instanceof Error ? settled : new Error(String(settled));
+        }
+      }
+    }
     if (st.fenced) {
       result = { ...ids, outcome: "fenced" };
     } else if (error instanceof SetupAbortedError) {
@@ -878,5 +915,24 @@ async function reapPriorAttempts(
         `cell.prior_reap_failed ${JSON.stringify({ stepKey: key.stepKey, attempt: old })}`,
       );
     }
+  }
+}
+
+/**
+ * A create that was in flight when the run aborted: if it later returns a cell
+ * the teardown's readback missed, remove it (best effort, never throws).
+ */
+async function removeLateCell(
+  provider: ICellProvider,
+  creating: Promise<{ cellId: string }>,
+  log: (line: string) => void,
+): Promise<void> {
+  try {
+    const { cellId } = await creating;
+    await provider.revoke(cellId);
+    await provider.quarantine(cellId);
+    await provider.delete(cellId);
+  } catch {
+    log("cell.late_create_cleanup_failed");
   }
 }

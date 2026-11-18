@@ -188,6 +188,22 @@ describe("fetchCellPlan", () => {
     ).toMatchObject({ ok: false, code: "cell_plan_mismatch" });
   });
 
+  // card: protects=the plan-fetch backoff ends the moment the run's signal aborts; fails_when=an aborted run waits out the backoff or sends another request; no_claim=Hatchet's cancel
+  it("L7: an abort during the backoff ends the fetch promptly", async () => {
+    const s = server([res(503)]);
+    const ac = new AbortController();
+    const started = Date.now();
+    const pending = fetchCellPlan(opts, BODY, {
+      fetch: s.fetchImpl,
+      signal: ac.signal,
+    });
+    setTimeout(() => ac.abort(), 20);
+    const out = await pending;
+    expect(Date.now() - started).toBeLessThan(800);
+    expect(out).toMatchObject({ ok: false, code: "cell_plan_unavailable" });
+    expect(s.calls).toHaveLength(1);
+  });
+
   // card: protects=a daemon-token 401 is confirmed before it refuses and a blip then 200 passes; fails_when=a single 401 refuses; no_claim=token validity
   it("confirms a 401 before refusing, and a blip recovers", async () => {
     const blip = server([

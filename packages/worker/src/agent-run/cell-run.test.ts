@@ -17,6 +17,7 @@ import {
 import type { RunExecutorInput } from "./run-executor";
 import {
   CellStepConflictError,
+  ThreadStatusHttpError,
   type CellLease,
   type PollContext,
   type ThreadStatusPoll,
@@ -91,6 +92,10 @@ function setup(
     pollThreadStatus?: () => Promise<ThreadStatusPoll>;
     pollUntilTerminal?: (ctx: PollContext) => Promise<unknown>;
     execExit?: (argv: string[]) => number;
+    execStderr?: (argv: string[]) => string;
+    execHang?: (argv: string[]) => boolean;
+    /** Holds the clone exec until released (setup stays busy, the cell exists). */
+    execGate?: Promise<void>;
   } = {},
 ) {
   released.length = 0;
@@ -109,6 +114,7 @@ function setup(
   let clock = 0;
   const retiredRuns = new Set<string>();
   const tokenGoneRuns = new Set<string>();
+  const fencedRuns = new Set<string>();
   const provider = {
     create: vi.fn(async () => {
       calls.push("provider.create");
@@ -117,10 +123,12 @@ function setup(
     exec: vi.fn(async (_id: string, argv: string[]) => {
       calls.push("provider.exec");
       execs.push(argv);
+      if (over.execHang?.(argv)) return new Promise<never>(() => {});
+      if (over.execGate && argv[1] === "clone") await over.execGate;
       return {
         exitCode: over.execExit?.(argv) ?? 0,
         stdout: "",
-        stderr: "",
+        stderr: over.execStderr?.(argv) ?? "",
       };
     }),
     copyOut: vi.fn(async () => {
@@ -212,16 +220,6 @@ function setup(
         return null;
       },
     },
-    loadCellConfig: () => ({
-      kind: "on",
-      baseUrl: "http://127.0.0.1:8090",
-      apiKey: "k".repeat(32),
-      image: {
-        repository: "r",
-        digest: `sha256:${"cd".repeat(32)}`,
-        reference: `r@sha256:${"cd".repeat(32)}`,
-      },
-    }),
     makeProvider,
     sleep: async (ms, signal) => {
       if (ms === CELL_SETUP_STAMP_MS) {
@@ -237,6 +235,7 @@ function setup(
     randomId: () => "rid0123456789abcdefghijkl",
     retiredRuns,
     tokenGoneRuns,
+    fencedRuns,
   };
   const abnormal = newAbnormalEndState({
     owns: true,
@@ -275,6 +274,16 @@ function setup(
     runStartedAt: 0,
     runKey: "rk",
     abnormal,
+    cellConfig: {
+      kind: "on",
+      baseUrl: "http://127.0.0.1:8090",
+      apiKey: "k".repeat(32),
+      image: {
+        repository: "r",
+        digest: `sha256:${"cd".repeat(32)}`,
+        reference: `r@sha256:${"cd".repeat(32)}`,
+      },
+    },
   } as unknown as RunExecutorInput;
   const executor = createCellExecutor(deps);
   /** One heartbeat tick: wake the pending sleep and let the beat finish. */
@@ -298,6 +307,7 @@ function setup(
     fetchPlan,
     retiredRuns,
     tokenGoneRuns,
+    fencedRuns,
     abnormal,
     ac,
     tick,
@@ -582,16 +592,11 @@ describe("the cell run: prior attempts", () => {
 
 describe("the cell run: the heartbeat and the lease", () => {
   /** A run held in create so ticks land during setup. */
+  /** Setup held in the clone exec: the cell exists, heartbeats land mid-setup. */
   function slowCreate() {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    return {
-      release,
-      create: async () => {
-        await gate;
-        return { cellId: "c1" };
-      },
-    };
+    return { release, gate };
   }
 
   // card: protects=a heartbeat read with cellAttempt goes out on each tick during a slow create and a refused beat then renewed does not fail; fails_when=no beat during setup or a single refusal fails; no_claim=real time
@@ -602,7 +607,7 @@ describe("the cell run: the heartbeat and the lease", () => {
       { kind: "status", status: "working", terminal: false, lease: "renewed" },
     ];
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () =>
         leases.shift() ?? {
           kind: "status",
@@ -627,7 +632,7 @@ describe("the cell run: the heartbeat and the lease", () => {
   it("T-DRAIN control / E13b: refused x2 is cell_attempt_revoked", async () => {
     const slow = slowCreate();
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () => ({
         kind: "status",
         status: "working",
@@ -650,7 +655,7 @@ describe("the cell run: the heartbeat and the lease", () => {
   it("T-DRAIN: superseded during setup fences, vault first, nothing posted", async () => {
     const slow = slowCreate();
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () => ({
         kind: "status",
         status: "working",
@@ -697,7 +702,7 @@ describe("the cell run: the heartbeat and the lease", () => {
     for (const mode of ["throw", "auth"] as const) {
       const slow = slowCreate();
       const s = setup({
-        create: slow.create,
+        execGate: slow.gate,
         pollThreadStatus: async () => {
           if (mode === "throw") throw new Error("HTTP 502");
           return { kind: "auth-error", httpStatus: 401 };
@@ -727,7 +732,7 @@ describe("the cell run: the heartbeat and the lease", () => {
       },
     ];
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () =>
         queue.length
           ? queue.shift()!()
@@ -751,7 +756,7 @@ describe("the cell run: the heartbeat and the lease", () => {
   it("E12: a terminal heartbeat completes the run, nothing is sent to the daemon", async () => {
     const slow = slowCreate();
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () => ({
         kind: "status",
         status: "complete",
@@ -774,7 +779,7 @@ describe("the cell run: the heartbeat and the lease", () => {
   it("T-HEARTBEAT: stopping returns stopped and sends no message", async () => {
     const slow = slowCreate();
     const s = setup({
-      create: slow.create,
+      execGate: slow.gate,
       pollThreadStatus: async () => ({
         kind: "status",
         status: "stopping",
@@ -906,5 +911,196 @@ describe("T-IMPORT: the worker imports one sandbox subpath only", () => {
       offenders('const m = await import("@terragon/sandbox/cell-reconcile");'),
     ).toEqual(["@terragon/sandbox/cell-reconcile"]);
     expect(offenders(`import a from "${ALLOWED}";`)).toEqual([]);
+  });
+});
+
+describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
+  /** Setup held in the clone exec: the cell exists, heartbeats land mid-setup. */
+  function slowCreate() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    return { release, gate };
+  }
+  const status = (over: Partial<ThreadStatusPoll & { kind: "status" }> = {}) =>
+    ({
+      kind: "status",
+      status: "working",
+      terminal: false,
+      lease: "renewed",
+      ...over,
+    }) as ThreadStatusPoll;
+  const http = (code: string, statusCode = 500) =>
+    new ThreadStatusHttpError(statusCode, "x", code);
+
+  // card: protects=a heartbeat 500 cell_finish_failed aborts setup at once, settles on a fresh read BEFORE the teardown, and completes; fails_when=the settle runs after teardown's report or the run fails; no_claim=the poll loop's own budget (www-client.test.ts)
+  it("M1: heartbeat 500 cell_finish_failed settles before the teardown", async () => {
+    const slow = slowCreate();
+    const reads: (() => Promise<ThreadStatusPoll>)[] = [
+      async () => {
+        throw http("cell_finish_failed");
+      },
+      async () =>
+        status({ status: "complete", terminal: true, lease: "finished" }),
+    ];
+    const s = setup({
+      execGate: slow.gate,
+      pollThreadStatus: async () => (reads.shift() ?? (async () => status()))(),
+    });
+    const run = s.executor.run(s.args);
+    await flush();
+    await s.tick();
+    slow.release();
+    const out = await run;
+    expect(out).toMatchObject({
+      outcome: "completed",
+      finalStatus: "complete",
+    });
+    expect(s.calls.filter((c) => c === "www.heartbeat")).toHaveLength(2);
+    const lastRead = s.calls.lastIndexOf("www.heartbeat");
+    expect(s.calls.indexOf("www.revoke")).toBeGreaterThan(lastRead);
+    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+    expect(s.calls[s.calls.length - 1]).toBe("www.report");
+    expect(s.calls).not.toContain("www.nextMessage");
+  });
+
+  // card: protects=a heartbeat 500 cell_retire_failed then a 401 on the settle read is confirmed through cell-teardown revoke BEFORE the report, and completes; fails_when=the confirm is skipped or lands after P; no_claim=the confirm hook's retries (cell-www-client.test.ts)
+  it("M1: heartbeat 500 cell_retire_failed, 401, confirm lands before the report", async () => {
+    const slow = slowCreate();
+    const reads: (() => Promise<ThreadStatusPoll>)[] = [
+      async () => {
+        throw http("cell_retire_failed");
+      },
+      async () => ({ kind: "auth-error", httpStatus: 401 }),
+    ];
+    const s = setup({
+      execGate: slow.gate,
+      pollThreadStatus: async () => (reads.shift() ?? (async () => status()))(),
+    });
+    const run = s.executor.run(s.args);
+    await flush();
+    await s.tick();
+    slow.release();
+    expect((await run).outcome).toBe("completed");
+    const revokes = s.calls.reduce<number[]>(
+      (acc, c, i) => (c === "www.revoke" ? [...acc, i] : acc),
+      [],
+    );
+    // the confirm, then teardown's own revoke: both before the report
+    expect(revokes).toHaveLength(2);
+    expect(revokes[0]).toBeGreaterThan(s.calls.lastIndexOf("www.heartbeat"));
+    expect(revokes[1]).toBeLessThan(s.calls.indexOf("www.report"));
+    expect(s.retiredRuns.has(RUN_ID)).toBe(true);
+  });
+
+  // card: protects=a revoke that also 401s after cell_retire_failed fails cell_terminal_unconfirmed with one abnormal end; fails_when=it completes or hangs; no_claim=the 3x backoff
+  it("M1 control: the confirm also 401s -> cell_terminal_unconfirmed", async () => {
+    const slow = slowCreate();
+    const reads: (() => Promise<ThreadStatusPoll>)[] = [
+      async () => {
+        throw http("cell_retire_failed");
+      },
+      async () => ({ kind: "auth-error", httpStatus: 401 }),
+    ];
+    const s = setup({
+      execGate: slow.gate,
+      pollThreadStatus: async () => (reads.shift() ?? (async () => status()))(),
+    });
+    s.www.revokeResult = "unauthorized";
+    const run = s.executor.run(s.args);
+    const settled = expect(run).rejects.toThrow("cell_terminal_unconfirmed");
+    await flush();
+    await s.tick();
+    slow.release();
+    await settled;
+    expect(s.www.abnormalPosts).toBe(1);
+  });
+
+  // card: protects=a heartbeat 409 cell_step_conflict ends the run with the conflict, no www teardown call and no terminal; fails_when=R, A or P goes out; no_claim=www's alert
+  it("M1: heartbeat 409 cell_step_conflict skips every www teardown call", async () => {
+    const slow = slowCreate();
+    const s = setup({
+      execGate: slow.gate,
+      pollThreadStatus: async () => {
+        throw http("cell_step_conflict", 409);
+      },
+    });
+    const run = s.executor.run(s.args);
+    const settled = expect(run).rejects.toBeInstanceOf(CellStepConflictError);
+    await flush();
+    await s.tick();
+    slow.release();
+    await settled;
+    expect(s.calls).not.toContain("www.revoke");
+    expect(s.calls).not.toContain("www.report");
+    expect(s.tokenGoneRuns.has(RUN_ID)).toBe(true);
+  });
+
+  // card: protects=a fence seen while an exec hangs starts the vault revoke at once, without waiting for the exec; fails_when=the run waits on the in-flight call; no_claim=real time (the race is on the abort, not a clock)
+  it("M2: a fence during a hung exec starts the vault revoke immediately", async () => {
+    const s = setup({
+      execHang: (a) => a[1] === "clone",
+      pollThreadStatus: async () => status({ lease: "superseded" }),
+    });
+    const run = s.executor.run(s.args);
+    await flush();
+    await s.tick();
+    const out = await Promise.race([
+      run,
+      new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 1000)),
+    ]);
+    expect(out).toMatchObject({ outcome: "fenced" });
+    expect(s.calls).toContain("provider.revoke");
+    expect(s.fencedRuns.has(RUN_ID)).toBe(true);
+    expect(s.calls).not.toContain("www.abnormal");
+  });
+
+  // card: protects=a Stop seen while a copyIn is hung returns stopped at once; fails_when=the run waits on the call; no_claim=the user-cancelled post
+  it("M2: a Stop during a hung create returns stopped without waiting", async () => {
+    const s = setup({
+      create: () => new Promise<never>(() => {}),
+      pollThreadStatus: async () => status({ status: "stopping" }),
+    });
+    const run = s.executor.run(s.args);
+    await flush();
+    await s.tick();
+    const out = await Promise.race([
+      run,
+      new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 1000)),
+    ]);
+    expect(out).toMatchObject({ outcome: "stopped" });
+    // The teardown still ran: R first, readback, report last.
+    expect(s.calls.indexOf("www.revoke")).toBeGreaterThan(-1);
+    expect(s.calls[s.calls.length - 1]).toBe("www.report");
+  });
+
+  // card: protects=a run with no cell config in its input fails cells_unconfigured and never reads one itself; fails_when=the executor loads a config on its own; no_claim=selectRunExecutor (workflow.test.ts)
+  it("L5: the config comes from the executor input only", async () => {
+    const s = setup();
+    await expect(
+      s.executor.run({ ...s.args, cellConfig: undefined }),
+    ).rejects.toMatchObject({ code: "cells_unconfigured" });
+    expect(s.provider.create).not.toHaveBeenCalled();
+  });
+
+  // card: protects=the message write's failure logs the step and exit code only, never stderr that may echo the staged message; fails_when=stderr text reaches a log line; no_claim=other steps, whose stderr tail is still logged redacted
+  it("L6: a failed message write logs no stderr; a failed clone still does", async () => {
+    const canary = "STDERR-ECHO-CANARY";
+    const w = setup({
+      execExit: (a) => (a[0] === "/bin/bash" ? 1 : 0),
+      execStderr: () => canary,
+    });
+    await expect(w.executor.run(w.args)).rejects.toThrow(
+      "message write failed",
+    );
+    expect(w.logs.join("\n")).not.toContain(canary);
+    expect(
+      w.logs.some((l) => l.includes("message write failed (exit 1)")),
+    ).toBe(true);
+    const c = setup({
+      execExit: (a) => (a[1] === "clone" ? 128 : 0),
+      execStderr: () => canary,
+    });
+    await expect(c.executor.run(c.args)).rejects.toThrow("git clone failed");
+    expect(c.logs.join("\n")).toContain(canary);
   });
 });

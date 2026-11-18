@@ -46,6 +46,11 @@ export interface RunExecutorInput {
   runKey: string;
   /** #437, shared with runAgentResolved so one abnormal terminal is posted. */
   abnormal: AbnormalEndState;
+  /**
+   * The cell config `selectRunExecutor` read for a marked run (read once, then
+   * passed through). Undefined for a box run.
+   */
+  cellConfig?: CellConfig;
 }
 
 export interface RunExecutor {

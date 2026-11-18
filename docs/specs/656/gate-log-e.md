@@ -63,3 +63,25 @@ Two defects in the test itself, found live and fixed:
    runtime secret, and PR-F's layer scan covers them in CI.
 2. **A cold pull outlasted the create budget.** The multi-GB pull happened inside `create` (about
    2 min). The test now pre-pulls the image into the dind, as the box's runbook does (PR-G).
+
+## Refinement
+
+There were no High findings: five Medium and two Low. All seven are fixed, each with tests.
+
+- **M1:** a heartbeat 500 on a terminal write aborts setup at once. The settle runs before
+  teardown, with each read under 10 s.
+- **M2:** every provider call (create, exec, copyIn) races the run's liveness, so a fence, Stop,
+  heartbeat loss or timeout starts the teardown immediately. A create that finishes late is reaped.
+- **M3:** the teardown deadline is 70 s and A is capped at 30 s. A test pins the worst case at least
+  30 s under onFailure's 120 s wait.
+- **M4:** a `fencedRuns` guard means onFailure posts nothing for a fenced run.
+- **L5:** the cell config is read once.
+- **L6:** a failed message write logs no stderr.
+- **L7:** the plan-fetch backoff stops on abort.
+
+Gates after the fixes, outside the Claude sandbox, all exit 0:
+
+- worker vitest: 2198 passed;
+- `HATCHET_IT=1` list: 65 passed, 1 skipped;
+- IT-E1 on the amd64 box: 5/5 (its `teardownCellRun` path changed);
+- worker tsc, `tsc-check --force`, `lint --force`.

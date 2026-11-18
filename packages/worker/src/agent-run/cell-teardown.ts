@@ -16,9 +16,18 @@ import type { FailedStep, TeardownCallResult } from "./cell-www-client";
  * run's (which may already be aborted by the engine's cancel).
  */
 
-export const CELL_TEARDOWN_DEADLINE_MS = 90_000;
+export const CELL_TEARDOWN_DEADLINE_MS = 70_000;
 /** The budget P and A still get once the deadline is spent. */
 const EXPIRED_GRACE_MS = 5_000;
+/** A (the typed terminal's own 3 x 10 s retries) never gets more than this. */
+export const CELL_ABNORMAL_POST_MAX_MS = 30_000;
+/**
+ * The longest the sequencer can run: the deadline, then A and P with only their
+ * grace left. It must stay under onFailure's wait for the run's own teardown
+ * (`ON_FAILURE_TYPED_TERMINAL_WAIT_MS`, 120 s): a test pins the sum.
+ */
+export const CELL_TEARDOWN_WORST_CASE_MS =
+  CELL_TEARDOWN_DEADLINE_MS + 2 * EXPIRED_GRACE_MS;
 
 const FAILED_ORDER: readonly FailedStep[] = [
   "revoke_attempt",
@@ -158,7 +167,10 @@ export async function teardownCellRun(
     if (!key.skipWww) {
       await bounded(
         () => deps.postAbnormal(),
-        Math.max(deadlineAt - deps.now(), EXPIRED_GRACE_MS),
+        Math.min(
+          Math.max(deadlineAt - deps.now(), EXPIRED_GRACE_MS),
+          CELL_ABNORMAL_POST_MAX_MS,
+        ),
       );
     }
     // P

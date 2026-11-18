@@ -1580,6 +1580,27 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     err.mockRestore();
   });
 
+  // card: protects=a fenced run's onFailure (an executionTimeout during its teardown) posts nothing and logs at info; fails_when=run-failed reaches the thread the newer attempt owns; no_claim=the fenced teardown itself (cell-run.test.ts)
+  it("M4: a fenced run's onFailure posts nothing", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const runId = "run-fenced-1";
+    wf._cellRunSetsForTests.fencedRuns.add(runId);
+    await workflowDef.onFailure.fn(await wireInput(), {
+      errors: () => ({ run: "timeout" }),
+      workflowRunId: () => runId,
+    });
+    expect(posts).toEqual([]);
+    expect(
+      info.mock.calls.some((c) =>
+        String(c[0]).includes("newer attempt fenced"),
+      ),
+    ).toBe(true);
+    expect(err).not.toHaveBeenCalled();
+    info.mockRestore();
+    err.mockRestore();
+  });
+
   // card: protects=the real cell executor is wired: a marked run whose plan www refuses with cells_disabled fails with that code and never runs on the box; fails_when=it falls back to the box executor or posts a cell-teardown; no_claim=a live cell
   it("cell half of T-FLAG-OFF: a marked run with cells_disabled fails closed, never on the box", async () => {
     wf._setAdmissionControllerForTests(null);

@@ -64,15 +64,32 @@ export class CellPlanUnavailableError extends NonRetryableError {
 }
 
 export interface CellWwwDeps {
-  sleep?: (ms: number) => Promise<void>;
+  /** Resolves early, and never rejects, when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   fetch?: typeof fetch;
   /** The run's signal: a cancel ends the wait and the request. */
   signal?: AbortSignal;
   log?: (line: string) => void;
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** `setTimeout` that resolves early, and never rejects, when `signal` aborts. */
+export function abortableSleep(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 function codeOf(body: unknown): string {
@@ -158,7 +175,7 @@ export async function fetchCellPlan(
   deps: CellWwwDeps = {},
 ): Promise<CellPlanResult> {
   const doFetch = deps.fetch ?? fetch;
-  const sleep = deps.sleep ?? defaultSleep;
+  const sleep = deps.sleep ?? abortableSleep;
   let lastKind: "unavailable" | "superseded" = "unavailable";
   let lastStatus = 0;
   for (let attempt = 1; attempt <= PLAN_TRIES; attempt++) {
@@ -210,7 +227,10 @@ export async function fetchCellPlan(
       }
     }
     if (attempt < PLAN_TRIES) {
-      await sleep(PLAN_BACKOFF_MS[attempt - 1] ?? AUTH_ERROR_RETRY_MS);
+      await sleep(
+        PLAN_BACKOFF_MS[attempt - 1] ?? AUTH_ERROR_RETRY_MS,
+        deps.signal,
+      );
     }
   }
   return {
@@ -255,7 +275,7 @@ async function teardownCall(
   stopped?: boolean;
 }> {
   const doFetch = deps.fetch ?? fetch;
-  const sleep = deps.sleep ?? defaultSleep;
+  const sleep = deps.sleep ?? abortableSleep;
   let last: "unauthorized" | "failed" = "failed";
   let priorSent = false;
   for (let attempt = 1; attempt <= retry.tries; attempt++) {
@@ -299,7 +319,7 @@ async function teardownCall(
       const wait =
         retry.backoffMs[Math.min(attempt - 1, retry.backoffMs.length - 1)] ??
         1_000;
-      await sleep(wait);
+      await sleep(wait, deadline);
     }
   }
   return { status: last };
