@@ -19,7 +19,7 @@
   "dependencies": {
     "@terragon/shared": "workspace:*",
     "@terragon/utils": "workspace:*",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.4"
   },
   "devDependencies": {
     "@terragon/tsconfig": "workspace:*",
