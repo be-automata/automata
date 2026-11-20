@@ -54,7 +54,7 @@ export const CELL_TEST_DB_START_SH = [
   "set -eu",
   "PATH=/usr/bin:/bin",
   `d=${CELL_TEST_DB_DIR}`,
-  `if ! ${CELL_PG_BIN}/initdb -D "$d/data" -U agent --auth-local=peer --auth-host=scram-sha-256 -E UTF8 --locale=C.UTF-8 --no-instructions >"$d/initdb.log" 2>&1; then`,
+  `if ! ${CELL_PG_BIN}/initdb -D "$d/data" -U agent --auth-local=peer --auth-host=scram-sha-256 -E UTF8 --locale=C.UTF-8 --no-sync --no-instructions >"$d/initdb.log" 2>&1; then`,
   '  tail -n 20 "$d/initdb.log" >&2',
   "  exit 1",
   "fi",

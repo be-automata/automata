@@ -105,6 +105,6 @@ box does not need it there), option B (OD-1 decided).
 
 ## Risks and rollback
 
-Image +~190 MB; setup +~3-4 s for listed repos only. Rollback: the previous cell image digest (a
+Image +~190 MB; setup +~2.5 s for listed repos only (measured under amd64 emulation). Rollback: the previous cell image digest (a
 worker on this code with the old image logs "test database not started" and runs on), or drop the
 repo from `TEST_SERVICES_REPOS`.

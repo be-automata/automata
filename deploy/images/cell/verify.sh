@@ -161,7 +161,7 @@ assert pg-no-cluster "no default cluster baked in" test ! -e /var/lib/postgresql
 assert pg-no-snakeoil "no snakeoil private key in the image" test ! -e /etc/ssl/private/ssl-cert-snakeoil.key
 pgd="$(mktemp -d)"
 pg_start=$(date +%s%N)
-if "$PG/initdb" -D "$pgd/data" -U agent --auth-local=peer --auth-host=scram-sha-256 -E UTF8 --locale=C.UTF-8 --no-instructions >/dev/null 2>&1 &&
+if "$PG/initdb" -D "$pgd/data" -U agent --auth-local=peer --auth-host=scram-sha-256 -E UTF8 --locale=C.UTF-8 --no-sync --no-instructions >/dev/null 2>&1 &&
   "$PG/pg_ctl" -D "$pgd/data" -l "$pgd/server.log" -w -t 30 -o "-c listen_addresses=127.0.0.1 -c port=25432 -c unix_socket_directories=$pgd -c fsync=off" start >/dev/null 2>&1; then
   ok pg-start "initdb and start in $(( ($(date +%s%N) - pg_start) / 1000000 ))ms"
   assert pg-loopback-only "listens on 127.0.0.1:25432 only" \
