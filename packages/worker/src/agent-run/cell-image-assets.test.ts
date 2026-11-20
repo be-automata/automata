@@ -1175,3 +1175,86 @@ describe("cellCloneArgv and cellGitConfigArgv (T-CLONE, argv half)", () => {
     ]);
   });
 });
+
+describe("the cell layer scan's gitleaks config", () => {
+  const SCAN = "deploy/images/cell/scan-layers.sh";
+  const CONFIG = "deploy/images/cell/gitleaks-layers.toml";
+  const MSVC_PATH =
+    "usr/lib/python3/dist-packages/setuptools/_distutils/msvccompiler\\.py$";
+  const ALIAS_LINE = "^\\s*Reg\\w+\\s*=\\s*win32api\\.Reg\\w+\\s*$";
+  const toml = read(CONFIG);
+  // The TOML minus comments and blank lines, so the checks read only settings.
+  const settings = toml
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  const literals = (key: string) =>
+    settings
+      .filter((l) => l.startsWith(`${key} =`))
+      .map((l) => [...l.matchAll(/'''(.*?)'''/g)].map((m) => m[1]));
+
+  // card: protects=the layer scan runs with the config, redacted, exactly once; fails_when=--config or --redact is dropped, or a second unconfigured gitleaks call is added; no_claim=what gitleaks finds
+  it("scan-layers.sh passes the config to its only gitleaks call", () => {
+    const calls = read(SCAN)
+      .split("\n")
+      .filter((l) => l.includes('"$gitleaks" dir'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain(
+      '--config "$(dirname "$0")/gitleaks-layers.toml"',
+    );
+    expect(calls[0]).toContain("--redact");
+  });
+
+  // card: protects=the config keeps every default rule and holds exactly one AND allowlist (one path, one line regex); fails_when=useDefault goes, a rule/stopword/commit allowlist or a second allowlist is added, the condition becomes OR, or the path or regex widens; no_claim=gitleaks' own matching
+  it("keeps the default rules and one narrow AND allowlist", () => {
+    expect(settings).toEqual([
+      "[extend]",
+      "useDefault = true",
+      "[[allowlists]]",
+      expect.stringMatching(/^description = "/),
+      'condition = "AND"',
+      `paths = ['''${MSVC_PATH}''']`,
+      'regexTarget = "line"',
+      `regexes = ['''${ALIAS_LINE}''']`,
+    ]);
+    expect(literals("paths")).toEqual([[MSVC_PATH]]);
+    expect(literals("regexes")).toEqual([[ALIAS_LINE]]);
+  });
+
+  // card: protects=the line regex allows only the win32api registry aliases; fails_when=it matches a credential-shaped line; no_claim=RE2 vs JS differences beyond \s and \w
+  it("allows the alias lines and nothing credential-shaped", () => {
+    const line = new RegExp(ALIAS_LINE);
+    const msvc = new RegExp(MSVC_PATH);
+    for (const ok of [
+      "        RegOpenKeyEx = win32api.RegOpenKeyEx",
+      "RegEnumValue = win32api.RegEnumValue",
+    ]) {
+      expect(line.test(ok)).toBe(true);
+    }
+    expect(
+      msvc.test(
+        "scan/layer-0/usr/lib/python3/dist-packages/setuptools/_distutils/msvccompiler.py",
+      ),
+    ).toBe(true);
+  });
+
+  // card: protects=negative control for the allowlist; fails_when=a widened regex or path would accept a real secret or another file; no_claim=every secret format
+  it("negative control: a secret line or another file is not allowed", () => {
+    const line = new RegExp(ALIAS_LINE);
+    const msvc = new RegExp(MSVC_PATH);
+    for (const bad of [
+      'api_key = "sk-live-0123456789abcdef0123456789abcdef"',
+      "RegOpenKeyEx = 'AKIAIOSFODNN7EXAMPLE'",
+      "RegKey = win32api.RegOpenKeyEx; token = abc123",
+    ]) {
+      expect(line.test(bad)).toBe(false);
+    }
+    for (const other of [
+      "usr/lib/python3/dist-packages/setuptools/_distutils/msvccompiler.py.bak",
+      "home/agent/msvccompiler.py",
+      "usr/lib/python3/dist-packages/setuptools/_distutils/other.py",
+    ]) {
+      expect(msvc.test(other)).toBe(false);
+    }
+  });
+});
