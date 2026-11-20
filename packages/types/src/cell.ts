@@ -251,3 +251,67 @@ export interface ICellProvider {
     opts?: CellListOptions,
   ): Promise<CellList>;
 }
+
+/**
+ * The egress switch guard's refusal reasons (#611, OD-1/OD-4), shared by the
+ * guard (`@terragon/shared/model/cell-egress-guard`) and the worker, which may
+ * show one in a thread (#718). A reason outside this list is never echoed.
+ */
+export const CELL_EGRESS_GUARD_REASONS = [
+  "unknown_profile", // null, undefined, {} or no id
+  "egress_mode_missing", // configuration.egress_mode absent
+  "egress_mode_observe", // configuration.egress_mode is "observe"
+  "egress_mode_unknown", // configuration.egress_mode is any other value than "enforce"
+  "egress_not_allowlist", // capabilities.egress !== "allowlist"
+  "allowlist_empty", // capabilities.egress_allowlist not a non-empty list of non-blank strings
+  "evidence_missing", // no evidence.expires_at
+  "evidence_not_from_conformance", // evidence.source !== "conformance"
+  "evidence_invalid", // expires_at not RFC 3339
+  "evidence_expired", // expires_at <= now
+] as const;
+
+export type CellEgressGuardReason = (typeof CELL_EGRESS_GUARD_REASONS)[number];
+
+const CELL_EGRESS_GUARD_REASON_SET: ReadonlySet<string> = new Set(
+  CELL_EGRESS_GUARD_REASONS,
+);
+
+/** True only for a member of `CELL_EGRESS_GUARD_REASONS`. */
+export function isCellEgressReason(x: unknown): x is CellEgressGuardReason {
+  return typeof x === "string" && CELL_EGRESS_GUARD_REASON_SET.has(x);
+}
+
+/**
+ * Every `error` code `POST /api/daemon/cell-plan` can answer (#718). The route
+ * types its `refuse()` with it, and the worker's refusal text is keyed by it,
+ * so a new code fails to compile until the worker names it.
+ */
+export const CELL_PLAN_REFUSAL_CODES = [
+  "invalid_body",
+  "cells_disabled",
+  "no_run_key",
+  "invalid_run_key",
+  "org_required",
+  "invalid_deployment_tag",
+  "agent_not_supported",
+  "thread_terminal",
+  "unknown_profile",
+  "egress_not_enforced",
+  // planCellEgressForRepo's codes
+  "egress_level_unsupported",
+  "egress_compile_failed",
+  "work_branch_unresolved",
+  "no_model_credential",
+  // openNextAttempt's refusals
+  "step_done",
+  "conflict",
+  "attempt_limit",
+  // a newer open for the same requestId: the worker retries it, never shows it
+  "superseded",
+  // CellPlanError codes
+  "runtime_not_runc",
+  "bearer_refused",
+  "egress_wildcard",
+] as const;
+
+export type CellPlanRefusalCode = (typeof CELL_PLAN_REFUSAL_CODES)[number];

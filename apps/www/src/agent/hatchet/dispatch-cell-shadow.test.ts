@@ -56,6 +56,7 @@ describe("dispatchAgentRun: allow_cell shadow", () => {
 
   const dispatch = () =>
     dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,

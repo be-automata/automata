@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { newAbnormalEndState } from "./abnormal-end";
+import {
+  abnormalEndInfo,
+  newAbnormalEndState,
+  type AbnormalEnd,
+} from "./abnormal-end";
 import { BoundedRunMap } from "./run-end-marks";
 import {
   buildCellMessage,
@@ -125,6 +129,7 @@ function setup(
     revokeSignals: [] as boolean[],
     pollOpts: [] as unknown[],
     abnormalPosts: 0,
+    abnormalEnds: [] as AbnormalEnd[],
     revokeResult: "ok" as "ok" | "unauthorized" | "failed",
     reportBodies: [] as unknown[],
   };
@@ -230,9 +235,10 @@ function setup(
       postEgress: async () => {
         calls.push("www.egress");
       },
-      postAbnormal: async () => {
+      postAbnormal: async (_state, end) => {
         calls.push("www.abnormal");
         www.abnormalPosts += 1;
+        www.abnormalEnds.push(end);
         return null;
       },
     },
@@ -1098,6 +1104,15 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
       s.executor.run({ ...s.args, cellConfig: undefined }),
     ).rejects.toMatchObject({ code: "cells_unconfigured" });
     expect(s.provider.create).not.toHaveBeenCalled();
+    // #718: the teardown's terminal names the code, not the internal config.
+    const end = s.www.abnormalEnds[0];
+    expect(end?.cause).toBe("run-failed-unreported");
+    const info = abnormalEndInfo(end!.cause, {
+      ...end!,
+      runExecutionTimeoutMs: 60_000,
+    });
+    expect(info).toContain("cells_unconfigured");
+    expect(info).not.toContain("Send the message again");
   });
 
   // card: protects=the message write's failure logs the step and exit code only, never stderr that may echo the staged message; fails_when=stderr text reaches a log line; no_claim=other steps, whose stderr tail is still logged redacted

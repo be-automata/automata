@@ -33,9 +33,9 @@ import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
 import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
+import { cellEligibilityAtDispatch } from "@/server-lib/compute/cell-eligibility";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
-  RepoReviewSetting,
   ThreadSourceMetadata,
   ThreadTrustContext,
 } from "@terragon/shared/db/types";
@@ -806,63 +806,6 @@ function resolvePlaneKey(): PlanePublicKey {
 }
 
 /**
- * OpenSandbox is configured, the run's org has cells on and the
- * `opensandboxCells` flag is on for the user (#708). A lookup failure means
- * "not eligible" (logged without values): the cell marker must never fail a
- * dispatch.
- */
-async function cellEligibleForRun(
-  userId: string,
-  organizationId: string,
-): Promise<boolean> {
-  try {
-    const { cellsEnabledForRun } = await import(
-      "@/server-lib/compute/cell-gate"
-    );
-    return await cellsEnabledForRun({ db, userId, organizationId });
-  } catch (error) {
-    console.warn("[hatchet] cell eligibility lookup failed (not eligible)", {
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
- * #705: the repo's cell egress compiles (the same pure check cell-plan runs).
- * A refusal or a failure means "not eligible" (logged by code only): the cell
- * marker must never fail a dispatch.
- */
-async function cellEgressCompiles(
-  repoFullName: string,
-  row: RepoReviewSetting | undefined,
-): Promise<boolean> {
-  try {
-    const [{ cellBrokerHost }, { planCellEgressForRepo }] = await Promise.all([
-      import("@/server-lib/compute/cell-gate"),
-      import("@terragon/shared/model/cell-egress-catalog"),
-    ]);
-    const plan = planCellEgressForRepo({
-      repoFullName,
-      row,
-      brokerHost: cellBrokerHost(),
-    });
-    if (!plan.ok) {
-      console.log("[hatchet] cell egress refused (run stays on the box)", {
-        code: plan.code,
-        reason: plan.reason,
-      });
-    }
-    return plan.ok;
-  } catch (error) {
-    console.warn("[hatchet] cell egress check failed (not eligible)", {
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
  * #380: the one place a secret meets the wire. Every run secret —
  * installationToken, githubReadToken, daemonToken, the owner's repoEnv and the
  * self-heal token — is sealed to the plane key (AAD = SHA-256 of the whole
@@ -911,12 +854,18 @@ export async function dispatchAgentRun({
   repoFullName,
   branch,
   deliveryId,
+  agent,
 }: {
   userId: string;
   threadId: string;
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * #718: the chat's agent (`threadChat.agent`). Dispatch loads no thread-chat
+   * columns, so the caller passes it; null or undefined is never marked.
+   */
+  agent: string | null | undefined;
   /**
    * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
    * descends from a GitHub webhook (plumbed webhook → automation → thread →
@@ -1256,11 +1205,19 @@ export async function dispatchAgentRun({
     // (OD-1) or one the cell cannot express (a wildcard, a non-443 port, over
     // the cap) is never marked and stays on the box; cell-plan refuses the
     // same sets as a backstop.
+    // #718: and only for a cell agent, enforced evidence and a Claude OAuth
+    // credential (cell-eligibility.ts).
     const cellMarker =
       isPlainTaskRun &&
       thread?.organizationId &&
-      (await cellEligibleForRun(userId, thread.organizationId)) &&
-      (await cellEgressCompiles(repoFullName, orgSettings?.rows.repo))
+      (await cellEligibilityAtDispatch({
+        db,
+        userId,
+        organizationId: thread.organizationId,
+        repoFullName,
+        row: orgSettings?.rows.repo,
+        agent,
+      }))
         ? ({ cell: "opensandbox" } as const)
         : {};
     const input: AgentRunInput = {

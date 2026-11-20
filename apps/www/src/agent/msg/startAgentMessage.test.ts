@@ -16,6 +16,7 @@ import { startAgentMessage } from "./startAgentMessage";
 import { hasActiveDaemonToken, daemonRunKey } from "@/lib/daemon-token";
 import { sendDaemonMessage } from "@/agent/daemon";
 import { installTestPlaneKey } from "@/agent/hatchet/__fixtures__/plane-key";
+import * as dispatchModule from "@/agent/hatchet/dispatch";
 
 // #380 strict mode: a remote dispatch fails closed without a plane key, so
 // this file installs a test key (the remote-dispatch cases trigger for real).
@@ -80,6 +81,41 @@ describe("startAgentMessage — flag-on (remote) dispatch seam", () => {
         name: daemonRunKey({ threadId, threadChatId }),
       }),
     ).toBe(true);
+  });
+
+  it("#718: forwards the chat's agent to the dispatch", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "be-automata/automata",
+        repoBaseBranchName: "main",
+      },
+    });
+    const chat = await getThreadChat({
+      db,
+      threadId,
+      threadChatId,
+      userId: user.id,
+    });
+    // Pass-through spy: the real dispatch runs; the test reads its input.
+    const dispatchSpy = vi.spyOn(dispatchModule, "dispatchAgentRun");
+
+    await startAgentMessage({
+      db,
+      userId: user.id,
+      message: null,
+      threadId,
+      threadChatId,
+      isNewThread: true,
+    });
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId, agent: chat!.agent }),
+    );
+    dispatchSpy.mockRestore();
+    expect(chat!.agent).toBeTruthy();
   });
 
   it("fails the thread to a terminal error (not a stuck 'booting' zombie) when the dispatch fails", async () => {

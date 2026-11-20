@@ -13,6 +13,7 @@ import {
 } from "@/lib/daemon-token";
 import {
   OPENSANDBOX_RUNC_PROFILE_ID,
+  cellAgentSupported,
   cellBrokerHost,
   cellsEnabledForRun,
 } from "@/server-lib/compute/cell-gate";
@@ -22,6 +23,7 @@ import {
   CELL_RUN_TTL_MS,
   cellStepKey,
   isCellLabelValue,
+  type CellPlanRefusalCode,
 } from "@terragon/types/cell";
 import {
   mintBearer,
@@ -120,7 +122,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
 
   /** Logs the outcome code only (never a body or a value) and answers no-store. */
   const refuse = (
-    code: string,
+    code: CellPlanRefusalCode,
     status: number,
     extra: Record<string, unknown> = {},
   ): NextResponse => {
@@ -164,7 +166,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   ]);
 
   // Explicit: a null chat or agent is not "the default agent" here.
-  if (threadChat?.agent !== "claudeCode") {
+  if (!threadChat || !cellAgentSupported(threadChat.agent)) {
     return refuse("agent_not_supported", 422);
   }
   // A finished run must not get a cell (the worker's poll would end it at once).

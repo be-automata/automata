@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CellPolicyProfile } from "@terragon/shared/cell-policy/cell-policy";
 
 import {
+  cellEvidenceEligibility,
   cellEvidenceNeedsAttention,
   classifyCellEvidence,
 } from "./cell-evidence-status";
@@ -161,5 +162,30 @@ describe("classifyCellEvidence (#709)", () => {
       expect(s).toEqual({ status: "unconfigured" });
       expect(cellEvidenceNeedsAttention(s)).toBe(false);
     }
+  });
+});
+
+describe("cellEvidenceEligibility (#718)", () => {
+  it.each([
+    [{ status: "ok", expiresAt: "x", daysLeft: 30 }, { eligible: true }],
+    [{ status: "expiring", expiresAt: "x", daysLeft: 2 }, { eligible: true }],
+    [
+      { status: "refused", reason: "unknown_profile", expiresAt: null },
+      { eligible: false, code: "unknown_profile", reason: "unknown_profile" },
+    ],
+    [
+      { status: "refused", reason: "evidence_expired", expiresAt: "x" },
+      {
+        eligible: false,
+        code: "egress_not_enforced",
+        reason: "evidence_expired",
+      },
+    ],
+    [
+      { status: "unconfigured" },
+      { eligible: false, code: "egress_not_enforced", reason: "unconfigured" },
+    ],
+  ] as const)("%o -> %o", (status, verdict) => {
+    expect(cellEvidenceEligibility(status)).toEqual(verdict);
   });
 });

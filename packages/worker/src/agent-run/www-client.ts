@@ -582,10 +582,13 @@ export type ThreadStatusPoll =
 
 const ERROR_CODE = /^[a-z_]{1,40}$/;
 
-/** The `error` field of a route's JSON body when it is a `^[a-z_]{1,40}$` code; nothing else of the body is read. */
-export function readErrorCode(body: unknown): string | undefined {
-  if (typeof body === "object" && body !== null && "error" in body) {
-    const code = (body as { error: unknown }).error;
+/** A route's JSON body `field` (`error` by default) when it is a `^[a-z_]{1,40}$` code; nothing else of the body is read. */
+export function readErrorCode(
+  body: unknown,
+  field: "error" | "reason" = "error",
+): string | undefined {
+  if (typeof body === "object" && body !== null && field in body) {
+    const code = (body as Record<string, unknown>)[field];
     if (typeof code === "string" && ERROR_CODE.test(code)) return code;
   }
   return undefined;

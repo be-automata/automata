@@ -15,7 +15,7 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
-import { cellsEnabledForRun } from "./cell-gate";
+import { cellAgentSupported, cellsEnabledForRun } from "./cell-gate";
 
 // Pass-through spies: the real reads run, and a test can assert one was skipped.
 vi.mock("@terragon/shared/model/feature-flags", async (importOriginal) => {
@@ -166,5 +166,21 @@ describe("cellsEnabledForRun", () => {
     expect(await cellsEnabledForRun({ db, userId, organizationId: orgB })).toBe(
       false,
     );
+  });
+});
+
+describe("cellAgentSupported (#718)", () => {
+  it.each([
+    ["claudeCode", true],
+    ["codex", false],
+    ["gemini", false],
+    ["amp", false],
+    ["opencode", false],
+    ["", false],
+    ["ClaudeCode", false],
+    [null, false],
+    [undefined, false],
+  ] as const)("%s -> %s (null and undefined fail closed)", (agent, ok) => {
+    expect(cellAgentSupported(agent)).toBe(ok);
   });
 });

@@ -70,6 +70,29 @@ export function classifyCellEvidence({
   };
 }
 
+/**
+ * #718: a status as the cell-plan route answers it. `ok` and `expiring` are
+ * eligible; a missing profile is `unknown_profile`; anything else is
+ * `egress_not_enforced` with the guard's reason (`unconfigured` stands for
+ * itself). Pure.
+ */
+export function cellEvidenceEligibility(s: CellEvidenceStatus):
+  | { eligible: true }
+  | {
+      eligible: false;
+      code: "unknown_profile" | "egress_not_enforced";
+      reason: CellEgressRefusal | "unconfigured";
+    } {
+  if (s.status === "ok" || s.status === "expiring") return { eligible: true };
+  const reason = s.status === "refused" ? s.reason : s.status;
+  return {
+    eligible: false,
+    code:
+      reason === "unknown_profile" ? "unknown_profile" : "egress_not_enforced",
+    reason,
+  };
+}
+
 export function cellEvidenceNeedsAttention(s: CellEvidenceStatus): boolean {
   return s.status === "expiring" || s.status === "refused";
 }

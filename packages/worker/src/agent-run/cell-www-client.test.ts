@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { TERMINAL_INFO_MAX_CHARS } from "./abnormal-end";
+import { cellRefusalInfo } from "./cell-refusal-text";
 import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
@@ -110,6 +112,55 @@ describe("fetchCellPlan", () => {
     });
     expect(out).toEqual({ ok: false, code, status });
     expect(s.calls).toHaveLength(1);
+  });
+
+  // card: protects=#718 the egress reason is read only when it passes the shape and the allowlist, and the thread line stays under www's 300 bound; fails_when=a bad, oversized or unlisted reason reaches the error or the text; no_claim=the route sending the reason
+  it("#718: an allowlisted egress reason is carried and named in the line", async () => {
+    const s = server([
+      res(409, { error: "egress_not_enforced", reason: "evidence_expired" }),
+    ]);
+    const out = await fetchCellPlan(opts, BODY, {
+      fetch: s.fetchImpl,
+      sleep: noSleep,
+    });
+    expect(out).toEqual({
+      ok: false,
+      code: "egress_not_enforced",
+      status: 409,
+      reason: "evidence_expired",
+    });
+    if (out.ok) throw new Error("unreachable");
+    const info = cellRefusalInfo(
+      new CellPlanRefusedError(out.code, out.status, out.reason),
+    );
+    expect(info).toContain("(egress_not_enforced: evidence_expired)");
+    expect(info!.length).toBeLessThanOrEqual(TERMINAL_INFO_MAX_CHARS);
+  });
+
+  it.each([
+    ["bad shape", "Evidence-Expired!"],
+    ["oversized", "a".repeat(100)],
+    ["unlisted", "some_internal_reason"],
+    ["not a string", 42],
+  ])("#718: a %s reason is dropped", async (_n, reason) => {
+    const s = server([res(409, { error: "egress_not_enforced", reason })]);
+    const out = await fetchCellPlan(opts, BODY, {
+      fetch: s.fetchImpl,
+      sleep: noSleep,
+    });
+    expect(out).toEqual({
+      ok: false,
+      code: "egress_not_enforced",
+      status: 409,
+    });
+    expect(out).not.toHaveProperty("reason");
+    if (out.ok) throw new Error("unreachable");
+    const info = cellRefusalInfo(
+      new CellPlanRefusedError(out.code, out.status, out.reason),
+    );
+    expect(info).toBe(
+      "The cell refused this run before it started (egress_not_enforced). Send the message again: it runs where it is allowed now.",
+    );
   });
 
   // card: protects=a dropped connection and a 502 retry under the SAME request id, then a 200; fails_when=the id changes or the try count is wrong; no_claim=a redelivery's new id (workflow level)

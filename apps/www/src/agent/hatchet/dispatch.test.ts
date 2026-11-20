@@ -185,6 +185,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,
@@ -205,6 +206,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,
@@ -292,6 +294,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,
@@ -325,6 +328,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: personal.threadId,
       threadChatId: personal.threadChatId,
@@ -358,6 +362,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,
@@ -384,6 +389,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId: LEGACY_THREAD_CHAT_ID,
@@ -391,6 +397,7 @@ describe("dispatchAgentRun", () => {
       branch: "main",
     });
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: other.threadId,
       threadChatId: LEGACY_THREAD_CHAT_ID,
@@ -414,6 +421,7 @@ describe("dispatchAgentRun", () => {
 
     await expect(
       dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId,
         threadChatId,
@@ -443,6 +451,7 @@ describe("dispatchAgentRun", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId,
       threadChatId,
@@ -464,6 +473,7 @@ describe("dispatchAgentRun", () => {
     try {
       await expect(
         dispatchAgentRun({
+          agent: "claudeCode",
           userId: user.id,
           threadId,
           threadChatId,
@@ -516,6 +526,7 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     const first = routedFetch("run-old");
     vi.stubGlobal("fetch", first.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: old.threadId,
       threadChatId: old.threadChatId,
@@ -531,6 +542,7 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     const second = routedFetch("run-new");
     vi.stubGlobal("fetch", second.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: fresh.threadId,
       threadChatId: fresh.threadChatId,
@@ -558,6 +570,7 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     const firstReview = routedFetch("run-review");
     vi.stubGlobal("fetch", firstReview.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: priorReview.threadId,
       threadChatId: priorReview.threadChatId,
@@ -571,6 +584,7 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
     const mentionFetch = routedFetch("run-mention");
     vi.stubGlobal("fetch", mentionFetch.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: mention.threadId,
       threadChatId: mention.threadChatId,
@@ -613,6 +627,7 @@ describe("dispatchAgentRun — #165 engine-only supersession (www never cancels)
       const f = routedFetch(runId);
       vi.stubGlobal("fetch", f.mock);
       await dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
@@ -693,6 +708,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const f = routedHatchetFetch("run-discard-1");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -731,6 +747,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const f = routedHatchetFetch("run-2");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -762,6 +779,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const f = routedHatchetFetch("run-79");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -795,6 +813,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     vi.stubGlobal("fetch", f.mock);
     await expect(
       dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
@@ -826,6 +845,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const f = routedHatchetFetch("run-plain");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -870,6 +890,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     );
     await expect(
       dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
@@ -906,6 +927,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     const f = routedHatchetFetch("run-new-91");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -938,6 +960,7 @@ describe("dispatchAgentRun — #125/#127/#165 policy-variant review dispatch", (
     });
     vi.stubGlobal("fetch", badShape);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -1031,6 +1054,7 @@ describe("dispatchAgentRun — phase 4 reviewAgent payload", () => {
     const f = routedHatchetFetch("run-agent");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -1217,6 +1241,7 @@ describe("dispatchAgentRun — phase 4 reviewAgent payload", () => {
     vi.stubGlobal("fetch", f.mock);
     await expect(
       dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
@@ -1298,6 +1323,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
     const f = routedHatchetFetch("run-agent");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -1360,6 +1386,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       const f = routedHatchetFetch("run-companion");
       vi.stubGlobal("fetch", f.mock);
       await dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
@@ -1518,6 +1545,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         let thrown: unknown;
         try {
           await dispatchAgentRun({
+            agent: "claudeCode",
             userId: user.id,
             threadId: t.threadId,
             threadChatId: t.threadChatId,
@@ -1622,6 +1650,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       let thrown: unknown;
       try {
         await dispatchAgentRun({
+          agent: "claudeCode",
           userId: user.id,
           threadId: t.threadId,
           threadChatId: t.threadChatId,
@@ -1671,6 +1700,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       try {
         await expect(
           dispatchAgentRun({
+            agent: "claudeCode",
             userId: user.id,
             threadId: t.threadId,
             threadChatId: t.threadChatId,
@@ -1712,6 +1742,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       let thrown: unknown;
       try {
         await dispatchAgentRun({
+          agent: "claudeCode",
           userId: user.id,
           threadId: t.threadId,
           threadChatId: t.threadChatId,
@@ -1748,6 +1779,7 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       let thrown: unknown;
       try {
         await dispatchAgentRun({
+          agent: "claudeCode",
           userId: user.id,
           threadId: t.threadId,
           threadChatId: t.threadChatId,
@@ -1952,6 +1984,7 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     const f = routedHatchetFetch("run-agent");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -2035,6 +2068,7 @@ describe("dispatchAgentRun — phase 8 selfHeal payload", () => {
     const f = routedHatchetFetch("run-agent");
     vi.stubGlobal("fetch", f.mock);
     await dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -2188,6 +2222,7 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
 
   const dispatch = (t: { threadId: string; threadChatId: string }) =>
     dispatchAgentRun({
+      agent: "claudeCode",
       userId: user.id,
       threadId: t.threadId,
       threadChatId: t.threadChatId,
@@ -2298,6 +2333,7 @@ describe("dispatchAgentRun — phase 9 fix dispatch (RACE-01, TMO-01, RES-06)", 
     vi.stubGlobal("fetch", f);
     await expect(
       dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: t.threadId,
         threadChatId: t.threadChatId,
