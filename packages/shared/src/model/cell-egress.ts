@@ -97,7 +97,7 @@ export function platformCellEgressBundle(brokerHost: string): CellEgressBundle {
  * target. A wildcard is refused: the broker bearer goes to one host only.
  */
 export function normalizeCellBrokerHost(brokerHost: string): string {
-  const entry = normalizeEntry(brokerHost);
+  const entry = normalizeCellEgressEntry(brokerHost);
   if (entry.wildcard) {
     throw new CellEgressError(
       "invalid_host",
@@ -115,7 +115,13 @@ export function cellEgressKey(entry: CellEgressEntry): string {
 /** Characters a host, `*.host`, `host:443` or an IP literal can hold (ASCII only: IDNs come as punycode). */
 const HOST_CHARS_RE = /^[A-Za-z0-9.*:[\]-]*$/;
 
-function normalizeEntry(raw: string): CellEgressEntry {
+/**
+ * One allowlist entry as a cell reads it, or a `CellEgressError` naming why it
+ * cannot. Exported for the per-entry classifier (#728, `egress-entries.ts`):
+ * that module maps these codes, it never re-parses. Imports `node:crypto` and
+ * `psl` through this file, so it is not for client bundles.
+ */
+export function normalizeCellEgressEntry(raw: string): CellEgressEntry {
   const trimmed = raw.trim();
   // Checked before lowercasing (U+212A lowercases to "k") and before echoing:
   // a URL or `user:token@host` must never reach an error message.
@@ -242,10 +248,10 @@ function collect(
   const take = (bundle: CellEgressBundle, platform: boolean): void => {
     out.bundles.add(bundle.id);
     for (const raw of bundle.allow ?? []) {
-      out.allows.push({ entry: normalizeEntry(raw), platform });
+      out.allows.push({ entry: normalizeCellEgressEntry(raw), platform });
     }
     for (const raw of bundle.deny ?? []) {
-      out.denies.push(normalizeEntry(raw));
+      out.denies.push(normalizeCellEgressEntry(raw));
     }
   };
 
@@ -373,7 +379,7 @@ export function compileCellEgress(
   // Templates only narrow.
   let result: CellEgressEntry[] = kept.map((k) => k.entry);
   if (deps.narrowTo) {
-    const narrowed = deps.narrowTo.map(normalizeEntry);
+    const narrowed = deps.narrowTo.map(normalizeCellEgressEntry);
     for (const [i, entry] of narrowed.entries()) {
       const allowed = result.some((k) => coversEntry(k, entry));
       if (!allowed) {

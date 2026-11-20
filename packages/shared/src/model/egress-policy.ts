@@ -90,7 +90,9 @@ function assertValidEntry(level: EgressPolicyLevel, entry: string): void {
  * (order-stable). Applied ONCE control-plane-side so the shape's allowlist is
  * truly final; plane-side normalization stays as belt-and-suspenders.
  */
-function canonicalizeEntries(entries: string[]): string[] {
+export function canonicalizeEgressEntries(
+  entries: readonly string[],
+): string[] {
   const out: string[] = [];
   for (const raw of entries) {
     const entry = raw.trim().toLowerCase();
@@ -132,15 +134,15 @@ export function buildEgressPolicyShape(
     );
   }
   if (level === "none") {
-    return { level, allowlist: canonicalizeEntries(systemHosts) };
+    return { level, allowlist: canonicalizeEgressEntries(systemHosts) };
   }
-  const userEntries = canonicalizeEntries(row.egressAllowlist ?? []);
+  const userEntries = canonicalizeEgressEntries(row.egressAllowlist ?? []);
   for (const entry of userEntries) {
     assertValidEntry(level, entry);
   }
   return {
     level,
-    allowlist: canonicalizeEntries([...userEntries, ...systemHosts]),
+    allowlist: canonicalizeEgressEntries([...userEntries, ...systemHosts]),
   };
 }
 

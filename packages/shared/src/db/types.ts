@@ -501,6 +501,8 @@ export type RepoReviewSetting = typeof schema.repoReviewSettings.$inferSelect;
 export type RepoReviewSettingInsert =
   typeof schema.repoReviewSettings.$inferInsert;
 
+export type RepoEgressAuditLog = typeof schema.repoEgressAuditLog.$inferSelect;
+
 export type OrganizationReviewSetting =
   typeof schema.organizationReviewSettings.$inferSelect;
 export type OrganizationReviewSettingInsert =

@@ -3102,6 +3102,55 @@ export const knowledgeAdminLog = pgTable(
   ],
 );
 
+/** How the actor of a repo egress change authenticated. */
+export type RepoEgressAuditAuthKind = "api_key" | "session";
+
+/** A stored egress level (the `EgressPolicyLevel` union, restated: types.ts imports this file). */
+type RepoEgressAuditLevel = "none" | "ip_port" | "domain";
+
+/**
+ * Append-only log of repo egress changes (#728, OD-3). One row per accepted
+ * change through the egress API, written in the same transaction as the
+ * repo_review_settings update. Hosts are stored here (our database) and never
+ * sent to PostHog. Not moved by a re-home (REHOME_EXCLUDED_TABLES): a repo's
+ * history restarts in the target org.
+ */
+export const repoEgressAuditLog = pgTable(
+  "repo_egress_audit_log",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    repoFullName: text("repo_full_name").notNull(),
+    /** No FK on purpose: the log survives user deletion. */
+    actorUserId: text("actor_user_id").notNull(),
+    authKind: text("auth_kind").notNull().$type<RepoEgressAuditAuthKind>(),
+    /** The apikey row id or the session row id (never a token value). */
+    credentialId: text("credential_id"),
+    levelBefore: text("level_before").$type<RepoEgressAuditLevel>(),
+    levelAfter: text("level_after").$type<RepoEgressAuditLevel>(),
+    /** Canonical hosts, order-stable. No SQL default: the writer always supplies them. */
+    hostsAdded: text("hosts_added").array().notNull(),
+    hostsRemoved: text("hosts_removed").array().notNull(),
+    registriesBefore: boolean("registries_before"),
+    registriesAfter: boolean("registries_after"),
+    /** Millisecond precision so a JS `Date` cursor `(createdAt, id)` round-trips exactly. */
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("repo_egress_audit_log_org_repo_created_index").on(
+      table.organizationId,
+      table.repoFullName,
+      table.createdAt,
+    ),
+  ],
+);
+
 /**
  * Platform-wide knowledge settings: a singleton row (id is always 'global').
  * No organization_id on purpose: this is not tenant data (ADR-001 does not
