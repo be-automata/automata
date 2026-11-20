@@ -135,6 +135,8 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (!isCellLabelValue(stepKey)) return refuse("invalid_run_key", 403);
 
   // cell_step.organization_id is a foreign key: an org-less thread cannot run in a cell.
+  // Since #708 the gate above already refuses one; this narrows the type and stays as a
+  // second line of defence.
   if (!thread.organizationId) return refuse("org_required", 403);
   const organizationId = thread.organizationId;
 

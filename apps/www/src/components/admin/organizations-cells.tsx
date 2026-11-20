@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -22,6 +22,7 @@ export interface AdminOrganizationCellsRow {
 function CellsToggle({ org }: { org: AdminOrganizationCellsRow }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
+  const [refreshing, startRefresh] = useTransition();
 
   const onChange = async (enabled: boolean) => {
     setPending(true);
@@ -35,7 +36,9 @@ function CellsToggle({ org }: { org: AdminOrganizationCellsRow }) {
         return;
       }
       toast.success(`Cells ${enabled ? "on" : "off"} for ${org.name}`);
-      router.refresh();
+      // Stay disabled until the refreshed row arrives, so a second click
+      // never toggles from the stale value.
+      startRefresh(() => router.refresh());
     } catch (error) {
       console.error(error);
       toast.error(`Failed to update ${org.name}`);
@@ -47,7 +50,7 @@ function CellsToggle({ org }: { org: AdminOrganizationCellsRow }) {
   return (
     <Switch
       checked={org.cellsEnabled}
-      disabled={pending}
+      disabled={pending || refreshing}
       onCheckedChange={(checked) => void onChange(checked)}
       aria-label={`Cells for ${org.name}`}
     />

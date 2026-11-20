@@ -1294,6 +1294,11 @@ What the worker does with them (#656 PR-E):
   without a deploy. Switching an org off does not reroute a run already marked: its cell-plan
   call answers `cells_disabled` and the run fails closed (no box fallback); new runs take the
   box. Rollback: switch the org off, or unset `OPENSANDBOX_URL` for every org.
+  **Upgrading to #708:** every org starts off, so the www revision that ships the org gate turns
+  cells off for every flagged user until an admin switches their org on, and a run marked by the
+  old revision then fails `cells_disabled`. Deploy it while no cell run is in flight (or with
+  the flag off), then switch on, at `/internal/admin/organizations`, the orgs that already ran
+  cells.
 - **One box per deployment.** Cells are supported on one box per deployment only. On one box
   the attempts of a run never overlap (systemd stops the old worker before the new one starts,
   and a redelivery waits in-process). Across two boxes attempt _n_ and _n+1_ can overlap, and

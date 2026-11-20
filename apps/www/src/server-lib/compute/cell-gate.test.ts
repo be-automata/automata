@@ -1,15 +1,43 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
-import { setUserFeatureFlagOverride } from "@terragon/shared/model/feature-flags";
-import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
+import {
+  getFeatureFlagForUser,
+  setUserFeatureFlagOverride,
+} from "@terragon/shared/model/feature-flags";
+import {
+  getOrganizationCellsEnabled,
+  setOrganizationCellsEnabled,
+} from "@terragon/shared/model/organizations";
 import {
   createTestOrg,
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 
 import { cellsEnabledForRun } from "./cell-gate";
+
+// Pass-through spies: the real reads run, and a test can assert one was skipped.
+vi.mock("@terragon/shared/model/feature-flags", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@terragon/shared/model/feature-flags")
+    >();
+  return {
+    ...actual,
+    getFeatureFlagForUser: vi.fn(actual.getFeatureFlagForUser),
+  };
+});
+vi.mock("@terragon/shared/model/organizations", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@terragon/shared/model/organizations")
+    >();
+  return {
+    ...actual,
+    getOrganizationCellsEnabled: vi.fn(actual.getOrganizationCellsEnabled),
+  };
+});
 
 /**
  * #708: the cells gate is configured AND org enabled AND user flag, read from
@@ -89,6 +117,27 @@ describe("cellsEnabledForRun", () => {
       );
     },
   );
+
+  it("an unconfigured deployment reads neither the org nor the flag", async () => {
+    setCellsEnv(false);
+    vi.mocked(getFeatureFlagForUser).mockClear();
+    vi.mocked(getOrganizationCellsEnabled).mockClear();
+    expect(
+      await cellsEnabledForRun({ db, userId, organizationId: orgId }),
+    ).toBe(false);
+    expect(getOrganizationCellsEnabled).not.toHaveBeenCalled();
+    expect(getFeatureFlagForUser).not.toHaveBeenCalled();
+  });
+
+  it("an org that is off skips the flag read", async () => {
+    setCellsEnv(true);
+    vi.mocked(getFeatureFlagForUser).mockClear();
+    expect(
+      await cellsEnabledForRun({ db, userId, organizationId: orgId }),
+    ).toBe(false);
+    expect(getOrganizationCellsEnabled).toHaveBeenCalled();
+    expect(getFeatureFlagForUser).not.toHaveBeenCalled();
+  });
 
   it("a missing org row is off", async () => {
     setCellsEnv(true);
