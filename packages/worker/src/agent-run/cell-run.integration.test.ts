@@ -448,7 +448,7 @@ describe.skipIf(!IT || IMAGE === "")(
       }
     });
 
-    // card: protects=#724: Dart and Flutter pub trust the sidecar's CA as uid 10001 (AC-1, AC-2), the other clients still work (AC-5), and the allowlist still denies (AC-3 negative control: example.org is not allowed, and the failure is the proxy's, not a trust error); fails_when=any create/pub get exits non-zero, a registry probe fails, or the example.org fetch succeeds or reports a handshake/verify error; no_claim=CA rotation inside a live cell (verify.sh covers the mechanism offline)
+    // card: protects=#724: Dart and Flutter pub trust the sidecar's CA as uid 10001 (AC-1, AC-2), the other clients still work (AC-5), and the allowlist still denies (AC-3 negative control: example.org is not allowed, and the cell's DNS allowlist refuses it (`Failed host lookup`), not a trust error); fails_when=any create/pub get exits non-zero, a registry probe fails, or the example.org fetch succeeds or reports a handshake/verify error; no_claim=CA rotation inside a live cell (verify.sh covers the mechanism offline)
     it(
       "(g) dart and flutter pub get work, other clients still do, and the allowlist still denies (#724)",
       async () => {
@@ -492,9 +492,17 @@ describe.skipIf(!IT || IMAGE === "")(
         const text = `${denied.stdout}${denied.stderr}`;
         expect(text).not.toContain("HandshakeException");
         expect(text).not.toContain("CERTIFICATE_VERIFY_FAILED");
+        // A positive deny marker, so an unrelated failure (a compile error, a
+        // missing binary) cannot pass for the allowlist. On amd64 (2026-11-20)
+        // the cell refused example.org at DNS: "Failed host lookup".
+        expect(text).toMatch(
+          /Failed host lookup|Connection refused|Connection reset/,
+        );
       },
-      // Below the cell's 30-minute TTL (plan()), so a hung step fails the test
-      // before the cell expires under it.
+      // A hang guard, not an expected run time: (g)'s step budgets total 25
+      // minutes, while the whole suite took 45 s on amd64 (2026-11-20). The
+      // cell's 30-minute TTL (plan()) runs from beforeAll, so a run that really
+      // used every budget could still outlive the cell.
       25 * 60_000,
     );
 
