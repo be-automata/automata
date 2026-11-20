@@ -82,6 +82,8 @@ export const CELL_TEST_DB_READY_ARGV: readonly string[] = [
 export const CELL_TEST_DB_ROLE_SH = [
   "set -eu",
   "PATH=/usr/bin:/bin",
+  // An absent or empty file would make a role with no password.
+  `[ -s ${CELL_TEST_DB_PASSWORD_FILE} ] || { echo "cell-test-db: no password file" >&2; exit 65; }`,
   "rc=0",
   `${CELL_PG_BIN}/psql -X -q -v ON_ERROR_STOP=1 -h ${CELL_TEST_DB_DIR} -p ${CELL_TEST_DB_PORT} -U agent -d postgres <<'SQL' || rc=$?`,
   "\\set VERBOSITY terse",

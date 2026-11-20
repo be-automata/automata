@@ -196,6 +196,24 @@ class SetupAbortedError extends Error {
   }
 }
 
+/** The test database's readiness budget ran out; its message holds no exec text, so it is logged. */
+class TestDbNotReadyError extends Error {
+  constructor() {
+    super(`cell test database not ready after ${TEST_DB_READY_MS}ms`);
+    this.name = "TestDbNotReadyError";
+  }
+}
+
+/** The run's test database state: a password (and its URL) only when one is started. */
+function cellTestDbState(
+  plan: "start" | "owner" | "off",
+  newPassword: () => string,
+): CellRunState["testDb"] {
+  if (plan !== "start") return { plan };
+  const password = newPassword();
+  return { plan, password, url: cellTestDbUrl(password) };
+}
+
 export function createCellExecutor(deps: CellExecutorDeps): RunExecutor {
   const epoch = String(deps.now());
   return {
@@ -270,11 +288,7 @@ async function runCell(
     repoEnv: repoEnv.env,
     envPath: deps.boxTestServicesEnvPath,
   });
-  let testDb: CellRunState["testDb"] = { plan: "off" };
-  if (testDbPlan === "start") {
-    const password = deps.testDbPassword();
-    testDb = { plan: "start", password, url: cellTestDbUrl(password) };
-  } else testDb = { plan: testDbPlan };
+  const testDb = cellTestDbState(testDbPlan, deps.testDbPassword);
   const repoValues = [
     ...Object.values(args.secrets.repoEnv ?? {}),
     ...(testDb.plan === "start" ? [testDb.password] : []),
@@ -792,6 +806,7 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
     r.step(
       `cell: test database not started (the owner's ${CELL_TEST_DB_ENV} wins)`,
     );
+    return {};
   }
   if (testDb.plan !== "start") return {};
   const provider = r.provider as ICellProvider;
@@ -817,9 +832,7 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
       );
       if (probe.exitCode === 0) break;
       if (r.deps.now() >= deadline) {
-        throw new Error(
-          `cell test database not ready after ${TEST_DB_READY_MS}ms`,
-        );
+        throw new TestDbNotReadyError();
       }
       await r.deps.sleep(TEST_DB_POLL_MS, r.live);
     }
@@ -827,6 +840,7 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
       r,
       ["/bin/bash", "-c", CELL_TEST_DB_ROLE_SH, "cell-test-db"],
       "test database role",
+      PGREP_TIMEOUT_MS,
     );
   } catch (error) {
     if (error instanceof SetupAbortedError || r.live.aborted) throw error;
@@ -843,9 +857,7 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
     }
     r.step(
       "cell: test database not started; the run goes on without it" +
-        (error instanceof Error && error.message.startsWith("cell test")
-          ? ` (${error.message})`
-          : ""),
+        (error instanceof TestDbNotReadyError ? ` (${error.message})` : ""),
     );
     return {};
   }
