@@ -1420,17 +1420,17 @@ wildcards), at most 100 entries.
   checked 2026-11-20); confirming this in a cell is AC-1 of #719. The Flutter SDK and engine
   artifacts do need `storage.googleapis.com`: `flutter precache`, artifacts fetched on demand,
   and the Android Gradle embedding (`/download.flutter.io`). They come from
-  `FLUTTER_STORAGE_BASE_URL`, which defaults to `https://storage.googleapis.com`. An Android
-  build also pulls the Android Gradle Plugin and androidx from Google's Maven repository
-  (`google()`, served from `dl.google.com`; `maven.google.com` if a build names it), which
-  `@1` does not carry either, so an Android repo lists that host too. No bundle
+  `FLUTTER_STORAGE_BASE_URL`, which defaults to `https://storage.googleapis.com`. No bundle
   carries that host (#719, OD-1). A repo that needs it lists it in its own `domain` allowlist,
   so the risk is a recorded choice per repo. **The host serves every Google Cloud Storage
   bucket, so allowing it lets a prompt-injected agent upload to a bucket an attacker owns,
   with no credential of ours.** The `domain` allowlist governs the box too, so the box opens
   the host as well. A repo with no policy that moves to `domain` also limits its box runs to
   the listed hosts plus the system hosts, so list everything its runs fetch. List the storage
-  host only for a repo that builds Flutter artifacts in its runs. Leave the third-party mirrors
+  host only for a repo that builds Flutter artifacts in its runs. An Android build also pulls
+  the Android Gradle Plugin and androidx from Google's Maven repository (`google()`, served
+  from `dl.google.com`; `maven.google.com` if a build names it), which `@1` does not carry
+  either, so an Android repo lists that host as well. Leave the third-party mirrors
   (`storage.flutter-io.cn`, `pub.flutter-io.cn`) out: the Flutter team can't verify their
   reliability or security (docs.flutter.dev/community/china).
 
