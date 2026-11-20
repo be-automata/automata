@@ -1,4 +1,5 @@
 import {
+  CELL_EGRESS_REASONS,
   CellPlanRefusedError,
   CellPlanUnavailableError,
 } from "./cell-www-client";
@@ -73,7 +74,14 @@ export function cellRefusalInfo(err: unknown): string | undefined {
   const code: CellRefusalCode = isCellRefusalCode(err.code)
     ? err.code
     : "unknown";
-  const reason = err instanceof CellPlanRefusedError ? err.reason : undefined;
+  // Re-checked here, not only in fetchCellPlan: the allowlist holds whoever
+  // built the error.
+  const reason =
+    err instanceof CellPlanRefusedError &&
+    err.reason !== undefined &&
+    (CELL_EGRESS_REASONS as readonly string[]).includes(err.reason)
+      ? err.reason
+      : undefined;
   const head = `The cell refused this run before it started (${
     reason ? `${code}: ${reason}` : code
   })`;

@@ -346,11 +346,22 @@ describe("dispatchAgentRun: cell marker", () => {
         evidenceMode.mode = mode;
         const input = await dispatchPlain({ organizationId: orgId });
         expect(input).not.toHaveProperty("cell");
-        expect(logged()).toContain("evidence_not_enforced");
+        expect(logged()).toContain("egress_not_enforced");
         expect(logged()).toContain(reason);
         expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
       },
     );
+
+    it("a failed evidence read is not marked and logs the error name only", async () => {
+      vi.mocked(readCellEvidenceStatus).mockRejectedValueOnce(
+        new Error("db down: secret-detail-xyz"),
+      );
+      const input = await dispatchPlain({ organizationId: orgId });
+      expect(input).not.toHaveProperty("cell");
+      expect(logged()).toContain("evidence_check_failed");
+      expect(logged()).not.toContain("secret-detail-xyz");
+      expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
+    });
 
     it("expiring evidence is still marked", async () => {
       evidenceMode.mode = "expiring";

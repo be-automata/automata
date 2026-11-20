@@ -880,6 +880,7 @@ async function cellAgentEligible(
     return false;
   } catch (error) {
     console.warn("[hatchet] cell agent check failed (not eligible)", {
+      code: "agent_check_failed",
       error: error instanceof Error ? error.name : "unknown",
     });
     return false;
@@ -903,9 +904,15 @@ async function cellEvidenceEnforced(): Promise<boolean> {
       configured: true,
     });
     if (status.status === "ok" || status.status === "expiring") return true;
+    // cell-plan's own codes: `unknown_profile` with no row, else the guard's
+    // reason under `egress_not_enforced`.
+    const reason = status.status === "refused" ? status.reason : status.status;
     console.log("[hatchet] cell evidence refused (run stays on the box)", {
-      code: "evidence_not_enforced",
-      reason: status.status === "refused" ? status.reason : status.status,
+      code:
+        reason === "unknown_profile"
+          ? "unknown_profile"
+          : "egress_not_enforced",
+      reason,
     });
     return false;
   } catch (error) {
