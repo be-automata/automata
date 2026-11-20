@@ -217,6 +217,26 @@ describe("untrusted wrapping", () => {
     });
   });
 
+  test("head + tail cap never splits a surrogate pair at either cut", () => {
+    const lone =
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // "😀" is two UTF-16 units: odd offsets put each cut inside a pair.
+    for (const prefix of ["", "a"]) {
+      const input = prefix + "😀".repeat(20);
+      for (const cap of [9, 10, 11, 12]) {
+        const { text, truncated } = capHeadTail(input, cap);
+        assert.equal(truncated, true);
+        assert.equal(lone.test(text), false, `prefix=${prefix} cap=${cap}`);
+        const kept = text.replace(
+          /\n\n\[\.\.\. truncated \d+ chars[^\]]*\]\n\n/,
+          "",
+        );
+        const dropped = Number(/truncated (\d+) chars/.exec(text)?.[1]);
+        assert.equal(kept.length + dropped, input.length);
+      }
+    }
+  });
+
   test("renderReviewContext wraps each block, separates with ---, caps at 24k and reports unavailable blocks", () => {
     assert.equal(REVIEW_CONTEXT_BLOCK_MAX_CHARS, 24_000);
     const out = renderReviewContext([
