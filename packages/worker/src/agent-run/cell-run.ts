@@ -28,6 +28,17 @@ import {
 import { cellRepoEnv, type CellRepoEnv } from "./cell-repo-env";
 import { teardownCellRun } from "./cell-teardown";
 import {
+  CELL_TEST_DB_ENV,
+  CELL_TEST_DB_MKDIR_ARGV,
+  CELL_TEST_DB_PASSWORD_FILE,
+  CELL_TEST_DB_READY_ARGV,
+  CELL_TEST_DB_ROLE_SH,
+  CELL_TEST_DB_START_SH,
+  CELL_TEST_DB_STOP_SH,
+  cellTestDbUrl,
+  planCellTestDb,
+} from "./cell-test-db";
+import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
   CELL_PLAN_UNAVAILABLE_CODES,
@@ -39,7 +50,7 @@ import {
 import { containerLanePolicy } from "./container-argv";
 import { composeContainerSettings } from "./container-policy";
 import { admitRunSlot } from "./run-admission";
-import { formatRunStartLine } from "./run-lane";
+import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { classifyNextMessageError } from "./retry-classification";
 import { getProcessWorkerId } from "./run-namespace";
 import type { RunExecutor, RunExecutorInput } from "./run-executor";
@@ -85,6 +96,11 @@ const EXEC_STDERR_TAIL = 512;
 const PGREP_TIMEOUT_MS = 10_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const CONFIRM_RETRY = { tries: 4, backoffMs: [1_000, 2_000, 4_000] } as const;
+/** The test database's readiness budget (#707): well under one setup stamp. */
+const TEST_DB_READY_MS = 30_000;
+const TEST_DB_POLL_MS = 500;
+/** initdb + a non-waiting start; with the 30 s ready budget the steps stay under one setup stamp. */
+const TEST_DB_START_TIMEOUT_MS = 20_000;
 
 /** The image user (deploy/images/batteries/Dockerfile): uid 10001. */
 const CELL_USER = { owner: "agent", group: "agent" } as const;
@@ -141,6 +157,10 @@ export interface CellExecutorDeps {
   now: () => number;
   /** A fresh 24-char base64url id (18 random bytes) for one plan fetch. */
   randomId: () => string;
+  /** A fresh 48-char hex password (24 random bytes) for one cell's test database (#707). */
+  testDbPassword: () => string;
+  /** The box test-services file (tests); default BOX_TEST_SERVICES_ENV_PATH. */
+  boxTestServicesEnvPath?: string;
   /**
    * How the run ended, for onFailure (run-end-marks.ts): `retired` (the terminal
    * read retired the token, H7), `tokenGone` (E16-409) or `fenced` (a newer
@@ -210,6 +230,12 @@ interface CellRunState {
   repoEnv: CellRepoEnv;
   /** The 4+ char repo env value scrub for exec text, run on the whole text before a cut. */
   scrub: (text: string) => string;
+  /** What this run does about a test database (#707), and its password when it starts one. Never logged. */
+  testDb:
+    | { plan: "start"; password: string; url: string }
+    | { plan: "owner" | "off" };
+  /** Whether the settings `env` block carries the test database URL (set by bootstrap). */
+  testDbDelivered: boolean;
   st: {
     fenced: boolean;
     stopRequested: boolean;
@@ -236,7 +262,23 @@ async function runCell(
   // can still be echoed). Exec text, which can echo anything, is scrubbed from
   // 4 chars; every cell log line from 8, so a common short value (`agent`,
   // `true`) cannot blank the platform's own words in every line.
-  const repoValues = Object.values(args.secrets.repoEnv ?? {});
+  const repoEnv = cellRepoEnv(args.secrets.repoEnv);
+  // The test database (#707): its password is scrubbed like a repo env value.
+  const testDbPlan = planCellTestDb({
+    input,
+    lane: resolveRunLane(input),
+    repoEnv: repoEnv.env,
+    envPath: deps.boxTestServicesEnvPath,
+  });
+  let testDb: CellRunState["testDb"] = { plan: "off" };
+  if (testDbPlan === "start") {
+    const password = deps.testDbPassword();
+    testDb = { plan: "start", password, url: cellTestDbUrl(password) };
+  } else testDb = { plan: testDbPlan };
+  const repoValues = [
+    ...Object.values(args.secrets.repoEnv ?? {}),
+    ...(testDb.plan === "start" ? [testDb.password] : []),
+  ];
   const scrub = createValueRedactor(repoValues);
   const scrubLine = createValueRedactor(repoValues, 8);
   const step = (msg: string) =>
@@ -330,8 +372,10 @@ async function runCell(
     abnormal,
     provider: null,
     cellId: null,
-    repoEnv: cellRepoEnv(args.secrets.repoEnv),
+    repoEnv,
     scrub,
+    testDb,
+    testDbDelivered: false,
     st: {
       fenced: false,
       stopRequested: false,
@@ -451,6 +495,9 @@ async function runCell(
         Object.keys(r.repoEnv.env).length > 0
       ) {
         step(`cell: repo env not delivered (agent=${pulled.agent})`);
+      }
+      if (pulled.agent !== "claudeCode" && r.testDbDelivered) {
+        step(`cell: test database env not delivered (agent=${pulled.agent})`);
       }
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
@@ -731,6 +778,81 @@ async function putFile(
   );
 }
 
+/**
+ * The cell's own test database (#707), when planCellTestDb said `start`: a
+ * 0700 dir, the password copied in (never in argv), initdb and a start, a
+ * bounded readiness loop (the setup heartbeat keeps stamping meanwhile), then
+ * the role. Returns the agent's env. A failure that is not an abort is logged
+ * and the run goes on without the variable: a repo whose suites need no
+ * database still runs. The elapsed time is logged (AC 4).
+ */
+async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
+  const { testDb } = r;
+  if (testDb.plan === "owner") {
+    r.step(
+      `cell: test database not started (the owner's ${CELL_TEST_DB_ENV} wins)`,
+    );
+  }
+  if (testDb.plan !== "start") return {};
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  const started = r.deps.now();
+  try {
+    await execOk(r, [...CELL_TEST_DB_MKDIR_ARGV], "test database dir");
+    await putFile(r, CELL_TEST_DB_PASSWORD_FILE, testDb.password, 600);
+    await execOk(
+      r,
+      ["/bin/bash", "-c", CELL_TEST_DB_START_SH, "cell-test-db"],
+      "test database start",
+      TEST_DB_START_TIMEOUT_MS,
+    );
+    const deadline = started + TEST_DB_READY_MS;
+    for (;;) {
+      ensureLive(r);
+      const probe = await raceLive(
+        r,
+        provider.exec(cellId, [...CELL_TEST_DB_READY_ARGV], {
+          timeoutMs: PGREP_TIMEOUT_MS,
+        }),
+      );
+      if (probe.exitCode === 0) break;
+      if (r.deps.now() >= deadline) {
+        throw new Error(
+          `cell test database not ready after ${TEST_DB_READY_MS}ms`,
+        );
+      }
+      await r.deps.sleep(TEST_DB_POLL_MS, r.live);
+    }
+    await execOk(
+      r,
+      ["/bin/bash", "-c", CELL_TEST_DB_ROLE_SH, "cell-test-db"],
+      "test database role",
+    );
+  } catch (error) {
+    if (error instanceof SetupAbortedError || r.live.aborted) throw error;
+    // Best effort: no half-made server or staged password is left behind.
+    try {
+      await raceLive(
+        r,
+        provider.exec(cellId, ["/bin/bash", "-c", CELL_TEST_DB_STOP_SH], {
+          timeoutMs: PGREP_TIMEOUT_MS,
+        }),
+      );
+    } catch (cleanup) {
+      if (cleanup instanceof SetupAbortedError || r.live.aborted) throw cleanup;
+    }
+    r.step(
+      "cell: test database not started; the run goes on without it" +
+        (error instanceof Error && error.message.startsWith("cell test")
+          ? ` (${error.message})`
+          : ""),
+    );
+    return {};
+  }
+  r.step(`cell: test database ready in ${r.deps.now() - started}ms`);
+  return { [CELL_TEST_DB_ENV]: testDb.url };
+}
+
 /** The clone, the git identity, HOME (settings, trust seed, placeholder login), and the entry's socket. */
 async function bootstrap(r: CellRunState): Promise<void> {
   const { input, config } = r.args;
@@ -778,6 +900,11 @@ async function bootstrap(r: CellRunState): Promise<void> {
     );
   }
   if (delivered > 0) r.step(`cell: repo env: ${delivered} names`);
+  // The test database URL rides in the same block (#707); the owner's own
+  // TEST_DATABASE_ADMIN_URL wins, as on the box (planCellTestDb starts none then).
+  const testDbEnv = await startTestDb(r);
+  r.testDbDelivered = Object.keys(testDbEnv).length > 0;
+  const settingsEnv = { ...testDbEnv, ...repoEnv };
   await putFile(
     r,
     `${HOME_CLAUDE_DIR}/settings.json`,
@@ -785,7 +912,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
       composeContainerSettings(
         containerLanePolicy("task"),
         batteries,
-        delivered > 0 ? repoEnv : null,
+        Object.keys(settingsEnv).length > 0 ? settingsEnv : null,
       ),
       null,
       2,

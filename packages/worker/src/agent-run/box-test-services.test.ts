@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  isBoxTestServicesRepo,
   readBoxTestServicesEnv,
   receivesBoxTestServices,
 } from "./box-test-services";
@@ -121,6 +122,34 @@ describe("readBoxTestServicesEnv", () => {
     );
     expect(readBoxTestServicesEnv(REPO, p)).toEqual({});
     expectOneWarningWithoutValues();
+  });
+});
+
+describe("isBoxTestServicesRepo (#707)", () => {
+  // card: protects=a cell's gate is the repo list alone, case-insensitive and exact; fails_when=a listed repo is refused, an unlisted one or a prefix is admitted; no_claim=the box's URL use
+  it("is true for a listed repo even with no URL in the file", () => {
+    const p = envFile(`TEST_SERVICES_REPOS=acme/widgets, ${REPO}\n`);
+    expect(isBoxTestServicesRepo("Be-Automata/Automata", p)).toBe(true);
+    expect(isBoxTestServicesRepo("acme/widgets", p)).toBe(true);
+    expect(isBoxTestServicesRepo("be-automata/automata-x", p)).toBe(false);
+    expect(isBoxTestServicesRepo("someone/else", p)).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // card: protects=an absent, unsafe or malformed file admits no repo; fails_when=any of them is true or a value is logged; no_claim=none
+  it("is false when the file is absent, unsafe or malformed", () => {
+    expect(isBoxTestServicesRepo(REPO, path.join(dir, "missing.env"))).toBe(
+      false,
+    );
+    expect(warn).not.toHaveBeenCalled();
+    const open = envFile(`TEST_SERVICES_REPOS=${REPO}\n`, 0o644);
+    expect(isBoxTestServicesRepo(REPO, open)).toBe(false);
+    const bad = envFile(
+      `TEST_SERVICES_REPOS=${REPO}\nTEST_DATABASE_ADMIN_URL ${SECRET_URL}\n`,
+    );
+    expect(isBoxTestServicesRepo(REPO, bad)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("s3cr3tpw");
   });
 });
 

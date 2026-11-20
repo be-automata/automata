@@ -61,5 +61,6 @@ export const cellExecutor = createCellExecutor({
   sleep: (ms, signal) => abortableSleep(ms, signal),
   now: () => Date.now(),
   randomId: () => randomBytes(18).toString("base64url"),
+  testDbPassword: () => randomBytes(24).toString("hex"),
   marks: runEndMarks,
 });
