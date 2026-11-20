@@ -1332,6 +1332,10 @@ wildcards), at most 100 entries.
   unmarked (one log line, `[hatchet] cell egress refused`), and `cell-plan` refuses with
   `409 egress_compile_failed` and a `reason` (`egress_wildcard`, `port_not_443`,
   `too_many_entries`, …) before it opens a step.
+- **A setting changed after dispatch fails the run.** Dispatch decides box or cell once. If the
+  repo moves to `ip_port`, or gains an entry the cell cannot express, while a marked run waits
+  for its plan, `cell-plan` refuses it and the run fails: the worker never falls back to the
+  box. Re-run the task.
 - **Package registries (opt-in, off by default, OD-2):** `cell_egress_registries = true` on the
   repo's row adds `automata/registries@1`. Its hosts are:
 
@@ -1344,8 +1348,10 @@ wildcards), at most 100 entries.
   - crates.io: `crates.io`, `index.crates.io`, `static.crates.io`;
   - Go: `proxy.golang.org`, `sum.golang.org`.
 
-  It applies with no policy or with `domain`. Under `none` it is ignored, so a cell never
-  reaches more than its box. **Registries accept uploads.** This layer cannot enforce GET-only,
+  It applies with no policy or with `domain`. Under `none` (the operator chose system hosts
+  only) it is ignored. It is the one deliberate widening past the box: the box never reads it,
+  so under `domain` a cell can reach registry hosts the repo's allowlist does not list.
+  **Registries accept uploads.** This layer cannot enforce GET-only,
   so the opt-in widens what a prompt-injected agent can send out. Turn it on only for a repo
   that needs it. Multi-tenant storage hosts (`storage.googleapis.com`, S3) are not in `@1`, so
   `flutter pub get` or a Flutter SDK download that redirects there still fails. A wider list
@@ -1362,7 +1368,9 @@ curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
 Each planned cell writes one `cell_decision` row (`seam = 'compile'`, `mode = 'shadow'`). Its
 `input.egress` holds `level`, `refs`, `bundles` and the `digest` the plan carries as
 `egressDigest`, so a `deny` row in `egress_events` can be traced to the set that produced it.
-The row records the set; it is not a policy decision.
+The row records the set (`input.kind = 'cell_egress'`); it is not a policy decision. A replayed
+plan request writes another row for the same `(stepKey, attempt)`, so key reads on
+`(stepKey, attempt, digest)`.
 
 ### Findings every operator must know
 

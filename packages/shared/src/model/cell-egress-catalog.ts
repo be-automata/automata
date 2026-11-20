@@ -71,17 +71,6 @@ export type CellEgressRepoFields = EgressPolicyFields & {
   cellEgressRegistries: boolean | null;
 };
 
-/** OD-1: a cell's policy is domain-based, so an `ip_port` repo stays on the box. */
-export class CellEgressLevelUnsupportedError extends Error {
-  readonly level: EgressPolicyLevel;
-
-  constructor(level: EgressPolicyLevel) {
-    super(`egress_level_unsupported: a cell cannot enforce '${level}'`);
-    this.name = "CellEgressLevelUnsupportedError";
-    this.level = level;
-  }
-}
-
 /**
  * The per-run bundle for a repo's operator entries. Its id is
  * content-addressed (`repo/<owner>__<name>@<16 hex>`), so the same entries give
@@ -101,22 +90,36 @@ export function repoCellEgressBundle(
 }
 
 export interface CellEgressForRepo {
+  ok: true;
   /** The repo's level; null when it has no row or no policy. */
   level: EgressPolicyLevel | null;
   refs: string[];
   catalog: CellEgressCatalog;
 }
 
+/** What cell-plan answers (409) and why dispatch keeps a run on the box. */
+export interface CellEgressRefusal {
+  ok: false;
+  code: "egress_level_unsupported" | "egress_compile_failed";
+  /** A compiler code, `egress_wildcard` or `invalid_policy`; absent for the level refusal. */
+  reason?: string;
+}
+
 /**
  * The refs and catalog a cell for this repo compiles from:
  * - no row or no policy: platform only, plus registries when opted in (the
- *   box enforces nothing for such a repo, so the opt-in widens nothing);
- * - `none`: platform only. The box reaches system hosts only, so the
- *   registries opt-in is ignored (a cell never reaches more than its box);
+ *   box enforces nothing for such a repo);
+ * - `none`: platform only. The operator chose "system hosts only", so the
+ *   registries opt-in is ignored;
  * - `domain`: the operator entries, validated by the box's own builder, become
- *   one per-run bundle, plus registries when opted in;
- * - `ip_port`: refused (CellEgressLevelUnsupportedError).
- * A stored policy the builder refuses throws `invalid_policy`, never echoed.
+ *   one per-run bundle (so the allowlist adds nothing the box would refuse),
+ *   plus registries when opted in;
+ * - `ip_port`: refused, `egress_level_unsupported` (OD-1: a cell's policy is
+ *   domain-based).
+ * The registries opt-in is the one deliberate widening past the box (OD-2):
+ * the box never reads it, so under `domain` a cell may reach registry hosts
+ * the box's allowlist does not list.
+ * A stored policy the builder refuses is `invalid_policy`, never echoed.
  */
 export function cellEgressForRepo({
   repoFullName,
@@ -124,21 +127,22 @@ export function cellEgressForRepo({
 }: {
   repoFullName: string;
   row: CellEgressRepoFields | undefined;
-}): CellEgressForRepo {
+}): CellEgressForRepo | CellEgressRefusal {
   let shape: ReturnType<typeof buildEgressPolicyShape> = null;
   if (row) {
     try {
       // No system hosts: the platform bundle carries the cell's own.
       shape = buildEgressPolicyShape(row, { systemHosts: [] });
     } catch {
-      throw new CellEgressError(
-        "invalid_policy",
-        "invalid_policy: the repo's stored egress policy is invalid; not echoed",
-      );
+      return {
+        ok: false,
+        code: "egress_compile_failed",
+        reason: "invalid_policy",
+      };
     }
   }
   if (shape?.level === "ip_port") {
-    throw new CellEgressLevelUnsupportedError(shape.level);
+    return { ok: false, code: "egress_level_unsupported" };
   }
   const refs: string[] = [];
   let catalog: CellEgressCatalog = CELL_EGRESS_CATALOG;
@@ -150,17 +154,12 @@ export function cellEgressForRepo({
   if (row?.cellEgressRegistries === true && shape?.level !== "none") {
     refs.push(CELL_EGRESS_REGISTRIES_BUNDLE);
   }
-  return { level: shape?.level ?? null, refs, catalog };
+  return { ok: true, level: shape?.level ?? null, refs, catalog };
 }
 
 export type CellEgressPlan =
-  | ({ ok: true; set: CellEgressSet } & CellEgressForRepo)
-  | {
-      ok: false;
-      code: "egress_level_unsupported" | "egress_compile_failed";
-      /** The compiler's code (or `egress_wildcard`); absent for the level refusal. */
-      reason?: string;
-    };
+  | (CellEgressForRepo & { set: CellEgressSet })
+  | CellEgressRefusal;
 
 /**
  * The repo's cell egress, compiled, or the refusal a cell-plan would answer.
@@ -175,27 +174,24 @@ export function planCellEgressForRepo(args: {
   row: CellEgressRepoFields | undefined;
   brokerHost: string;
 }): CellEgressPlan {
+  const repo = cellEgressForRepo(args);
+  if (!repo.ok) return repo;
+  let set: CellEgressSet;
   try {
-    const repo = cellEgressForRepo(args);
-    const set = compileCellEgress(repo.refs, {
+    set = compileCellEgress(repo.refs, {
       brokerHost: args.brokerHost,
       catalog: repo.catalog,
     });
-    if (set.entries.some((e) => e.wildcard)) {
-      return {
-        ok: false,
-        code: "egress_compile_failed",
-        reason: "egress_wildcard",
-      };
-    }
-    return { ok: true, set, ...repo };
   } catch (error) {
-    if (error instanceof CellEgressLevelUnsupportedError) {
-      return { ok: false, code: "egress_level_unsupported" };
-    }
-    if (error instanceof CellEgressError) {
-      return { ok: false, code: "egress_compile_failed", reason: error.code };
-    }
-    throw error;
+    if (!(error instanceof CellEgressError)) throw error;
+    return { ok: false, code: "egress_compile_failed", reason: error.code };
   }
+  if (set.entries.some((e) => e.wildcard)) {
+    return {
+      ok: false,
+      code: "egress_compile_failed",
+      reason: "egress_wildcard",
+    };
+  }
+  return { ...repo, set };
 }

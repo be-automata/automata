@@ -283,6 +283,8 @@ export async function PUT(
       recheckOnComplete: row.recheckOnComplete,
       // The level only: allowlist entries may name internal hosts.
       egressPolicy: row.egressPolicy,
+      // #705: the cell registries opt-in widens a cell's egress.
+      cellEgressRegistries: row.cellEgressRegistries,
       // What THIS write changed — the audit trail must show the delta, not
       // just the resulting row.
       changed: Object.keys(patch),

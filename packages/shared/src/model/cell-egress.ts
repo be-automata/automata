@@ -70,8 +70,7 @@ export type CellEgressErrorCode =
   | "inexpressible"
   | "template_widens"
   | "too_many_entries"
-  | "empty_set"
-  | "invalid_policy"; // a stored repo policy the box's own builder refuses (#705)
+  | "empty_set";
 
 export class CellEgressError extends Error {
   readonly code: CellEgressErrorCode;

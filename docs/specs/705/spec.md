@@ -68,8 +68,8 @@ Already done (do not redo): the compiler, renderer, cap, guard, cell_decision ta
   - `none` → no repo bundle (the box allows system hosts only);
   - `domain` → operator entries (via `buildEgressPolicyShape(row, { systemHosts: [] })`, so the
     validation is the box's own) become one per-run repo bundle when non-empty;
-  - `ip_port` → throws `CellEgressLevelUnsupportedError` (OD-1);
-  - an invalid stored policy → `CellEgressError("invalid_policy")` (new code in `cell-egress.ts`);
+  - `ip_port` → refusal `{ ok: false, code: "egress_level_unsupported" }` (OD-1);
+  - an invalid stored policy → refusal `egress_compile_failed` / `invalid_policy` (results, not throws; simplify pass);
   - `cellEgressRegistries === true` adds the registries ref with no policy or `domain`; under
     `none` it is ignored (validator fix 2: the box reaches system hosts only, and a cell never
     reaches more than its box; with no policy the box enforces nothing, so nothing widens);
@@ -84,7 +84,7 @@ catalog }` or `{ ok: false, code, reason? }`: `cellEgressForRepo` + `compileCell
 - Read the repo row with `getRepoReviewSetting({ db, organizationId, repoFullName: thread.githubRepoFullName })`
   in the existing `Promise.all`.
 - After the profile guard and before `openNextAttempt`: `planCellEgressForRepo`:
-  - `CellEgressLevelUnsupportedError` → `409 { error: "egress_level_unsupported" }`;
+  - refusal `egress_level_unsupported` → `409 { error: "egress_level_unsupported" }`;
   - `CellEgressError` → `409 { error: "egress_compile_failed", reason: <code> }`;
   - any wildcard entry → `409 { error: "egress_compile_failed", reason: "egress_wildcard" }` (the
     plan would refuse it after the step opened).
@@ -151,7 +151,7 @@ off the cell; a setting changed between dispatch and plan fails closed).
 
 1. Storage: `packages/shared/src/db/schema.ts`, `deploy/migrations/2026-11-22-repo-cell-egress-registries.sql`,
    `packages/shared/src/model/repo-review-settings.ts`, `packages/shared/src/model/repo-review-settings.test.ts`.
-2. Catalog: `packages/shared/src/model/cell-egress.ts`, `cell-egress-catalog.ts`, `cell-egress-catalog.test.ts`.
+2. Catalog: `cell-egress-catalog.ts`, `cell-egress-catalog.test.ts`.
 3. cell-plan: `apps/www/src/app/api/daemon/cell-plan/route.ts`, `route.test.ts`.
 4. API: `review-settings-route-shared.ts`, `[owner]/[repo]/route.ts`, `[owner]/[repo]/route.test.ts`,
    `apps/www/src/app/api/review-settings/route.test.ts`.

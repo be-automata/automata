@@ -31,6 +31,7 @@ import {
   CellPlanError,
   buildCellCreatePlan,
 } from "@terragon/shared/model/cell-create-plan";
+import { CellEgressError } from "@terragon/shared/model/cell-egress";
 import { planCellEgressForRepo } from "@terragon/shared/model/cell-egress-catalog";
 import {
   CellEgressNotEnforcedError,
@@ -188,11 +189,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     brokerHost,
   });
   if (!egress.ok) {
-    return refuse(
-      egress.code,
-      409,
-      egress.reason === undefined ? {} : { reason: egress.reason },
-    );
+    return refuse(egress.code, 409, { reason: egress.reason });
   }
 
   // The thread row, not startAgentMessage's per-message branch: a mismatch makes
@@ -285,6 +282,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     if (error instanceof CellEgressNotEnforcedError) {
       return refuseEgress(error);
     }
+    // Unreachable while the pre-compile above sees the same inputs; kept so a
+    // drift between the two compiles refuses (409) instead of a 5xx.
+    if (error instanceof CellEgressError) {
+      return refuse("egress_compile_failed", 409, { reason: error.code });
+    }
     throw error;
   }
   // This plan won its bearer: the step's older cell tokens (earlier attempts,
@@ -304,9 +306,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     ),
   );
   // #705: the compile seam's shadow row, so an egress deny can be traced to
-  // the set that produced it. Never fails the plan.
-  try {
-    await insertCellDecision({
+  // the set that produced it. Off the response path and never fails the plan.
+  // A replayed requestId writes another row for the same (stepKey, attempt):
+  // readers key on (stepKey, attempt, digest).
+  waitUntil(
+    insertCellDecision({
       db,
       decision: {
         threadId,
@@ -331,15 +335,15 @@ export const POST = withDaemonAuthUnavailable(async function POST(
           },
         },
       },
-    });
-  } catch (error) {
-    console.warn("[daemon cell-plan] cell_decision insert failed", {
-      threadId,
-      stepKey,
-      attempt,
-      errorName: error instanceof Error ? error.name : "unknown",
-    });
-  }
+    }).catch((error: unknown) =>
+      console.warn("[daemon cell-plan] cell_decision insert failed", {
+        threadId,
+        stepKey,
+        attempt,
+        errorName: error instanceof Error ? error.name : "unknown",
+      }),
+    ),
+  );
   console.log("[daemon cell-plan]", {
     threadId,
     stepKey,

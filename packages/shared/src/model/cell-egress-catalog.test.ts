@@ -13,7 +13,6 @@ import {
 import {
   CELL_EGRESS_CATALOG,
   CELL_EGRESS_REGISTRIES_BUNDLE,
-  CellEgressLevelUnsupportedError,
   cellEgressForRepo,
   planCellEgressForRepo,
   repoCellEgressBundle,
@@ -32,8 +31,15 @@ function row(over: Partial<CellEgressRepoFields> = {}): CellEgressRepoFields {
   };
 }
 
+/** The ok half of cellEgressForRepo; fails the test on a refusal. */
+function okFor(r: CellEgressRepoFields | undefined) {
+  const result = cellEgressForRepo({ repoFullName: REPO, row: r });
+  if (!result.ok) throw new Error(`refused: ${result.code}`);
+  return result;
+}
+
 function compileFor(r: CellEgressRepoFields | undefined) {
-  const { refs, catalog } = cellEgressForRepo({ repoFullName: REPO, row: r });
+  const { refs, catalog } = okFor(r);
   return compileCellEgress(refs, { brokerHost: BROKER, catalog });
 }
 
@@ -109,7 +115,7 @@ describe("cellEgressForRepo", () => {
       egressPolicy: "domain",
       egressAllowlist: [" Example.COM "],
     });
-    const { refs, level } = cellEgressForRepo({ repoFullName: REPO, row: r });
+    const { refs, level } = okFor(r);
     expect(level).toBe("domain");
     expect(refs).toEqual([repoCellEgressBundle(REPO, ["example.com"]).id]);
     const set = compileFor(r);
@@ -121,7 +127,7 @@ describe("cellEgressForRepo", () => {
 
   it("`domain` with an empty allowlist adds no repo bundle", () => {
     const r = row({ egressPolicy: "domain", egressAllowlist: [] });
-    expect(cellEgressForRepo({ repoFullName: REPO, row: r }).refs).toEqual([]);
+    expect(okFor(r).refs).toEqual([]);
   });
 
   it("the registries opt-in adds the registries ref with no policy or a domain policy", () => {
@@ -133,30 +139,24 @@ describe("cellEgressForRepo", () => {
         cellEgressRegistries: true,
       }),
     ]) {
-      expect(cellEgressForRepo({ repoFullName: REPO, row: r }).refs).toContain(
-        CELL_EGRESS_REGISTRIES_BUNDLE,
-      );
+      expect(okFor(r).refs).toContain(CELL_EGRESS_REGISTRIES_BUNDLE);
       expect(keys(compileFor(r))).toContain("registry.npmjs.org");
     }
-    expect(
-      cellEgressForRepo({
-        repoFullName: REPO,
-        row: row({ cellEgressRegistries: false }),
-      }).refs,
-    ).toEqual([]);
+    expect(okFor(row({ cellEgressRegistries: false })).refs).toEqual([]);
   });
 
   it("`none` ignores the registries opt-in: a cell never reaches more than its box", () => {
     const r = row({ egressPolicy: "none", cellEgressRegistries: true });
-    expect(cellEgressForRepo({ repoFullName: REPO, row: r }).refs).toEqual([]);
+    expect(okFor(r).refs).toEqual([]);
     expect(compileFor(r).bundles).toEqual([CELL_EGRESS_PLATFORM_BUNDLE]);
   });
 
-  it("OD-1: `ip_port` is refused with the level", () => {
+  it("OD-1: `ip_port` is refused with egress_level_unsupported", () => {
     const r = row({ egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5"] });
-    expect(() => cellEgressForRepo({ repoFullName: REPO, row: r })).toThrow(
-      CellEgressLevelUnsupportedError,
-    );
+    expect(cellEgressForRepo({ repoFullName: REPO, row: r })).toEqual({
+      ok: false,
+      code: "egress_level_unsupported",
+    });
   });
 
   it("an invalid stored policy is `invalid_policy` and the entry is never echoed", () => {
@@ -164,15 +164,13 @@ describe("cellEgressForRepo", () => {
       egressPolicy: "domain",
       egressAllowlist: ["user:secret-token@host"],
     });
-    let caught: unknown;
-    try {
-      cellEgressForRepo({ repoFullName: REPO, row: r });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(CellEgressError);
-    expect((caught as CellEgressError).code).toBe("invalid_policy");
-    expect((caught as CellEgressError).message).not.toContain("secret-token");
+    const result = cellEgressForRepo({ repoFullName: REPO, row: r });
+    expect(result).toEqual({
+      ok: false,
+      code: "egress_compile_failed",
+      reason: "invalid_policy",
+    });
+    expect(JSON.stringify(result)).not.toContain("secret-token");
   });
 
   it("a repo entry the cell cannot express (a non-443 port) refuses at compile", () => {
@@ -204,7 +202,7 @@ describe("cellEgressForRepo", () => {
       egressAllowlist: ["example.com", "keep.example.org"],
       cellEgressRegistries: true,
     });
-    const { refs, catalog } = cellEgressForRepo({ repoFullName: REPO, row: r });
+    const { refs, catalog } = okFor(r);
     const withDeny: CellEgressCatalog = {
       ...catalog,
       "test/deny@1": {
@@ -224,10 +222,7 @@ describe("cellEgressForRepo", () => {
 
   it("pins the registries policy the sandbox IT case creates (#705 OPENSANDBOX_IT)", () => {
     // opensandbox-cell.integration.test.ts uses this exact literal.
-    const { refs, catalog } = cellEgressForRepo({
-      repoFullName: REPO,
-      row: row({ cellEgressRegistries: true }),
-    });
+    const { refs, catalog } = okFor(row({ cellEgressRegistries: true }));
     const set = compileCellEgress(refs, { brokerHost: "osbit.test", catalog });
     expect(toOpenSandboxNetworkPolicy(set)).toEqual({
       defaultAction: "deny",
@@ -261,10 +256,9 @@ describe("cellEgressForRepo", () => {
   it("pins the OpenSandbox policy the sandbox IT case creates (#705 OPENSANDBOX_IT)", () => {
     // opensandbox-cell.integration.test.ts cannot import shared: its
     // "compiled repo set" case uses this exact literal.
-    const { refs, catalog } = cellEgressForRepo({
-      repoFullName: REPO,
-      row: row({ egressPolicy: "domain", egressAllowlist: ["httpbin.org"] }),
-    });
+    const { refs, catalog } = okFor(
+      row({ egressPolicy: "domain", egressAllowlist: ["httpbin.org"] }),
+    );
     const set = compileCellEgress(refs, { brokerHost: "osbit.test", catalog });
     expect(toOpenSandboxNetworkPolicy(set)).toEqual({
       defaultAction: "deny",

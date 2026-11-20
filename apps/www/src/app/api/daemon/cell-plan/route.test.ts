@@ -653,6 +653,8 @@ describe("POST /api/daemon/cell-plan", () => {
         expect(allowTargets(plan)).toEqual(
           [cellBrokerHost(), "api.anthropic.com", "example.com"].sort(),
         );
+        // The compile row is written off the response path.
+        await waitUntilResolved();
         expect(plan.networkPolicy.egress.at(-1)).toEqual({
           action: "deny",
           ports: [80],
@@ -705,6 +707,18 @@ describe("POST /api/daemon/cell-plan", () => {
           ]),
         );
         expect(on.plan.egressDigest).not.toBe(off.plan.egressDigest);
+      });
+
+      it("`none` ignores the registries opt-in: platform only", async () => {
+        await setRepo({
+          egressPolicy: "none",
+          egressAllowlist: null,
+          cellEgressRegistries: true,
+        });
+        const { plan } = await (await POST(req(body()))).json();
+        expect(allowTargets(plan)).toEqual(
+          [cellBrokerHost(), "api.anthropic.com"].sort(),
+        );
       });
 
       it("an allowlist over the cap is 409 egress_compile_failed and no step is opened", async () => {
