@@ -112,6 +112,14 @@ describe("buildContainerRunEnv (the run env file's content)", () => {
     expect(delivered.AMP_API_KEY).toBe("amp");
     expect(delivered.HOME).toBeUndefined();
     expect(delivered.MY_VAR).toBe("ok");
+    // #717: the batteries image's own ENV, reserved as in a cell.
+    const image = buildContainerRunEnv({
+      ...base,
+      policy: containerLanePolicy("task"),
+      repoEnv: { SOMNIO_ROOT: "/evil", VENDOR_SKILLS_ROOT: "/evil" },
+    });
+    expect(image.SOMNIO_ROOT).toBeUndefined();
+    expect(image.VENDOR_SKILLS_ROOT).toBeUndefined();
     const boxKey = buildContainerRunEnv({
       ...base,
       policy: containerLanePolicy("pr"),

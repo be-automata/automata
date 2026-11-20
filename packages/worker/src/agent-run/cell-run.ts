@@ -25,7 +25,11 @@ import {
   cellEntrypoint,
   cellGitConfigArgv,
 } from "./cell-image";
-import { cellRepoEnv, type CellRepoEnv } from "./cell-repo-env";
+import {
+  filterRepoEnv,
+  repoEnvDroppedNote,
+  type FilteredRepoEnv,
+} from "./repo-env";
 import { teardownCellRun } from "./cell-teardown";
 import {
   CELL_TEST_DB_ENV,
@@ -245,7 +249,7 @@ interface CellRunState {
   provider: ICellProvider | null;
   cellId: string | null;
   /** The owner's repo env, filtered for a cell (#706). Its values are never logged. */
-  repoEnv: CellRepoEnv;
+  repoEnv: FilteredRepoEnv;
   /** The 4+ char repo env value scrub for exec text, run on the whole text before a cut. */
   scrub: (text: string) => string;
   /** What this run does about a test database (#707), and its password when it starts one. Never logged. */
@@ -280,7 +284,7 @@ async function runCell(
   // can still be echoed). Exec text, which can echo anything, is scrubbed from
   // 4 chars; every cell log line from 8, so a common short value (`agent`,
   // `true`) cannot blank the platform's own words in every line.
-  const repoEnv = cellRepoEnv(args.secrets.repoEnv);
+  const repoEnv = filterRepoEnv(args.secrets.repoEnv);
   // The test database (#707): its password is scrubbed like a repo env value.
   const testDbPlan = planCellTestDb({
     input,
@@ -913,14 +917,10 @@ async function bootstrap(r: CellRunState): Promise<void> {
   }
   // The owner's repo env rides in the settings `env` block (#706, OD-1): the
   // CLI applies it to the agent's process env. Names only in the log.
-  const { env: repoEnv, dropped, invalidNames } = r.repoEnv;
+  const repoEnv = r.repoEnv.env;
   const delivered = Object.keys(repoEnv).length;
-  if (dropped.length > 0 || invalidNames > 0) {
-    r.step(
-      `cell: repo env names not set (reserved): ${dropped.join(", ") || "none"}` +
-        (invalidNames > 0 ? ` (+${invalidNames} not an env name)` : ""),
-    );
-  }
+  const droppedNote = repoEnvDroppedNote(r.repoEnv);
+  if (droppedNote) r.step(`cell: ${droppedNote}`);
   if (delivered > 0) r.step(`cell: repo env: ${delivered} names`);
   // The test database URL rides in the same block (#707); the owner's own
   // TEST_DATABASE_ADMIN_URL wins, as on the box (planCellTestDb starts none then).

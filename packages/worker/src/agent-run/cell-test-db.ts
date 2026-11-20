@@ -126,7 +126,7 @@ export function cellTestDbUrl(password: string): string {
 export function planCellTestDb(opts: {
   input: Pick<AgentRunInput, "repoFullName" | "reviewAgent" | "selfHeal">;
   lane: RunLane;
-  /** The repo env the agent gets (cellRepoEnv's `env`). */
+  /** The repo env the agent gets (filterRepoEnv's `env`). */
   repoEnv: Record<string, string>;
   /** The box test-services file; default BOX_TEST_SERVICES_ENV_PATH. */
   envPath?: string;

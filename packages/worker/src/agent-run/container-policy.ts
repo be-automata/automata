@@ -221,9 +221,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *   - the lane's `permissions.deny` rules (a review denies risky skills);
  *   - the settings `env` block, when the caller passes one: the box's run
  *     telemetry (run-telemetry.ts), or a cell's filtered repo env
- *     (cell-repo-env.ts, #706). A settings `env` block beats the process env,
+ *     (repo-env.ts, #706). A settings `env` block beats the process env,
  *     so this is the one place the telemetry export can be set without being
- *     silently overridden, and why a cell's repo env drops more names.
+ *     silently overridden, and why the reserved rule covers the names the
+ *     runtime sets for the agent (#717).
  *
  * Hook arrays are concatenated per event, never replaced; nothing from
  * `batteries` other than `hooks` is taken (the image carries no policy, I1).

@@ -23,7 +23,7 @@ import {
   CELL_WRITE_MESSAGE_SH,
   cellEntrypoint,
 } from "./cell-image";
-import { cellRepoEnv } from "./cell-repo-env";
+import { filterRepoEnv } from "./repo-env";
 import { CELL_SETUP_STAMP_MS } from "./cell-run";
 import { teardownCellRun } from "./cell-teardown";
 import {
@@ -295,10 +295,10 @@ describe.skipIf(!IT || IMAGE === "")(
       }
     });
 
-    // card: protects=AC 2 of #706: a repo env value in a settings env block built by the same helpers cell-run.ts uses (cellRepoEnv, composeContainerSettings) and copied in is in that file and nowhere in docker inspect or the logs of the server, the egress sidecar or the cell; fails_when=the file lacks it or any inspect or log holds it; no_claim=bootstrap's own call order (cell-run.test.ts) or the CLI applying the block (UAT)
+    // card: protects=AC 2 of #706: a repo env value in a settings env block built by the same helpers cell-run.ts uses (filterRepoEnv, composeContainerSettings) and copied in is in that file and nowhere in docker inspect or the logs of the server, the egress sidecar or the cell; fails_when=the file lacks it or any inspect or log holds it; no_claim=bootstrap's own call order (cell-run.test.ts) or the CLI applying the block (UAT)
     it("(e) a repo env value is in the agent's settings only, never in inspect or logs (#706)", async () => {
       const value = `repo-env-canary-${randomBytes(8).toString("hex")}`;
-      const { env } = cellRepoEnv({ FOO_TOKEN: value });
+      const { env } = filterRepoEnv({ FOO_TOKEN: value });
       const path = "/home/agent/.claude/settings.json";
       await provider.exec(cellId, [
         "/bin/mkdir",

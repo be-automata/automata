@@ -322,6 +322,19 @@ const RESERVED_REPO_ENV_KEYS = new Set([
   "YTCTL",
   // #546: the box's stuck-agent stop; an owner may not lift it.
   "TOOL_FAILURE_STREAK_LIMIT",
+  // #717: the batteries image's own ENV (the Somnio CLI's tree, the battery
+  // skills' root, roborev telemetry off). The run env file is sourced over
+  // the image ENV on the box, and a cell's settings env beats it, so a repo
+  // value would redirect a battery or turn telemetry back on.
+  "SOMNIO_ROOT",
+  "VENDOR_SKILLS_ROOT",
+  "ROBOREV_TELEMETRY_ENABLED",
+  // The daemon's own agent env (daemon.ts childEnv, claude-adapter.ts
+  // bashTimeoutEnv). On the box the daemon writes them after process.env; a
+  // cell's settings env would beat them.
+  "DAEMON_TOKEN",
+  "BASH_MAX_TIMEOUT_MS",
+  "BASH_DEFAULT_TIMEOUT_MS",
 ]);
 const RESERVED_REPO_ENV_PREFIXES = [
   "LD_",
@@ -342,8 +355,16 @@ const RESERVED_REPO_ENV_PREFIXES = [
   "MCP_",
   "CLAUDE_FLOW_",
   "BROWSE_",
+  // A cell's runtime (the MITM CA path, the transparent-proxy switch).
+  "OPENSANDBOX_",
 ];
 
+/**
+ * The one reserved-name rule for an owner's repo env, on the box and in a
+ * cell (#717). A test keeps every name a cell's entry starts the daemon with
+ * (`CELL_DAEMON_ENV`) reserved here, but the build-tool settings an owner may
+ * set.
+ */
 export function isReservedRepoEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
   return (
