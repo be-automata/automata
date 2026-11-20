@@ -56,6 +56,10 @@ const adminCategories: AdminCategory[] = [
         title: "Knowledge Budget Ceiling",
         href: "/internal/admin/knowledge",
       },
+      {
+        title: "Organizations (cells)",
+        href: "/internal/admin/organizations",
+      },
     ],
   },
   {

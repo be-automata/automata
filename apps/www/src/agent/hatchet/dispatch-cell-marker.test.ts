@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import type { User } from "@terragon/shared";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
 import {
   createTestOrg,
   createTestThread,
@@ -50,6 +51,11 @@ describe("dispatchAgentRun: cell marker", () => {
     vi.mocked(getFeatureFlagForUser).mockResolvedValue(true);
     user = (await createTestUser({ db })).user;
     orgId = await createTestOrg({ db });
+    await setOrganizationCellsEnabled({
+      db,
+      organizationId: orgId,
+      enabled: true,
+    });
   });
 
   async function dispatchPlain(overrides: { organizationId?: string } = {}) {
@@ -113,6 +119,36 @@ describe("dispatchAgentRun: cell marker", () => {
     expect(input).not.toHaveProperty("cell");
     expect(JSON.stringify(warn.mock.calls)).not.toContain("db down");
     warn.mockRestore();
+  });
+
+  it("#708: org A enabled gets the marker, org B of the same user does not", async () => {
+    const orgB = await createTestOrg({ db, name: "Org B" });
+    const inA = await dispatchPlain({ organizationId: orgId });
+    const inB = await dispatchPlain({ organizationId: orgB });
+    expect(inA.cell).toBe("opensandbox");
+    expect(inB).not.toHaveProperty("cell");
+  });
+
+  it("#708: switching the org off removes the marker on the next dispatch", async () => {
+    expect((await dispatchPlain({ organizationId: orgId })).cell).toBe(
+      "opensandbox",
+    );
+    await setOrganizationCellsEnabled({
+      db,
+      organizationId: orgId,
+      enabled: false,
+    });
+    expect(await dispatchPlain({ organizationId: orgId })).not.toHaveProperty(
+      "cell",
+    );
+    await setOrganizationCellsEnabled({
+      db,
+      organizationId: orgId,
+      enabled: true,
+    });
+    expect((await dispatchPlain({ organizationId: orgId })).cell).toBe(
+      "opensandbox",
+    );
   });
 
   it("a thread without an organization never gets the marker", async () => {

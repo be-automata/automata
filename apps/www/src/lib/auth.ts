@@ -332,6 +332,15 @@ export const auth = betterAuth({
               defaultValue: false,
               input: false,
             },
+            // organization.cells_enabled (#708). input: false — only the
+            // admin page switches an org's cells gate; the create/update
+            // endpoints cannot set it (members can still read it).
+            cellsEnabled: {
+              type: "boolean",
+              required: false,
+              defaultValue: false,
+              input: false,
+            },
           },
         },
       },

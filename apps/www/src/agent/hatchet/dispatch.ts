@@ -460,8 +460,9 @@ export interface AgentRunInput {
    */
   workBranch?: string;
   /**
-   * #634 S4: plain org task runs only, when OpenSandbox is configured and the
-   * `opensandboxCells` flag is on for the user. A reference, never a secret:
+   * #634 S4: plain org task runs only, when OpenSandbox is configured, the
+   * org has cells on (#708) and the `opensandboxCells` flag is on for the
+   * user. A reference, never a secret:
    * the worker would fetch its create plan from /api/daemon/cell-plan. Absent
    * otherwise (byte-identical payload); the worker ignores it until S5.
    */
@@ -804,16 +805,20 @@ function resolvePlaneKey(): PlanePublicKey {
 }
 
 /**
- * OpenSandbox is configured and the `opensandboxCells` flag is on for the user.
- * A lookup failure means "not eligible" (logged without values): the cell
- * marker must never fail a dispatch.
+ * OpenSandbox is configured, the run's org has cells on and the
+ * `opensandboxCells` flag is on for the user (#708). A lookup failure means
+ * "not eligible" (logged without values): the cell marker must never fail a
+ * dispatch.
  */
-async function cellEligibleForUser(userId: string): Promise<boolean> {
+async function cellEligibleForRun(
+  userId: string,
+  organizationId: string,
+): Promise<boolean> {
   try {
-    const { cellsEnabledForUser } = await import(
+    const { cellsEnabledForRun } = await import(
       "@/server-lib/compute/cell-gate"
     );
-    return await cellsEnabledForUser({ db, userId });
+    return await cellsEnabledForRun({ db, userId, organizationId });
   } catch (error) {
     console.warn("[hatchet] cell eligibility lookup failed (not eligible)", {
       error: error instanceof Error ? error.name : "unknown",
@@ -1211,10 +1216,11 @@ export async function dispatchAgentRun({
     // #634 S4: the cell marker. Plain task runs on an org thread only (the
     // cell step's organization is a foreign key), set BEFORE the seal because
     // its binding covers the whole input. A reference; no secret is added.
+    // #708: and only when that org has cells on.
     const cellMarker =
       isPlainTaskRun &&
       thread?.organizationId &&
-      (await cellEligibleForUser(userId))
+      (await cellEligibleForRun(userId, thread.organizationId))
         ? ({ cell: "opensandbox" } as const)
         : {};
     const input: AgentRunInput = {

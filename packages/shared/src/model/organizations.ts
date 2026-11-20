@@ -215,3 +215,66 @@ export async function removeOrganizationMember({
       and(eq(member.organizationId, organizationId), eq(member.userId, userId)),
     );
 }
+
+/**
+ * #708: whether the org's runs may use OpenSandbox cells. A missing row is
+ * off. Read per call (no cache), so an admin toggle applies on the next read.
+ */
+export async function getOrganizationCellsEnabled({
+  db,
+  organizationId,
+}: {
+  db: DB;
+  organizationId: string;
+}): Promise<boolean> {
+  const [row] = await db
+    .select({ cellsEnabled: organization.cellsEnabled })
+    .from(organization)
+    .where(eq(organization.id, organizationId))
+    .limit(1);
+  return row?.cellsEnabled ?? false;
+}
+
+/** #708: sets the org's cells gate. True when a row was updated. */
+export async function setOrganizationCellsEnabled({
+  db,
+  organizationId,
+  enabled,
+}: {
+  db: DB;
+  organizationId: string;
+  enabled: boolean;
+}): Promise<boolean> {
+  const rows = await db
+    .update(organization)
+    .set({ cellsEnabled: enabled })
+    .where(eq(organization.id, organizationId))
+    .returning({ id: organization.id });
+  return rows.length > 0;
+}
+
+export interface AdminOrganizationRow {
+  id: string;
+  name: string;
+  slug: string;
+  isPersonal: boolean;
+  cellsEnabled: boolean;
+}
+
+/** Every org with its cells gate, for the admin page, by name. */
+export async function listOrganizationsForAdmin({
+  db,
+}: {
+  db: DB;
+}): Promise<AdminOrganizationRow[]> {
+  return await db
+    .select({
+      id: organization.id,
+      name: organization.name,
+      slug: organization.slug,
+      isPersonal: organization.isPersonal,
+      cellsEnabled: organization.cellsEnabled,
+    })
+    .from(organization)
+    .orderBy(organization.name, organization.id);
+}

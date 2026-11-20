@@ -104,6 +104,9 @@ const SINCE_NOTES: Readonly<Record<string, string>> = {
   "organization.is_personal":
     "organization.is_personal — the org switcher and the default active org " +
     "read it (deploy/migrations/2026-10-14-environment-org-unique.sql)",
+  "organization.cells_enabled":
+    "organization.cells_enabled — the per-org cells gate reads it " +
+    "(deploy/migrations/2026-11-22-organization-cells-enabled.sql)",
   environment_org_user_repo_unique: ENV_ORG_UNIQUE_SINCE,
   environment_user_global_unique: ENV_ORG_UNIQUE_SINCE,
 };

@@ -1255,7 +1255,7 @@ non-empty, so set them in this order:
    `ssh <box> sudo sed -n 's/^OPENSANDBOX_API_KEY=//p' /etc/automata/opensandbox.env | npx wrangler secret put OPENSANDBOX_API_KEY --name automata-www`;
 4. **last**, `OPENSANDBOX_URL=https://<host>`, and only after step 7 passes.
 
-The per-user flag `opensandboxCells` still gates `cell-plan`.
+The per-user flag `opensandboxCells` and the per-org switch (`organization.cells_enabled`, #708) still gate `cell-plan`.
 
 ### 9. Worker
 
@@ -1276,7 +1276,7 @@ The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
 
 What the worker does with them (#656 PR-E):
 
-- **`cells_unconfigured`.** The cell marker follows www's per-user `opensandboxCells` flag,
+- **`cells_unconfigured`.** The cell marker follows www's gate (the `opensandboxCells` flag and the org switch),
   not the worker's box. With the flag on, a marked run on a worker whose three names are unset
   or invalid (a partial set, a key file that is not exactly one `OPENSANDBOX_API_KEY=<hex>`
   line, a non-loopback `http:` URL, a tag-only image) fails closed with `cells_unconfigured`
@@ -1284,9 +1284,21 @@ What the worker does with them (#656 PR-E):
   is no marker and the run takes the box path unchanged. The key file is read per marked run,
   so a rotated key needs no restart, and the boot line reports only which names are present
   (`cells: off` or `cells: env present (...)`).
-- **Rollout (R7).** Turn `opensandboxCells` on only for users whose org runs on a box with the
-  OpenSandbox server installed and the three names set. A flagged user whose run lands on any
-  other box fails `cells_unconfigured` on every run.
+- **Rollout (R7), org by org (#708).** A run is marked for a cell only when www has OpenSandbox
+  configured, the run owner's `opensandboxCells` flag is on **and** the run's org has cells on
+  (`organization.cells_enabled`, default off, set by an admin at `/internal/admin/organizations`).
+  One account can own the automations of many orgs, so the flag alone no longer moves every org
+  at once: switch on only the orgs whose runs land on a box with the OpenSandbox server installed
+  and the three names set. A marked run that lands on any other box fails `cells_unconfigured`.
+  The switch is read on every dispatch and every cell-plan call, so it applies on the next run
+  without a deploy. Switching an org off does not reroute a run already marked: its cell-plan
+  call answers `cells_disabled` and the run fails closed (no box fallback); new runs take the
+  box. Rollback: switch the org off, or unset `OPENSANDBOX_URL` for every org.
+  **Upgrading to #708:** every org starts off, so the www revision that ships the org gate turns
+  cells off for every flagged user until an admin switches their org on, and a run marked by the
+  old revision then fails `cells_disabled`. Deploy it while no cell run is in flight (or with
+  the flag off), then switch on, at `/internal/admin/organizations`, the orgs that already ran
+  cells.
 - **One box per deployment.** Cells are supported on one box per deployment only. On one box
   the attempts of a run never overlap (systemd stops the old worker before the new one starts,
   and a redelivery waits in-process). Across two boxes attempt _n_ and _n+1_ can overlap, and
