@@ -208,7 +208,7 @@ interface CellRunState {
   cellId: string | null;
   /** The owner's repo env, filtered for a cell (#706). Its values are never logged. */
   repoEnv: CellRepoEnv;
-  /** The repo env value scrub `step` applies; also run on whole text before a cut. */
+  /** The 4+ char repo env value scrub for exec text, run on the whole text before a cut. */
   scrub: (text: string) => string;
   st: {
     fenced: boolean;
@@ -232,11 +232,15 @@ async function runCell(
 ): Promise<AgentRunOutput> {
   const { input, ctx, config, wwwOpts, runKey, abnormal, cellConfig } = args;
   const runSignal = ctx.abortController?.signal;
-  // Every cell log line passes the repo env value scrub (#706): every value
-  // of 4+ chars, the dropped ones too (a dropped value can still be echoed).
-  const scrub = createValueRedactor(Object.values(args.secrets.repoEnv ?? {}));
+  // The repo env value scrub (#706), the dropped values too (a dropped value
+  // can still be echoed). Exec text, which can echo anything, is scrubbed from
+  // 4 chars; every cell log line from 8, so a common short value (`agent`,
+  // `true`) cannot blank the platform's own words in every line.
+  const repoValues = Object.values(args.secrets.repoEnv ?? {});
+  const scrub = createValueRedactor(repoValues);
+  const scrubLine = createValueRedactor(repoValues, 8);
   const step = (msg: string) =>
-    ctx.log(scrub(`[agent-run ${input.threadId}] ${msg}`));
+    ctx.log(scrubLine(`[agent-run ${input.threadId}] ${msg}`));
   const ids = { threadId: input.threadId, threadChatId: input.threadChatId };
 
   // A poll slower than a quarter of the stale window could let a healthy

@@ -107,9 +107,10 @@ export function createValueRedactor(
 
 It blanks each value of `minLength`+ characters and its JSON-escaped form, longest first, then
 applies `redactSecrets`. `cell-run.ts` builds one from every `repoEnv` value (the delivered and the
-dropped ones: a dropped value can still be echoed) and wraps the run's `step` logger with it, so
-every cell log line passes it (the `execOk` error tails, the teardown and poll lines, and any line
-added later). Moving `dispatch.ts`'s private copy onto it is a follow-up
+dropped ones: a dropped value can still be echoed). Exec stderr is scrubbed whole from 4 chars, then
+cut to its 512-char tail (AC 4). The run's `step` logger also wraps every cell log line with one
+from 8 chars (the box's token threshold), so a value echoed into any later line is blanked while a
+common short value (`MODE=agent`, `CI=true`) does not blank the platform's own words. Moving `dispatch.ts`'s private copy onto it is a follow-up
 (out of scope: www).
 
 ### Files

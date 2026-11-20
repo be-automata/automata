@@ -1256,6 +1256,16 @@ describe("the cell run: the owner's repo env (#706)", () => {
     expect(s.logs.join("\n")).not.toContain(VALUE);
   });
 
+  // card: protects=a common short repo env value does not blank the platform's words in every log line; fails_when=`agent` or `true` is redacted out of ordinary lines; no_claim=exec tails, which still blank from 4 chars
+  it("leaves ordinary log lines readable with short common values", async () => {
+    const s = setup();
+    await s.executor.run(withRepoEnv(s, { CI: "true", MODE: "agent" }));
+    expect(s.logs).toContain(
+      "[agent-run thr_1] next-message: got message (agent=claudeCode, model=m)",
+    );
+    expect(s.logs.join("\n")).not.toContain("<redacted>");
+  });
+
   // card: protects=the scrub runs on the whole stderr before the 512-char cut, so a value straddling the cut leaves no half behind; fails_when=the tail is cut first and the value's second half is logged; no_claim=values under 4 chars
   it("scrubs before the tail is cut", async () => {
     const half = VALUE.slice(VALUE.length / 2);
