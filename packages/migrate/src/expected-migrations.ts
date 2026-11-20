@@ -33,4 +33,5 @@ export const EXPECTED_MIGRATION_IDS = [
   "2026-11-20-cell-step-open-nonce",
   "2026-11-20-credential-unavailable",
   "2026-11-21-agent-messages",
+  "2026-11-22-organization-cells-enabled",
 ] as const;
