@@ -1,0 +1,107 @@
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { ColumnDef } from "@tanstack/react-table";
+import { toast } from "sonner";
+
+import { Badge } from "@/components/ui/badge";
+import { DataTable } from "@/components/ui/data-table";
+import { Switch } from "@/components/ui/switch";
+import { usePageBreadcrumbs } from "@/hooks/usePageBreadcrumbs";
+import { setOrganizationCellsEnabledAction } from "@/server-actions/admin/organization";
+
+export interface AdminOrganizationCellsRow {
+  id: string;
+  name: string;
+  slug: string;
+  isPersonal: boolean;
+  cellsEnabled: boolean;
+}
+
+function CellsToggle({ org }: { org: AdminOrganizationCellsRow }) {
+  const router = useRouter();
+  const [pending, setPending] = useState(false);
+
+  const onChange = async (enabled: boolean) => {
+    setPending(true);
+    try {
+      const result = await setOrganizationCellsEnabledAction({
+        organizationId: org.id,
+        enabled,
+      });
+      if (!result.ok) {
+        toast.error(`Failed to update ${org.name}: ${result.error}`);
+        return;
+      }
+      toast.success(`Cells ${enabled ? "on" : "off"} for ${org.name}`);
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      toast.error(`Failed to update ${org.name}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <Switch
+      checked={org.cellsEnabled}
+      disabled={pending}
+      onCheckedChange={(checked) => void onChange(checked)}
+      aria-label={`Cells for ${org.name}`}
+    />
+  );
+}
+
+const columns: ColumnDef<AdminOrganizationCellsRow>[] = [
+  {
+    accessorKey: "name",
+    header: "Name",
+    cell: ({ row }) => (
+      <div className="flex items-center gap-2">
+        <span className="font-medium">{row.original.name}</span>
+        {row.original.isPersonal && <Badge variant="secondary">personal</Badge>}
+      </div>
+    ),
+  },
+  {
+    accessorKey: "slug",
+    header: "Slug",
+    cell: ({ row }) => (
+      <span className="font-mono text-sm">{row.original.slug}</span>
+    ),
+  },
+  {
+    accessorKey: "cellsEnabled",
+    header: "Cells",
+    cell: ({ row }) => <CellsToggle org={row.original} />,
+  },
+];
+
+/**
+ * #708: the per-org OpenSandbox cells gate. A run uses a cell only when the
+ * deployment is configured, the owner's `opensandboxCells` flag is on and the
+ * run's org is on here. A switch applies on the next dispatch, no deploy.
+ */
+export function AdminOrganizationsCells({
+  organizations,
+}: {
+  organizations: AdminOrganizationCellsRow[];
+}) {
+  usePageBreadcrumbs([
+    { label: "Admin", href: "/internal/admin" },
+    { label: "Organizations" },
+  ]);
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-sm text-muted-foreground">
+        Cells run for an org&apos;s runs only when OpenSandbox is configured,
+        the run owner&apos;s <code>opensandboxCells</code> flag is on, and the
+        org is switched on here. Switching an org off fails its runs already
+        marked for a cell (no box fallback); new runs go to the box.
+      </p>
+      <DataTable columns={columns} data={organizations} />
+    </div>
+  );
+}
