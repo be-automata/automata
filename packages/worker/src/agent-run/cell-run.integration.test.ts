@@ -93,6 +93,15 @@ const dind = (args: string[]) =>
     maxBuffer: 64 * 1024 * 1024,
   });
 
+/** Case (g)'s AC-3 probe: a Dart HTTPS fetch of a host outside the allowlist. */
+const DENIED_PROBE_DART = `import 'dart:io';
+
+Future<void> main() async {
+  final r = await (await HttpClient().getUrl(Uri.parse('https://example.org/'))).close();
+  exit(r.statusCode == 200 ? 0 : 3);
+}
+`;
+
 function plan(): OpenSandboxCellCreatePlan {
   const ttlMs = 30 * 60 * 1000;
   return {
@@ -156,18 +165,11 @@ describe.skipIf(!IT || IMAGE === "")(
       }
       // Pre-pull, as the box's runbook does (PR-G): a cold multi-GB pull inside
       // `create` outlasts the adapter's create budget (seen live: ~2 min). A tag
-      // already loaded in the dind (docker save | docker load) is accepted as is:
-      // the image is inspected first, and only pulled when it is absent.
-      const loaded = await dind(["docker", "image", "inspect", IMAGE]).then(
-        () => true,
-        () => false,
-      );
-      if (loaded) {
-        console.log(`cell image ${IMAGE}: already in the dind, no pull`);
-      } else {
+      // already loaded in the dind (docker save | docker load) is used as is.
+      await dind(["docker", "image", "inspect", IMAGE]).catch(() => {
         console.log(`cell image ${IMAGE}: not in the dind, pulling`);
-        await dind(["docker", "pull", "-q", IMAGE]);
-      }
+        return dind(["docker", "pull", "-q", IMAGE]);
+      });
       const apiKey = readFileSync(join(stateDir(), "api_key"), "utf8").trim();
       provider = createOpenSandboxCellProvider(
         {
@@ -452,39 +454,48 @@ describe.skipIf(!IT || IMAGE === "")(
       async () => {
         const DART = "/opt/flutter/bin/dart";
         const FLUTTER = "/opt/flutter/bin/flutter";
-        const sh = (script: string, timeoutMs = 5 * 60_000) =>
+        const sh = (script: string, timeoutMs: number) =>
           provider.exec(cellId, ["/bin/bash", "-c", script], { timeoutMs });
         const inTmp = 'cd "$(mktemp -d -p "$HOME")" && ';
-        const dart = await sh(
-          `${inTmp}${DART} create -t console --no-pub app && cd app && ${DART} pub add path:1.9.1 && ${DART} pub get`,
-        );
-        expect(dart.exitCode, dart.stderr).toBe(0);
-        const flutter = await sh(
-          `${inTmp}${FLUTTER} create --no-pub --platforms=web fapp && cd fapp && ${FLUTTER} pub get`,
-          10 * 60_000,
-        );
-        expect(flutter.exitCode, flutter.stderr).toBe(0);
-        // AC-5: no regression for the other ecosystems.
-        for (const [name, script] of [
-          ["npm", "npm view left-pad version"],
-          ["git", "git ls-remote https://github.com/git/git HEAD"],
-          ["curl", "curl -sS -o /dev/null https://pub.dev"],
-          ["pip", `${inTmp}pip download --no-deps -d . six`],
+        // AC-1 and AC-2, then AC-5 (no regression for the other ecosystems).
+        // The trailing `dart pub get` stays although `pub add` already resolves:
+        // AC-1 names `dart pub get` exiting 0.
+        for (const [name, script, timeoutMs] of [
+          [
+            "dart",
+            `${inTmp}${DART} create -t console --no-pub app && cd app && ${DART} pub add path:1.9.1 && ${DART} pub get`,
+            5 * 60_000,
+          ],
+          [
+            "flutter",
+            `${inTmp}${FLUTTER} create --no-pub --platforms=web fapp && cd fapp && ${FLUTTER} pub get`,
+            10 * 60_000,
+          ],
+          ["npm", "npm view left-pad version", 2 * 60_000],
+          ["git", "git ls-remote https://github.com/git/git HEAD", 2 * 60_000],
+          ["curl", "curl -sS -o /dev/null https://pub.dev", 2 * 60_000],
+          ["pip", `${inTmp}pip download --no-deps -d . six`, 2 * 60_000],
         ] as const) {
-          const out = await sh(script, 2 * 60_000);
+          const out = await sh(script, timeoutMs);
           expect(out.exitCode, `${name}: ${out.stderr}`).toBe(0);
         }
         // AC-3: a host outside the allowlist still fails, and not for trust.
-        const denied = await sh(
-          `${inTmp}printf '%s\\n' "import 'dart:io';" 'Future<void> main() async {' "  final r = await (await HttpClient().getUrl(Uri.parse('https://example.org/'))).close();" '  exit(r.statusCode == 200 ? 0 : 3);' '}' > f.dart && ${DART} run f.dart 2>&1`,
-          2 * 60_000,
+        const probe = `${CELL_MESSAGE_DIR}/it-denied.dart`;
+        await provider.copyIn(
+          cellId,
+          probe,
+          new TextEncoder().encode(DENIED_PROBE_DART),
+          { mode: 600, owner: "agent", group: "agent" },
         );
+        const denied = await sh(`${DART} run ${probe} 2>&1`, 2 * 60_000);
         expect(denied.exitCode).not.toBe(0);
         const text = `${denied.stdout}${denied.stderr}`;
         expect(text).not.toContain("HandshakeException");
         expect(text).not.toContain("CERTIFICATE_VERIFY_FAILED");
       },
-      30 * 60_000,
+      // Below the cell's 30-minute TTL (plan()), so a hung step fails the test
+      // before the cell expires under it.
+      25 * 60_000,
     );
 
     // card: protects=the step-by-step teardown leaves the attempt's readback empty; fails_when=a survivor remains or a step is reported failed; no_claim=the www half

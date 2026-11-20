@@ -85,14 +85,9 @@ The image fixes it at build time (#724): the one `RUN` in the Dockerfile makes `
 not `/etc/ssl`, `/etc/ssl/private`, `/etc/ca-certificates*` or `/usr/share/ca-certificates`. That is
 what `update-ca-certificates` writes (the copied CA, the `<name>.pem` links, the rebuilt
 `ca-certificates.crt` and the `<hash>.0` links); it needs no ownership of the root-owned files in
-them, because replacing an entry needs only write on the directory. `verify.sh` checks the
-ownership (`ca-store-owner`); that no `update.d` hook or store subdirectory (a JDK's
-`java/cacerts`) has appeared (`ca-store-no-hooks`), because a failing hook only prints `E:` and the
-install still exits 0; and the whole path with a throwaway CA: a Dart fetch fails before the
-install (`dart-trust-control`), the bootstrap sequence exits 0 as uid 10001 (`dart-trust-install`),
-the fetch then passes (`dart-trust`), and after a rotation to a new CA with the same subject and file
-name the new generation passes and the old one is refused (`dart-trust-rotation`). A stock image
-fails at the install.
+them, because replacing an entry needs only write on the directory. `verify.sh` checks the grant
+(`ca-store-*`) and the bootstrap install with a throwaway CA, including a rotation (`dart-trust-*`);
+a stock image fails at the install.
 
 The fallback `DART_VM_OPTIONS=--root-certs-file=...` was measured and does **not** work: the Dart
 3.13.5 `dart` CLI ignores it. Only the command-line flag works, and Flutter runs
@@ -115,9 +110,7 @@ Two settings stay, for clients that do not read the system store:
 | Dart, Flutter         | the system store only; `DART_VM_OPTIONS` is ignored                                              |
 | Java                  | `cacerts`; there is no JDK in the image today. A JDK added later needs the same treatment (OD-2) |
 
-A rotation re-runs `update-ca-certificates` with the same file name, so the old generation's links
-are replaced and the hash links are rebuilt (`openssl rehash`). The merged bundle is rewritten
-atomically from the system bundle, which the install has just refreshed.
+A rotation re-runs the same install under the same file name, replacing the old generation's links.
 
 **Why a CA store the agent can write is safe:**
 
@@ -139,7 +132,8 @@ the other registries), not by `verify.sh` alone. If the install does not take, t
 ## Token custody
 
 The image holds no token, placeholder or key: no `ARG` or `ENV` is a credential, there is no
-`ADD`, no secret mount and only the one `RUN` (Postgres, pip/venv and the CA-store grant: no token reaches it), and the build context is secret-scanned (gitleaks). The daemon
+`ADD`, no secret mount and only the one `RUN` (Postgres, pip/venv and the CA-store grant: no token
+reaches it), and the build context is secret-scanned (gitleaks). The daemon
 takes its token from each message, not from env. PR-E sends the placeholder
 (`automata-cell-daemon-token`) as the message `token`; the sidecar vault swaps it for the real
 credential on `/api/daemon-event` only. Every other www path gets the placeholder and a 401.

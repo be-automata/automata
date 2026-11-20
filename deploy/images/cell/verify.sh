@@ -142,11 +142,10 @@ fi
 # OpenSandbox's bootstrap runs `update-ca-certificates` as uid 10001, and Dart
 # and Flutter read only the system store. The image owns exactly two
 # directories to the agent; everything else under the store stays root's.
-own() { test "$(stat -c %U:%G "$1")" = "agent:agent"; }
 assert ca-store-owner "/etc/ssl/certs and /usr/local/share/ca-certificates are agent-owned" \
-  bash -c "$(declare -f own); own /etc/ssl/certs && own /usr/local/share/ca-certificates"
+  test "$(stat -c %U:%G /etc/ssl/certs /usr/local/share/ca-certificates | grep -cx agent:agent)" -eq 2
 assert ca-store-rest-root "/etc/ssl, /etc/ssl/private, /usr/share/ca-certificates stay root" \
-  bash -c 'for d in /etc/ssl /etc/ssl/private /usr/share/ca-certificates; do test "$(stat -c %U "$d")" = root || exit 1; done'
+  test "$(stat -c %U /etc/ssl /etc/ssl/private /usr/share/ca-certificates | grep -cx root)" -eq 3
 # update-ca-certificates runs /etc/ca-certificates/update.d hooks (a JDK's
 # ca-certificates-java writes /etc/ssl/certs/java/cacerts) and only prints
 # "E: ..." when one fails, so a hook or a store subdirectory brought in by a
@@ -157,15 +156,15 @@ assert ca-store-no-hooks "no update.d hook and no subdirectory under /etc/ssl/ce
 
 DART=/opt/flutter/bin/dart
 cad="$(mktemp -d)"
-# mkca NAME: a CA and a localhost leaf. Both CAs share one subject, so a
-# rotation replaces the CA the way the sidecar's does.
+# mkca GEN: a CA and a localhost leaf it signs (EC P-256). Both generations
+# share one subject, so a rotation replaces the CA the way the sidecar's does.
 mkca() {
-  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$cad/$1-ca.key" -out "$cad/$1-ca.pem" -days 1 \
-    -subj "/CN=verify-probe-ca" -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign &&
-    openssl req -newkey rsa:2048 -nodes -keyout "$cad/$1-leaf.key" -out "$cad/$1-leaf.csr" -subj /CN=localhost &&
-    printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' >"$cad/ext" &&
-    openssl x509 -req -in "$cad/$1-leaf.csr" -CA "$cad/$1-ca.pem" -CAkey "$cad/$1-ca.key" -CAcreateserial \
-      -out "$cad/$1-leaf.pem" -days 1 -extfile "$cad/ext"
+  local key=(-newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1)
+  openssl req -x509 "${key[@]}" -keyout "$cad/$1-ca.key" -out "$cad/$1-ca.pem" -subj /CN=verify-probe-ca \
+    -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign &&
+    openssl req -x509 "${key[@]}" -keyout "$cad/$1-leaf.key" -out "$cad/$1-leaf.pem" -subj /CN=localhost \
+      -CA "$cad/$1-ca.pem" -CAkey "$cad/$1-ca.key" -addext basicConstraints=critical,CA:FALSE \
+      -addext subjectAltName=DNS:localhost -addext extendedKeyUsage=serverAuth
 }
 # The response is not drained on purpose: a drain hangs against s_server -www.
 cat >"$cad/fetch.dart" <<'DART'
@@ -190,46 +189,50 @@ unserve() {
   if [ -n "$srv" ]; then kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; srv=""; fi
 }
 trap unserve EXIT
-fetch() { timeout 60 "$DART" run "$cad/fetch.dart" >"$cad/out.txt" 2>&1; }
-# dart_fails NAME DETAIL: the fetch fails with a certificate verification error.
-dart_fails() {
-  if ! fetch && grep -q CERTIFICATE_VERIFY_FAILED "$cad/out.txt"; then ok "$1" "$2"; else bad "$1" "$2: $(head -c 200 "$cad/out.txt" | tr '\n' ' ')"; fi
-}
-dart_passes() {
-  if fetch; then ok "$1" "$2"; else bad "$1" "$2: $(head -c 200 "$cad/out.txt" | tr '\n' ' ')"; fi
-}
-install_ca() { # as bootstrap.sh does (_sudo falls back to a direct call)
-  mkdir -p /usr/local/share/ca-certificates &&
+# Each fetch is its own Dart process, so no TLS state carries across checks.
+fetch() { timeout 60 "$DART" run "$cad/fetch.dill" >"$cad/out.txt" 2>&1; }
+# install_ca GEN: as bootstrap.sh does (_sudo falls back to a direct call). A
+# failing update.d hook only prints "E: ..." and still exits 0, so that fails too.
+install_ca() {
+  { mkdir -p /usr/local/share/ca-certificates &&
     cp "$cad/$1-ca.pem" /usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt &&
-    update-ca-certificates
+    update-ca-certificates; } >"$cad/install-$1.txt" 2>&1 && ! grep -q '^E: ' "$cad/install-$1.txt"
+}
+# dart_check NAME GEN pass|fail DETAIL: serve GEN's leaf and fetch it with Dart.
+# `fail` holds only for a certificate verification error, not any failure.
+dart_check() {
+  local name="$1" want="$3" detail="$4" got=fail
+  if ! serve "$2"; then
+    bad "$name" "s_server did not start"
+  else
+    fetch && got=pass
+    if [ "$got" = "$want" ] && { [ "$want" = pass ] || grep -q CERTIFICATE_VERIFY_FAILED "$cad/out.txt"; }; then
+      ok "$name" "$detail"
+    else
+      bad "$name" "$detail: $(head -c 200 "$cad/out.txt" | tr '\n' ' ')"
+    fi
+  fi
+  unserve
 }
 
-if mkca g1 >/dev/null 2>&1 && mkca g2 >/dev/null 2>&1 && serve g1; then
-  dart_fails dart-trust-control "a Dart fetch of an unknown CA fails CERTIFICATE_VERIFY_FAILED"
-  if install_ca g1 >"$cad/install.txt" 2>&1 && ! grep -q '^E: ' "$cad/install.txt"; then
-    ok dart-trust-install "mkdir, cp and update-ca-certificates exit 0 as uid 10001"
-    dart_passes dart-trust "a Dart fetch trusts the installed CA"
-    unserve
-    if ! install_ca g2 >"$cad/install2.txt" 2>&1 || grep -q '^E: ' "$cad/install2.txt"; then
-      bad dart-trust-rotation "the rotation install failed: $(tail -n 3 "$cad/install2.txt" | tr '\n' ' ')"
-    elif ! serve g2; then
-      bad dart-trust-rotation "s_server did not start for the new generation"
-    else
-      dart_passes dart-trust-rotation "after a rotation the new generation is trusted"
-      unserve
-      if serve g1; then
-        dart_fails dart-trust-rotation-old "after a rotation the old generation is refused"
-      else
-        bad dart-trust-rotation-old "s_server did not start for the old generation"
-      fi
-    fi
+if mkca g1 >/dev/null 2>&1 && mkca g2 >/dev/null 2>&1 &&
+  "$DART" compile kernel "$cad/fetch.dart" -o "$cad/fetch.dill" >"$cad/compile.txt" 2>&1; then
+  dart_check dart-trust-control g1 fail "a Dart fetch of an unknown CA fails CERTIFICATE_VERIFY_FAILED"
+  if ! install_ca g1; then
+    bad dart-trust-install "update-ca-certificates failed: $(tail -n 3 "$cad/install-g1.txt" | tr '\n' ' ')"
   else
-    bad dart-trust-install "update-ca-certificates failed: $(tail -n 3 "$cad/install.txt" | tr '\n' ' ')"
+    ok dart-trust-install "mkdir, cp and update-ca-certificates exit 0 as uid 10001"
+    dart_check dart-trust g1 pass "a Dart fetch trusts the installed CA"
+    if ! install_ca g2; then
+      bad dart-trust-rotation "the rotation install failed: $(tail -n 3 "$cad/install-g2.txt" | tr '\n' ' ')"
+    else
+      dart_check dart-trust-rotation g2 pass "after a rotation the new generation is trusted"
+      dart_check dart-trust-rotation-old g1 fail "after a rotation the old generation is refused"
+    fi
   fi
 else
-  bad dart-trust-setup "could not generate the probe CAs or start s_server"
+  bad dart-trust-setup "could not generate the probe CAs or compile the probe"
 fi
-unserve
 
 # ── PATH ────────────────────────────────────────────────────────────────────
 case "$PATH" in
