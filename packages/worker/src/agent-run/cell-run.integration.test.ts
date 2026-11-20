@@ -24,7 +24,18 @@ import {
   cellEntrypoint,
 } from "./cell-image";
 import { cellRepoEnv } from "./cell-repo-env";
+import { CELL_SETUP_STAMP_MS } from "./cell-run";
 import { teardownCellRun } from "./cell-teardown";
+import {
+  CELL_PG_BIN,
+  CELL_TEST_DB_DIR,
+  CELL_TEST_DB_MKDIR_ARGV,
+  CELL_TEST_DB_PASSWORD_FILE,
+  CELL_TEST_DB_READY_ARGV,
+  CELL_TEST_DB_ROLE_SH,
+  CELL_TEST_DB_START_SH,
+  cellTestDbUrl,
+} from "./cell-test-db";
 import { containerLanePolicy } from "./container-argv";
 import { composeContainerSettings } from "./container-policy";
 
@@ -345,6 +356,76 @@ describe.skipIf(!IT || IMAGE === "")(
         expect(inspect.stdout).not.toContain(value);
         const logs = await dind(["sh", "-c", `docker logs ${id} 2>&1 || true`]);
         expect(logs.stdout).not.toContain(value);
+      }
+    });
+
+    // card: protects=AC 1, 4 and 5 of #707: the worker's own test-db steps (cell-test-db.ts) start Postgres in a live cell within one setup stamp, a client with the URL creates and drops a database, and the password is in no docker inspect, no container log and no guest log; fails_when=a step fails, the start outlasts CELL_SETUP_STAMP_MS, the create/drop fails, or the password shows up; no_claim=the Claude CLI applying the settings env (UAT)
+    it("(f) the cell's test database starts, and a client creates and drops a database (#707)", async () => {
+      const password = randomBytes(24).toString("hex");
+      const url = cellTestDbUrl(password);
+      const started = Date.now();
+      const ok = async (argv: string[], timeoutMs = 60_000) => {
+        const out = await provider.exec(cellId, argv, { timeoutMs });
+        expect(out.exitCode, argv.slice(0, 3).join(" ")).toBe(0);
+        return out;
+      };
+      await ok([...CELL_TEST_DB_MKDIR_ARGV]);
+      await provider.copyIn(
+        cellId,
+        CELL_TEST_DB_PASSWORD_FILE,
+        new TextEncoder().encode(password),
+        { mode: 600, owner: "agent", group: "agent" },
+      );
+      await ok(["/bin/bash", "-c", CELL_TEST_DB_START_SH, "cell-test-db"]);
+      for (let i = 0; ; i++) {
+        const probe = await provider.exec(cellId, [...CELL_TEST_DB_READY_ARGV]);
+        if (probe.exitCode === 0) break;
+        expect(i).toBeLessThan(60);
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      await ok(["/bin/bash", "-c", CELL_TEST_DB_ROLE_SH, "cell-test-db"]);
+      const elapsed = Date.now() - started;
+      console.info(`[IT-E1 f] test database ready in ${elapsed}ms`);
+      expect(elapsed).toBeLessThan(CELL_SETUP_STAMP_MS);
+      // The client reads the URL from a 0600 file, as the agent's env would
+      // hold it: never in an exec argv (execd logs argv).
+      const urlFile = `${CELL_MESSAGE_DIR}/it-test-db-url`;
+      await provider.copyIn(cellId, urlFile, new TextEncoder().encode(url), {
+        mode: 600,
+        owner: "agent",
+        group: "agent",
+      });
+      await ok([
+        "/bin/bash",
+        "-c",
+        `${CELL_PG_BIN}/psql "$(cat "$1")" -X -q -v ON_ERROR_STOP=1 -c 'create database t1' -c 'drop database t1' && rm -f -- "$1"`,
+        "it-client",
+        urlFile,
+      ]);
+      const role = await ok([
+        "/bin/bash",
+        "-c",
+        `${CELL_PG_BIN}/psql -X -At -h ${CELL_TEST_DB_DIR} -p 25432 -U agent -d postgres -c "select rolcreatedb, rolsuper from pg_roles where rolname = 'automata_test'"`,
+      ]);
+      expect(role.stdout.trim()).toBe("t|f");
+      const guest = await provider.exec(cellId, [
+        "/bin/bash",
+        "-c",
+        `c="$1$2"; test ! -e ${CELL_TEST_DB_PASSWORD_FILE} || echo pwfile; grep -rlF -- "$c" ${CELL_TEST_DB_DIR}/server.log ${CELL_TEST_DB_DIR}/initdb.log 2>/dev/null; true`,
+        "scan",
+        password.slice(0, 24),
+        password.slice(24),
+      ]);
+      expect(guest.stdout).toBe("");
+      const ids = (await dind(["docker", "ps", "-aq"])).stdout
+        .split("\n")
+        .filter(Boolean);
+      expect(ids.length).toBeGreaterThanOrEqual(3);
+      for (const id of ids) {
+        const inspect = await dind(["docker", "inspect", id]);
+        expect(inspect.stdout).not.toContain(password);
+        const logs = await dind(["sh", "-c", `docker logs ${id} 2>&1 || true`]);
+        expect(logs.stdout).not.toContain(password);
       }
     });
 

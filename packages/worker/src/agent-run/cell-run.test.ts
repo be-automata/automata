@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { newAbnormalEndState } from "./abnormal-end";
@@ -11,6 +13,17 @@ import {
   type CellExecutorDeps,
 } from "./cell-run";
 import { cellEntrypoint } from "./cell-image";
+import {
+  CELL_PG_BIN,
+  CELL_TEST_DB_DIR,
+  CELL_TEST_DB_MKDIR_ARGV,
+  CELL_TEST_DB_PASSWORD_FILE,
+  CELL_TEST_DB_READY_ARGV,
+  CELL_TEST_DB_ROLE_SH,
+  CELL_TEST_DB_START_SH,
+  CELL_TEST_DB_STOP_SH,
+  cellTestDbUrl,
+} from "./cell-test-db";
 import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
@@ -50,6 +63,7 @@ const PROMPT = "PROMPT-CANARY-do-the-thing";
 const VAULT = "VAULT-CANARY-credential";
 const DAEMON = "daemon-token-canary";
 const RUN_ID = "run-1";
+const TEST_DB_PASSWORD = "0f".repeat(24);
 
 function plan(attempt = 7, deployment = "www.example.org") {
   return {
@@ -98,6 +112,8 @@ function setup(
     execHang?: (argv: string[]) => boolean;
     /** Holds the clone exec until released (setup stays busy, the cell exists). */
     execGate?: Promise<void>;
+    /** The box test-services file (#707); default a path that does not exist. */
+    testServicesPath?: string;
   } = {},
 ) {
   released.length = 0;
@@ -233,6 +249,9 @@ function setup(
     },
     now: () => clock,
     randomId: () => "rid0123456789abcdefghijkl",
+    testDbPassword: () => TEST_DB_PASSWORD,
+    boxTestServicesEnvPath:
+      over.testServicesPath ?? "/nonexistent/agent-test-services.env",
     marks,
   };
   const abnormal = newAbnormalEndState({
@@ -1289,5 +1308,220 @@ describe("the cell run: the owner's repo env (#706)", () => {
     const d = setup();
     await d.executor.run(withRepoEnv(d, { PATH: "/x" }));
     expect(settingsOf(d).json).not.toHaveProperty("env");
+  });
+});
+
+describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", () => {
+  const TEST_DB_URL = cellTestDbUrl(TEST_DB_PASSWORD);
+  const dir = mkdtempSync(join(tmpdir(), "cell-tdb-"));
+  const listFile = (name: string, repos: string) => {
+    const p = join(dir, `${name}.env`);
+    writeFileSync(p, `TEST_SERVICES_REPOS=${repos}\n`, { mode: 0o640 });
+    return p;
+  };
+  const LISTED = listFile("listed", "other/repo, ACME/Widgets");
+  const UNLISTED = listFile("unlisted", "other/repo");
+  const isPg = (argv: string[]) =>
+    argv.some((a) => a.includes(CELL_PG_BIN) || a.includes(CELL_TEST_DB_DIR));
+  const settingsEnv = (s: ReturnType<typeof setup>) => {
+    const f = s.files.find((x) => x.path.endsWith("/.claude/settings.json"));
+    if (f === undefined) throw new Error("no settings.json copied in");
+    return (JSON.parse(f.text) as { env?: Record<string, string> }).env;
+  };
+
+  // card: protects=AC 1's worker half: a listed repo's cell gets the dir, the password file (600 agent, the exact bytes), the start, a ready probe and the role, in that order, then the URL in the settings env; fails_when=a step is missing or reordered, the file mode/owner changes, or the URL differs; no_claim=that Postgres runs in the image (IT-E1 f, verify.sh)
+  it("starts the database for a listed repo and hands the agent the URL", async () => {
+    const s = setup({ testServicesPath: LISTED });
+    await s.executor.run(s.args);
+    expect(s.execs.filter(isPg)).toEqual([
+      [...CELL_TEST_DB_MKDIR_ARGV],
+      ["/bin/bash", "-c", CELL_TEST_DB_START_SH, "cell-test-db"],
+      [...CELL_TEST_DB_READY_ARGV],
+      ["/bin/bash", "-c", CELL_TEST_DB_ROLE_SH, "cell-test-db"],
+    ]);
+    const pw = s.files.find((f) => f.path === CELL_TEST_DB_PASSWORD_FILE);
+    expect(pw?.text).toBe(TEST_DB_PASSWORD);
+    expect(pw?.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
+    expect(settingsEnv(s)).toEqual({
+      TEST_DATABASE_ADMIN_URL: TEST_DB_URL,
+    });
+    const order = s.files.map((f) => f.path);
+    expect(order.indexOf(CELL_TEST_DB_PASSWORD_FILE)).toBeLessThan(
+      order.indexOf("/home/agent/.claude/settings.json"),
+    );
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: test database ready in 0ms",
+    );
+  });
+
+  // card: protects=AC 5's worker half: the password is only in the password file and the settings file, never in an exec argv, the create plan, a www call or a log line; fails_when=any of them carries it; no_claim=execd's, docker's or the server's own records (IT-E1 f)
+  it("keeps the password out of argv, the plan and the logs", async () => {
+    const s = setup({ testServicesPath: LISTED });
+    await s.executor.run(s.args);
+    expect(JSON.stringify(s.execs)).not.toContain(TEST_DB_PASSWORD);
+    expect(JSON.stringify(s.provider.create.mock.calls)).not.toContain(
+      TEST_DB_PASSWORD,
+    );
+    expect(JSON.stringify(s.makeProvider.mock.calls)).not.toContain(
+      TEST_DB_PASSWORD,
+    );
+    expect(JSON.stringify(s.www)).not.toContain(TEST_DB_PASSWORD);
+    expect(s.logs.join("\n")).not.toContain(TEST_DB_PASSWORD);
+    expect(
+      s.files
+        .filter((f) => f.text.includes(TEST_DB_PASSWORD))
+        .map((f) => f.path),
+    ).toEqual([
+      CELL_TEST_DB_PASSWORD_FILE,
+      "/home/agent/.claude/settings.json",
+    ]);
+  });
+
+  // card: protects=AC 2: an unlisted repo, or no file at all, gets no Postgres exec, no password file and no variable; fails_when=any of them appears; no_claim=none
+  it("does nothing for a repo the list does not name, or without the file", async () => {
+    for (const path of [UNLISTED, undefined]) {
+      const s = setup({ testServicesPath: path });
+      await s.executor.run(s.args);
+      expect(s.execs.filter(isPg)).toEqual([]);
+      expect(s.files.map((f) => f.path)).not.toContain(
+        CELL_TEST_DB_PASSWORD_FILE,
+      );
+      expect(settingsEnv(s)).toBeUndefined();
+      expect(s.logs.join("\n")).not.toContain("test database");
+    }
+  });
+
+  // card: protects=AC 3: the owner's own TEST_DATABASE_ADMIN_URL reaches the agent unchanged and no server is started for it; fails_when=the cell's URL replaces it or a Postgres exec runs; no_claim=the owner's database being reachable from a cell
+  it("lets the owner's TEST_DATABASE_ADMIN_URL win and starts nothing", async () => {
+    const owner = "postgresql://mine:owner-secret-value@db.example.org/x";
+    const s = setup({ testServicesPath: LISTED });
+    await s.executor.run({
+      ...s.args,
+      secrets: {
+        ...s.args.secrets,
+        repoEnv: { TEST_DATABASE_ADMIN_URL: owner },
+      },
+    } as RunExecutorInput);
+    expect(settingsEnv(s)).toEqual({ TEST_DATABASE_ADMIN_URL: owner });
+    expect(s.execs.filter(isPg)).toEqual([]);
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: test database not started (the owner's TEST_DATABASE_ADMIN_URL wins)",
+    );
+    expect(s.logs.join("\n")).not.toContain("owner-secret-value");
+  });
+
+  // card: protects=the readiness wait is a loop of probes with a pause between them; fails_when=the loop stops before a 0 or never pauses; no_claim=the real server's start time (AC 4, IT-E1 f)
+  it("probes until ready, pausing between probes", async () => {
+    let probes = 0;
+    const s = setup({
+      testServicesPath: LISTED,
+      execExit: (a) =>
+        a[0] === CELL_TEST_DB_READY_ARGV[0] ? (++probes < 3 ? 2 : 0) : 0,
+    });
+    await s.executor.run(s.args);
+    expect(probes).toBe(3);
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: test database ready in 1000ms",
+    );
+    expect(settingsEnv(s)?.TEST_DATABASE_ADMIN_URL).toBe(TEST_DB_URL);
+  });
+
+  // card: protects=a database that never gets ready stops at the budget, the role is never made, and the run goes on without the variable; fails_when=the loop runs past the budget, the role step runs, the variable is set or the run fails; no_claim=the budget's size against a real server
+  it("gives up at the budget and runs on without the variable", async () => {
+    let probes = 0;
+    const s = setup({
+      testServicesPath: LISTED,
+      execExit: (a) => {
+        if (a[0] !== CELL_TEST_DB_READY_ARGV[0]) return 0;
+        probes += 1;
+        return 2;
+      },
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(probes).toBe(61);
+    expect(s.execs.some((a) => a[2] === CELL_TEST_DB_ROLE_SH)).toBe(false);
+    expect(settingsEnv(s)).toBeUndefined();
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: test database not started; the run goes on without it (cell test database not ready after 30000ms)",
+    );
+  });
+
+  // card: protects=a failed start's stderr tail is logged with the password redacted, and the run goes on; fails_when=the password reaches the log, the variable is set or the run fails; no_claim=what initdb or psql print
+  it("redacts the password from a failed step's stderr", async () => {
+    const s = setup({
+      testServicesPath: LISTED,
+      execExit: (a) => (a[2] === CELL_TEST_DB_START_SH ? 1 : 0),
+      execStderr: (a) =>
+        a[2] === CELL_TEST_DB_START_SH
+          ? `initdb: echo ${TEST_DB_PASSWORD}`
+          : "",
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    const all = s.logs.join("\n");
+    expect(all).not.toContain(TEST_DB_PASSWORD);
+    expect(all).toContain(
+      "cell setup: test database start failed (exit 1): initdb: echo <redacted>",
+    );
+    expect(settingsEnv(s)).toBeUndefined();
+  });
+
+  // card: protects=a fence during the readiness probe ends the run as fenced at once, not degraded: no "not started" line, no role, no cleanup, no settings file; fails_when=the abort is swallowed into the degrade path; no_claim=the other abort kinds (they share the same catch)
+  it("a fence during the readiness probe propagates", async () => {
+    const s = setup({
+      testServicesPath: LISTED,
+      execHang: (a) => a[0] === CELL_TEST_DB_READY_ARGV[0],
+      pollThreadStatus: async () => ({
+        kind: "status",
+        status: "working",
+        terminal: false,
+        lease: "superseded",
+      }),
+    });
+    const run = s.executor.run(s.args);
+    for (let i = 0; i < 5; i++) await flush();
+    expect(s.execs.some((a) => a[0] === CELL_TEST_DB_READY_ARGV[0])).toBe(true);
+    await s.tick();
+    const out = await Promise.race([
+      run,
+      new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 1000)),
+    ]);
+    expect(out).toMatchObject({ outcome: "fenced" });
+    expect(s.logs.join("\n")).not.toContain("test database not started");
+    expect(s.execs.some((a) => a[2] === CELL_TEST_DB_ROLE_SH)).toBe(false);
+    expect(s.execs.some((a) => a[2] === CELL_TEST_DB_STOP_SH)).toBe(false);
+    expect(s.files.map((f) => f.path)).not.toContain(
+      "/home/agent/.claude/settings.json",
+    );
+  });
+
+  // card: protects=a degraded start cleans up after itself (password file, server) and a failing cleanup does not fail the run; fails_when=no cleanup exec runs or its failure fails the run; no_claim=what pg_ctl does in the image
+  it("cleans up after a failed start, ignoring the cleanup's own failure", async () => {
+    const s = setup({
+      testServicesPath: LISTED,
+      execExit: (a) =>
+        a[2] === CELL_TEST_DB_ROLE_SH || a[2] === CELL_TEST_DB_STOP_SH ? 1 : 0,
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(s.execs.filter(isPg).at(-1)).toEqual([
+      "/bin/bash",
+      "-c",
+      CELL_TEST_DB_STOP_SH,
+    ]);
+    expect(settingsEnv(s)).toBeUndefined();
+  });
+
+  // card: protects=a non-Claude agent is told apart, not silently left without the URL; fails_when=no line is logged for it; no_claim=the other agent's behaviour
+  it("logs when the agent is not the Claude CLI", async () => {
+    const s = setup({
+      testServicesPath: LISTED,
+      nextMessage: async () => ({ ...pulled, agent: "codex" }),
+    });
+    await s.executor.run(s.args);
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: test database env not delivered (agent=codex)",
+    );
   });
 });

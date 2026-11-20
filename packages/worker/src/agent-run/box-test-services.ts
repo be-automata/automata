@@ -22,9 +22,12 @@ import type { AgentRunInput } from "./types";
 export const BOX_TEST_SERVICES_ENV_PATH =
   "/etc/automata/agent-test-services.env";
 
+/** The test database's admin URL: the box's and a cell's (#707) share the name. */
+export const TEST_DATABASE_ADMIN_URL = "TEST_DATABASE_ADMIN_URL";
+
 /** The env keys the file may hand a run. Anything else is dropped. */
 const ENV_KEYS: ReadonlySet<string> = new Set([
-  "TEST_DATABASE_ADMIN_URL",
+  TEST_DATABASE_ADMIN_URL,
   "TEST_REDIS_HTTP_URL",
   "TEST_REDIS_HTTP_TOKEN",
 ]);
@@ -83,8 +86,29 @@ export function readBoxTestServicesEnv(
   repoFullName: string,
   path: string = BOX_TEST_SERVICES_ENV_PATH,
 ): Record<string, string> {
+  const parsed = parseBoxTestServices(path);
+  return parsed?.repos.includes(repoFullName.toLowerCase()) ? parsed.env : {};
+}
+
+/**
+ * Whether the file's TEST_SERVICES_REPOS names `repoFullName`, whatever URLs
+ * it holds: a cell run (#707) starts its own Postgres for a listed repo and
+ * never uses the box's. The same read and refusals as readBoxTestServicesEnv.
+ */
+export function isBoxTestServicesRepo(
+  repoFullName: string,
+  path: string = BOX_TEST_SERVICES_ENV_PATH,
+): boolean {
+  const parsed = parseBoxTestServices(path);
+  return parsed?.repos.includes(repoFullName.toLowerCase()) ?? false;
+}
+
+/** The file parsed: the allowlisted env and the listed repos (lower-cased); null when absent or refused. */
+function parseBoxTestServices(
+  path: string,
+): { env: Record<string, string>; repos: string[] } | null {
   const text = readGuarded(path);
-  if (typeof text !== "string") return text;
+  if (typeof text !== "string") return null;
 
   const env: Record<string, string> = {};
   let repos: string[] = [];
@@ -92,7 +116,10 @@ export function readBoxTestServicesEnv(
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     const match = LINE.exec(line);
-    if (!match) return refuse(path, `malformed line ${index + 1}`);
+    if (!match) {
+      refuse(path, `malformed line ${index + 1}`);
+      return null;
+    }
     const [, key = "", value = ""] = match;
     if (key === REPOS_KEY) {
       repos = value.split(",").map((repo) => repo.trim().toLowerCase());
@@ -100,7 +127,7 @@ export function readBoxTestServicesEnv(
       env[key] = value;
     }
   }
-  return repos.includes(repoFullName.toLowerCase()) ? env : {};
+  return { env, repos };
 }
 
 /**

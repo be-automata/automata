@@ -37,6 +37,7 @@ import {
   cellGitConfigArgv,
   isForbiddenCellEnvName,
 } from "./cell-image";
+import { CELL_PG_BIN } from "./cell-test-db";
 
 /**
  * The cell guest image (#656 PR-F): static checks of the Dockerfile and the
@@ -120,12 +121,29 @@ describe("the cell Dockerfile", () => {
     ).toThrow();
   });
 
-  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, no RUN in the image; fails_when=any of them appears; no_claim=layers of the base image
-  it("holds no credential-shaped ARG/ENV and no ADD, secret or RUN", () => {
+  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, and one RUN only: the snapshot-pinned Postgres 16 install with no default cluster (#707); fails_when=any of them appears, a second RUN is added, or the RUN loses the snapshot, the pinned major, the no-cluster drop-in or the snakeoil removal; no_claim=layers of the base image
+  it("holds no credential-shaped ARG/ENV, no ADD or secret, and only the Postgres RUN", () => {
     expect(credentialShapedNames(dockerfile)).toEqual([]);
     expect(ins.some((i) => i.op === "ADD")).toBe(false);
-    expect(ins.some((i) => i.op === "RUN")).toBe(false);
     expect(codeOf(dockerfile)).not.toContain("--secret");
+    const runs = ins.filter((i) => i.op === "RUN");
+    expect(runs).toHaveLength(1);
+    const run = runs[0]?.args ?? "";
+    expect(run).toContain('--snapshot "${APT_SNAPSHOT}"');
+    expect(run).toMatch(
+      /--no-install-recommends "\$\{snap\[@\]\}" postgresql-16;/,
+    );
+    expect(run).toContain("create_main_cluster = false");
+    expect(run).toContain("rm -f /etc/ssl/private/ssl-cert-snakeoil.key");
+    expect(run).toContain(`test -x ${CELL_PG_BIN}/initdb`);
+  });
+
+  // card: protects=the cell's apt snapshot is the batteries image's, so the Postgres .debs come from the same frozen archive; fails_when=the two APT_SNAPSHOT defaults differ; no_claim=that the snapshot still serves them
+  it("pins the batteries image's apt snapshot", () => {
+    const snapshotOf = (text: string) =>
+      /^ARG APT_SNAPSHOT=(\S+)$/m.exec(text)?.[1];
+    expect(snapshotOf(dockerfile)).toBeDefined();
+    expect(snapshotOf(dockerfile)).toBe(snapshotOf(read(BATTERIES_DOCKERFILE)));
   });
 
   // card: protects=the credential-name guard actually fires; fails_when=a fixture with ENV DAEMON_TOKEN or ARG API_KEY passes unflagged; no_claim=the real Dockerfile

@@ -9,6 +9,13 @@ the ADR-013 batteries image, pinned by digest in the `FROM`, plus three baked fi
 - `/opt/automata/cell-send.sh`: writes one daemon message. An exec has no stdin, and the daemon's
   `--write` reads stdin, so a fixed helper replaces ad-hoc shell quoting.
 
+It also installs the Postgres 16 server (`postgresql-16`, the box's major, from the batteries
+image's apt snapshot; the image's one `RUN`) with no default cluster and no snakeoil key (#707).
+Nothing starts it at boot: for a run of a repo the box's `TEST_SERVICES_REPOS` lists, the worker
+starts one per cell as uid 10001 under `/tmp/automata-test-db`, on `127.0.0.1:25432` only, and the
+agent gets `TEST_DATABASE_ADMIN_URL` (a `CREATEDB` role, a per-cell password) through its settings
+`env` block (`packages/worker/src/agent-run/cell-test-db.ts`). It adds about 190 MB to the image.
+
 The image sets no `ENTRYPOINT` or `CMD`: OpenSandbox replaces both with its own bootstrap and runs
 the request `entrypoint` as the command. It runs as `agent` (uid 10001), never root.
 

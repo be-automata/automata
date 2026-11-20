@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 # The cell guest image (ADR-014, #656): the ADR-013 batteries image plus the
-# daemon bundle and two small static scripts. A cell cannot bind-mount and has
-# no copy-in and no stdin, so everything the cell needs is baked here.
+# daemon bundle, two small static scripts and the Postgres 16 server for the
+# cell's test database (#707). A cell cannot bind-mount and has no copy-in and
+# no stdin, so everything the cell needs is baked here.
 #
 # OpenSandbox replaces this image's ENTRYPOINT and CMD with its own bootstrap
 # and runs the request `entrypoint` instead, so none is set here.
@@ -17,7 +18,29 @@
 FROM --platform=linux/amd64 ghcr.io/be-automata/automata-batteries@sha256:da029c443bfba5d61f67fdee4f5596ba1bfc6aff7653a46fa858a6b3cdfffffc
 
 ARG REVISION=unknown
-# Root only for COPY ownership; nothing upstream runs here.
+# apt: the batteries image's Ubuntu snapshot, so every .deb version is frozen.
+ARG APT_SNAPSHOT=20261015T000000Z
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+USER root
+# The cell's test database (#707, OD-2): the Postgres 16 server the box runs
+# (install-test-postgres.sh), and the one RUN in this image. No default
+# cluster: a cell run of a TEST_SERVICES_REPOS repo starts its own, as uid
+# 10001 under /tmp (packages/worker/src/agent-run/cell-test-db.ts). ssl-cert's
+# postinst generates a snakeoil key pair, which a cell never uses: removed, so
+# no private key sits in a layer.
+RUN mkdir -p /etc/postgresql-common/createcluster.d; \
+    echo 'create_main_cluster = false' >/etc/postgresql-common/createcluster.d/automata-cell.conf; \
+    snap=(); if [ -n "${APT_SNAPSHOT}" ]; then snap=(--snapshot "${APT_SNAPSHOT}"); fi; \
+    apt-get update --error-on=any "${snap[@]}"; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${snap[@]}" postgresql-16; \
+    rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -x /usr/lib/postgresql/16/bin/initdb; \
+    test ! -e /var/lib/postgresql/16/main
+
+# Still root, for COPY ownership; the image ends as agent below.
 # The bundle goes into /opt/automata, which the base already has (0755). A COPY
 # --chmod into a NEW directory creates that directory without search permission
 # for uid 10001 (measured: `statx … Permission denied` in the cell-image run).
