@@ -865,33 +865,79 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       );
     }
 
-    it("PUT: a body organizationId equal to the active org writes that org", async () => {
-      const res = await PUT(
-        putReq({ blockTolerance: "error", organizationId: ORG }),
-        { params },
-      );
-      expect(res.status).toBe(200);
-      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
-        expect.objectContaining({
-          organizationId: ORG,
-          patch: { blockTolerance: "error" },
-        }),
-      );
-    });
+    // Both verbs take the same guard: PUT from the body, DELETE from the query.
+    const verbs = [
+      {
+        verb: "PUT",
+        send: (organizationId?: string) =>
+          PUT(
+            putReq(
+              organizationId === undefined
+                ? { blockTolerance: "error" }
+                : { blockTolerance: "error", organizationId },
+            ),
+            { params },
+          ),
+        write: upsertRepoReviewSetting,
+      },
+      {
+        verb: "DELETE",
+        send: (organizationId?: string) =>
+          DELETE(
+            deleteReq(
+              organizationId === undefined
+                ? ""
+                : `?organizationId=${encodeURIComponent(organizationId)}`,
+            ),
+            { params },
+          ),
+        write: removeRepoReviewSetting,
+      },
+    ];
 
-    it("PUT: a body organizationId that differs from the active org is 409 active_org_changed, nothing read or written", async () => {
-      const res = await PUT(
-        putReq({ blockTolerance: "error", organizationId: "org_other" }),
-        { params },
-      );
-      expect(res.status).toBe(409);
-      expect(await res.json()).toEqual({
-        error: "active_org_changed",
-        message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+    describe.each(verbs)("$verb", ({ send, write }) => {
+      it("an organizationId equal to the active org writes that org", async () => {
+        const res = await send(ORG);
+        expect(res.status).toBe(200);
+        expect(write).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: ORG }),
+        );
       });
-      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
-      expect(getRepoReviewSetting).not.toHaveBeenCalled();
-      expect(captureMock).not.toHaveBeenCalled();
+
+      it("no organizationId keeps today's behaviour (the active org)", async () => {
+        const res = await send();
+        expect(res.status).toBe(200);
+        expect(write).toHaveBeenCalledWith(
+          expect.objectContaining({ organizationId: ORG }),
+        );
+      });
+
+      // Ids are opaque: no trim, no case folding. The 409 echoes neither id.
+      it.each(["org_other", ` ${ORG}`, `${ORG} `, ORG.toUpperCase()])(
+        "%j differs from the active org: 409 active_org_changed, nothing read or written",
+        async (organizationId) => {
+          const res = await send(organizationId);
+          expect(res.status).toBe(409);
+          expect(await res.json()).toEqual({
+            error: "active_org_changed",
+            message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+          });
+          expect(write).not.toHaveBeenCalled();
+          expect(getRepoReviewSetting).not.toHaveBeenCalled();
+          expect(captureMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it("a personal session (no active org) naming an org is 400 and writes nothing", async () => {
+        vi.mocked(getTenantContextOrNull).mockResolvedValue({
+          userId: USER,
+          organizationId: null,
+        });
+        const res = await send(ORG);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "No active organization" });
+        expect(write).not.toHaveBeenCalled();
+      });
     });
 
     it("PUT: the mismatch is refused before the body is validated", async () => {
@@ -902,8 +948,9 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       expect(res.status).toBe(409);
     });
 
-    it("PUT: a non-string or empty organizationId is 400", async () => {
-      for (const organizationId of [42, null, "", { id: ORG }]) {
+    it.each([42, null, "", { id: ORG }, [ORG]])(
+      "PUT: organizationId %j is 400",
+      async (organizationId) => {
         const res = await PUT(
           putReq({ blockTolerance: "error", organizationId }),
           { params },
@@ -912,51 +959,28 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
         expect(await res.json()).toEqual({
           error: "organizationId must be a string",
         });
-      }
-      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
-    });
+        expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+      },
+    );
 
-    it("PUT: no organizationId keeps today's behaviour (the active org)", async () => {
-      const res = await PUT(putReq({ blockTolerance: "error" }), { params });
-      expect(res.status).toBe(200);
-      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
-        expect.objectContaining({ organizationId: ORG }),
-      );
-    });
-
-    it("DELETE: ?organizationId= equal to the active org clears that org", async () => {
-      const res = await DELETE(deleteReq(`?organizationId=${ORG}`), { params });
-      expect(res.status).toBe(200);
-      expect(removeRepoReviewSetting).toHaveBeenCalledWith(
-        expect.objectContaining({ organizationId: ORG }),
-      );
-    });
-
-    it("DELETE: a different ?organizationId= is 409 active_org_changed, nothing removed", async () => {
-      const res = await DELETE(deleteReq("?organizationId=org_other"), {
-        params,
-      });
-      expect(res.status).toBe(409);
-      expect(await res.json()).toEqual({
-        error: "active_org_changed",
-        message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
-      });
-      expect(removeRepoReviewSetting).not.toHaveBeenCalled();
-      expect(getRepoReviewSetting).not.toHaveBeenCalled();
-    });
-
-    it("DELETE: an empty ?organizationId= is 400", async () => {
-      const res = await DELETE(deleteReq("?organizationId="), { params });
+    it.each([
+      ["empty", "?organizationId="],
+      [
+        "repeated, active first",
+        `?organizationId=${ORG}&organizationId=org_other`,
+      ],
+      [
+        "repeated, active last",
+        `?organizationId=org_other&organizationId=${ORG}`,
+      ],
+      ["repeated, same value", `?organizationId=${ORG}&organizationId=${ORG}`],
+    ])("DELETE: an %s ?organizationId= is 400", async (_label, query) => {
+      const res = await DELETE(deleteReq(query), { params });
       expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "organizationId must be a string",
+      });
       expect(removeRepoReviewSetting).not.toHaveBeenCalled();
-    });
-
-    it("DELETE: no ?organizationId= keeps today's behaviour (the active org)", async () => {
-      const res = await DELETE(deleteReq(""), { params });
-      expect(res.status).toBe(200);
-      expect(removeRepoReviewSetting).toHaveBeenCalledWith(
-        expect.objectContaining({ organizationId: ORG }),
-      );
     });
   });
 });

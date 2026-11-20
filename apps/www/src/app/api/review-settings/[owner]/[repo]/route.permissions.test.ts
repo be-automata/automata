@@ -62,9 +62,11 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     await actor("member");
     let res = await put({ supersedePolicy: "complete-run-queue" });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toMatch(
-      /organization admins or admins of this repository/i,
-    );
+    // Exact body: #728 moved the decision to lib/repo-write-access, the copy stays.
+    expect(await res.json()).toEqual({
+      error:
+        "Only organization admins or admins of this repository can change its review settings.",
+    });
     // GitHub says they administer the repo → allowed.
     vi.mocked(checkRepoAdmin).mockResolvedValue("admin");
     res = await put({ supersedePolicy: "complete-run-queue" });
@@ -89,9 +91,10 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
     vi.mocked(checkRepoAdmin).mockResolvedValue("lookup-failed");
     const res = await put({ reviewDraftPrs: false });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toMatch(
-      /couldn't verify your permission on GitHub/i,
-    );
+    expect(await res.json()).toEqual({
+      error:
+        "We couldn't verify your permission on GitHub for this repository. Try again in a moment.",
+    });
   });
 
   it("DELETE is gated the same way", async () => {

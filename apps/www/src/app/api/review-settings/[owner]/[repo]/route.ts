@@ -57,8 +57,9 @@ function repoFromParams(owner: string, repo: string): string {
  * #728 (AC-13): the caller may name the org it means (`organizationId` in the
  * PUT body, `?organizationId=` on DELETE). When it differs from the session's
  * active org — another tab switched orgs — the request is refused before any
- * read or write, so it can never land in the wrong org. Absent keeps today's
- * behaviour (the OD-5 grace period). Returns a NextResponse to send, or null.
+ * read or write, so it can never land in the wrong org. Ids are opaque: the
+ * match is exact (no trim, no case folding), and the 409 echoes neither id.
+ * Absent keeps today's behaviour (the OD-5 grace period). Returns a NextResponse to send, or null.
  */
 function findOrgMismatchResponse(
   requested: unknown,
@@ -351,10 +352,11 @@ export async function DELETE(
     );
   }
   const searchParams = request.nextUrl.searchParams;
+  // A repeated param stays an array, so it is a 400 rather than "the first
+  // one wins" (`?organizationId=<active>&organizationId=<other>` must not pass).
+  const requestedOrgs = searchParams.getAll("organizationId");
   const orgMismatch = findOrgMismatchResponse(
-    searchParams.has("organizationId")
-      ? searchParams.get("organizationId")
-      : undefined,
+    requestedOrgs.length > 1 ? requestedOrgs : requestedOrgs[0],
     ctx.organizationId,
   );
   if (orgMismatch) return orgMismatch;
