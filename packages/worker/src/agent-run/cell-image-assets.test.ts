@@ -90,6 +90,17 @@ function credentialShapedNames(dockerfile: string): string[] {
     .filter((name) => CELL_FORBIDDEN_ENV_PATTERN.test(name));
 }
 
+/** The one permission change the cell RUN may make (#724). */
+const CA_STORE_CHOWN =
+  "chown agent:agent /etc/ssl/certs /usr/local/share/ca-certificates";
+
+/** Every chown/chmod statement of a RUN body, whitespace-normalised. */
+const permissionChanges = (run: string) =>
+  run
+    .split(/[;\n]|&&/)
+    .map((part) => part.replace(/\\/g, " ").trim().replace(/\s+/g, " "))
+    .filter((part) => /^(chown|chmod)\b/.test(part));
+
 /** Command words `node` that are not an absolute path. */
 const bareNodeCalls = (script: string) =>
   [...codeOf(script).matchAll(/(?:^|[\s;|&(])node(?=\s|$)/gm)].length;
@@ -121,8 +132,8 @@ describe("the cell Dockerfile", () => {
     ).toThrow();
   });
 
-  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, and one RUN only: the snapshot-pinned Postgres 16 (+ pip/venv, #716) install with no default cluster (#707); fails_when=any of them appears, a second RUN is added, or the RUN loses the snapshot, the pinned major, pip/venv, the no-cluster drop-in or the snakeoil removal; no_claim=layers of the base image
-  it("holds no credential-shaped ARG/ENV, no ADD or secret, and only the Postgres RUN", () => {
+  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, and one RUN only: the snapshot-pinned Postgres 16 (+ pip/venv, #716) install with no default cluster (#707) plus the CA-store grant (#724); fails_when=any of them appears, a second RUN is added, the RUN loses the snapshot, the pinned major, pip/venv, the no-cluster drop-in or the snakeoil removal, or it chowns/chmods anything but the two CA directories; no_claim=layers of the base image
+  it("holds no credential-shaped ARG/ENV, no ADD or secret, and only the Postgres + CA-store RUN", () => {
     expect(credentialShapedNames(dockerfile)).toEqual([]);
     expect(ins.some((i) => i.op === "ADD")).toBe(false);
     expect(codeOf(dockerfile)).not.toContain("--secret");
@@ -136,6 +147,21 @@ describe("the cell Dockerfile", () => {
     expect(run).toContain("create_main_cluster = false");
     expect(run).toContain("rm -f /etc/ssl/private/ssl-cert-snakeoil.key");
     expect(run).toContain(`test -x ${CELL_PG_BIN}/initdb`);
+    expect(permissionChanges(run)).toEqual([CA_STORE_CHOWN]);
+    expect(run).not.toMatch(/\bchmod\b/);
+  });
+
+  // card: protects=the permission-change guard actually fires; fails_when=a recursive chown of /etc/ssl, a chmod or an extra directory passes unflagged; no_claim=the real Dockerfile
+  it("negative control: a wider chown or a chmod is flagged", () => {
+    expect(permissionChanges("chown -R agent /etc/ssl; x")).not.toEqual([
+      CA_STORE_CHOWN,
+    ]);
+    expect(permissionChanges(`${CA_STORE_CHOWN} /etc/ssl; x`)).not.toEqual([
+      CA_STORE_CHOWN,
+    ]);
+    expect(
+      permissionChanges(`${CA_STORE_CHOWN}; chmod 0777 /etc/ssl/certs`),
+    ).toEqual([CA_STORE_CHOWN, "chmod 0777 /etc/ssl/certs"]);
   });
 
   // card: protects=the cell's apt snapshot is the batteries image's, so the Postgres .debs come from the same frozen archive; fails_when=the two APT_SNAPSHOT defaults differ; no_claim=that the snapshot still serves them
