@@ -164,12 +164,18 @@ describe.skipIf(!IT || IMAGE === "")(
           /^OPENSANDBOX_IT_BASE_URL=(\S+)$/m.exec(out)?.[1] ?? DEFAULT_BASE_URL;
       }
       // Pre-pull, as the box's runbook does (PR-G): a cold multi-GB pull inside
-      // `create` outlasts the adapter's create budget (seen live: ~2 min). A tag
-      // already loaded in the dind (docker save | docker load) is used as is.
-      await dind(["docker", "image", "inspect", IMAGE]).catch(() => {
-        console.log(`cell image ${IMAGE}: not in the dind, pulling`);
+      // `create` outlasts the adapter's create budget (seen live: ~2 min). Only
+      // an immutable ref skips the pull when it is already in the dind: a digest,
+      // or a local tag loaded with docker save | docker load (no registry host).
+      // A registry tag (`:main`) can move, so it is always pulled.
+      const immutable = IMAGE.includes("@sha256:") || !IMAGE.includes("/");
+      const pull = () => {
+        console.log(`cell image ${IMAGE}: pulling`);
         return dind(["docker", "pull", "-q", IMAGE]);
-      });
+      };
+      await (immutable
+        ? dind(["docker", "image", "inspect", IMAGE]).catch(pull)
+        : pull());
       const apiKey = readFileSync(join(stateDir(), "api_key"), "utf8").trim();
       provider = createOpenSandboxCellProvider(
         {
