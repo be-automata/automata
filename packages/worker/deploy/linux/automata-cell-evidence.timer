@@ -1,0 +1,18 @@
+# Weekly renewal of the opensandbox/runc conformance evidence
+# (opensandbox-evidence-renew.sh, #709). Evidence lasts 30 days; weekly leaves
+# three missed runs before it expires, and the cell-evidence issue opens 7 days
+# ahead. Wednesday, so it never overlaps the Sunday box-evidence run.
+# Persistent=true: a run missed while the box was down fires on the next boot
+# instead of being skipped in silence.
+
+[Unit]
+Description=Weekly opensandbox/runc conformance evidence renewal (OPENSANDBOX_IT)
+
+[Timer]
+OnCalendar=Wed *-*-* 04:00:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+Unit=automata-cell-evidence.service
+
+[Install]
+WantedBy=timers.target

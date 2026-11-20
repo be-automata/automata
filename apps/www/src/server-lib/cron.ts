@@ -411,6 +411,8 @@ export async function runScheduledCron(cron: string): Promise<void> {
           } finally {
             // ADR-014 evidence upkeep: once a day (the 13:00 UTC run), LAST.
             await runProfileEvidenceExpiryCheckSafe();
+            // #709: the cell evidence, every hour; swallows its own errors.
+            await runCellEvidenceCheckSafe();
           }
         }
       }
@@ -486,6 +488,40 @@ async function runCellReconcilerSafe(): Promise<void> {
     await runCellReconciler({ db, provider });
   } catch (error) {
     console.error("[cron:cell-reconciler] failed (non-fatal)", error);
+  }
+}
+
+/**
+ * #709: one line an hour about the opensandbox/runc evidence cell-plan needs.
+ * An error line while it is expiring or refused (every cell plan then answers
+ * egress_not_enforced), an ok line otherwise, nothing while cells are off. The
+ * `cell-evidence` issue comes from the synthetic workflow, which reads the same
+ * status from GET /api/health/cell-evidence. Dynamic import, fail-soft.
+ */
+async function runCellEvidenceCheckSafe(): Promise<void> {
+  try {
+    const { cellEvidenceNeedsAttention, readCellEvidenceStatus } = await import(
+      "@/server-lib/compute/cell-evidence-status"
+    );
+    const { opensandboxConfigured } = await import(
+      "@/server-lib/compute/cell-gate"
+    );
+    const status = await readCellEvidenceStatus({
+      db,
+      now: new Date(),
+      configured: opensandboxConfigured(),
+    });
+    if (status.status === "unconfigured") return;
+    if (cellEvidenceNeedsAttention(status)) {
+      console.error(
+        "[cron:cell-evidence] opensandbox/runc evidence needs attention: cell-plan refuses egress_not_enforced (unknown_profile without the profile row) once it lapses; count the `[daemon cell-plan]` lines with that outcome. Renew: packages/worker/deploy/README.md, OpenSandbox cells, step 8",
+        status,
+      );
+    } else {
+      console.log("[cron:cell-evidence] ok", status);
+    }
+  } catch (error) {
+    console.error("[cron:cell-evidence] failed (non-fatal)", error);
   }
 }
 

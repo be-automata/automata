@@ -106,3 +106,73 @@ jobs:
             gh issue comment "$number" --body "Recovered: $RUN_URL"
             gh issue close "$number"
           fi
+
+  # #709: the opensandbox/runc conformance evidence cell-plan needs. Reads the
+  # public GET /api/health/cell-evidence (status, enum reason, expiry, days
+  # left; no secret) and keeps ONE open issue labelled cell-evidence while the
+  # status is `expiring` (under 7 days left) or `refused` (cell-plan answers
+  # egress_not_enforced). An open issue is left alone, so no comment per run;
+  # `ok` closes it; `unconfigured` (cells off) touches nothing.
+  cell-evidence:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: cell-evidence
+      cancel-in-progress: false
+    env:
+      SMOKE_BASE_URL: ${{ vars.SMOKE_BASE_URL }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Read the cell evidence status
+        id: read
+        run: |
+          if [ -z "$SMOKE_BASE_URL" ]; then
+            echo "::error::repository variable SMOKE_BASE_URL is not set"
+            exit 1
+          fi
+          curl -sS --fail --max-time 30 "${SMOKE_BASE_URL%/}/api/health/cell-evidence" > status.json
+          status=$(jq -er '.status | strings' status.json)
+          cat status.json
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Open the cell-evidence issue
+        if: steps.read.outputs.status == 'expiring' || steps.read.outputs.status == 'refused'
+        run: |
+          number=$(gh issue list --label cell-evidence --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            echo "cell-evidence issue #$number is already open"
+            exit 0
+          fi
+          gh label create cell-evidence --force --color B60205 \
+            --description "The opensandbox/runc conformance evidence is expiring or refused"
+          {
+            jq -r '"The `opensandbox/runc` conformance evidence is **\(.status)**"
+              + (if .reason then " (`\(.reason)`)" else "" end)
+              + ": expires `\(.expiresAt // "none")`"
+              + (if .daysLeft != null then ", \(.daysLeft) day(s) left" else "" end) + "."' status.json
+            echo
+            echo "Once it lapses every cell plan answers \`egress_not_enforced\` (\`unknown_profile\` without the profile row); count the \`[daemon cell-plan]\` log lines with that outcome."
+            echo "Renew on the box: \`systemctl start automata-cell-evidence.service\`, then \`journalctl -u automata-cell-evidence -n 30\`"
+            echo "(packages/worker/deploy/README.md, \"OpenSandbox cells\", step 8). The first \`ok\` run closes this issue."
+            echo
+            echo "Run: $RUN_URL"
+          } > body.md
+          gh issue create --title "OpenSandbox cell evidence needs renewal" \
+            --label cell-evidence --body-file body.md
+
+      - name: Close the cell-evidence issue on recovery
+        if: steps.read.outputs.status == 'ok'
+        run: |
+          number=$(gh issue list --label cell-evidence --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "Recovered (expires $(jq -r '.expiresAt' status.json)): $RUN_URL"
+            gh issue close "$number"
+          fi

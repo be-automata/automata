@@ -1186,7 +1186,7 @@ In Cloudflare Zero Trust, create a self-hosted Access application on the server 
 - Do **not** add an Allow policy or an identity provider. Either one makes Access answer a
   token-less request with a 302 to the login page instead of a 403.
 - Note the application's **AUD** tag, and keep the token's id and secret out of the repo and
-  out of command lines (they are PR-C's Worker secrets, step 8).
+  out of command lines (they are PR-C's Worker secrets, step 9).
 
 ### 4. Tunnel ingress rule with `access.required`
 
@@ -1243,7 +1243,62 @@ secret store into the shell, never type them inline):
 - with the API key too, `GET /sandboxes?metadata=automata%3Dcell` returns 200;
 - `…/sandboxes/x/proxy/44772/ping` returns 404.
 
-### 8. www secrets (PR-C's code reads the Access ones)
+### 8. Conformance evidence (before `OPENSANDBOX_URL`, #709)
+
+`cell-plan` refuses every cell with `egress_not_enforced` until the `opensandbox/runc` profile
+has unexpired `conformance` evidence. The evidence comes from the `OPENSANDBOX_IT` live suite
+(a throwaway OpenSandbox in a privileged dind on the host's rootful Docker, about 5 minutes),
+and `push-evidence.sh` reports it to www. Without this step the first cell run fails, as it did
+on 2026-11-19.
+
+**Renewal rule.** The evidence lasts **30 days from the run**: re-run within 30 days of the
+last run. Push within **24 h** of the run, because www refuses an older report
+(`measured_at_out_of_window`), and run it from a checkout with no local changes, because www
+refuses a `-dirty` platform sha. The weekly timer below does both.
+
+Needs `/etc/automata/profile-evidence.env` and the `PROFILE_EVIDENCE_SECRET` www secret, the
+same pair as "Scheduled evidence renewal" above (install them first if that section has not
+run on this box):
+
+```bash
+cd /opt/automata-platform/packages/worker/deploy/linux
+# 1. install-opensandbox.sh installs automata-cell-evidence.{service,timer} and enables the
+#    timer once profile-evidence.env exists: re-run it after creating that file
+./install-opensandbox.sh
+./install-opensandbox.sh --check      # cell-evidence-unit and cell-evidence-timer lines: ok
+# 2. the plan: read-only checks (config, clean checkout, free disk, idle); runs and pushes nothing
+./opensandbox-evidence-renew.sh --dry-run
+# 3. the first push, now
+systemctl start automata-cell-evidence.service
+journalctl -u automata-cell-evidence -n 20 --no-pager   # ends: renewed: rows=9 expiresAt=<instant>
+```
+
+Prove it read-only:
+`SELECT capability, measured_at, expires_at FROM profile_evidence WHERE profile_id = 'opensandbox/runc' ORDER BY measured_at DESC LIMIT 9;`
+shows rows measured minutes ago. Once step 9 sets the URL,
+`curl -s https://<www host>/api/health/cell-evidence` answers `{"status":"ok",...}`.
+
+The timer, `automata-cell-evidence.timer`:
+
+- runs on Wednesdays at 04:00 UTC (up to 30 min later), so it never overlaps the Sunday box
+  evidence; `Persistent=true` fires a run missed while the box was down at the next boot;
+- skips, with one `skip:` line and exit 0, while a cell exists on the OpenSandbox server
+  (metadata `automata=cell`), while a hand-run IT is up (an `osbit=1` container, which `up.sh`
+  would remove), or while another renewal holds the lock. The check runs once, at the start:
+  a cell that starts during the run is unaffected, because the IT uses its own dind;
+- fails, and stays `failed` in `systemctl --failed`, on a missing config, a dirty checkout,
+  under 10 GB free in the Docker root, an IT failure or a refused push;
+- keeps the IT output in `/var/lib/automata-cell-evidence/last-it.log` (root, 0600). The journal
+  gets fixed lines, counts, the host, `expiresAt` and enum codes, never a secret.
+
+Alerting. www's hourly cron logs `[cron:cell-evidence]`: an error line while the evidence
+expires within 7 days or `cell-plan` would refuse, an `ok` line otherwise, nothing while cells
+are off. `GET /api/health/cell-evidence` (public, read-only, no secret) answers the same status,
+and the Synthetic workflow's `cell-evidence` job keeps one issue labelled `cell-evidence` open
+while it is `expiring` or `refused`, then closes it on the first `ok`. Count the effect in the
+`[daemon cell-plan]` log lines with outcome `egress_not_enforced`.
+
+### 9. www secrets (PR-C's code reads the Access ones)
 
 Every value goes through `wrangler secret put … --name automata-www` on stdin, never on a
 command line. `opensandboxConfigured()` turns the cell plane on once both URL and key are
@@ -1253,11 +1308,12 @@ non-empty, so set them in this order:
 2. `OPENSANDBOX_GUEST_IMAGE` (the cell image digest);
 3. `OPENSANDBOX_API_KEY`, streamed from the box:
    `ssh <box> sudo sed -n 's/^OPENSANDBOX_API_KEY=//p' /etc/automata/opensandbox.env | npx wrangler secret put OPENSANDBOX_API_KEY --name automata-www`;
-4. **last**, `OPENSANDBOX_URL=https://<host>`, and only after step 7 passes.
+4. **last**, `OPENSANDBOX_URL=https://<host>`, and only after step 7 passes and step 8
+   recorded the evidence.
 
 The per-user flag `opensandboxCells` and the per-org switch (`organization.cells_enabled`, #708) still gate `cell-plan`.
 
-### 9. Worker
+### 10. Worker
 
 The worker reads three names (PR-E): `WORKER_OPENSANDBOX_URL`,
 `WORKER_OPENSANDBOX_API_KEY_FILE` and `WORKER_OPENSANDBOX_GUEST_IMAGE`.
@@ -1334,7 +1390,9 @@ What the worker does with them (#656 PR-E):
    `systemctl daemon-reload`, then `automata-worker-safe-restart`: the launcher stops
    exporting `WORKER_OPENSANDBOX_*`;
 4. `systemctl disable --now automata-opensandbox.service`;
-5. remove the DNS route and the ingress rule.
+5. remove the DNS route and the ingress rule;
+6. `systemctl disable --now automata-cell-evidence.timer` (the evidence already recorded still
+   lasts 30 days from its run).
 
 **Never remove or replace `/etc/automata/opensandbox.env` while the drop-in exists.** Its
 `LoadCredential=` has no fallback, so the worker cannot restart without the key file. Remove the

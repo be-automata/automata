@@ -1,0 +1,59 @@
+{
+  "criteria": [
+    {
+      "id": "AC-1",
+      "text": "The README \"OpenSandbox cells\" section lists the evidence push as a numbered step before `OPENSANDBOX_URL`, and the renewal rule.",
+      "tiers": [
+        "unmapped"
+      ],
+      "hints": [],
+      "status": "PENDING",
+      "evidence": [],
+      "defer": null
+    },
+    {
+      "id": "AC-2",
+      "text": "The timer runs on the box, pushes fresh evidence, and the newest evidence's `expires_at` moves forward (shown by a read-only query).",
+      "tiers": [
+        "unmapped"
+      ],
+      "hints": [],
+      "status": "PENDING",
+      "evidence": [],
+      "defer": null
+    },
+    {
+      "id": "AC-3",
+      "text": "The timer skips (and logs why) when a cell run is live.",
+      "tiers": [
+        "production"
+      ],
+      "hints": [],
+      "status": "PENDING",
+      "evidence": [],
+      "defer": null
+    },
+    {
+      "id": "AC-4",
+      "text": "With evidence expiring within 7 days, the alert fires once (no duplicate issue while one is open); with fresh evidence it does not.",
+      "tiers": [
+        "unmapped"
+      ],
+      "hints": [],
+      "status": "PENDING",
+      "evidence": [],
+      "defer": null
+    },
+    {
+      "id": "AC-5",
+      "text": "No secret appears in the timer's journal or the alert.",
+      "tiers": [
+        "unmapped"
+      ],
+      "hints": [],
+      "status": "PENDING",
+      "evidence": [],
+      "defer": null
+    }
+  ]
+}

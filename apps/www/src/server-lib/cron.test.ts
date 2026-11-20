@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   selfHeal: vi.fn(),
   purge: vi.fn(),
   evidenceCheck: vi.fn(),
+  cellEvidence: vi.fn(),
   reconcile: vi.fn(),
   busSweep: vi.fn(),
   dueThreads: vi.fn(async (): Promise<unknown[]> => []),
@@ -95,6 +96,11 @@ vi.mock("@/server-lib/compute/cell-control", () => ({
 vi.mock("@/server-lib/compute/profile-evidence-expiry", () => ({
   runProfileEvidenceExpiryCheck: h.evidenceCheck,
 }));
+vi.mock("@/server-lib/compute/cell-evidence-status", () => ({
+  readCellEvidenceStatus: h.cellEvidence,
+  cellEvidenceNeedsAttention: (s: { status: string }) =>
+    s.status === "expiring" || s.status === "refused",
+}));
 
 /**
  * Enterprise-hardening #2 watchdog delta (amendment 5): the hourly stalled-task cron
@@ -135,6 +141,11 @@ describe("runScheduledCron self-heal bulkhead", () => {
       h.order.push("profile-evidence");
       return { ran: false, expiring: [], alerted: false };
     });
+    h.cellEvidence.mockReset();
+    h.cellEvidence.mockImplementation(async () => {
+      h.order.push("cell-evidence");
+      return { status: "unconfigured" };
+    });
     h.cellProvider.mockReset();
     h.cellProvider.mockReturnValue(null);
     h.cellReconcile.mockReset();
@@ -160,6 +171,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "self-heal:hourly",
       "knowledge-purge",
       "profile-evidence",
+      "cell-evidence",
     ]);
   });
 
@@ -174,19 +186,58 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "mention-reply:t1",
       "knowledge-purge",
       "profile-evidence",
+      "cell-evidence",
     ]);
   });
 
   it("hourly: a throwing knowledge purge does not reject the cron", async () => {
     h.purge.mockRejectedValue(new Error("purge down"));
     await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
-    expect(h.order.slice(-2)).toEqual(["self-heal:hourly", "profile-evidence"]);
+    expect(h.order.slice(-3)).toEqual([
+      "self-heal:hourly",
+      "profile-evidence",
+      "cell-evidence",
+    ]);
   });
 
   it("hourly: a throwing evidence expiry check does not reject the cron", async () => {
     h.evidenceCheck.mockRejectedValue(new Error("db down"));
     await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
-    expect(h.order.at(-1)).toBe("knowledge-purge");
+    expect(h.order.slice(-2)).toEqual(["knowledge-purge", "cell-evidence"]);
+  });
+
+  it("hourly (#709): the cell evidence check logs an error line only when it needs attention", async () => {
+    h.cellEvidence.mockResolvedValueOnce({
+      status: "expiring",
+      expiresAt: "2026-12-19T00:00:00.000Z",
+      daysLeft: 3,
+    });
+    await runScheduledCron("0 * * * *");
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("egress_not_enforced"),
+      expect.objectContaining({ status: "expiring", daysLeft: 3 }),
+    );
+    vi.mocked(console.error).mockClear();
+    h.cellEvidence.mockResolvedValueOnce({
+      status: "ok",
+      expiresAt: "2026-12-19T00:00:00.000Z",
+      daysLeft: 20,
+    });
+    await runScheduledCron("0 * * * *");
+    expect(console.log).toHaveBeenCalledWith(
+      "[cron:cell-evidence] ok",
+      expect.objectContaining({ status: "ok" }),
+    );
+    expect(console.error).not.toHaveBeenCalledWith(
+      expect.stringContaining("[cron:cell-evidence]"),
+      expect.anything(),
+    );
+  });
+
+  it("hourly (#709): a throwing cell evidence check does not reject the cron", async () => {
+    h.cellEvidence.mockRejectedValue(new Error("db down"));
+    await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
+    expect(h.order.at(-1)).toBe("profile-evidence");
   });
 
   it("other patterns never run the knowledge purge", async () => {
@@ -194,6 +245,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
     await runScheduledCron("*/1 * * * *");
     expect(h.purge).not.toHaveBeenCalled();
     expect(h.evidenceCheck).not.toHaveBeenCalled();
+    expect(h.cellEvidence).not.toHaveBeenCalled();
   });
 
   it("hourly: a hanging self-heal cron cannot have delayed anything before it", async () => {

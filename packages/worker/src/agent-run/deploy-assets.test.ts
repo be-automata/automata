@@ -332,6 +332,9 @@ describeBashScriptHygiene(
 describeBashScriptHygiene(
   "packages/worker/deploy/linux/install-opensandbox.sh",
 );
+describeBashScriptHygiene(
+  "packages/worker/deploy/linux/opensandbox-evidence-renew.sh",
+);
 
 /** The quoted `echo|log|fail|printf "…"` arguments of a bash script. */
 function printedStrings(script: string): string[] {
@@ -1368,5 +1371,116 @@ describe("packages/worker/deploy/linux — worker OpenSandbox wiring (#656 G2)",
     expect(launcher.indexOf("opensandbox_credential=")).toBeLessThan(
       launcher.lastIndexOf("exec node --import tsx"),
     );
+  });
+});
+
+describe("packages/worker/deploy/linux — cell conformance evidence renewal (#709)", () => {
+  const script = deployFile("linux", "opensandbox-evidence-renew.sh");
+  const unit = deployFile("linux", "automata-cell-evidence.service");
+  const timer = deployFile("linux", "automata-cell-evidence.timer");
+  const installer = deployFile("linux", "install-opensandbox.sh");
+  const readme = deployFile("README.md");
+
+  // card: protects=#709 OD-2 weekly renewal that survives downtime; fails_when=the timer stops being weekly or a missed run is skipped silently; no_claim=that systemd honours it on the box
+  it("runs weekly from a oneshot root unit that fails loudly, catching up missed runs", () => {
+    expect(timer).toMatch(/^OnCalendar=Wed \*-\*-\* 04:00:00 UTC$/m);
+    expect(timer).toMatch(/^Persistent=true$/m);
+    expect(timer).toMatch(/^Unit=automata-cell-evidence\.service$/m);
+    expect(timer).toMatch(/^WantedBy=timers\.target$/m);
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).not.toMatch(/^Restart=/m);
+    expect(unit).not.toMatch(/^User=/m);
+    expect(unit).toMatch(
+      /^ExecStart=\/opt\/automata-platform\/packages\/worker\/deploy\/linux\/opensandbox-evidence-renew\.sh$/m,
+    );
+    expect(unit).toMatch(/^StateDirectory=automata-cell-evidence$/m);
+    expect(unit).toMatch(/^StateDirectoryMode=0700$/m);
+    // The box evidence runs on Sundays: the two heavy runs never overlap.
+    expect(deployFile("linux", "automata-box-evidence.timer")).toMatch(
+      /^OnCalendar=Sun /m,
+    );
+  });
+
+  // card: protects=#709 AC-3 no renewal while a cell runs; fails_when=the idle check is dropped, stops filtering by the cell tag, or runs after the IT; no_claim=the OpenSandbox server's own filtering
+  it("skips with a logged reason while a cell or a hand-run IT is up, before the IT runs", () => {
+    expect(script).toContain("sandboxes?metadata=automata%3Dcell");
+    expect(script).toContain('select(.metadata.automata == "cell")');
+    expect(script).toContain("--filter label=osbit=1");
+    expect(script).toMatch(/flock -n 9/);
+    const skips = [...script.matchAll(/log "skip: [^"]*"\n\s*exit 0/g)];
+    expect(skips.length).toBe(3);
+    // The real invocation (quoted), not the dry-run plan line that names it.
+    const itRun = script.indexOf(
+      'OPENSANDBOX_IT=1 OPENSANDBOX_IT_STATE="$STATE"',
+    );
+    expect(itRun).toBeGreaterThan(0);
+    for (const m of skips) expect(m.index).toBeLessThan(itRun);
+    // --dry-run prints the plan and exits before anything runs or is pushed.
+    expect(
+      script.indexOf('log "dry run: nothing run, nothing pushed"'),
+    ).toBeLessThan(itRun);
+  });
+
+  // card: protects=#709 AC-5 no secret in the journal; fails_when=a printed line expands the secret, the key or the IT output, or the secret is exported to the IT; no_claim=what www or curl print themselves
+  it("never prints the secret, the API key or the IT output, and never exports the secret", () => {
+    for (const text of printedStrings(script)) {
+      expect(text).not.toMatch(/\$\{?(secret|PROFILE_EVIDENCE_SECRET)\b/);
+      expect(text).not.toMatch(/OPENSANDBOX_API_KEY/);
+    }
+    expect(script).not.toMatch(
+      /^\s*export\s+(secret|PROFILE_EVIDENCE_SECRET)/m,
+    );
+    expect(script).not.toMatch(/^\s*(source|\.)\s+"?\$CONFIG/m);
+    expect(script).not.toMatch(/set -x/);
+    // The IT output goes to a file in the 0700 state dir, never stdout.
+    expect(script).toMatch(/\) >"\$STATE\/last-it\.log" 2>&1/);
+    // Only push-evidence.sh gets the secret, in its own environment.
+    expect(
+      [...script.matchAll(/PROFILE_EVIDENCE_SECRET="\$secret"/g)].length,
+    ).toBe(1);
+    expect(script).toMatch(
+      /PROFILE_EVIDENCE_SECRET="\$secret" OPENSANDBOX_IT_STATE="\$STATE" \\\n\s+"\$PLATFORM\/packages\/sandbox\/opensandbox-it\/push-evidence\.sh"/,
+    );
+    expect(script).toContain('log "renewed: rows=$rows expiresAt=$expires"');
+  });
+
+  // card: protects=#709 installed by the provisioning path; fails_when=install-opensandbox.sh stops installing the units, enables the timer without its config, or --check stops verifying them; no_claim=the box's systemd state
+  it("install-opensandbox.sh installs both units, enables the timer only with its config, and --check verifies them", () => {
+    expect(installer).toContain(
+      "EVIDENCE_UNITS=(automata-cell-evidence.service automata-cell-evidence.timer)",
+    );
+    expect(installer).toMatch(
+      /install_changed "\$HERE\/\$u" "\/etc\/systemd\/system\/\$u" 0644/,
+    );
+    expect(installer).toMatch(
+      /if \[ -e "\$EVIDENCE_CONFIG" \]; then\n\s+systemctl enable --now "\$EVIDENCE_TIMER"/,
+    );
+    expect(installer).toContain(
+      "EVIDENCE_CONFIG=/etc/automata/profile-evidence.env",
+    );
+    expect(installer).toContain("cell-evidence-unit");
+    expect(installer).toContain("cell-evidence-timer");
+  });
+
+  // card: protects=#709 AC-1 runbook order; fails_when=the evidence step moves after OPENSANDBOX_URL or the renewal rule is dropped; no_claim=that an operator follows it
+  it("the README pushes the evidence as a numbered step before OPENSANDBOX_URL, with the renewal rule", () => {
+    const section = readme.slice(
+      readme.indexOf("## OpenSandbox cells"),
+      readme.indexOf("### Findings every operator must know"),
+    );
+    const evidenceStep = section.indexOf(
+      "### 8. Conformance evidence (before `OPENSANDBOX_URL`",
+    );
+    const urlStep = section.indexOf(
+      "**last**, `OPENSANDBOX_URL=https://<host>`",
+    );
+    expect(evidenceStep).toBeGreaterThan(0);
+    expect(urlStep).toBeGreaterThan(evidenceStep);
+    expect(section).toContain("### 9. www secrets");
+    expect(section).toContain("### 10. Worker");
+    expect(section).toContain("**Renewal rule.**");
+    expect(section).toContain("**30 days from the run**");
+    expect(section).toContain("within **24 h**");
+    expect(section).toContain("systemctl start automata-cell-evidence.service");
   });
 });
