@@ -1,0 +1,18 @@
+# gitleaks config for scan-layers.sh: the default rules, plus one allowlist for
+# a known false positive in a Debian-packaged file the cell build installs.
+#
+# python3-pip pulls in python3-setuptools, whose Windows-only
+# setuptools/_distutils/msvccompiler.py aliases win32api registry functions
+# (`RegOpenKeyEx = win32api.RegOpenKeyEx`). generic-api-key reads "Key" plus
+# the identifier as a key. The allowlist matches that file AND those alias
+# lines only: any other finding in the file, or this pattern anywhere else,
+# still fails the scan.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "setuptools msvccompiler win32api registry aliases (python3-setuptools)"
+condition = "AND"
+paths = ['''usr/lib/python3/dist-packages/setuptools/_distutils/msvccompiler\.py$''']
+regexTarget = "line"
+regexes = ['''^\s*Reg\w+\s*=\s*win32api\.Reg\w+\s*$''']

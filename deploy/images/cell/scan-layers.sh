@@ -55,5 +55,5 @@ for layer in "${layers[@]}"; do
   tar -xf "$work/$layer" -C "$scan/layer-$i" --no-same-owner --no-same-permissions
   i=$((i + 1))
 done
-"$gitleaks" dir --redact --no-banner "$scan"
+"$gitleaks" dir --redact --no-banner --config "$(dirname "$0")/gitleaks-layers.toml" "$scan"
 echo "scan-layers: config and $added layer(s) above the base are clean"
