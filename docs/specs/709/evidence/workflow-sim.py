@@ -52,6 +52,8 @@ for f in ("curl", "gh"):
 
 
 def run_job(status):
+    if "status" in status:
+        status = dict(status, needsAttention=status["status"] in ("expiring", "refused"))
     status_file = os.path.join(work, "fake-status.json")
     json.dump(status, open(status_file, "w"))
     out_file = os.path.join(work, "gh_output")
@@ -71,7 +73,7 @@ def run_job(status):
         cond = step.get("if")
         if cond:
             s = outputs.get("status", "")
-            expr = re.sub(r"steps\.read\.outputs\.status", repr(s), cond)
+            expr = re.sub(r"steps\.read\.outputs\.(\w+)", lambda m: repr(outputs.get(m.group(1), "")), cond)
             expr = expr.replace("||", " or ").replace("&&", " and ")
             if not eval(expr):
                 continue

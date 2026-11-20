@@ -501,12 +501,13 @@ async function runCellReconcilerSafe(): Promise<void> {
  */
 async function runCellEvidenceCheckSafe(): Promise<void> {
   try {
-    const { cellEvidenceNeedsAttention, readCellEvidenceStatus } = await import(
-      "@/server-lib/compute/cell-evidence-status"
-    );
-    const { opensandboxConfigured } = await import(
-      "@/server-lib/compute/cell-gate"
-    );
+    const [
+      { cellEvidenceNeedsAttention, readCellEvidenceStatus },
+      { opensandboxConfigured },
+    ] = await Promise.all([
+      import("@/server-lib/compute/cell-evidence-status"),
+      import("@/server-lib/compute/cell-gate"),
+    ]);
     const status = await readCellEvidenceStatus({
       db,
       now: new Date(),

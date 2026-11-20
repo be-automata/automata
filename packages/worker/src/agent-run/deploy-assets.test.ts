@@ -1447,7 +1447,7 @@ describe("packages/worker/deploy/linux — cell conformance evidence renewal (#7
   // card: protects=#709 installed by the provisioning path; fails_when=install-opensandbox.sh stops installing the units, enables the timer without its config, or --check stops verifying them; no_claim=the box's systemd state
   it("install-opensandbox.sh installs both units, enables the timer only with its config, and --check verifies them", () => {
     expect(installer).toContain(
-      "EVIDENCE_UNITS=(automata-cell-evidence.service automata-cell-evidence.timer)",
+      'EVIDENCE_UNITS=(automata-cell-evidence.service "$EVIDENCE_TIMER")',
     );
     expect(installer).toMatch(
       /install_changed "\$HERE\/\$u" "\/etc\/systemd\/system\/\$u" 0644/,

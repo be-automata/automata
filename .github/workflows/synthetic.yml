@@ -138,11 +138,14 @@ jobs:
           fi
           curl -sS --fail --max-time 30 "${SMOKE_BASE_URL%/}/api/health/cell-evidence" > status.json
           status=$(jq -er '.status | strings' status.json)
+          # Not `jq -e`: it exits 1 on a `false` output.
+          attention=$(jq -r 'if (.needsAttention | type) == "boolean" then .needsAttention else error("needsAttention") end' status.json)
           cat status.json
           echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "attention=$attention" >> "$GITHUB_OUTPUT"
 
       - name: Open the cell-evidence issue
-        if: steps.read.outputs.status == 'expiring' || steps.read.outputs.status == 'refused'
+        if: steps.read.outputs.attention == 'true'
         run: |
           number=$(gh issue list --label cell-evidence --state open \
             --json number --jq '.[0].number // empty')

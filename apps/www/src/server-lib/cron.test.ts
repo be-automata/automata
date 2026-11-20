@@ -96,10 +96,11 @@ vi.mock("@/server-lib/compute/cell-control", () => ({
 vi.mock("@/server-lib/compute/profile-evidence-expiry", () => ({
   runProfileEvidenceExpiryCheck: h.evidenceCheck,
 }));
-vi.mock("@/server-lib/compute/cell-evidence-status", () => ({
+vi.mock("@/server-lib/compute/cell-evidence-status", async (importActual) => ({
+  ...(await importActual<
+    typeof import("@/server-lib/compute/cell-evidence-status")
+  >()),
   readCellEvidenceStatus: h.cellEvidence,
-  cellEvidenceNeedsAttention: (s: { status: string }) =>
-    s.status === "expiring" || s.status === "refused",
 }));
 
 /**

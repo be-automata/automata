@@ -52,8 +52,8 @@ RENDER="$TEMPLATE_DIR/render-opensandbox-config.sh"
 RUN_DIR="$RUNNER_HOME/run"
 WORKER_DROPIN=/etc/systemd/system/automata-worker.service.d/opensandbox.conf
 # The weekly conformance-evidence renewal (#709) and the config it reads.
-EVIDENCE_UNITS=(automata-cell-evidence.service automata-cell-evidence.timer)
 EVIDENCE_TIMER=automata-cell-evidence.timer
+EVIDENCE_UNITS=(automata-cell-evidence.service "$EVIDENCE_TIMER")
 EVIDENCE_CONFIG=/etc/automata/profile-evidence.env
 PORT=8090
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

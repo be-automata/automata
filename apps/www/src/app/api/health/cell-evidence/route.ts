@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { db } from "@/lib/db";
 import {
+  cellEvidenceNeedsAttention,
   readCellEvidenceStatus,
   type CellEvidenceStatus,
 } from "@/server-lib/compute/cell-evidence-status";
@@ -34,7 +35,12 @@ export async function GET(): Promise<NextResponse> {
       }),
     };
   }
-  return NextResponse.json(memo.status, {
+  // The workflow branches on needsAttention, so the rule lives in one place.
+  const body = {
+    ...memo.status,
+    needsAttention: cellEvidenceNeedsAttention(memo.status),
+  };
+  return NextResponse.json(body, {
     headers: { "Cache-Control": "no-store" },
   });
 }
