@@ -2,7 +2,7 @@
 [cell-evidence] skip: 1 cell(s) live on the OpenSandbox server (metadata automata=cell); evidence not renewed this run
 exit=0
 === dry run on an idle box -> plan only
-[cell-evidence] host=db913b2876c6 platform=658ab85 cells=0 push-to=www.example.test
+[cell-evidence] host=4a2aaf0aee4b platform=e43b9db cells=0 push-to=www.example.test
 [cell-evidence] dry run, plan: OPENSANDBOX_IT=1 OPENSANDBOX_IT_STATE=/var/lib/automata-cell-evidence pnpm --filter @terragon/sandbox exec vitest run src/providers/opensandbox-cell.integration.test.ts (in /opt/automata-platform, up to 1800s), then push-evidence.sh to https://www.example.test
 [cell-evidence] dry run: nothing run, nothing pushed
 exit=0
@@ -16,19 +16,19 @@ exit=1
 [cell-evidence] FAIL: GET /sandboxes answered a page this script cannot count
 exit=1
 === idle -> IT + push, renewed
-[cell-evidence] host=db913b2876c6 platform=658ab85 cells=0 push-to=www.example.test
+[cell-evidence] host=4a2aaf0aee4b platform=e43b9db cells=0 push-to=www.example.test
 [cell-evidence] OPENSANDBOX_IT passed
 [cell-evidence] renewed: rows=9 expiresAt=2026-12-26T04:10:00.000Z
 exit=0
 root-owned left under packages/sandbox: 0
 git index owner: automata
 === push refused -> fail with the enum only
-[cell-evidence] host=db913b2876c6 platform=658ab85 cells=0 push-to=www.example.test
+[cell-evidence] host=4a2aaf0aee4b platform=e43b9db cells=0 push-to=www.example.test
 [cell-evidence] OPENSANDBOX_IT passed
-[cell-evidence] FAIL: www did not record the evidence (push exit 22, check_failed)
+[cell-evidence] FAIL: www did not record the evidence (push exit 22, check_failed); see /var/lib/automata-cell-evidence/last-it.log
 exit=1
 === IT fails -> fail
-[cell-evidence] host=db913b2876c6 platform=658ab85 cells=0 push-to=www.example.test
+[cell-evidence] host=4a2aaf0aee4b platform=e43b9db cells=0 push-to=www.example.test
 [cell-evidence] FAIL: OPENSANDBOX_IT failed (exit 1); see /var/lib/automata-cell-evidence/last-it.log
 exit=1
 last-it.log mode: 600

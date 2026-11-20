@@ -409,7 +409,8 @@ export async function runScheduledCron(cron: string): Promise<void> {
             // OPS-04: after recovery and self-heal; purge can never delay or skip them.
             await runKnowledgePurgeSweepSafe();
           } finally {
-            // ADR-014 evidence upkeep: once a day (the 13:00 UTC run), LAST.
+            // ADR-014 evidence upkeep: once a day (the 13:00 UTC run), after
+            // everything above; only the hourly cell-evidence line follows.
             await runProfileEvidenceExpiryCheckSafe();
             // #709: the cell evidence, every hour; swallows its own errors.
             await runCellEvidenceCheckSafe();

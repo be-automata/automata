@@ -45,6 +45,9 @@ EVIDENCE="$STATE/opensandbox-runc-conformance.json"
 # Root must not rewrite the automata-owned .git/index on a read-only `git status`
 # (here or in the IT's own call): no opportunistic index refresh.
 export GIT_OPTIONAL_LOCKS=0
+# Every docker call here, the IT's and down.sh's included, talks to the same
+# daemon: the host's default (rootful) one.
+unset DOCKER_HOST
 
 log() { echo "[cell-evidence] $*"; }
 fail() {
@@ -92,8 +95,9 @@ www_host="${www_host%%/*}"
 # the one directory, here and (by environment) for the IT's own git calls.
 git_p() { git -c safe.directory="$PLATFORM" -C "$PLATFORM" "$@"; }
 sha="$(git_p rev-parse --short HEAD)" || fail "no platform checkout at $PLATFORM"
-[ -z "$(git_p status --porcelain)" ] || fail "the checkout at $PLATFORM has local changes; the evidence would be -dirty"
-owner="$(stat -c '%U:%G' "$PLATFORM")"
+changes="$(git_p status --porcelain)" || fail "git status failed in $PLATFORM"
+[ -z "$changes" ] || fail "the checkout at $PLATFORM has local changes; the evidence would be -dirty"
+owner="$(stat -c '%u:%g' "$PLATFORM")"
 docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null)" || fail "the host Docker does not answer (the IT runs a privileged dind on it)"
 free_gb="$(df --output=avail -BG "$docker_root" | awk 'NR == 2 {gsub(/G/, "", $1); print $1}')"
 [ "${free_gb:-0}" -ge "$MIN_FREE_GB" ] || fail "only ${free_gb:-0} GB free under $docker_root, need $MIN_FREE_GB GB for the IT's images"
@@ -118,7 +122,9 @@ if [ "$cells" -gt 0 ]; then
   log "skip: $cells cell(s) live on the OpenSandbox server (metadata automata=cell); evidence not renewed this run"
   exit 0
 fi
-its="$(docker ps -aq --filter label=osbit=1 | wc -l | tr -d ' ')" || fail "docker ps failed on the host Docker"
+# Running ones only: a stopped osbit-dind left by a crash or a reboot would
+# otherwise make every later run skip, and up.sh removes it anyway.
+its="$(docker ps -q --filter label=osbit=1 --filter status=running | wc -l | tr -d ' ')" || fail "docker ps failed on the host Docker"
 if [ "$its" -gt 0 ]; then
   log "skip: an OPENSANDBOX_IT run is up on the host Docker ($its osbit=1 container(s)); evidence not renewed this run"
   exit 0
@@ -134,17 +140,18 @@ fi
 # ── the IT; its output stays in a 0600 file, never the journal ───────────────
 rm -f "$EVIDENCE"
 it_rc=0
+# `9>&-` on every child: an orphan must never keep holding the lock.
 (
-  cd "$PLATFORM"
-  env -u DOCKER_HOST HOME="$STATE" CI=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  cd "$PLATFORM" || exit 1
+  env HOME="$STATE" CI=1 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     OPENSANDBOX_IT=1 OPENSANDBOX_IT_STATE="$STATE" \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$PLATFORM" \
-    timeout "$IT_TIMEOUT_S" pnpm --filter @terragon/sandbox exec \
+    timeout -k 60 "$IT_TIMEOUT_S" pnpm --filter @terragon/sandbox exec \
     vitest run --no-cache --no-file-parallelism "$IT_TEST"
-) >"$STATE/last-it.log" 2>&1 || it_rc=$?
+) >"$STATE/last-it.log" 2>&1 9>&- || it_rc=$?
 # A timed-out or crashed run can skip the IT's own teardown; with the lock held
-# and no osbit container before the run, whatever is left is this run's.
-bash "$PLATFORM/packages/sandbox/opensandbox-it/down.sh" >>"$STATE/last-it.log" 2>&1 || true
+# and no running osbit container before the run, whatever is left is this run's.
+bash "$PLATFORM/packages/sandbox/opensandbox-it/down.sh" >>"$STATE/last-it.log" 2>&1 9>&- || true
 # Whatever the run left under the package as root goes back to the checkout's owner.
 find "$PLATFORM/packages/sandbox" -xdev -user 0 -exec chown -h "$owner" {} + 2>/dev/null || true
 [ "$it_rc" -eq 0 ] || fail "OPENSANDBOX_IT failed (exit $it_rc); see $STATE/last-it.log"
@@ -155,10 +162,12 @@ log "OPENSANDBOX_IT passed"
 # gets it, in its own environment (never argv); the IT, up.sh and vitest never do.
 push_rc=0
 PROFILE_EVIDENCE_SECRET="$secret" OPENSANDBOX_IT_STATE="$STATE" \
-  "$PLATFORM/packages/sandbox/opensandbox-it/push-evidence.sh" "$www" >"$tmp/reply.json" 2>"$tmp/push.err" || push_rc=$?
+  "$PLATFORM/packages/sandbox/opensandbox-it/push-evidence.sh" "$www" >"$tmp/reply.json" 2>"$tmp/push.err" 9>&- || push_rc=$?
 if [ "$push_rc" -ne 0 ] || ! jq -e '.recorded == true' "$tmp/reply.json" >/dev/null 2>&1; then
+  # curl's own error (DNS, TLS) names only the URL: the secret went on its stdin.
+  { echo "--- push-evidence.sh stderr"; cat "$tmp/push.err"; } >>"$STATE/last-it.log"
   why="$(jq -r '[.error, .reason] | map(select(. != null)) | join(" ") | select(. != "")' "$tmp/reply.json" 2>/dev/null || true)"
-  fail "www did not record the evidence (push exit $push_rc${why:+, $why})"
+  fail "www did not record the evidence (push exit $push_rc${why:+, $why}); see $STATE/last-it.log"
 fi
 rows="$(jq -r '.rows' "$tmp/reply.json")"
 expires="$(jq -r '.expiresAt' "$tmp/reply.json")"

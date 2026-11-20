@@ -99,4 +99,4 @@ rm -f $P/dirty-file
 ( flock -n 9 && sleep 3 ) 9>/run/automata-cell-evidence.lock &
 sleep 0.5
 run "another run holds the lock -> skip"
-wait
+sleep 3; pkill -f stubserver || true

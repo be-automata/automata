@@ -1460,6 +1460,27 @@ describe("packages/worker/deploy/linux — cell conformance evidence renewal (#7
     );
     expect(installer).toContain("cell-evidence-unit");
     expect(installer).toContain("cell-evidence-timer");
+    // README step 1 runs before step 8 writes the config: a warning, not a FAIL.
+    const check = fnBody(installer, "verify_server");
+    expect(check).toMatch(
+      /elif \[ ! -e "\$EVIDENCE_CONFIG" \]; then\n\s+echo "warn cell-evidence-timer [^"]*"\n\s+else\n\s+echo "FAIL cell-evidence-timer [^"]*"\n\s+fail=1/,
+    );
+  });
+
+  // card: protects=#709 a crashed run cannot block every later run; fails_when=the osbit check counts stopped containers, the IT timeout has no kill, or children inherit the lock fd; no_claim=docker's own filter semantics
+  it("only a running IT blocks a run, the IT is killed after its timeout, and no child holds the lock", () => {
+    expect(script).toContain(
+      "docker ps -q --filter label=osbit=1 --filter status=running",
+    );
+    expect(script).toMatch(/timeout -k 60 "\$IT_TIMEOUT_S" pnpm/);
+    expect(script).toMatch(/^unset DOCKER_HOST$/m);
+    expect(script).toMatch(
+      /\) >"\$STATE\/last-it\.log" 2>&1 9>&- \|\| it_rc=\$\?/,
+    );
+    expect(script).toMatch(/down\.sh" [^\n]*9>&- \|\| true/);
+    expect(script).toMatch(
+      /push-evidence\.sh" "\$www" [^\n]*9>&- \|\| push_rc=\$\?/,
+    );
   });
 
   // card: protects=#709 AC-1 runbook order; fails_when=the evidence step moves after OPENSANDBOX_URL or the renewal rule is dropped; no_claim=that an operator follows it

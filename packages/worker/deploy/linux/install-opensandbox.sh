@@ -201,10 +201,14 @@ verify_server() {
       fail=1
     fi
   done
+  # Step 1 of the README runs before step 8 writes the config: no config is a
+  # warning there, not a failure. With the config, a disabled timer fails.
   if systemctl is-enabled --quiet "$EVIDENCE_TIMER"; then
     echo "ok   cell-evidence-timer $EVIDENCE_TIMER is enabled"
+  elif [ ! -e "$EVIDENCE_CONFIG" ]; then
+    echo "warn cell-evidence-timer $EVIDENCE_TIMER is not enabled: no $EVIDENCE_CONFIG yet (README, OpenSandbox cells, step 8)"
   else
-    echo "FAIL cell-evidence-timer $EVIDENCE_TIMER is not enabled (needs $EVIDENCE_CONFIG; README, OpenSandbox cells, step 8)"
+    echo "FAIL cell-evidence-timer $EVIDENCE_TIMER is not enabled although $EVIDENCE_CONFIG exists (re-run $0)"
     fail=1
   fi
   if systemctl is-active --quiet "$UNIT"; then

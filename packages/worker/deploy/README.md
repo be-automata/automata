@@ -1295,7 +1295,9 @@ Alerting. www's hourly cron logs `[cron:cell-evidence]`: an error line while the
 expires within 7 days or `cell-plan` would refuse, an `ok` line otherwise, nothing while cells
 are off. `GET /api/health/cell-evidence` (public, read-only, no secret) answers the same status,
 and the Synthetic workflow's `cell-evidence` job keeps one issue labelled `cell-evidence` open
-while it is `expiring` or `refused`, then closes it on the first `ok`. Count the effect in the
+while it is `expiring` or `refused`, then closes it on the first `ok`. The job fails (red run,
+no issue) while the endpoint does not answer 200 with a `status`, so deploy www before the
+workflow change reaches `main`, or expect red runs until it is deployed. Count the effect in the
 `[daemon cell-plan]` log lines with outcome `egress_not_enforced`.
 
 ### 9. www secrets (PR-C's code reads the Access ones)
