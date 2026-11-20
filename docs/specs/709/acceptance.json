@@ -3,56 +3,98 @@
     {
       "id": "AC-1",
       "text": "The README \"OpenSandbox cells\" section lists the evidence push as a numbered step before `OPENSANDBOX_URL`, and the renewal rule.",
-      "tiers": [
-        "unmapped"
-      ],
+      "tiers": ["unmapped"],
       "hints": [],
-      "status": "PENDING",
-      "evidence": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "packages/worker/deploy/README.md"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/deploy-assets.test.ts",
+          "name": "the README pushes the evidence as a numbered step before OPENSANDBOX_URL, with the renewal rule"
+        }
+      ],
       "defer": null
     },
     {
       "id": "AC-2",
       "text": "The timer runs on the box, pushes fresh evidence, and the newest evidence's `expires_at` moves forward (shown by a read-only query).",
-      "tiers": [
-        "unmapped"
-      ],
+      "tiers": ["unmapped"],
       "hints": [],
-      "status": "PENDING",
+      "status": "DEFERRED",
       "evidence": [],
-      "defer": null
+      "defer": {
+        "reason": "needs-production",
+        "when": "after merge: install-opensandbox.sh on automata-exec-1, systemctl start automata-cell-evidence.service, then the read-only profile_evidence query shows expires_at moved forward (main session, before 2026-12-12)",
+        "confirmed_by": ""
+      }
     },
     {
       "id": "AC-3",
       "text": "The timer skips (and logs why) when a cell run is live.",
-      "tiers": [
-        "production"
-      ],
+      "tiers": ["production"],
       "hints": [],
-      "status": "PENDING",
-      "evidence": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/709/evidence/renew-harness.out.txt"
+        },
+        {
+          "kind": "file",
+          "path": "docs/specs/709/gate-log.md"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/deploy-assets.test.ts",
+          "name": "skips with a logged reason while a cell or a hand-run IT is up, before the IT runs"
+        }
+      ],
       "defer": null
     },
     {
       "id": "AC-4",
       "text": "With evidence expiring within 7 days, the alert fires once (no duplicate issue while one is open); with fresh evidence it does not.",
-      "tiers": [
-        "unmapped"
-      ],
+      "tiers": ["unmapped"],
       "hints": [],
-      "status": "PENDING",
-      "evidence": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/709/evidence/workflow-sim.out.txt"
+        },
+        {
+          "kind": "file",
+          "path": "apps/www/src/server-lib/compute/cell-evidence-status.test.ts"
+        },
+        {
+          "kind": "test",
+          "path": "apps/www/src/server-lib/compute/cell-evidence-status.test.ts",
+          "name": "classifyCellEvidence (#709)"
+        }
+      ],
       "defer": null
     },
     {
       "id": "AC-5",
       "text": "No secret appears in the timer's journal or the alert.",
-      "tiers": [
-        "unmapped"
-      ],
+      "tiers": ["unmapped"],
       "hints": [],
-      "status": "PENDING",
-      "evidence": [],
+      "status": "PASS",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "docs/specs/709/evidence/renew-harness.out.txt"
+        },
+        {
+          "kind": "test",
+          "path": "packages/worker/src/agent-run/deploy-assets.test.ts",
+          "name": "never prints the secret, the API key or the IT output, and never exports the secret"
+        }
+      ],
       "defer": null
     }
   ]
