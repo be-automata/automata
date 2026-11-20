@@ -94,6 +94,14 @@ check pnpm             "${PNPM_VERSION}" pnpm --version
 check claude           "${CLAUDE_CODE_VERSION}" claude --version
 check gh               "${GH_VERSION}" gh --version
 check git              "git version"   git --version
+# Python (#716): pip and venv are there, a venv gets its own pip offline, and a
+# system `pip install` is still refused (PEP 668). The venv goes under HOME: the
+# run's /tmp is a noexec tmpfs.
+assert pip "pip --version" pip --version
+assert python3-venv "python3 -m venv, then the venv's pip" \
+  bash -c 'v="$(mktemp -d -p "$HOME")/venv" && python3 -m venv "$v" && "$v/bin/pip" --version'
+assert pep668 "a system pip install is refused (externally-managed-environment)" \
+  bash -c '! out="$(pip install --no-index automata-probe 2>&1)" && printf "%s" "$out" | grep -q externally-managed-environment'
 check ruflo            "${RUFLO_VERSION}" ruflo --version
 check gsd-core         ""              node "$HOME/.claude/gsd-core/bin/gsd-tools.cjs" current-timestamp
 check gstack-browse    ""              "$HOME/.claude/skills/gstack/browse/dist/browse" --help

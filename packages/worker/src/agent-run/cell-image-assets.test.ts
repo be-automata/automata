@@ -121,7 +121,7 @@ describe("the cell Dockerfile", () => {
     ).toThrow();
   });
 
-  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, and one RUN only: the snapshot-pinned Postgres 16 install with no default cluster (#707); fails_when=any of them appears, a second RUN is added, or the RUN loses the snapshot, the pinned major, the no-cluster drop-in or the snakeoil removal; no_claim=layers of the base image
+  // card: protects=no credential-shaped ARG/ENV, no ADD, no secret mount, and one RUN only: the snapshot-pinned Postgres 16 (+ pip/venv, #716) install with no default cluster (#707); fails_when=any of them appears, a second RUN is added, or the RUN loses the snapshot, the pinned major, pip/venv, the no-cluster drop-in or the snakeoil removal; no_claim=layers of the base image
   it("holds no credential-shaped ARG/ENV, no ADD or secret, and only the Postgres RUN", () => {
     expect(credentialShapedNames(dockerfile)).toEqual([]);
     expect(ins.some((i) => i.op === "ADD")).toBe(false);
@@ -131,7 +131,7 @@ describe("the cell Dockerfile", () => {
     const run = runs[0]?.args ?? "";
     expect(run).toContain('--snapshot "${APT_SNAPSHOT}"');
     expect(run).toMatch(
-      /--no-install-recommends "\$\{snap\[@\]\}" postgresql-16;/,
+      /--no-install-recommends "\$\{snap\[@\]\}" postgresql-16 python3-pip python3-venv;/,
     );
     expect(run).toContain("create_main_cluster = false");
     expect(run).toContain("rm -f /etc/ssl/private/ssl-cert-snakeoil.key");

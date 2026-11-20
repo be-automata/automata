@@ -16,6 +16,11 @@ starts one per cell as uid 10001 under `/tmp/automata-test-db`, on `127.0.0.1:25
 agent gets `TEST_DATABASE_ADMIN_URL` (a `CREATEDB` role, a per-cell password) through its settings
 `env` block (`packages/worker/src/agent-run/cell-test-db.ts`). It adds about 190 MB to the image.
 
+The same `RUN` adds `python3-pip` and `python3-venv` (#716), which the batteries image now installs
+too but the pinned base predates; after the `FROM` bump they are a no-op and can be dropped. Python
+deps go into a venv in the checkout (PEP 668 refuses a system `pip install`); PyPI is reachable only
+with the `automata/registries@1` egress bundle. They add about 22 MB.
+
 The image sets no `ENTRYPOINT` or `CMD`: OpenSandbox replaces both with its own bootstrap and runs
 the request `entrypoint` as the command. It runs as `agent` (uid 10001), never root.
 

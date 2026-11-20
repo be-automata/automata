@@ -36,6 +36,10 @@ The pins were first copied from the host-model battery manifests, which the ADR-
 deleted with the host path; the Dockerfile is now their only source. The npm lockfiles (GSD, ruflo)
 and the Somnio CLI `pubspec.lock` overlay live beside it in `gsd/`, `ruflo/` and `somnio-cli/`.
 
+Python: the system `python3` with `pip` and `venv` (#716). The system Python stays externally managed
+(PEP 668), so a bare `pip install` is refused; a Python repo installs its dependencies into a venv in
+the checkout: `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
+
 Runtime user: `agent`, uid 10001, HOME `/home/agent`, workdir `/workspace`. Batteries that install
 into a HOME (Somnio skills, gstack, GSD) were installed as that user, never as root.
 
