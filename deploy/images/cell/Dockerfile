@@ -30,11 +30,14 @@ USER root
 # 10001 under /tmp (packages/worker/src/agent-run/cell-test-db.ts). ssl-cert's
 # postinst generates a snakeoil key pair, which a cell never uses: removed, so
 # no private key sits in a layer.
+# python3-pip + python3-venv (#716): the batteries image installs them too, but
+# the base digest above predates that; once the FROM is bumped past it, this
+# install is a no-op and the two names can go.
 RUN mkdir -p /etc/postgresql-common/createcluster.d; \
     echo 'create_main_cluster = false' >/etc/postgresql-common/createcluster.d/automata-cell.conf; \
     snap=(); if [ -n "${APT_SNAPSHOT}" ]; then snap=(--snapshot "${APT_SNAPSHOT}"); fi; \
     apt-get update --error-on=any "${snap[@]}"; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${snap[@]}" postgresql-16; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${snap[@]}" postgresql-16 python3-pip python3-venv; \
     rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
     rm -rf /var/lib/apt/lists/*; \
     test -x /usr/lib/postgresql/16/bin/initdb; \

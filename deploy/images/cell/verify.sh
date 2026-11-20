@@ -173,6 +173,15 @@ else
   bad pg-start "initdb or start failed: $(tail -n 5 "$pgd/server.log" 2>/dev/null)"
 fi
 
+# ── Python (#716) ───────────────────────────────────────────────────────────
+# pip and venv are there, a venv gets its own pip offline, and a system
+# `pip install` is still refused (PEP 668).
+assert pip "pip --version" pip --version
+assert python3-venv "python3 -m venv, then the venv's pip" \
+  bash -c 'v="$(mktemp -d -p "$HOME")/venv" && python3 -m venv "$v" && "$v/bin/pip" --version'
+assert pep668 "a system pip install is refused (externally-managed-environment)" \
+  bash -c '! out="$(pip install --no-index automata-probe 2>&1)" && printf "%s" "$out" | grep -q externally-managed-environment'
+
 # ── round trip: the daemon starts and accepts a message ─────────────────────
 "$ENTRY" --url https://example.org >/dev/null 2>&1 &
 daemon=$!

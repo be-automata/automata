@@ -114,6 +114,9 @@ EOF
 # ubuntu24.04-x64, plus fonts.
 # socat bridges the run's unix sockets (egress proxy, git broker, test Postgres)
 # to the loopback ports the agent's tools expect (ADR-013 "egress").
+# python3-pip + python3-venv: Python repos install their deps into a venv per
+# checkout (`python3 -m venv .venv`). The PEP 668 marker stays, so a system
+# `pip install` is still refused (#716).
 #
 # snapshot.ubuntu.com is https-only and the base image has no CA bundle, so
 # ca-certificates is bootstrapped from the live (signed) archive first; the
@@ -130,7 +133,7 @@ RUN echo 'Acquire::Retries "8";' >/etc/apt/apt.conf.d/80-retries; \
     apt-get update --error-on=any "${snap[@]:0:2}"; \
     apt-get install -y --no-install-recommends "${snap[@]}" \
       ca-certificates curl git jq unzip xz-utils zip less procps file \
-      python3 socat openssh-client build-essential \
+      python3 python3-pip python3-venv socat openssh-client build-essential \
       libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 \
       libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
       libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
