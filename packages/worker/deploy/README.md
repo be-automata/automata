@@ -1442,10 +1442,13 @@ curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
   -d '{"egressPolicy":"domain","egressAllowlist":["example.com"],"cellEgressRegistries":true}'
 ```
 
-For a Flutter repo that builds for Android in its runs, the allowlist names the storage host
-and Google's Maven host next to the hosts the box needs (here `pub.dev`; the cell gets it from
-`registries@1`). A repo that only precaches SDK or engine artifacts drops `dl.google.com`.
-The PUT replaces the whole list, so send all of them:
+For a Flutter repo, the allowlist adds the storage host (and, for Android, `dl.google.com`) to
+the repo's other hosts. The example below shows the shape, not a complete list. The PUT
+replaces the whole list, so send every host the repo's runs fetch. The box never reads
+`registries@1`, so under `domain` it needs the registry hosts listed too: here `pub.dev`, and
+for an Android build on the box also the Gradle and Maven hosts it uses (`services.gradle.org`,
+`plugins.gradle.org`, `repo.maven.apache.org`). The exact set for a Flutter Android build is
+confirmed by the #719 AC-1 run.
 
 ```bash
 curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
