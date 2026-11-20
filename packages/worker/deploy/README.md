@@ -1442,14 +1442,15 @@ curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
   -d '{"egressPolicy":"domain","egressAllowlist":["example.com"],"cellEgressRegistries":true}'
 ```
 
-For a Flutter repo that downloads SDK or engine artifacts in its runs, the allowlist names the
-storage host next to the hosts the box needs (here `pub.dev`; the cell gets it from
-`registries@1`). The PUT replaces the whole list, so send all of them:
+For a Flutter repo that builds for Android in its runs, the allowlist names the storage host
+and Google's Maven host next to the hosts the box needs (here `pub.dev`; the cell gets it from
+`registries@1`). A repo that only precaches SDK or engine artifacts drops `dl.google.com`.
+The PUT replaces the whole list, so send all of them:
 
 ```bash
 curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
   -H 'content-type: application/json' --cookie "<session>" \
-  -d '{"egressPolicy":"domain","egressAllowlist":["pub.dev","storage.googleapis.com"],"cellEgressRegistries":true}'
+  -d '{"egressPolicy":"domain","egressAllowlist":["pub.dev","storage.googleapis.com","dl.google.com"],"cellEgressRegistries":true}'
 ```
 
 Each planned cell writes one `cell_decision` row (`seam = 'compile'`, `mode = 'shadow'`). Its
