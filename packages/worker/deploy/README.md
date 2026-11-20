@@ -1411,9 +1411,28 @@ wildcards), at most 100 entries.
   so under `domain` a cell can reach registry hosts the repo's allowlist does not list.
   **Registries accept uploads.** This layer cannot enforce GET-only,
   so the opt-in widens what a prompt-injected agent can send out. Turn it on only for a repo
-  that needs it. Multi-tenant storage hosts (`storage.googleapis.com`, S3) are not in `@1`, so
-  `flutter pub get` or a Flutter SDK download that redirects there still fails. A wider list
-  is a new version (`@2`), never an edit of `@1`.
+  that needs it. Multi-tenant storage hosts (`storage.googleapis.com`, S3) are not in `@1`,
+  and a wider list is a new version (`@2`), never an edit of `@1`.
+
+- **Flutter and Dart (#719):** `flutter pub get` should not need any host beyond `@1` for
+  dependencies hosted on pub.dev; a git or third-party hosted dependency needs its own host.
+  pub.dev serves package archives itself (`/api/archives/<package>-<version>.tar.gz`, no redirect,
+  checked 2026-11-20); confirming this in a cell is AC-1 of #719. The Flutter SDK and engine
+  artifacts do need `storage.googleapis.com`: `flutter precache`, artifacts fetched on demand,
+  and the Android Gradle embedding (`/download.flutter.io`). They come from
+  `FLUTTER_STORAGE_BASE_URL`, which defaults to `https://storage.googleapis.com`. No bundle
+  carries that host (#719, OD-1). A repo that needs it lists it in its own `domain` allowlist,
+  so the risk is a recorded choice per repo. **The host serves every Google Cloud Storage
+  bucket, so allowing it lets a prompt-injected agent upload to a bucket an attacker owns,
+  with no credential of ours.** The `domain` allowlist governs the box too, so the box opens
+  the host as well. A repo with no policy that moves to `domain` also limits its box runs to
+  the listed hosts plus the system hosts, so list everything its runs fetch. List the storage
+  host only for a repo that builds Flutter artifacts in its runs. An Android build also pulls
+  the Android Gradle Plugin and androidx from Google's Maven repository (`google()`, served
+  from `dl.google.com`; `maven.google.com` if a build names it), which `@1` does not carry
+  either, so an Android repo lists that host as well. Leave the third-party mirrors
+  (`storage.flutter-io.cn`, `pub.flutter-io.cn`) out: the Flutter team can't verify their
+  reliability or security (docs.flutter.dev/community/china).
 
 To widen a repo, set it through the review-settings API (repo admin), for example:
 
@@ -1421,6 +1440,20 @@ To widen a repo, set it through the review-settings API (repo admin), for exampl
 curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
   -H 'content-type: application/json' --cookie "<session>" \
   -d '{"egressPolicy":"domain","egressAllowlist":["example.com"],"cellEgressRegistries":true}'
+```
+
+For a Flutter repo, the allowlist adds the storage host (and, for Android, `dl.google.com`) to
+the repo's other hosts. The example below shows the shape, not a complete list. The PUT
+replaces the whole list, so send every host the repo's runs fetch. The box never reads
+`registries@1`, so under `domain` it needs the registry hosts listed too: here `pub.dev`, and
+for an Android build on the box also the Gradle and Maven hosts it uses (`services.gradle.org`,
+`plugins.gradle.org`, `repo.maven.apache.org`). The exact set for a Flutter Android build is
+confirmed by the #719 AC-1 run.
+
+```bash
+curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
+  -H 'content-type: application/json' --cookie "<session>" \
+  -d '{"egressPolicy":"domain","egressAllowlist":["pub.dev","storage.googleapis.com","dl.google.com"],"cellEgressRegistries":true}'
 ```
 
 Each planned cell writes one `cell_decision` row (`seam = 'compile'`, `mode = 'shadow'`). Its
