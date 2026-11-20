@@ -1420,7 +1420,10 @@ wildcards), at most 100 entries.
   checked 2026-11-20); confirming this in a cell is AC-1 of #719. The Flutter SDK and engine
   artifacts do need `storage.googleapis.com`: `flutter precache`, artifacts fetched on demand,
   and the Android Gradle embedding (`/download.flutter.io`). They come from
-  `FLUTTER_STORAGE_BASE_URL`, which defaults to `https://storage.googleapis.com`. No bundle
+  `FLUTTER_STORAGE_BASE_URL`, which defaults to `https://storage.googleapis.com`. An Android
+  build also pulls the Android Gradle Plugin and androidx from Google's Maven repository
+  (`google()`, served from `dl.google.com`; `maven.google.com` if a build names it), which
+  `@1` does not carry either, so an Android repo lists that host too. No bundle
   carries that host (#719, OD-1). A repo that needs it lists it in its own `domain` allowlist,
   so the risk is a recorded choice per repo. **The host serves every Google Cloud Storage
   bucket, so allowing it lets a prompt-injected agent upload to a bucket an attacker owns,
