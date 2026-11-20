@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactSecrets } from "./redact";
+import { createValueRedactor, redactSecrets } from "./redact";
 
 describe("redactSecrets", () => {
   it("scrubs a git extraHeader basic credential, bearer tokens, GitHub tokens and URL-embedded tokens", () => {
@@ -57,5 +57,28 @@ describe("redactSecrets", () => {
   it("leaves ordinary text untouched", () => {
     const s = "fatal: could not read from remote repository (exit 128)";
     expect(redactSecrets(s)).toBe(s);
+  });
+});
+
+describe("createValueRedactor", () => {
+  it("blanks values of 4+ chars, raw and JSON-escaped, longest first", () => {
+    const quoted = 'q"uo\nte';
+    const scrub = createValueRedactor(["abcd", "abcdefgh", quoted, "xyz"]);
+    const echoed = JSON.stringify({ k: quoted });
+    const out = scrub(`v=abcdefgh w=abcd body=${echoed} raw=${quoted} s=xyz`);
+    expect(out).toBe(
+      'v=<redacted> w=<redacted> body={"k":"<redacted>"} raw=<redacted> s=xyz',
+    );
+  });
+
+  it("still applies the pattern redactor", () => {
+    expect(createValueRedactor([])("token ghs_3211193_abcdefghijklmnop")).toBe(
+      "token <redacted>",
+    );
+  });
+
+  it("honours a custom minLength", () => {
+    expect(createValueRedactor(["abc"], 3)("x abc y")).toBe("x <redacted> y");
+    expect(createValueRedactor(["abcdef"], 8)("x abcdef y")).toBe("x abcdef y");
   });
 });

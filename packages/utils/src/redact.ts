@@ -33,3 +33,26 @@ export function redactSecrets(text: string): string {
   }
   return out;
 }
+
+/**
+ * A redactor that also blanks exact values (an owner's repo env) before the
+ * pattern pass. A value counts from `minLength` characters: below that it is
+ * too short to be a credential and too common to blank without mangling the
+ * text. Each value is blanked raw and JSON-escaped (an echoed request body
+ * carries a quote, a backslash or a newline escaped), longest first, so a
+ * value that contains another is never half-blanked.
+ */
+export function createValueRedactor(
+  values: Iterable<string>,
+  minLength = 4,
+): (text: string) => string {
+  const plain = [...values].filter((v) => v.length >= minLength);
+  const blanks = [
+    ...new Set(plain.flatMap((v) => [v, JSON.stringify(v).slice(1, -1)])),
+  ].sort((a, b) => b.length - a.length);
+  return (text) => {
+    let out = text;
+    for (const v of blanks) out = out.split(v).join("<redacted>");
+    return redactSecrets(out);
+  };
+}

@@ -1139,3 +1139,129 @@ describe("the cell run: refinement (M1, M2, M4, L5, L6)", () => {
     expect(s.www.abnormalPosts).toBe(1);
   });
 });
+
+describe("the cell run: the owner's repo env (#706)", () => {
+  const VALUE = "repo-env-canary-value-1234";
+  const SHORT = "abc";
+  const withRepoEnv = (
+    s: ReturnType<typeof setup>,
+    repoEnv: Record<string, string>,
+  ) =>
+    ({
+      ...s.args,
+      secrets: { ...s.args.secrets, repoEnv },
+    }) as RunExecutorInput;
+  const settingsOf = (s: ReturnType<typeof setup>) => {
+    const f = s.files.find((x) => x.path.endsWith("/.claude/settings.json"));
+    if (f === undefined) throw new Error("no settings.json copied in");
+    return { file: f, json: JSON.parse(f.text) as Record<string, unknown> };
+  };
+
+  // card: protects=AC 1's worker half: kept names reach the agent's settings env with exact values, in a 600 agent file; fails_when=a kept name is missing, a value differs, or the mode/owner changes; no_claim=the CLI applying the block (UAT)
+  it("puts the kept names in the settings env block, 600 agent", async () => {
+    const s = setup();
+    await s.executor.run(
+      withRepoEnv(s, {
+        FOO_TOKEN: VALUE,
+        PLAIN: "x",
+        ANTHROPIC_API_KEY: VALUE,
+      }),
+    );
+    const { file, json } = settingsOf(s);
+    expect(json.env).toEqual({ FOO_TOKEN: VALUE, PLAIN: "x" });
+    expect(file.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
+  });
+
+  // card: protects=AC 2's worker half: the value travels only in the settings copyIn bytes, never in the create plan, an exec argv, another file or a log line; fails_when=any of them carries it; no_claim=execd's or docker's own records (IT-E1 e)
+  it("the value is only in the settings file", async () => {
+    const s = setup();
+    await s.executor.run(withRepoEnv(s, { FOO_TOKEN: VALUE }));
+    expect(JSON.stringify(s.provider.create.mock.calls)).not.toContain(VALUE);
+    expect(JSON.stringify(s.makeProvider.mock.calls)).not.toContain(VALUE);
+    expect(JSON.stringify(s.execs)).not.toContain(VALUE);
+    expect(s.logs.join("\n")).not.toContain(VALUE);
+    const carriers = s.files.filter((f) => f.text.includes(VALUE));
+    expect(carriers.map((f) => f.path)).toEqual([
+      "/home/agent/.claude/settings.json",
+    ]);
+    expect(s.logs).toContain("[agent-run thr_1] cell: repo env: 1 names");
+  });
+
+  // card: protects=AC 3: a reserved name is not injected and one warn line names only the keys; fails_when=the name is set, a value is logged, or the line repeats; no_claim=the box's silent drop
+  it("drops reserved names with one line naming only the keys", async () => {
+    const s = setup();
+    await s.executor.run(
+      withRepoEnv(s, {
+        ANTHROPIC_API_KEY: VALUE,
+        DAEMON_TOKEN: VALUE,
+        "bad-name": VALUE,
+        OK: "fine",
+      }),
+    );
+    expect(settingsOf(s).json.env).toEqual({ OK: "fine" });
+    const lines = s.logs.filter((l) => l.includes("repo env names not set"));
+    expect(lines).toEqual([
+      "[agent-run thr_1] cell: repo env names not set (reserved): ANTHROPIC_API_KEY, DAEMON_TOKEN (+1 not an env name)",
+    ]);
+    expect(s.logs.join("\n")).not.toContain(VALUE);
+    expect(s.logs.join("\n")).not.toContain("bad-name");
+  });
+
+  // card: protects=AC 4: an exec error tail echoing a repo env value of 4+ chars is redacted, a dropped one's too; a 3-char value is left; fails_when=the value reaches the log; no_claim=www's own scrub
+  it("redacts repo env values in an exec error tail", async () => {
+    const s = setup({
+      execExit: (a) => (a[1] === "clone" ? 128 : 0),
+      execStderr: () =>
+        `fatal: ${VALUE} and ${VALUE}-dropped and ${SHORT} ghs_3211193_abcdefghijklmnop`,
+    });
+    await expect(
+      s.executor.run(
+        withRepoEnv(s, {
+          FOO_TOKEN: VALUE,
+          ANTHROPIC_API_KEY: `${VALUE}-dropped`,
+          TINY: SHORT,
+        }),
+      ),
+    ).rejects.toThrow("git clone failed");
+    const all = s.logs.join("\n");
+    expect(all).not.toContain(VALUE);
+    expect(all).not.toContain("ghs_3211193");
+    expect(all).toContain(`fatal: <redacted> and <redacted> and ${SHORT}`);
+  });
+
+  // card: protects=a non-Claude agent in a cell is told apart, not silently left without the repo env; fails_when=no line is logged for it, or one is for claudeCode; no_claim=the other agent's behaviour
+  it("logs when the agent is not the Claude CLI", async () => {
+    const s = setup({
+      nextMessage: async () => ({ ...pulled, agent: "codex" }),
+    });
+    await s.executor.run(withRepoEnv(s, { FOO_TOKEN: VALUE }));
+    expect(s.logs).toContain(
+      "[agent-run thr_1] cell: repo env not delivered (agent=codex)",
+    );
+    const c = setup();
+    await c.executor.run(withRepoEnv(c, { FOO_TOKEN: VALUE }));
+    expect(c.logs.join("\n")).not.toContain("not delivered");
+  });
+
+  // card: protects=every cell log line passes the value scrub, not only exec tails; fails_when=a value echoed into another log line (a lease error, a teardown line) is logged raw; no_claim=lines other modules log
+  it("scrubs a value echoed into any cell log line", async () => {
+    // The deployment host is logged on the `cell: image=` line; here it
+    // happens to equal the owner's value.
+    const s = setup({ deployment: VALUE });
+    await s.executor.run(withRepoEnv(s, { FOO_TOKEN: VALUE }));
+    const line = s.logs.find((l) => l.includes("cell: image="));
+    expect(line).toContain("deployment=<redacted>");
+    expect(s.logs.join("\n")).not.toContain(VALUE);
+  });
+
+  // card: protects=no repo env is no change: the settings file has no env key and no repo env line is logged; fails_when=either appears; no_claim=none
+  it("absent or fully dropped repo env leaves the settings as today", async () => {
+    const s = setup();
+    await s.executor.run(s.args);
+    expect(settingsOf(s).json).not.toHaveProperty("env");
+    expect(s.logs.join("\n")).not.toContain("repo env");
+    const d = setup();
+    await d.executor.run(withRepoEnv(d, { PATH: "/x" }));
+    expect(settingsOf(d).json).not.toHaveProperty("env");
+  });
+});

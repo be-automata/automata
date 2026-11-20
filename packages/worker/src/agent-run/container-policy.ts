@@ -219,9 +219,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *     none, as the host model kept its review HOME hook-free;
  *   - the foreground-only PreToolUse guard, for every non-review lane;
  *   - the lane's `permissions.deny` rules (a review denies risky skills);
- *   - the run's telemetry `env` (run-telemetry.ts), when the box exports it:
- *     a settings `env` block beats the process env, so this is the one place
- *     the export can be set without being silently overridden.
+ *   - the settings `env` block, when the caller passes one: the box's run
+ *     telemetry (run-telemetry.ts), or a cell's filtered repo env
+ *     (cell-repo-env.ts, #706). A settings `env` block beats the process env,
+ *     so this is the one place the telemetry export can be set without being
+ *     silently overridden, and why a cell's repo env drops more names.
  *
  * Hook arrays are concatenated per event, never replaced; nothing from
  * `batteries` other than `hooks` is taken (the image carries no policy, I1).
@@ -230,7 +232,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export function composeContainerSettings(
   policy: ContainerLanePolicy,
   batteries: unknown,
-  telemetryEnv: Record<string, string> | null = null,
+  settingsEnv: Record<string, string> | null = null,
 ): Record<string, unknown> {
   let settings: Record<string, unknown> = {};
   if (policy.batteriesHooks && isPlainObject(batteries)) {
@@ -252,8 +254,8 @@ export function composeContainerSettings(
       permissions: { deny: [...policy.denyRules] },
     };
   }
-  if (telemetryEnv) {
-    settings = { ...settings, env: { ...telemetryEnv } };
+  if (settingsEnv) {
+    settings = { ...settings, env: { ...settingsEnv } };
   }
   return settings;
 }
