@@ -350,7 +350,11 @@ async function runCell(
           fetched.status,
         );
       }
-      throw new CellPlanRefusedError(fetched.code, fetched.status);
+      throw new CellPlanRefusedError(
+        fetched.code,
+        fetched.status,
+        fetched.reason,
+      );
     }
     ({ plan, attempt } = fetched);
   } catch (error) {

@@ -7,9 +7,16 @@ import {
   newAbnormalEndState,
   postAbnormalEnd,
   postRunTerminalWithRetry,
+  TERMINAL_INFO_MAX_CHARS,
   TERMINAL_POST_TIMEOUT_MS,
   type AbnormalEndInput,
 } from "./abnormal-end";
+import { CELL_REFUSAL_KINDS } from "./cell-refusal-text";
+import {
+  CellPlanRefusedError,
+  CellPlanUnavailableError,
+} from "./cell-www-client";
+import { CellRunRefusedError } from "./run-executor";
 import { resourceLimitFailure } from "./retry-classification";
 import { ownsAbnormalTerminal } from "./run-lane";
 import type { WwwClientOpts } from "./www-client";
@@ -145,6 +152,63 @@ describe("abnormalEndInfo (#437 Part A2)", () => {
         runExecutionTimeoutMs: LIMIT_MS,
       }),
     ).toBe("Memory limit 1500M reached (2 process(es) killed).");
+  });
+
+  describe("a refused cell run (#718)", () => {
+    const o = { starvation: null, runExecutionTimeoutMs: LIMIT_MS };
+    const infoFor = (error: unknown) =>
+      abnormalEndInfo("run-failed-unreported", { ...o, thrown: { error } });
+    const errorFor = (code: string) =>
+      code === "cells_unconfigured" || code === "cell_lane_refused"
+        ? new CellRunRefusedError(code)
+        : code === "cell_plan_unavailable" || code === "cell_plan_superseded"
+          ? new CellPlanUnavailableError(code, 503)
+          : new CellPlanRefusedError(code, 409);
+
+    it.each(Object.entries(CELL_REFUSAL_KINDS))(
+      "%s names the code (%s guidance) within the www bound",
+      (code, kind) => {
+        // protects=AC-1/AC-2 for every code in the map; fails_when=a code has no
+        // text, the line passes 300 chars (www 400s) or a named code offers a resend.
+        const info = infoFor(errorFor(code));
+        expect(info).toContain(`(${code})`);
+        expect(info!.length).toBeLessThanOrEqual(TERMINAL_INFO_MAX_CHARS);
+        expect(info!.includes("Send the message again")).toBe(
+          kind === "resend",
+        );
+      },
+    );
+
+    it("a code outside the map prints unknown, never the raw string", () => {
+      const info = infoFor(new CellPlanRefusedError("foo_bar", 409));
+      expect(info).toContain("(unknown)");
+      expect(info).not.toContain("foo_bar");
+    });
+
+    it("never carries the message, the status or internal config", () => {
+      for (const error of [
+        new CellRunRefusedError("cells_unconfigured"),
+        new CellPlanRefusedError("cells_disabled", 404),
+        new CellPlanUnavailableError("cell_plan_unavailable", 503),
+      ]) {
+        const info = infoFor(error)!;
+        expect(info).not.toContain("WORKER_OPENSANDBOX");
+        expect(info).not.toContain("HTTP");
+        expect(info).not.toContain("404");
+        expect(info).not.toContain("503");
+      }
+    });
+
+    it("a plain Error, and every other cause, stays undefined", () => {
+      expect(infoFor(new Error("boom"))).toBeUndefined();
+      expect(infoFor(undefined)).toBeUndefined();
+      expect(
+        abnormalEndInfo("daemon-failed", {
+          ...o,
+          thrown: { error: new CellPlanRefusedError("cells_disabled", 404) },
+        }),
+      ).toBeUndefined();
+    });
   });
 });
 

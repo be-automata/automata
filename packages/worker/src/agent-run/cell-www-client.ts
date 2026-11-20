@@ -28,12 +28,13 @@ const MAX_ATTEMPT = 1_000;
 
 export type CellPlanResult =
   | { ok: true; attempt: number; plan: CellCreatePlan }
-  /** Refused, final: the code is the route's `error` (or `unknown`). */
-  | { ok: false; code: string; status: number }
+  /** Refused, final: the code is the route's `error` (or `unknown`); `reason` is an allowlisted egress reason (#718). */
+  | { ok: false; code: string; status: number; reason?: CellEgressReason }
   | {
       ok: false;
       code: "cell_plan_unavailable" | "cell_plan_superseded";
       status: number;
+      reason?: undefined;
     };
 
 /** Codes `fetchCellPlan` itself reports: retries exhausted, not a route refusal. */
@@ -42,11 +43,38 @@ export const CELL_PLAN_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
   "cell_plan_superseded",
 ]);
 
+/**
+ * #718: the egress guard's reasons the worker may show a thread. A mirror of
+ * `CELL_EGRESS_GUARD_REASONS` (packages/shared/src/model/cell-egress-guard.ts):
+ * the worker does not depend on `@terragon/shared`, so a reason outside this
+ * list is dropped rather than echoed.
+ */
+export const CELL_EGRESS_REASONS = [
+  "unknown_profile",
+  "egress_mode_missing",
+  "egress_mode_observe",
+  "egress_mode_unknown",
+  "egress_not_allowlist",
+  "allowlist_empty",
+  "evidence_missing",
+  "evidence_not_from_conformance",
+  "evidence_invalid",
+  "evidence_expired",
+] as const;
+
+export type CellEgressReason = (typeof CELL_EGRESS_REASONS)[number];
+
+const CELL_EGRESS_REASON_SET: ReadonlySet<string> = new Set(
+  CELL_EGRESS_REASONS,
+);
+
 /** A refused plan (AC-2). The message carries the code and status only. */
 export class CellPlanRefusedError extends NonRetryableError {
   constructor(
     public readonly code: string,
     public readonly status: number,
+    /** The egress guard's reason, allowlisted by `fetchCellPlan`. */
+    public readonly reason?: CellEgressReason,
   ) {
     super(`cell plan refused: ${code} (HTTP ${status})`);
     this.name = "CellPlanRefusedError";
@@ -74,6 +102,21 @@ export interface CellWwwDeps {
 }
 
 const codeOf = (body: unknown): string => readErrorCode(body) ?? "unknown";
+
+const REASON_SHAPE = /^[a-z_]{1,40}$/;
+
+/** The body's optional egress `reason`: the code's shape AND a member of the allowlist, else nothing. */
+function reasonOf(body: unknown): CellEgressReason | undefined {
+  if (typeof body !== "object" || body === null || !("reason" in body)) {
+    return undefined;
+  }
+  const reason = (body as { reason: unknown }).reason;
+  return typeof reason === "string" &&
+    REASON_SHAPE.test(reason) &&
+    CELL_EGRESS_REASON_SET.has(reason)
+    ? (reason as CellEgressReason)
+    : undefined;
+}
 
 /** Reads a response body as JSON under a byte cap; `undefined` when unreadable or over the cap. */
 async function readCappedJson(
@@ -183,7 +226,15 @@ export async function fetchCellPlan(
         }
         return { ok: true, ...valid };
       }
-      const code = codeOf(await readCappedJson(res, 4096));
+      const errorBody = await readCappedJson(res, 4096);
+      const code = codeOf(errorBody);
+      const reason = reasonOf(errorBody);
+      const refused = {
+        ok: false as const,
+        code,
+        status: res.status,
+        ...(reason ? { reason } : {}),
+      };
       if (res.status === 409 && code === "superseded") {
         lastKind = "superseded";
       } else if (res.status >= 500 || res.status === 408) {
@@ -196,10 +247,10 @@ export async function fetchCellPlan(
         // AUTH_ERROR_CONFIRM_ATTEMPTS), so confirm before refusing.
         lastKind = "unavailable";
         if (attempt >= Math.min(PLAN_TRIES, AUTH_ERROR_CONFIRM_ATTEMPTS)) {
-          return { ok: false, code, status: res.status };
+          return refused;
         }
       } else {
-        return { ok: false, code, status: res.status };
+        return refused;
       }
     }
     if (attempt < PLAN_TRIES) {

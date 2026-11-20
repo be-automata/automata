@@ -1,6 +1,7 @@
 import { redactSecrets } from "@terragon/utils/redact";
 
 import type { AgentCommandResult, RunAsAgent } from "./agent-command";
+import { cellRefusalInfo } from "./cell-refusal-text";
 import {
   appendGitConfig,
   botGitIdentity,
@@ -124,6 +125,10 @@ export function abnormalEndInfo(
     if (oom) {
       return `Memory limit ${formatMemoryMax(oom.memoryMaxBytes)} reached (${oom.oomKills} process(es) killed).`;
     }
+  }
+  if (cause === "run-failed-unreported") {
+    // #718: a refused cell run names its reason; any other error stays silent.
+    return cellRefusalInfo(o.thrown?.error);
   }
   return undefined;
 }

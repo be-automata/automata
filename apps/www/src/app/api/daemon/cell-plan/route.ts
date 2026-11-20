@@ -13,6 +13,7 @@ import {
 } from "@/lib/daemon-token";
 import {
   OPENSANDBOX_RUNC_PROFILE_ID,
+  cellAgentSupported,
   cellBrokerHost,
   cellsEnabledForRun,
 } from "@/server-lib/compute/cell-gate";
@@ -164,7 +165,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   ]);
 
   // Explicit: a null chat or agent is not "the default agent" here.
-  if (threadChat?.agent !== "claudeCode") {
+  if (!threadChat || !cellAgentSupported(threadChat.agent)) {
     return refuse("agent_not_supported", 422);
   }
   // A finished run must not get a cell (the worker's poll would end it at once).

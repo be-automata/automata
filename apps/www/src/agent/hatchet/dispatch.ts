@@ -863,6 +863,93 @@ async function cellEgressCompiles(
 }
 
 /**
+ * #718: the chat's agent is one a cell can run. The same predicate cell-plan
+ * uses; an absent agent (a caller that did not pass it) is not eligible.
+ */
+async function cellAgentEligible(
+  agent: string | null | undefined,
+): Promise<boolean> {
+  try {
+    const { cellAgentSupported } = await import(
+      "@/server-lib/compute/cell-gate"
+    );
+    if (cellAgentSupported(agent)) return true;
+    console.log("[hatchet] cell agent refused (run stays on the box)", {
+      code: "agent_not_supported",
+    });
+    return false;
+  } catch (error) {
+    console.warn("[hatchet] cell agent check failed (not eligible)", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return false;
+  }
+}
+
+/**
+ * #718: the `opensandbox/runc` profile and its evidence pass the same guard
+ * cell-plan runs (`readCellEvidenceStatus`); only `ok` and `expiring` are
+ * eligible. A refusal or a failure means "not eligible" (logged by code, plus
+ * the guard's reason).
+ */
+async function cellEvidenceEnforced(): Promise<boolean> {
+  try {
+    const { readCellEvidenceStatus } = await import(
+      "@/server-lib/compute/cell-evidence-status"
+    );
+    const status = await readCellEvidenceStatus({
+      db,
+      now: new Date(),
+      configured: true,
+    });
+    if (status.status === "ok" || status.status === "expiring") return true;
+    console.log("[hatchet] cell evidence refused (run stays on the box)", {
+      code: "evidence_not_enforced",
+      reason: status.status === "refused" ? status.reason : status.status,
+    });
+    return false;
+  } catch (error) {
+    console.warn("[hatchet] cell evidence check failed (not eligible)", {
+      code: "evidence_check_failed",
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return false;
+  }
+}
+
+/**
+ * #718: the user has a Claude OAuth credential, the check cell-plan makes
+ * (`no_model_credential`). Only `!== null` is read: the value is a live
+ * credential and is never held, logged or put in the input. A failed lookup
+ * (it can refresh the token over the network) means "not eligible".
+ */
+async function cellModelCredentialPresent(
+  userId: string,
+  organizationId: string,
+): Promise<boolean> {
+  try {
+    const { getClaudeOauthAccessToken } = await import(
+      "@/agent/msg/claudeCredentials"
+    );
+    if (
+      (await getClaudeOauthAccessToken({ userId, organizationId })) !== null
+    ) {
+      return true;
+    }
+    console.log("[hatchet] cell credential refused (run stays on the box)", {
+      code: "no_model_credential",
+    });
+    return false;
+  } catch (error) {
+    console.warn("[hatchet] cell credential check failed (not eligible)", {
+      code: "credential_lookup_failed",
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return false;
+  }
+}
+
+/**
  * #380: the one place a secret meets the wire. Every run secret —
  * installationToken, githubReadToken, daemonToken, the owner's repoEnv and the
  * self-heal token — is sealed to the plane key (AAD = SHA-256 of the whole
@@ -911,12 +998,18 @@ export async function dispatchAgentRun({
   repoFullName,
   branch,
   deliveryId,
+  agent,
 }: {
   userId: string;
   threadId: string;
   threadChatId: string;
   repoFullName: string;
   branch: string;
+  /**
+   * #718: the chat's agent (`threadChat.agent`). Dispatch loads no thread-chat
+   * columns, so the caller passes it; absent means a cell run is never marked.
+   */
+  agent?: string | null;
   /**
    * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
    * descends from a GitHub webhook (plumbed webhook → automation → thread →
@@ -1260,7 +1353,10 @@ export async function dispatchAgentRun({
       isPlainTaskRun &&
       thread?.organizationId &&
       (await cellEligibleForRun(userId, thread.organizationId)) &&
-      (await cellEgressCompiles(repoFullName, orgSettings?.rows.repo))
+      (await cellEgressCompiles(repoFullName, orgSettings?.rows.repo)) &&
+      (await cellAgentEligible(agent)) &&
+      (await cellEvidenceEnforced()) &&
+      (await cellModelCredentialPresent(userId, thread.organizationId))
         ? ({ cell: "opensandbox" } as const)
         : {};
     const input: AgentRunInput = {

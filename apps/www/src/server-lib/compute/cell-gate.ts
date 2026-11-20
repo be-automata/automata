@@ -99,6 +99,15 @@ export async function cellsEnabledForRun({
   });
 }
 
+/**
+ * #718: the one rule for which chat agents a cell can run. cell-plan refuses any
+ * other agent (`agent_not_supported`) and dispatch does not mark such a run, so
+ * both read this. A null or undefined agent is not the default agent: it fails.
+ */
+export function cellAgentSupported(agent: string | null | undefined): boolean {
+  return agent === "claudeCode";
+}
+
 /** This deployment's public host, as the compiled egress set allows it. */
 export function cellBrokerHost(): string {
   return normalizeCellBrokerHost(new URL(nonLocalhostPublicAppUrl()).hostname);

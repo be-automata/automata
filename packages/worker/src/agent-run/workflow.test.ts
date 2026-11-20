@@ -1438,6 +1438,14 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
       expect(cellCalls()).toEqual([]);
       // A pre-daemon throw of a task run: the outer catch posts its one typed terminal.
       expect(terminals()).toHaveLength(1);
+      // #718: the terminal names the code, with no resend line (it fails the same way).
+      const info = (
+        posts.find((p) => p.url.endsWith("/run-terminal"))?.body.detail as
+          | { info?: string }
+          | undefined
+      )?.info;
+      expect(info).toContain("cells_unconfigured");
+      expect(info).not.toContain("Send the message again");
     },
   );
 
@@ -1631,6 +1639,14 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     expect(urls().filter((u) => u.endsWith("/cell-teardown"))).toEqual([]);
     // The refusal came before the executor's teardown try: the outer catch posts the one terminal.
     expect(terminals()).toHaveLength(1);
+    // #718: the thread text names the code and says a resend runs where allowed.
+    const info = (
+      posts.find((p) => p.url.endsWith("/run-terminal"))?.body.detail as
+        | { info?: string }
+        | undefined
+    )?.info;
+    expect(info).toContain("cells_disabled");
+    expect(info).toContain("Send the message again");
     wf._setAdmissionControllerForTests(undefined);
   });
 });

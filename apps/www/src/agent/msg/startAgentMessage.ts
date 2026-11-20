@@ -406,6 +406,7 @@ async function startAgentMessageUnguarded({
           branch:
             branchName ?? thread!.branchName ?? thread!.repoBaseBranchName,
           deliveryId,
+          agent: threadChat.agent,
         });
         return;
       }
