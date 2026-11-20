@@ -31,6 +31,7 @@ import {
   CellPlanError,
   buildCellCreatePlan,
 } from "@terragon/shared/model/cell-create-plan";
+import { planCellEgressForRepo } from "@terragon/shared/model/cell-egress-catalog";
 import {
   CellEgressNotEnforcedError,
   assertCellEgressEnforced,
@@ -38,8 +39,10 @@ import {
 import {
   getCurrentProfileEvidence,
   getExecutionProfile,
+  insertCellDecision,
   profileRecordForPolicy,
 } from "@terragon/shared/model/execution-profiles";
+import { getRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { getThreadChat } from "@terragon/shared/model/threads";
 
 /**
@@ -147,10 +150,16 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (!isCellLabelValue(worker)) return refuse("invalid_body", 400);
 
   // Independent reads, fetched together; the refusals below keep their order.
-  const [threadChat, profileRow, evidence] = await Promise.all([
+  const [threadChat, profileRow, evidence, repoRow] = await Promise.all([
     getThreadChat({ db, threadId, threadChatId, userId: ctx.userId }),
     getExecutionProfile({ db, id: OPENSANDBOX_RUNC_PROFILE_ID }),
     getCurrentProfileEvidence({ db, profileId: OPENSANDBOX_RUNC_PROFILE_ID }),
+    // The same (org, repo) row the box path reads (dispatch.ts).
+    getRepoReviewSetting({
+      db,
+      organizationId,
+      repoFullName: thread.githubRepoFullName,
+    }),
   ]);
 
   // Explicit: a null chat or agent is not "the default agent" here.
@@ -161,12 +170,29 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (!isAgentWorking(threadChat.status)) return refuse("thread_terminal", 409);
 
   if (!profileRow) return refuse("unknown_profile", 409);
-  const { profile } = profileRecordForPolicy(profileRow, evidence);
+  const { profile, evidenceIds } = profileRecordForPolicy(profileRow, evidence);
   try {
     assertCellEgressEnforced({ profile, now: new Date() });
   } catch (error) {
     if (!(error instanceof CellEgressNotEnforcedError)) throw error;
     return refuseEgress(error);
+  }
+
+  // #705: the repo's allowlist (domain level) and the registries opt-in,
+  // compiled here so a refusal lands before openNextAttempt (the plan builder
+  // compiles the same refs again). An ip_port repo is refused (OD-1), and so is
+  // any set the cell cannot express; dispatch keeps both on the box.
+  const egress = planCellEgressForRepo({
+    repoFullName: thread.githubRepoFullName,
+    row: repoRow,
+    brokerHost,
+  });
+  if (!egress.ok) {
+    return refuse(
+      egress.code,
+      409,
+      egress.reason === undefined ? {} : { reason: egress.reason },
+    );
   }
 
   // The thread row, not startAgentMessage's per-message branch: a mismatch makes
@@ -215,8 +241,8 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         stepKey,
         attempt,
         ttlMs: CELL_RUN_TTL_MS,
-        egressRefs: [],
-        egress: { brokerHost },
+        egressRefs: egress.refs,
+        egress: { brokerHost, catalog: egress.catalog },
         profile,
         tags: { worker, epoch, deployment: brokerHost },
         resources: { cpu: 2, memoryMiB: 4096 },
@@ -277,11 +303,49 @@ export const POST = withDaemonAuthUnavailable(async function POST(
       }),
     ),
   );
+  // #705: the compile seam's shadow row, so an egress deny can be traced to
+  // the set that produced it. Never fails the plan.
+  try {
+    await insertCellDecision({
+      db,
+      decision: {
+        threadId,
+        threadChatId,
+        organizationId,
+        profileId: profileRow.id,
+        allowed: true,
+        reasons: [],
+        evidenceIds,
+        seam: "compile",
+        mode: "shadow",
+        input: {
+          // A record of the compiled set, not a policy decision.
+          kind: "cell_egress",
+          stepKey,
+          attempt,
+          egress: {
+            level: egress.level,
+            refs: egress.refs,
+            bundles: egress.set.bundles,
+            digest: egress.set.digest,
+          },
+        },
+      },
+    });
+  } catch (error) {
+    console.warn("[daemon cell-plan] cell_decision insert failed", {
+      threadId,
+      stepKey,
+      attempt,
+      errorName: error instanceof Error ? error.name : "unknown",
+    });
+  }
   console.log("[daemon cell-plan]", {
     threadId,
     stepKey,
     attempt,
     outcome: "planned",
+    egressDigest: plan.egressDigest,
   });
   return reply({ attempt, plan });
 });

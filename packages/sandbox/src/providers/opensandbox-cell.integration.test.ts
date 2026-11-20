@@ -437,6 +437,70 @@ describe(
       }
     });
 
+    it("#705: a compiled repo set reaches its host on :443 only; the registries set reaches npm and PyPI", async () => {
+      // The policies compileCellEgress renders for broker `osbit.test` and
+      // (a) a domain repo allowing `httpbin.org`, (b) the registries opt-in.
+      // This package cannot import shared, so the literals are pinned by
+      // packages/shared/src/model/cell-egress-catalog.test.ts.
+      const repoSet = policy("api.anthropic.com", ALLOWED, IT_DEPLOYMENT);
+      const registriesSet = policy(
+        "api.anthropic.com",
+        "crates.io",
+        "downloads.gradle.org",
+        "files.pythonhosted.org",
+        "index.crates.io",
+        IT_DEPLOYMENT,
+        "plugins-artifacts.gradle.org",
+        "plugins.gradle.org",
+        "proxy.golang.org",
+        "pub.dartlang.org",
+        "pub.dev",
+        "pypi.org",
+        "registry.npmjs.org",
+        "registry.yarnpkg.com",
+        "repo.maven.apache.org",
+        "repo1.maven.org",
+        "services.gradle.org",
+        "static.crates.io",
+        "sum.golang.org",
+      );
+      const NPM = "https://registry.npmjs.org/left-pad";
+      const PYPI = "https://pypi.org/simple/six/";
+
+      const repoCell = await create(plan("egress-repo", repoSet));
+      try {
+        const [allowed, plain, npm, offList] = await probe(repoCell, [
+          { kind: "https", url: `https://${ALLOWED}/get` },
+          { kind: "http", url: `http://${ALLOWED}/get` },
+          { kind: "https", url: NPM },
+          { kind: "https", url: "https://example.org/" },
+        ]);
+        expect(allowed?.status, JSON.stringify(brief(allowed))).toBe(200);
+        expect(blocked(plain), JSON.stringify(brief(plain))).toBe(true);
+        // Without the opt-in a registry is off the list.
+        expect(blocked(npm), JSON.stringify(brief(npm))).toBe(true);
+        expect(blocked(offList), JSON.stringify(brief(offList))).toBe(true);
+      } finally {
+        await destroy(repoCell);
+      }
+
+      const registriesCell = await create(
+        plan("egress-registries", registriesSet),
+      );
+      try {
+        const [npm, pypi, offList] = await probe(registriesCell, [
+          { kind: "https", url: NPM },
+          { kind: "https", url: PYPI },
+          { kind: "https", url: `https://${ALLOWED}/get` },
+        ]);
+        expect(npm?.status, JSON.stringify(brief(npm))).toBe(200);
+        expect(pypi?.status, JSON.stringify(brief(pypi))).toBe(200);
+        expect(blocked(offList), JSON.stringify(brief(offList))).toBe(true);
+      } finally {
+        await destroy(registriesCell);
+      }
+    });
+
     it("live API: exec exit codes, argv, cwd, copyOut, listByTags", async () => {
       const p = plan("api", P_ONE);
       const id = await create(p);

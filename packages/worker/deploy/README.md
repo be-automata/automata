@@ -1312,6 +1312,58 @@ What the worker does with them (#656 PR-E):
   fence as a revocation and fail loudly. The first cell run is also the first retired token
   (PR-D).
 
+### What a cell may reach (#705)
+
+`cell-plan` compiles every cell's egress from named bundles (ADR-014,
+`packages/shared/src/model/cell-egress.ts` and `cell-egress-catalog.ts`). The cell's policy is
+default-deny, HTTPS on 443 only (`:80` is denied on every host), exact hosts only (no
+wildcards), at most 100 entries.
+
+- **Always:** the platform bundle, which holds the broker (the www public host) and
+  `api.anthropic.com`.
+- **The repo's allowlist,** when its `egress_policy` is `domain`: every operator entry of
+  `repo_review_settings.egress_allowlist` becomes a per-run bundle
+  `repo/<owner>__<name>@<hash>`. The entries pass the box's own validator first, so a cell can
+  only reach what the box would allow. `none` and no policy give the platform bundle only.
+- **`ip_port` repos stay on the box** (OD-1). The cell policy is domain-based, so dispatch never
+  marks such a run for a cell, and `cell-plan` refuses one with `409 egress_level_unsupported`.
+- **A set the cell cannot express also stays on the box.** That covers a wildcard such as
+  `*.example.com`, a port other than 443 and anything over the cap. Dispatch leaves the run
+  unmarked (one log line, `[hatchet] cell egress refused`), and `cell-plan` refuses with
+  `409 egress_compile_failed` and a `reason` (`egress_wildcard`, `port_not_443`,
+  `too_many_entries`, …) before it opens a step.
+- **Package registries (opt-in, off by default, OD-2):** `cell_egress_registries = true` on the
+  repo's row adds `automata/registries@1`. Its hosts are:
+
+  - npm and yarn: `registry.npmjs.org`, `registry.yarnpkg.com`;
+  - PyPI: `pypi.org`, `files.pythonhosted.org`;
+  - pub: `pub.dev`, `pub.dartlang.org`;
+  - Maven Central: `repo.maven.apache.org`, `repo1.maven.org`;
+  - Gradle: `plugins.gradle.org`, `plugins-artifacts.gradle.org`, `services.gradle.org`,
+    `downloads.gradle.org`;
+  - crates.io: `crates.io`, `index.crates.io`, `static.crates.io`;
+  - Go: `proxy.golang.org`, `sum.golang.org`.
+
+  It applies with no policy or with `domain`. Under `none` it is ignored, so a cell never
+  reaches more than its box. **Registries accept uploads.** This layer cannot enforce GET-only,
+  so the opt-in widens what a prompt-injected agent can send out. Turn it on only for a repo
+  that needs it. Multi-tenant storage hosts (`storage.googleapis.com`, S3) are not in `@1`, so
+  `flutter pub get` or a Flutter SDK download that redirects there still fails. A wider list
+  is a new version (`@2`), never an edit of `@1`.
+
+To widen a repo, set it through the review-settings API (repo admin), for example:
+
+```bash
+curl -X PUT https://<www>/api/review-settings/<owner>/<repo> \
+  -H 'content-type: application/json' --cookie "<session>" \
+  -d '{"egressPolicy":"domain","egressAllowlist":["example.com"],"cellEgressRegistries":true}'
+```
+
+Each planned cell writes one `cell_decision` row (`seam = 'compile'`, `mode = 'shadow'`). Its
+`input.egress` holds `level`, `refs`, `bundles` and the `digest` the plan carries as
+`egressDigest`, so a `deny` row in `egress_events` can be traced to the set that produced it.
+The row records the set; it is not a policy decision.
+
 ### Findings every operator must know
 
 - **Metadata values** must match `[A-Za-z0-9._-]`, at most 63 characters, alphanumeric at both

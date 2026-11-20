@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
 import type { User } from "@terragon/shared";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
+import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
+import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
   createTestOrg,
   createTestThread,
@@ -45,8 +47,16 @@ describe("dispatchAgentRun: cell marker", () => {
   let user: User;
   let orgId: string;
 
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  afterEach(() => {
+    process.env.NEXT_PUBLIC_APP_URL = appUrl;
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
+    // The cell broker host is a public hostname (cell-gate.ts); a cell
+    // egress set never compiles for a localhost one.
+    process.env.NEXT_PUBLIC_APP_URL = "https://app.example.test";
     setCellsEnv(true);
     vi.mocked(getFeatureFlagForUser).mockResolvedValue(true);
     user = (await createTestUser({ db })).user;
@@ -149,6 +159,49 @@ describe("dispatchAgentRun: cell marker", () => {
     expect((await dispatchPlain({ organizationId: orgId })).cell).toBe(
       "opensandbox",
     );
+  });
+
+  describe("#705: the repo's egress must compile for a cell", () => {
+    const policyOf = (input: Record<string, unknown>) =>
+      input.egressPolicy as EgressPolicyShape | undefined;
+    const setRepo = (patch: {
+      egressPolicy: string;
+      egressAllowlist: string[];
+    }) =>
+      upsertRepoReviewSetting({
+        db,
+        organizationId: orgId,
+        repoFullName: "be-automata/automata",
+        patch,
+      });
+
+    it("OD-1: an ip_port repo is not marked and keeps its box egress", async () => {
+      await setRepo({ egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5"] });
+      const input = await dispatchPlain({ organizationId: orgId });
+      expect(input).not.toHaveProperty("cell");
+      expect(policyOf(input)?.level).toBe("ip_port");
+      expect(policyOf(input)?.allowlist).toContain("10.0.0.5");
+    });
+
+    it.each([["*.example.com"], ["example.com:8443"]])(
+      "a domain entry the cell cannot express (%s) is not marked; the box keeps it",
+      async (entry) => {
+        await setRepo({ egressPolicy: "domain", egressAllowlist: [entry] });
+        const input = await dispatchPlain({ organizationId: orgId });
+        expect(input).not.toHaveProperty("cell");
+        expect(policyOf(input)?.allowlist).toContain(entry);
+      },
+    );
+
+    it("a domain repo the cell can express is marked", async () => {
+      await setRepo({
+        egressPolicy: "domain",
+        egressAllowlist: ["example.com"],
+      });
+      const input = await dispatchPlain({ organizationId: orgId });
+      expect(input.cell).toBe("opensandbox");
+      expect(policyOf(input)?.level).toBe("domain");
+    });
   });
 
   it("a thread without an organization never gets the marker", async () => {

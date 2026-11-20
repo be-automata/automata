@@ -1613,6 +1613,13 @@ export const repoReviewSettings = pgTable(
      */
     egressAllowlist: text("egress_allowlist").array(),
     /**
+     * #705 (OD-2): a cell run on this repo may also reach the package
+     * registries bundle (`automata/registries@1`, cell-egress-catalog.ts).
+     * Cells only: the box never reads it. Nullable, NO column default:
+     * NULL or false = off (registries accept uploads, so it is opt-in).
+     */
+    cellEgressRegistries: boolean("cell_egress_registries"),
+    /**
      * Supersede policy for PR-review runs on this (org, repo) (#125/#127):
      * what happens when a new commit lands while a review run is still in
      * flight on the same PR. One of 'newest-wins' | 'complete-run-queue' |

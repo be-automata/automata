@@ -109,6 +109,7 @@ export async function PUT(
     recheckOnComplete?: unknown;
     egressPolicy?: unknown;
     egressAllowlist?: unknown;
+    cellEgressRegistries?: unknown;
     expectedUpdatedAt?: unknown;
   } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
@@ -124,6 +125,7 @@ export async function PUT(
     recheckOnComplete?: boolean;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
+    cellEgressRegistries?: boolean | null;
   } & ReviewAgentFieldsPatch &
     SelfHealFieldsPatch = {};
   if (body.blockTolerance !== undefined) {
@@ -157,7 +159,7 @@ export async function PUT(
     return NextResponse.json(
       {
         error:
-          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete, egressPolicy, egressAllowlist and/or a review-agent field or self-heal field",
+          "provide blockTolerance, reviewDraftPrs, supersedePolicy, recheckOnComplete, egressPolicy, egressAllowlist, cellEgressRegistries and/or a review-agent field or self-heal field",
       },
       { status: 400 },
     );

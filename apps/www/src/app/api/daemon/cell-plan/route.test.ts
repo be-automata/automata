@@ -25,9 +25,11 @@ import {
   verifyBearer,
 } from "@terragon/shared/model/cell-authority";
 import {
+  getCellDecisionsForThread,
   insertProfileEvidenceRows,
   upsertExecutionProfile,
 } from "@terragon/shared/model/execution-profiles";
+import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
 import {
@@ -605,6 +607,161 @@ describe("POST /api/daemon/cell-plan", () => {
       expect((await POST(req(body({ worker: "w1-" })))).status).toBe(400);
       // negative control
       expect((await POST(req(body({ worker: "w1" })))).status).toBe(200);
+    });
+
+    describe("#705: the repo's egress", () => {
+      const REPO = "terragon/test-repo";
+      const setRepo = (
+        patch: Parameters<typeof upsertRepoReviewSetting>[0]["patch"],
+      ) =>
+        upsertRepoReviewSetting({
+          db,
+          organizationId: orgId,
+          repoFullName: REPO,
+          patch,
+        });
+      const allowTargets = (plan: {
+        networkPolicy: { egress: Array<{ action: string; target?: string }> };
+      }) =>
+        plan.networkPolicy.egress
+          .filter((r) => r.action === "allow")
+          .map((r) => r.target);
+
+      it("no row: only the broker and the model host, then the :80 deny (today's set)", async () => {
+        const res = await POST(req(body()));
+        expect(res.status).toBe(200);
+        const { plan } = await res.json();
+        expect(plan.networkPolicy).toEqual({
+          defaultAction: "deny",
+          egress: [
+            ...[cellBrokerHost(), "api.anthropic.com"]
+              .sort()
+              .map((target) => ({ action: "allow", target })),
+            { action: "deny", ports: [80] },
+          ],
+        });
+      });
+
+      it("domain row: the operator entry is allowed and the compile row records the set", async () => {
+        await setRepo({
+          egressPolicy: "domain",
+          egressAllowlist: ["example.com"],
+        });
+        const res = await POST(req(body()));
+        expect(res.status).toBe(200);
+        const { plan, attempt } = await res.json();
+        expect(allowTargets(plan)).toEqual(
+          [cellBrokerHost(), "api.anthropic.com", "example.com"].sort(),
+        );
+        expect(plan.networkPolicy.egress.at(-1)).toEqual({
+          action: "deny",
+          ports: [80],
+        });
+        const rows = (await getCellDecisionsForThread({ db, threadId })).filter(
+          (r) => r.seam === "compile",
+        );
+        expect(rows).toHaveLength(1);
+        const [row] = rows;
+        expect(row).toMatchObject({
+          threadChatId,
+          organizationId: orgId,
+          profileId: PROFILE_ID,
+          allowed: true,
+          reasons: [],
+          mode: "shadow",
+        });
+        expect(row?.evidenceIds.length).toBeGreaterThan(0);
+        const input = row?.input as {
+          stepKey: string;
+          attempt: number;
+          egress: {
+            level: string;
+            refs: string[];
+            bundles: string[];
+            digest: string;
+          };
+        };
+        expect(input.stepKey).toBe(cellStepKey(apiKeyId));
+        expect(input.attempt).toBe(attempt);
+        expect(input.egress.digest).toBe(plan.egressDigest);
+        expect(input.egress.level).toBe("domain");
+        expect(input.egress.refs).toHaveLength(1);
+        expect(input.egress.refs[0]).toMatch(/^repo\/terragon__test-repo@/);
+        expect(input.egress.bundles).toEqual(
+          ["automata/platform@1", ...input.egress.refs].sort(),
+        );
+      });
+
+      it("the registries opt-in adds the registry hosts; without it they are absent", async () => {
+        const off = await (await POST(req(body()))).json();
+        expect(allowTargets(off.plan)).not.toContain("registry.npmjs.org");
+        await setRepo({ cellEgressRegistries: true });
+        const on = await (await POST(req(body({ requestId: NONCE_B })))).json();
+        expect(allowTargets(on.plan)).toEqual(
+          expect.arrayContaining([
+            "registry.npmjs.org",
+            "pypi.org",
+            "files.pythonhosted.org",
+          ]),
+        );
+        expect(on.plan.egressDigest).not.toBe(off.plan.egressDigest);
+      });
+
+      it("an allowlist over the cap is 409 egress_compile_failed and no step is opened", async () => {
+        await setRepo({
+          egressPolicy: "domain",
+          egressAllowlist: Array.from(
+            { length: 99 },
+            (_, i) => `h${i}.example.com`,
+          ),
+        });
+        const res = await POST(req(body()));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: "egress_compile_failed",
+          reason: "too_many_entries",
+        });
+        expect(await steps()).toEqual([]);
+        expect(await cellTokenRows()).toEqual([]);
+        expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
+      });
+
+      it("a wildcard or a non-443 entry is 409 egress_compile_failed before any step", async () => {
+        await setRepo({
+          egressPolicy: "domain",
+          egressAllowlist: ["*.example.com"],
+        });
+        const wild = await POST(req(body()));
+        expect(wild.status).toBe(409);
+        expect(await wild.json()).toEqual({
+          error: "egress_compile_failed",
+          reason: "egress_wildcard",
+        });
+        await setRepo({ egressAllowlist: ["example.com:8443"] });
+        const port = await POST(req(body()));
+        expect(port.status).toBe(409);
+        expect(await port.json()).toEqual({
+          error: "egress_compile_failed",
+          reason: "port_not_443",
+        });
+        expect(await steps()).toEqual([]);
+      });
+
+      it("OD-1: an ip_port repo is 409 egress_level_unsupported and no step is opened", async () => {
+        await setRepo({
+          egressPolicy: "ip_port",
+          egressAllowlist: ["10.0.0.5:443"],
+        });
+        const res = await POST(req(body()));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({ error: "egress_level_unsupported" });
+        expect(await steps()).toEqual([]);
+        expect(
+          (await getCellDecisionsForThread({ db, threadId })).filter(
+            (r) => r.seam === "compile",
+          ),
+        ).toEqual([]);
+      });
     });
   });
 });

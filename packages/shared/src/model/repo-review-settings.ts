@@ -314,6 +314,8 @@ export async function upsertRepoReviewSetting({
     egressPolicy?: string | null;
     /** #66 operator allowlist entries; null clears. Validated at shape-build time. */
     egressAllowlist?: string[] | null;
+    /** #705 cell-only registries opt-in; null clears (= off). */
+    cellEgressRegistries?: boolean | null;
     /** #125/#127 supersede policy; null clears (falls back org-default → 'newest-wins'). */
     supersedePolicy?: string | null;
     /** #125 discard-mode recheck toggle. */
@@ -418,6 +420,7 @@ export async function upsertRepoReviewSetting({
     reviewDraftPrs?: boolean | null;
     egressPolicy?: string | null;
     egressAllowlist?: string[] | null;
+    cellEgressRegistries?: boolean | null;
     supersedePolicy?: string | null;
     recheckOnComplete?: boolean;
     updatedByUserId: string | null;
@@ -434,6 +437,8 @@ export async function upsertRepoReviewSetting({
   if (patch.egressPolicy !== undefined) set.egressPolicy = patch.egressPolicy;
   if (patch.egressAllowlist !== undefined)
     set.egressAllowlist = patch.egressAllowlist;
+  if (patch.cellEgressRegistries !== undefined)
+    set.cellEgressRegistries = patch.cellEgressRegistries;
   if (patch.supersedePolicy !== undefined)
     set.supersedePolicy = patch.supersedePolicy;
   if (patch.recheckOnComplete !== undefined)
@@ -551,6 +556,7 @@ export async function removeRepoReviewSetting({
     isNotNull(repoReviewSettings.supersedePolicy),
     isNotNull(repoReviewSettings.egressPolicy),
     isNotNull(repoReviewSettings.egressAllowlist),
+    isNotNull(repoReviewSettings.cellEgressRegistries),
     // Tri-state migration: drafts are their OWN family now. A row whose only
     // content is a draft override must survive a tolerance reset — and the
     // reset below no longer touches reviewDraftPrs at all.
