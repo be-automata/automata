@@ -44,7 +44,7 @@ import { composeContainerSettings } from "./container-policy";
  * 1.2.1 in the sandbox package's throwaway dind. Opt-in, outside the Claude
  * sandbox (Docker and the public internet):
  *
- *   OPENSANDBOX_IT=1 OPENSANDBOX_IT_CELL_IMAGE=<automata-cell@sha256:...> \
+ *   OPENSANDBOX_IT=1 OPENSANDBOX_IT_CELL_IMAGE=<automata-cell@sha256:... | a tag loaded in the dind> \
  *     pnpm --filter @terragon/worker exec vitest run --no-file-parallelism \
  *     src/agent-run/cell-run.integration.test.ts
  *
@@ -93,8 +93,17 @@ const dind = (args: string[]) =>
     maxBuffer: 64 * 1024 * 1024,
   });
 
+/** Case (g)'s AC-3 probe: a Dart HTTPS fetch of a host outside the allowlist. */
+const DENIED_PROBE_DART = `import 'dart:io';
+
+Future<void> main() async {
+  final r = await (await HttpClient().getUrl(Uri.parse('https://example.org/'))).close();
+  exit(r.statusCode == 200 ? 0 : 3);
+}
+`;
+
 function plan(): OpenSandboxCellCreatePlan {
-  const ttlMs = 15 * 60 * 1000;
+  const ttlMs = 30 * 60 * 1000;
   return {
     provider: "opensandbox",
     runtime: "runc",
@@ -113,6 +122,12 @@ function plan(): OpenSandboxCellCreatePlan {
         { action: "allow", target: "httpbin.org" },
         { action: "allow", target: "github.com" },
         { action: "allow", target: "*.github.com" },
+        // Package registries for case (g) (#724): pub, npm, PyPI.
+        { action: "allow", target: "pub.dev" },
+        { action: "allow", target: "pub.dartlang.org" },
+        { action: "allow", target: "registry.npmjs.org" },
+        { action: "allow", target: "pypi.org" },
+        { action: "allow", target: "files.pythonhosted.org" },
         { action: "deny", ports: [80] },
       ],
     },
@@ -149,8 +164,18 @@ describe.skipIf(!IT || IMAGE === "")(
           /^OPENSANDBOX_IT_BASE_URL=(\S+)$/m.exec(out)?.[1] ?? DEFAULT_BASE_URL;
       }
       // Pre-pull, as the box's runbook does (PR-G): a cold multi-GB pull inside
-      // `create` outlasts the adapter's create budget (seen live: ~2 min).
-      await dind(["docker", "pull", "-q", IMAGE]);
+      // `create` outlasts the adapter's create budget (seen live: ~2 min). Only
+      // an immutable ref skips the pull when it is already in the dind: a digest,
+      // or a local tag loaded with docker save | docker load (no registry host).
+      // A registry tag (`:main`) can move, so it is always pulled.
+      const immutable = IMAGE.includes("@sha256:") || !IMAGE.includes("/");
+      const pull = () => {
+        console.log(`cell image ${IMAGE}: pulling`);
+        return dind(["docker", "pull", "-q", IMAGE]);
+      };
+      await (immutable
+        ? dind(["docker", "image", "inspect", IMAGE]).catch(pull)
+        : pull());
       const apiKey = readFileSync(join(stateDir(), "api_key"), "utf8").trim();
       provider = createOpenSandboxCellProvider(
         {
@@ -428,6 +453,64 @@ describe.skipIf(!IT || IMAGE === "")(
         expect(logs.stdout).not.toContain(password);
       }
     });
+
+    // card: protects=#724: Dart and Flutter pub trust the sidecar's CA as uid 10001 (AC-1, AC-2), the other clients still work (AC-5), and the allowlist still denies (AC-3 negative control: example.org is not allowed, and the cell's DNS allowlist refuses it (`Failed host lookup`), not a trust error); fails_when=any create/pub get exits non-zero, a registry probe fails, or the example.org fetch succeeds or reports a handshake/verify error; no_claim=CA rotation inside a live cell (verify.sh covers the mechanism offline)
+    it(
+      "(g) dart and flutter pub get work, other clients still do, and the allowlist still denies (#724)",
+      async () => {
+        const DART = "/opt/flutter/bin/dart";
+        const FLUTTER = "/opt/flutter/bin/flutter";
+        const sh = (script: string, timeoutMs: number) =>
+          provider.exec(cellId, ["/bin/bash", "-c", script], { timeoutMs });
+        const inTmp = 'cd "$(mktemp -d -p "$HOME")" && ';
+        // AC-1 and AC-2, then AC-5 (no regression for the other ecosystems).
+        // The trailing `dart pub get` stays although `pub add` already resolves:
+        // AC-1 names `dart pub get` exiting 0.
+        for (const [name, script, timeoutMs] of [
+          [
+            "dart",
+            `${inTmp}${DART} create -t console --no-pub app && cd app && ${DART} pub add path:1.9.1 && ${DART} pub get`,
+            5 * 60_000,
+          ],
+          [
+            "flutter",
+            `${inTmp}${FLUTTER} create --no-pub --platforms=web fapp && cd fapp && ${FLUTTER} pub get`,
+            10 * 60_000,
+          ],
+          ["npm", "npm view left-pad version", 2 * 60_000],
+          ["git", "git ls-remote https://github.com/git/git HEAD", 2 * 60_000],
+          ["curl", "curl -sS -o /dev/null https://pub.dev", 2 * 60_000],
+          ["pip", `${inTmp}pip download --no-deps -d . six`, 2 * 60_000],
+        ] as const) {
+          const out = await sh(script, timeoutMs);
+          expect(out.exitCode, `${name}: ${out.stderr}`).toBe(0);
+        }
+        // AC-3: a host outside the allowlist still fails, and not for trust.
+        const probe = `${CELL_MESSAGE_DIR}/it-denied.dart`;
+        await provider.copyIn(
+          cellId,
+          probe,
+          new TextEncoder().encode(DENIED_PROBE_DART),
+          { mode: 600, owner: "agent", group: "agent" },
+        );
+        const denied = await sh(`${DART} run ${probe} 2>&1`, 2 * 60_000);
+        expect(denied.exitCode).not.toBe(0);
+        const text = `${denied.stdout}${denied.stderr}`;
+        expect(text).not.toContain("HandshakeException");
+        expect(text).not.toContain("CERTIFICATE_VERIFY_FAILED");
+        // A positive deny marker, so an unrelated failure (a compile error, a
+        // missing binary) cannot pass for the allowlist. On amd64 (2026-11-20)
+        // the cell refused example.org at DNS: "Failed host lookup".
+        expect(text).toMatch(
+          /Failed host lookup|Connection refused|Connection reset/,
+        );
+      },
+      // A hang guard, not an expected run time: (g)'s step budgets total 25
+      // minutes, while the whole suite took 45 s on amd64 (2026-11-20). The
+      // cell's 30-minute TTL (plan()) runs from beforeAll, so a run that really
+      // used every budget could still outlive the cell.
+      25 * 60_000,
+    );
 
     // card: protects=the step-by-step teardown leaves the attempt's readback empty; fails_when=a survivor remains or a step is reported failed; no_claim=the www half
     it("(d) the step-by-step teardown leaves listByTags empty", async () => {

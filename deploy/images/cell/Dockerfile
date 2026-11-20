@@ -30,6 +30,15 @@ USER root
 # 10001 under /tmp (packages/worker/src/agent-run/cell-test-db.ts). ssl-cert's
 # postinst generates a snakeoil key pair, which a cell never uses: removed, so
 # no private key sits in a layer.
+# The CA store (#724): OpenSandbox's bootstrap installs the egress sidecar's
+# MITM CA with `update-ca-certificates`, which as uid 10001 needs write access
+# to /usr/local/share/ca-certificates (the copy) and /etc/ssl/certs (the links
+# and the rebuilt bundle). Dart and Flutter read ONLY the system store, so
+# without this `dart pub get` fails CERTIFICATE_VERIFY_FAILED. Exactly those
+# two directories are chowned to agent, not recursive, nothing else under
+# /etc/ssl, /etc/ca-certificates or /usr/share/ca-certificates. Safe for the
+# reason in README "TLS in the cell": trust is enforced by the sidecar outside
+# the guest, and uid 10001 can already run anything inside the cell.
 # python3-pip + python3-venv (#716): the batteries image installs them too, but
 # the base digest above predates that; once the FROM is bumped past it, this
 # install is a no-op and the two names can go.
@@ -39,6 +48,7 @@ RUN mkdir -p /etc/postgresql-common/createcluster.d; \
     apt-get update --error-on=any "${snap[@]}"; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${snap[@]}" postgresql-16 python3-pip python3-venv; \
     rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
+    chown agent:agent /etc/ssl/certs /usr/local/share/ca-certificates; \
     rm -rf /var/lib/apt/lists/*; \
     test -x /usr/lib/postgresql/16/bin/initdb; \
     test ! -e /var/lib/postgresql/16/main
