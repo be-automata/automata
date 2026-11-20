@@ -8,7 +8,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@orpc/contract": "1.14.13",
+    "@orpc/contract": "1.16.2",
     "@terragon/agent": "workspace:*",
     "zod": "4.6.7"
   },
