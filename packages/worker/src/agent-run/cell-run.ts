@@ -792,6 +792,27 @@ async function putFile(
   );
 }
 
+/** Probes `argv` until it exits 0, pausing `pollMs` between probes; past `deadline` throws `onTimeout()`. Raced against `live`. */
+async function waitForExitZero(
+  r: CellRunState,
+  argv: string[],
+  deadline: number,
+  pollMs: number,
+  onTimeout: () => Error,
+): Promise<void> {
+  const provider = r.provider as ICellProvider;
+  for (;;) {
+    ensureLive(r);
+    const probe = await raceLive(
+      r,
+      provider.exec(r.cellId as string, argv, { timeoutMs: PGREP_TIMEOUT_MS }),
+    );
+    if (probe.exitCode === 0) return;
+    if (r.deps.now() >= deadline) throw onTimeout();
+    await r.deps.sleep(pollMs, r.live);
+  }
+}
+
 /**
  * The cell's own test database (#707), when planCellTestDb said `start`: a
  * 0700 dir, the password copied in (never in argv), initdb and a start, a
@@ -821,21 +842,13 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
       "test database start",
       TEST_DB_START_TIMEOUT_MS,
     );
-    const deadline = started + TEST_DB_READY_MS;
-    for (;;) {
-      ensureLive(r);
-      const probe = await raceLive(
-        r,
-        provider.exec(cellId, [...CELL_TEST_DB_READY_ARGV], {
-          timeoutMs: PGREP_TIMEOUT_MS,
-        }),
-      );
-      if (probe.exitCode === 0) break;
-      if (r.deps.now() >= deadline) {
-        throw new TestDbNotReadyError();
-      }
-      await r.deps.sleep(TEST_DB_POLL_MS, r.live);
-    }
+    await waitForExitZero(
+      r,
+      [...CELL_TEST_DB_READY_ARGV],
+      started + TEST_DB_READY_MS,
+      TEST_DB_POLL_MS,
+      () => new TestDbNotReadyError(),
+    );
     await execOk(
       r,
       ["/bin/bash", "-c", CELL_TEST_DB_ROLE_SH, "cell-test-db"],
@@ -845,16 +858,13 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
   } catch (error) {
     if (error instanceof SetupAbortedError || r.live.aborted) throw error;
     // Best effort: no half-made server or staged password is left behind.
-    try {
-      await raceLive(
-        r,
-        provider.exec(cellId, ["/bin/bash", "-c", CELL_TEST_DB_STOP_SH], {
-          timeoutMs: PGREP_TIMEOUT_MS,
-        }),
-      );
-    } catch (cleanup) {
-      if (cleanup instanceof SetupAbortedError || r.live.aborted) throw cleanup;
-    }
+    await raceLive(
+      r,
+      provider.exec(cellId, ["/bin/bash", "-c", CELL_TEST_DB_STOP_SH], {
+        timeoutMs: PGREP_TIMEOUT_MS,
+      }),
+    ).catch(() => undefined);
+    ensureLive(r);
     r.step(
       "cell: test database not started; the run goes on without it" +
         (error instanceof TestDbNotReadyError ? ` (${error.message})` : ""),
@@ -962,21 +972,13 @@ async function bootstrap(r: CellRunState): Promise<void> {
     600,
   );
   // The entry is the create entrypoint: only wait for the daemon's socket.
-  const socketDeadline = r.deps.now() + SOCKET_WAIT_MS;
-  for (;;) {
-    ensureLive(r);
-    const probe = await raceLive(
-      r,
-      provider.exec(cellId, ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET], {
-        timeoutMs: PGREP_TIMEOUT_MS,
-      }),
-    );
-    if (probe.exitCode === 0) break;
-    if (r.deps.now() >= socketDeadline) {
-      throw new Error(`cell daemon socket not ready after ${SOCKET_WAIT_MS}ms`);
-    }
-    await r.deps.sleep(SOCKET_POLL_MS, r.live);
-  }
+  await waitForExitZero(
+    r,
+    ["/usr/bin/test", "-S", CELL_DAEMON_SOCKET],
+    r.deps.now() + SOCKET_WAIT_MS,
+    SOCKET_POLL_MS,
+    () => new Error(`cell daemon socket not ready after ${SOCKET_WAIT_MS}ms`),
+  );
   r.abnormal.daemonStarted = true;
   r.step("cell: daemon socket ready");
 }

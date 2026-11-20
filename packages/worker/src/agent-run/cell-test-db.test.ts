@@ -18,49 +18,30 @@ writeFileSync(LISTED, "TEST_SERVICES_REPOS=acme/widgets\n", { mode: 0o640 });
 const input = { repoFullName: "Acme/Widgets" };
 
 describe("planCellTestDb (#707)", () => {
+  const plan = (over: Partial<Parameters<typeof planCellTestDb>[0]> = {}) =>
+    planCellTestDb({
+      input,
+      lane: "task",
+      repoEnv: {},
+      envPath: LISTED,
+      ...over,
+    });
+
   // card: protects=the gate: a listed repo starts one, an unlisted one or no file does not, the owner's own variable wins; fails_when=any of the three is decided otherwise; no_claim=the steps (cell-run.test.ts)
   it("starts for a listed repo, not otherwise, and the owner's variable wins", () => {
+    expect(plan()).toBe("start");
+    expect(plan({ input: { repoFullName: "other/repo" } })).toBe("off");
+    expect(plan({ envPath: join(dir, "missing.env") })).toBe("off");
     expect(
-      planCellTestDb({ input, lane: "task", repoEnv: {}, envPath: LISTED }),
-    ).toBe("start");
-    expect(
-      planCellTestDb({
-        input: { repoFullName: "other/repo" },
-        lane: "task",
-        repoEnv: {},
-        envPath: LISTED,
-      }),
-    ).toBe("off");
-    expect(
-      planCellTestDb({
-        input,
-        lane: "task",
-        repoEnv: {},
-        envPath: join(dir, "missing.env"),
-      }),
-    ).toBe("off");
-    expect(
-      planCellTestDb({
-        input,
-        lane: "task",
-        repoEnv: { TEST_DATABASE_ADMIN_URL: "postgresql://mine" },
-        envPath: LISTED,
-      }),
+      plan({ repoEnv: { TEST_DATABASE_ADMIN_URL: "postgresql://mine" } }),
     ).toBe("owner");
   });
 
   // card: protects=the box's lane rule holds for a cell: no database for a review or a self-heal audit; fails_when=either starts one; no_claim=cells running those lanes (run-executor refuses them today)
   it("starts none for a review lane or a self-heal audit", () => {
+    expect(plan({ lane: "review" })).toBe("off");
     expect(
-      planCellTestDb({ input, lane: "review", repoEnv: {}, envPath: LISTED }),
-    ).toBe("off");
-    expect(
-      planCellTestDb({
-        input: { ...input, selfHeal: { kind: "audit" } as never },
-        lane: "task",
-        repoEnv: {},
-        envPath: LISTED,
-      }),
+      plan({ input: { ...input, selfHeal: { kind: "audit" } as never } }),
     ).toBe("off");
   });
 });

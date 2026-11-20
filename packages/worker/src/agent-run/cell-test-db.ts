@@ -1,6 +1,7 @@
 import {
   isBoxTestServicesRepo,
   receivesBoxTestServices,
+  TEST_DATABASE_ADMIN_URL,
 } from "./box-test-services";
 import type { RunLane } from "./run-lane";
 import type { AgentRunInput } from "./types";
@@ -24,7 +25,7 @@ import type { AgentRunInput } from "./types";
  * Constants and argvs only: the worker's steps are in cell-run.ts.
  */
 
-export const CELL_TEST_DB_ENV = "TEST_DATABASE_ADMIN_URL";
+export const CELL_TEST_DB_ENV = TEST_DATABASE_ADMIN_URL;
 /** The Postgres 16 server binaries the cell image installs (Ubuntu `postgresql-16`, OD-2). */
 export const CELL_PG_BIN = "/usr/lib/postgresql/16/bin";
 /** Data dir, socket and server log; created 0700 by the first step, so it must not exist yet. */
@@ -103,7 +104,6 @@ export const CELL_TEST_DB_STOP_SH = [
   "PATH=/usr/bin:/bin",
   `rm -f -- ${CELL_TEST_DB_PASSWORD_FILE}`,
   `${CELL_PG_BIN}/pg_ctl -D ${CELL_TEST_DB_DIR}/data -m immediate stop >/dev/null 2>&1`,
-  "true",
 ].join("\n");
 
 const PASSWORD = /^[0-9a-f]{32,}$/;

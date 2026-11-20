@@ -22,9 +22,12 @@ import type { AgentRunInput } from "./types";
 export const BOX_TEST_SERVICES_ENV_PATH =
   "/etc/automata/agent-test-services.env";
 
+/** The test database's admin URL: the box's and a cell's (#707) share the name. */
+export const TEST_DATABASE_ADMIN_URL = "TEST_DATABASE_ADMIN_URL";
+
 /** The env keys the file may hand a run. Anything else is dropped. */
 const ENV_KEYS: ReadonlySet<string> = new Set([
-  "TEST_DATABASE_ADMIN_URL",
+  TEST_DATABASE_ADMIN_URL,
   "TEST_REDIS_HTTP_URL",
   "TEST_REDIS_HTTP_TOKEN",
 ]);

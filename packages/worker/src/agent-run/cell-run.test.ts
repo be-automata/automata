@@ -18,12 +18,11 @@ import {
   CELL_TEST_DB_DIR,
   CELL_TEST_DB_MKDIR_ARGV,
   CELL_TEST_DB_PASSWORD_FILE,
-  CELL_TEST_DB_PORT,
   CELL_TEST_DB_READY_ARGV,
-  CELL_TEST_DB_ROLE,
   CELL_TEST_DB_ROLE_SH,
   CELL_TEST_DB_START_SH,
   CELL_TEST_DB_STOP_SH,
+  cellTestDbUrl,
 } from "./cell-test-db";
 import {
   CellPlanRefusedError,
@@ -1313,8 +1312,7 @@ describe("the cell run: the owner's repo env (#706)", () => {
 });
 
 describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", () => {
-  const urlOf = (pw: string) =>
-    `postgresql://${CELL_TEST_DB_ROLE}:${pw}@127.0.0.1:${CELL_TEST_DB_PORT}/postgres`;
+  const TEST_DB_URL = cellTestDbUrl(TEST_DB_PASSWORD);
   const dir = mkdtempSync(join(tmpdir(), "cell-tdb-"));
   const listFile = (name: string, repos: string) => {
     const p = join(dir, `${name}.env`);
@@ -1345,7 +1343,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(pw?.text).toBe(TEST_DB_PASSWORD);
     expect(pw?.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
     expect(settingsEnv(s)).toEqual({
-      TEST_DATABASE_ADMIN_URL: urlOf(TEST_DB_PASSWORD),
+      TEST_DATABASE_ADMIN_URL: TEST_DB_URL,
     });
     const order = s.files.map((f) => f.path);
     expect(order.indexOf(CELL_TEST_DB_PASSWORD_FILE)).toBeLessThan(
@@ -1425,9 +1423,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(s.logs).toContain(
       "[agent-run thr_1] cell: test database ready in 1000ms",
     );
-    expect(settingsEnv(s)?.TEST_DATABASE_ADMIN_URL).toBe(
-      urlOf(TEST_DB_PASSWORD),
-    );
+    expect(settingsEnv(s)?.TEST_DATABASE_ADMIN_URL).toBe(TEST_DB_URL);
   });
 
   // card: protects=a database that never gets ready stops at the budget, the role is never made, and the run goes on without the variable; fails_when=the loop runs past the budget, the role step runs, the variable is set or the run fails; no_claim=the budget's size against a real server
