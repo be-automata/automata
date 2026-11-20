@@ -1,0 +1,42 @@
+=== fresh evidence: job=ok
+  gh calls: issue list --label
+  issues: []
+=== expiring (3 days): job=ok
+  gh calls: issue list --label; label create cell-evidence; issue create --title
+  issues: [(100, 'open')]
+=== expiring again, issue already open: job=ok
+  gh calls: issue list --label
+  issues: [(100, 'open')]
+=== expired (refused) while open: job=ok
+  gh calls: issue list --label
+  issues: [(100, 'open')]
+=== renewed -> ok: job=ok
+  gh calls: issue list --label; issue comment 100; issue close 100
+  issues: [(100, 'closed')]
+=== cells unconfigured: job=ok
+  gh calls: 
+  issues: [(100, 'closed')]
+=== refused, no evidence: job=ok
+  gh calls: issue list --label; label create cell-evidence; issue create --title
+  issues: [(100, 'closed'), (101, 'open')]
+=== bad body: job=step 'Read the cell evidence status' failed: 
+  gh calls: 
+  issues: [(100, 'closed'), (101, 'open')]
+=== first issue body:
+The `opensandbox/runc` conformance evidence is **expiring**: expires `2026-12-19T00:00:00.000Z`, 3 day(s) left.
+
+Once it lapses every cell plan answers `egress_not_enforced` (`unknown_profile` without the profile row); count the `[daemon cell-plan]` log lines with that outcome.
+Renew on the box: `systemctl start automata-cell-evidence.service`, then `journalctl -u automata-cell-evidence -n 30`
+(packages/worker/deploy/README.md, "OpenSandbox cells", step 8). The first `ok` run closes this issue.
+
+Run: https://github.invalid/run/1
+
+=== second issue body:
+The `opensandbox/runc` conformance evidence is **refused** (`evidence_missing`): expires `none`.
+
+Once it lapses every cell plan answers `egress_not_enforced` (`unknown_profile` without the profile row); count the `[daemon cell-plan]` log lines with that outcome.
+Renew on the box: `systemctl start automata-cell-evidence.service`, then `journalctl -u automata-cell-evidence -n 30`
+(packages/worker/deploy/README.md, "OpenSandbox cells", step 8). The first `ok` run closes this issue.
+
+Run: https://github.invalid/run/1
+

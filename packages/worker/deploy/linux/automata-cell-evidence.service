@@ -1,0 +1,29 @@
+# Weekly renewal of the opensandbox/runc conformance evidence (#709): the
+# OPENSANDBOX_IT live suite, then push-evidence.sh to www, which records the
+# rows cell-plan needs (it refuses egress_not_enforced once they expire).
+#
+# Oneshot, driven by automata-cell-evidence.timer. Root: the IT runs a
+# privileged dind on the host's rootful Docker, and the script reads root-only
+# /etc/automata/profile-evidence.env and /etc/automata/opensandbox.env. A
+# failure is LOUD by design: no Restart=, so a failed run stays `failed` for
+# `systemctl --failed`; the synthetic workflow also opens a cell-evidence issue
+# a week before the evidence lapses.
+
+[Unit]
+Description=Renew the opensandbox/runc conformance evidence (OPENSANDBOX_IT)
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/opensandbox-evidence-renew.sh
+After=network-online.target docker.service automata-opensandbox.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/automata-platform/packages/worker/deploy/linux/opensandbox-evidence-renew.sh
+# The IT's state (the evidence file, its api key, last-it.log): root, 0700.
+StateDirectory=automata-cell-evidence
+StateDirectoryMode=0700
+# The IT is bounded to 1800 s inside the script; the rest is the push and teardown.
+TimeoutStartSec=2400
+Nice=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-cell-evidence

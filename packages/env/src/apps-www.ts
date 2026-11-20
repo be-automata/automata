@@ -116,7 +116,7 @@ export const env = envsafe({
   OPENSANDBOX_GUEST_IMAGE: str({ default: "", allowEmpty: true }),
   // Cloudflare Access service token for the box's tunnel (#656 PR-C). Secrets:
   // never logged. OPENSANDBOX_URL is the Access-protected tunnel hostname
-  // (https://<host>, deploy README "OpenSandbox cells" steps 3-8), not the box's
+  // (https://<host>, deploy README "OpenSandbox cells" steps 3-9), not the box's
   // loopback. Both empty = plain fetch (dev); exactly one set keeps the cell
   // control plane off.
   OPENSANDBOX_ACCESS_CLIENT_ID: str({ default: "", allowEmpty: true }),

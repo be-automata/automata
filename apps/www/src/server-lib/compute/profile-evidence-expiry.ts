@@ -61,7 +61,7 @@ export function formatExpiringProfilesAlert(
     return `${profileId} ${verb} ${expiresAt}`;
   });
   return {
-    text: `execution profile evidence within ${EVIDENCE_ALERT_WINDOW_DAYS} days of expiry (the policy denies evidence_expired): ${items.join("; ")}. Renew with the box probes (packages/worker/deploy/README.md, "Security probes").`,
+    text: `execution profile evidence within ${EVIDENCE_ALERT_WINDOW_DAYS} days of expiry (the policy denies evidence_expired): ${items.join("; ")}. Renew (packages/worker/deploy/README.md): automata-box/* with the box probes ("Security probes"), opensandbox/runc with automata-cell-evidence ("OpenSandbox cells", step 8).`,
   };
 }
 

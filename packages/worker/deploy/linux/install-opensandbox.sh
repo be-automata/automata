@@ -22,7 +22,9 @@ umask 022
 #      file, the key or an image changed), and installs the worker drop-in
 #      automata-worker.service.d/opensandbox.conf (LoadCredential= for the same
 #      key file). The worker is NOT restarted: it takes the credential at its
-#      next restart (automata-worker-safe-restart);
+#      next restart (automata-worker-safe-restart). It also installs the
+#      weekly evidence renewal, automata-cell-evidence.{service,timer} (#709),
+#      and enables the timer once /etc/automata/profile-evidence.env exists;
 #   5. verifies: /health 200 on 127.0.0.1:8090, the listener on loopback only,
 #      an authenticated GET /sandboxes is 200 and an unauthenticated one is 401.
 #
@@ -49,6 +51,10 @@ RENDER="$TEMPLATE_DIR/render-opensandbox-config.sh"
 # invisible to the containers.
 RUN_DIR="$RUNNER_HOME/run"
 WORKER_DROPIN=/etc/systemd/system/automata-worker.service.d/opensandbox.conf
+# The weekly conformance-evidence renewal (#709) and the config it reads.
+EVIDENCE_TIMER=automata-cell-evidence.timer
+EVIDENCE_UNITS=(automata-cell-evidence.service "$EVIDENCE_TIMER")
+EVIDENCE_CONFIG=/etc/automata/profile-evidence.env
 PORT=8090
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -186,6 +192,25 @@ verify_server() {
     echo "FAIL worker-dropin       $WORKER_DROPIN is missing or differs from automata-worker-opensandbox.conf"
     fail=1
   fi
+  local u
+  for u in "${EVIDENCE_UNITS[@]}"; do
+    if cmp -s "$HERE/$u" "/etc/systemd/system/$u"; then
+      echo "ok   cell-evidence-unit  /etc/systemd/system/$u matches the repo file"
+    else
+      echo "FAIL cell-evidence-unit  /etc/systemd/system/$u is missing or differs from the repo file"
+      fail=1
+    fi
+  done
+  # Step 1 of the README runs before step 8 writes the config: no config is a
+  # warning there, not a failure. With the config, a disabled timer fails.
+  if systemctl is-enabled --quiet "$EVIDENCE_TIMER"; then
+    echo "ok   cell-evidence-timer $EVIDENCE_TIMER is enabled"
+  elif [ ! -e "$EVIDENCE_CONFIG" ]; then
+    echo "warn cell-evidence-timer $EVIDENCE_TIMER is not enabled: no $EVIDENCE_CONFIG yet (README, OpenSandbox cells, step 8)"
+  else
+    echo "FAIL cell-evidence-timer $EVIDENCE_TIMER is not enabled although $EVIDENCE_CONFIG exists (re-run $0)"
+    fail=1
+  fi
   if systemctl is-active --quiet "$UNIT"; then
     echo "ok   unit-active         $UNIT"
   else
@@ -280,12 +305,22 @@ if install_changed "$HERE/render-opensandbox-config.sh" "$RENDER" 0755; then cha
 if install_changed "$HERE/$UNIT" "$UNIT_DEST" 0644; then changed=1; fi
 # The worker only reads it at its next restart; it is never restarted here.
 install_changed "$HERE/automata-worker-opensandbox.conf" "$WORKER_DROPIN" 0644 || true
+for u in "${EVIDENCE_UNITS[@]}"; do
+  install_changed "$HERE/$u" "/etc/systemd/system/$u" 0644 || true
+done
 systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1
 if [ "$changed" -eq 1 ]; then
   systemctl restart "$UNIT"
 else
   systemctl start "$UNIT"
+fi
+# The renewal needs the evidence secret; without it the timer would fail every week.
+if [ -e "$EVIDENCE_CONFIG" ]; then
+  systemctl enable --now "$EVIDENCE_TIMER" >/dev/null
+  log "$EVIDENCE_TIMER enabled"
+else
+  log "WARNING: $EVIDENCE_CONFIG is missing, so $EVIDENCE_TIMER is installed but not enabled (README, OpenSandbox cells, step 8)"
 fi
 # The first layout rendered the config under /run/automata-opensandbox (a key at
 # rest on tmpfs): drop what it left, now that the unit no longer mounts it.
