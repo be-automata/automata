@@ -22,11 +22,22 @@ interface CellCheckRefusal {
 /** `null` passes; a refusal names its code. */
 type CellCheck = () => Promise<CellCheckRefusal | null>;
 
+/**
+ * The everyday "not for cells" answers, which the dispatch path has never
+ * logged: every plain task run outside a cells org, or on another agent, would
+ * otherwise print a line. Only the unexpected refusals after them are logged.
+ */
+const QUIET_REFUSALS: ReadonlySet<string> = new Set([
+  "agent_not_supported",
+  "cells_disabled",
+]);
+
 /** One fail-closed step: a refusal or a throw is false, logged by code only. */
 async function passes(failCode: string, check: CellCheck): Promise<boolean> {
   try {
     const refusal = await check();
     if (refusal === null) return true;
+    if (QUIET_REFUSALS.has(refusal.code)) return false;
     console.log("[hatchet] cell check refused (run stays on the box)", {
       code: refusal.code,
       ...(refusal.reason !== undefined ? { reason: refusal.reason } : {}),

@@ -327,13 +327,32 @@ describe("dispatchAgentRun: cell marker", () => {
       JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
 
     it.each([["codex"], ["gemini"], [null], [undefined]])(
-      "agent %s is not marked and logs the code only",
+      "agent %s is not marked, and the everyday refusal logs nothing",
       async (agent) => {
         const input = await dispatchPlain({ organizationId: orgId }, { agent });
         expect(input).not.toHaveProperty("cell");
-        expect(logged()).toContain("agent_not_supported");
+        expect(logged()).not.toContain("cell check refused");
       },
     );
+
+    it("an org without cells is not marked, and logs nothing", async () => {
+      await setOrganizationCellsEnabled({
+        db,
+        organizationId: orgId,
+        enabled: false,
+      });
+      try {
+        const input = await dispatchPlain({ organizationId: orgId });
+        expect(input).not.toHaveProperty("cell");
+        expect(logged()).not.toContain("cell check refused");
+      } finally {
+        await setOrganizationCellsEnabled({
+          db,
+          organizationId: orgId,
+          enabled: true,
+        });
+      }
+    });
 
     it("an unknown profile is not marked", async () => {
       vi.mocked(readCellEvidenceStatus).mockResolvedValueOnce({
