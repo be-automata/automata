@@ -73,8 +73,15 @@ cell's own runtime sets for the agent and the box protects by ordering:
 - a value containing a NUL byte (no process env can carry it; the box refuses it too,
   `container-policy.ts:202-204`).
 
-Matching is case-insensitive (as the box). Image-set names the box lets an owner override (`CI`,
-`FLUTTER_ROOT`, ...) stay overridable, as on the box.
+- every name the entry starts the daemon with (`CELL_DAEMON_ENV`, `cell-image.ts:47-97`), except
+  the named build-tool settings `CELL_OWNER_OVERRIDABLE` (`CI`, `DEBIAN_FRONTEND`, `PUB_CACHE`,
+  `FLUTTER_ROOT`, `FLUTTER_SUPPRESS_ANALYTICS`, `DART_SUPPRESS_ANALYTICS`). This reserves
+  `SOMNIO_ROOT`, `VENDOR_SKILLS_ROOT` and `ROBOREV_TELEMETRY_ENABLED` (where the battery skills load
+  from), and any name a future image adds, by default. A test keeps every `CELL_DAEMON_ENV` name
+  either reserved or listed.
+
+Matching is case-insensitive (as the box). The box itself does not reserve `SOMNIO_ROOT` or
+`VENDOR_SKILLS_ROOT` today; that gap is reported as a follow-up, not changed here.
 
 Dropped identifier names are logged once, in one line, by NAME only, sorted; a name that is not an
 identifier is counted, never printed (it is free text):

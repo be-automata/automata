@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { cellRepoEnv, isReservedCellRepoEnvKey } from "./cell-repo-env";
+import { CELL_DAEMON_ENV } from "./cell-image";
+import {
+  CELL_OWNER_OVERRIDABLE,
+  cellRepoEnv,
+  isReservedCellRepoEnvKey,
+} from "./cell-repo-env";
 
 describe("cellRepoEnv (#706)", () => {
   // card: protects=ordinary owner names reach the agent with their exact values; fails_when=a plain name is dropped or a value changes; no_claim=the agent's env (UAT)
@@ -49,6 +54,18 @@ describe("cellRepoEnv (#706)", () => {
       expect(isReservedCellRepoEnvKey(key), key).toBe(true);
     }
     expect(isReservedCellRepoEnvKey("BASH_ENV_EXTRA")).toBe(false);
+  });
+
+  // card: protects=every name the entry starts the daemon with is reserved or a named exception, so a new image name is reserved by default; fails_when=a CELL_DAEMON_ENV name is overridable without being listed, or an exception is reserved; no_claim=names the image sets outside CELL_DAEMON_ENV
+  it("reserves every CELL_DAEMON_ENV name but the named exceptions", () => {
+    for (const name of CELL_DAEMON_ENV) {
+      expect(isReservedCellRepoEnvKey(name), name).toBe(
+        !CELL_OWNER_OVERRIDABLE.includes(name),
+      );
+    }
+    for (const name of ["SOMNIO_ROOT", "vendor_skills_root", "HOME"]) {
+      expect(isReservedCellRepoEnvKey(name), name).toBe(true);
+    }
   });
 
   // card: protects=an invalid name is counted, never listed, and a NUL value is dropped by name; fails_when=a free-text name reaches the dropped list or a NUL value is kept; no_claim=the log line

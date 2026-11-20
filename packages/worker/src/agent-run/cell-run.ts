@@ -6,7 +6,7 @@ import {
   type CellCreatePlan,
   type ICellProvider,
 } from "@terragon/types/cell";
-import { createValueRedactor, redactSecrets } from "@terragon/utils/redact";
+import { createValueRedactor } from "@terragon/utils/redact";
 
 import {
   claimAbnormalEnd,
@@ -208,6 +208,8 @@ interface CellRunState {
   cellId: string | null;
   /** The owner's repo env, filtered for a cell (#706). Its values are never logged. */
   repoEnv: CellRepoEnv;
+  /** The repo env value scrub `step` applies; also run on whole text before a cut. */
+  scrub: (text: string) => string;
   st: {
     fenced: boolean;
     stopRequested: boolean;
@@ -325,6 +327,7 @@ async function runCell(
     provider: null,
     cellId: null,
     repoEnv: cellRepoEnv(args.secrets.repoEnv),
+    scrub,
     st: {
       fenced: false,
       stopRequested: false,
@@ -699,7 +702,7 @@ async function execOk(
     // The message write's stderr is never logged: it may echo the staged message.
     r.step(
       logStderr
-        ? `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`
+        ? `cell setup: ${label} failed (exit ${out.exitCode}): ${r.scrub(out.stderr).slice(-EXEC_STDERR_TAIL)}`
         : `cell setup: ${label} failed (exit ${out.exitCode})`,
     );
     throw new Error(`cell setup: ${label} failed (exit ${out.exitCode})`);

@@ -1180,6 +1180,8 @@ describe("the cell run: the owner's repo env (#706)", () => {
     expect(JSON.stringify(s.makeProvider.mock.calls)).not.toContain(VALUE);
     expect(JSON.stringify(s.execs)).not.toContain(VALUE);
     expect(s.logs.join("\n")).not.toContain(VALUE);
+    expect(JSON.stringify(s.www)).not.toContain(VALUE);
+    expect(JSON.stringify(s.fetchPlan.mock.calls)).not.toContain(VALUE);
     const carriers = s.files.filter((f) => f.text.includes(VALUE));
     expect(carriers.map((f) => f.path)).toEqual([
       "/home/agent/.claude/settings.json",
@@ -1252,6 +1254,20 @@ describe("the cell run: the owner's repo env (#706)", () => {
     const line = s.logs.find((l) => l.includes("cell: image="));
     expect(line).toContain("deployment=<redacted>");
     expect(s.logs.join("\n")).not.toContain(VALUE);
+  });
+
+  // card: protects=the scrub runs on the whole stderr before the 512-char cut, so a value straddling the cut leaves no half behind; fails_when=the tail is cut first and the value's second half is logged; no_claim=values under 4 chars
+  it("scrubs before the tail is cut", async () => {
+    const half = VALUE.slice(VALUE.length / 2);
+    const s = setup({
+      execExit: (a) => (a[1] === "clone" ? 128 : 0),
+      // The cut lands inside VALUE: 512 chars from the end is mid-value.
+      execStderr: () => `${VALUE}${"x".repeat(512 - half.length)}`,
+    });
+    await expect(
+      s.executor.run(withRepoEnv(s, { FOO_TOKEN: VALUE })),
+    ).rejects.toThrow("git clone failed");
+    expect(s.logs.join("\n")).not.toContain(half);
   });
 
   // card: protects=no repo env is no change: the settings file has no env key and no repo env line is logged; fails_when=either appears; no_claim=none

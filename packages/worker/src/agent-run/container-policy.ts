@@ -22,7 +22,7 @@ import { TOOL_FAILURE_STREAK_LIMIT_KEY } from "./run-telemetry";
  */
 
 /** The env file's one line format: `export NAME='value'` (single-quoted, `'` escaped). */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** gh's isolated config dir inside the container (its config.yml names the broker socket). */
 export const CONTAINER_GH_CONFIG_DIR = `${CONTAINER_HOME}/.config/gh`;

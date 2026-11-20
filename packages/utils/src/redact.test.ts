@@ -77,6 +77,15 @@ describe("createValueRedactor", () => {
     );
   });
 
+  it("never garbles its own marker, and escapes regex characters", () => {
+    expect(createValueRedactor(["secret", "dact"])("a secret b")).toBe(
+      "a <redacted> b",
+    );
+    expect(createValueRedactor(["a.b*c"])("x a.b*c axbbc")).toBe(
+      "x <redacted> axbbc",
+    );
+  });
+
   it("honours a custom minLength", () => {
     expect(createValueRedactor(["abc"], 3)("x abc y")).toBe("x <redacted> y");
     expect(createValueRedactor(["abcdef"], 8)("x abcdef y")).toBe("x abcdef y");

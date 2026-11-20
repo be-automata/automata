@@ -1,3 +1,5 @@
+import { CELL_DAEMON_ENV } from "./cell-image";
+import { ENV_NAME } from "./container-policy";
 import { isReservedRepoEnvKey } from "./daemon-env";
 
 /**
@@ -8,14 +10,14 @@ import { isReservedRepoEnvKey } from "./daemon-env";
  *
  * A settings `env` block beats the process env, the opposite of the box, where
  * the platform writes its own keys after the repo env. So on top of the box's
- * rule (`isReservedRepoEnvKey`) a cell also drops every name its own runtime
+ * rule (`isReservedRepoEnvKey`) a cell also drops the names its own runtime
  * sets for the agent: the daemon's (`DAEMON_TOKEN`, the Claude adapter's bash
- * timeouts) and OpenSandbox's (`OPENSANDBOX_*`: the MITM CA path, the
- * transparent-proxy switch). Pure.
+ * timeouts), OpenSandbox's (`OPENSANDBOX_*`: the MITM CA path, the
+ * transparent-proxy switch) and every name the entry starts the daemon with
+ * (`CELL_DAEMON_ENV`: where the battery skills load from, among others),
+ * except the build-tool settings an owner may set on the box too
+ * (`CELL_OWNER_OVERRIDABLE`). Pure.
  */
-
-/** The box's run env file name rule (container-policy.ts `ENV_NAME`). */
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Set by the daemon on the agent (daemon.ts childEnv, claude-adapter.ts bashTimeoutEnv). */
 const CELL_RESERVED_KEYS = new Set([
@@ -25,12 +27,30 @@ const CELL_RESERVED_KEYS = new Set([
 ]);
 const CELL_RESERVED_PREFIXES = ["OPENSANDBOX_"];
 
+/** Names in `CELL_DAEMON_ENV` an owner may still set: build-tool settings with no platform role. */
+export const CELL_OWNER_OVERRIDABLE: readonly string[] = [
+  "CI",
+  "DEBIAN_FRONTEND",
+  "PUB_CACHE",
+  "FLUTTER_ROOT",
+  "FLUTTER_SUPPRESS_ANALYTICS",
+  "DART_SUPPRESS_ANALYTICS",
+];
+
+const CELL_RUNTIME_KEYS = new Set(
+  CELL_DAEMON_ENV.filter((n) => !CELL_OWNER_OVERRIDABLE.includes(n)).map((n) =>
+    n.toUpperCase(),
+  ),
+);
+
+/** Case-insensitive, as the box. A name that is not an identifier is reserved too. */
 export function isReservedCellRepoEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
   return (
     !ENV_NAME.test(key) ||
     isReservedRepoEnvKey(key) ||
     CELL_RESERVED_KEYS.has(upper) ||
+    CELL_RUNTIME_KEYS.has(upper) ||
     CELL_RESERVED_PREFIXES.some((prefix) => upper.startsWith(prefix))
   );
 }

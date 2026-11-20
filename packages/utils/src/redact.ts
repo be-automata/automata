@@ -50,9 +50,14 @@ export function createValueRedactor(
   const blanks = [
     ...new Set(plain.flatMap((v) => [v, JSON.stringify(v).slice(1, -1)])),
   ].sort((a, b) => b.length - a.length);
-  return (text) => {
-    let out = text;
-    for (const v of blanks) out = out.split(v).join("<redacted>");
-    return redactSecrets(out);
-  };
+  // One pass over one alternation: a value that occurs inside a marker
+  // already written (`dact`) can never garble it.
+  const any =
+    blanks.length > 0
+      ? new RegExp(
+          blanks.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+          "g",
+        )
+      : null;
+  return (text) => redactSecrets(any ? text.replace(any, "<redacted>") : text);
 }
