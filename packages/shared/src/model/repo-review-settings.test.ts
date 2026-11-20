@@ -376,6 +376,61 @@ describe("repo-review-settings egress columns (#66 slice 1)", () => {
     expect(cleared.egressAllowlist).toBeNull();
     expect(cleared.blockTolerance).toBe("info");
   });
+
+  it("#705: the cell registries opt-in is NULL by default, round-trips, and null clears it", async () => {
+    const fresh = await setRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      blockTolerance: "warning",
+    });
+    expect(fresh.cellEgressRegistries).toBeNull();
+    const on = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { cellEgressRegistries: true },
+    });
+    expect(on.cellEgressRegistries).toBe(true);
+    // Another family's write leaves it alone.
+    const afterEgress = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { egressPolicy: "domain", egressAllowlist: ["example.com"] },
+    });
+    expect(afterEgress.cellEgressRegistries).toBe(true);
+    const cleared = await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { cellEgressRegistries: null },
+    });
+    expect(cleared.cellEgressRegistries).toBeNull();
+    expect(cleared.egressAllowlist).toEqual(["example.com"]);
+  });
+
+  it("#705: a tolerance reset keeps a row whose only other content is the registries opt-in", async () => {
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+      patch: { blockTolerance: "error", cellEgressRegistries: true },
+    });
+    const { removed } = await removeRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+    });
+    expect(removed).toBe(true);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgA,
+      repoFullName: "acme/widgets",
+    });
+    expect(row?.blockTolerance).toBe("warning");
+    expect(row?.cellEgressRegistries).toBe(true);
+  });
 });
 
 describe("resolveSupersedePolicy (#125/#127)", () => {

@@ -88,6 +88,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       trustedAuthorThreshold: null,
       egressPolicy: null,
       egressAllowlist: null,
+      cellEgressRegistries: null,
       supersedePolicy: null,
       recheckOnComplete: false,
       reviewMode: null,
@@ -190,6 +191,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       trustedAuthorThreshold: null,
       egressPolicy: null,
       egressAllowlist: null,
+      cellEgressRegistries: null,
       supersedePolicy: null,
       recheckOnComplete: false,
       reviewMode: null,
@@ -234,6 +236,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       trustedAuthorThreshold: null,
       egressPolicy: null,
       egressAllowlist: null,
+      cellEgressRegistries: null,
       supersedePolicy: null,
       recheckOnComplete: false,
       reviewMode: null,
@@ -318,6 +321,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       trustedAuthorThreshold: null,
       egressPolicy: null,
       egressAllowlist: null,
+      cellEgressRegistries: null,
       supersedePolicy: null,
       recheckOnComplete: false,
       reviewMode: null,
@@ -468,6 +472,7 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
         trustedAuthorThreshold: null,
         egressPolicy: null,
         egressAllowlist: null,
+        cellEgressRegistries: null,
         supersedePolicy: null,
         recheckOnComplete: false,
         reviewMode: "orchestrated",
@@ -745,6 +750,23 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       }
     });
 
+    it("#705: cellEgressRegistries true/null is sent to the upsert and returned in the DTO", async () => {
+      for (const value of [true, null]) {
+        vi.mocked(upsertRepoReviewSetting).mockClear();
+        const res = await PUT(putReq({ cellEgressRegistries: value }), {
+          params,
+        });
+        expect(res.status).toBe(200);
+        expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+          expect.objectContaining({ patch: { cellEgressRegistries: value } }),
+        );
+        const json = (await res.json()) as { setting: Record<string, unknown> };
+        expect("cellEgressRegistries" in json.setting).toBe(true);
+      }
+      // Not an egress level/allowlist change: no stored row is read.
+      expect(getRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
     it("null clears the level (= no enforcement) and the allowlist", async () => {
       const res = await PUT(
         putReq({ egressPolicy: null, egressAllowlist: null }),
@@ -764,6 +786,8 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       ["egressPolicy", 1],
       ["egressAllowlist", "registry.npmjs.org"],
       ["egressAllowlist", ["registry.npmjs.org", 7]],
+      ["cellEgressRegistries", "yes"],
+      ["cellEgressRegistries", 1],
     ])("400 on %s = %j, nothing written", async (field, value) => {
       const res = await PUT(putReq({ [field]: value }), { params });
       expect(res.status).toBe(400);

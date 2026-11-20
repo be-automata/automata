@@ -48,6 +48,7 @@ export function toRepoReviewSettingDto(row: RepoReviewSetting) {
     recheckOnComplete: row.recheckOnComplete,
     egressPolicy: row.egressPolicy,
     egressAllowlist: row.egressAllowlist,
+    cellEgressRegistries: row.cellEgressRegistries,
     ...pickReviewAgentFields(row),
     ...pickSelfHealFields(row),
     updatedAt: row.updatedAt,
@@ -261,6 +262,8 @@ export async function recordSelfHealSettingsChange({
 export type EgressPatch = {
   egressPolicy?: string | null;
   egressAllowlist?: string[] | null;
+  /** #705: cell-only registries opt-in; null clears (= off). */
+  cellEgressRegistries?: boolean | null;
 };
 
 /**
@@ -268,11 +271,13 @@ export type EgressPatch = {
  * `egressPolicy` is null (clears = no enforcement) or a level, and
  * `egressAllowlist` is null (clears) or an array of strings. Whether the
  * entries fit the level is checked by {@link findEgressPatchErrorResponse},
- * which needs the stored row.
+ * which needs the stored row. `cellEgressRegistries` (#705) is a boolean or
+ * null.
  */
 export function parseEgressPatch(body: {
   egressPolicy?: unknown;
   egressAllowlist?: unknown;
+  cellEgressRegistries?: unknown;
 }): { patch: EgressPatch } | { errorResponse: NextResponse } {
   const patch: EgressPatch = {};
   if (body.egressPolicy !== undefined) {
@@ -310,6 +315,20 @@ export function parseEgressPatch(body: {
       };
     }
     patch.egressAllowlist = body.egressAllowlist as string[] | null;
+  }
+  if (body.cellEgressRegistries !== undefined) {
+    if (
+      body.cellEgressRegistries !== null &&
+      typeof body.cellEgressRegistries !== "boolean"
+    ) {
+      return {
+        errorResponse: NextResponse.json(
+          { error: "cellEgressRegistries must be null or a boolean" },
+          { status: 400 },
+        ),
+      };
+    }
+    patch.cellEgressRegistries = body.cellEgressRegistries;
   }
   return { patch };
 }

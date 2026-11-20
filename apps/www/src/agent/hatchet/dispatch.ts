@@ -35,6 +35,7 @@ import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
 import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
+  RepoReviewSetting,
   ThreadSourceMetadata,
   ThreadTrustContext,
 } from "@terragon/shared/db/types";
@@ -828,6 +829,40 @@ async function cellEligibleForRun(
 }
 
 /**
+ * #705: the repo's cell egress compiles (the same pure check cell-plan runs).
+ * A refusal or a failure means "not eligible" (logged by code only): the cell
+ * marker must never fail a dispatch.
+ */
+async function cellEgressCompiles(
+  repoFullName: string,
+  row: RepoReviewSetting | undefined,
+): Promise<boolean> {
+  try {
+    const [{ cellBrokerHost }, { planCellEgressForRepo }] = await Promise.all([
+      import("@/server-lib/compute/cell-gate"),
+      import("@terragon/shared/model/cell-egress-catalog"),
+    ]);
+    const plan = planCellEgressForRepo({
+      repoFullName,
+      row,
+      brokerHost: cellBrokerHost(),
+    });
+    if (!plan.ok) {
+      console.log("[hatchet] cell egress refused (run stays on the box)", {
+        code: plan.code,
+        reason: plan.reason,
+      });
+    }
+    return plan.ok;
+  } catch (error) {
+    console.warn("[hatchet] cell egress check failed (not eligible)", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return false;
+  }
+}
+
+/**
  * #380: the one place a secret meets the wire. Every run secret —
  * installationToken, githubReadToken, daemonToken, the owner's repoEnv and the
  * self-heal token — is sealed to the plane key (AAD = SHA-256 of the whole
@@ -1217,10 +1252,15 @@ export async function dispatchAgentRun({
     // cell step's organization is a foreign key), set BEFORE the seal because
     // its binding covers the whole input. A reference; no secret is added.
     // #708: and only when that org has cells on.
+    // #705: only when the repo's egress compiles for a cell. An ip_port repo
+    // (OD-1) or one the cell cannot express (a wildcard, a non-443 port, over
+    // the cap) is never marked and stays on the box; cell-plan refuses the
+    // same sets as a backstop.
     const cellMarker =
       isPlainTaskRun &&
       thread?.organizationId &&
-      (await cellEligibleForRun(userId, thread.organizationId))
+      (await cellEligibleForRun(userId, thread.organizationId)) &&
+      (await cellEgressCompiles(repoFullName, orgSettings?.rows.repo))
         ? ({ cell: "opensandbox" } as const)
         : {};
     const input: AgentRunInput = {
