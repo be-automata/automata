@@ -44,7 +44,7 @@ Already done (do not redo): the compiler, renderer, cap, guard, cell_decision ta
 
 - `repo_review_settings.cell_egress_registries boolean` (nullable, no default; NULL or false = off).
   Drizzle `cellEgressRegistries: boolean("cell_egress_registries")` beside `egressAllowlist`.
-- Migration `deploy/migrations/2026-11-22-repo-cell-egress-registries.sql`, `-- migrate:expand`,
+- Migration `deploy/migrations/2026-11-23-repo-cell-egress-registries.sql`, `-- migrate:expand`,
   `ALTER TABLE "repo_review_settings" ADD COLUMN IF NOT EXISTS "cell_egress_registries" boolean;`
 - `upsertRepoReviewSetting` patch gains `cellEgressRegistries?: boolean | null`; the reset's
   `otherFamiliesPresent` includes it (a row holding only this opt-in survives a tolerance reset).
@@ -149,7 +149,7 @@ off the cell; a setting changed between dispatch and plan fails closed).
 
 ## Phases (≤ 5 files each)
 
-1. Storage: `packages/shared/src/db/schema.ts`, `deploy/migrations/2026-11-22-repo-cell-egress-registries.sql`,
+1. Storage: `packages/shared/src/db/schema.ts`, `deploy/migrations/2026-11-23-repo-cell-egress-registries.sql`,
    `packages/shared/src/model/repo-review-settings.ts`, `packages/shared/src/model/repo-review-settings.test.ts`.
 2. Catalog: `cell-egress-catalog.ts`, `cell-egress-catalog.test.ts`.
 3. cell-plan: `apps/www/src/app/api/daemon/cell-plan/route.ts`, `route.test.ts`.
