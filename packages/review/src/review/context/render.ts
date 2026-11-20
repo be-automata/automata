@@ -119,6 +119,43 @@ export function prViewFromRest(pr: RestPullRequestLike): PrViewData {
   };
 }
 
+export interface IssueViewData {
+  number: number;
+  title: string;
+  /** gh casing: OPEN | CLOSED. */
+  state: string;
+  authorLogin: string | null;
+  labels: readonly string[];
+  url: string;
+  body: string | null;
+}
+
+/** The REST issue fields the issue view reads (GitHub `GET /issues/{n}`). */
+export interface RestIssueLike {
+  number: number;
+  title: string;
+  state: string;
+  user?: { login: string } | null;
+  labels: ReadonlyArray<string | { name?: string | null }>;
+  html_url: string;
+  body?: string | null;
+}
+
+/** REST issue → the issue view, in gh's casing (OPEN/CLOSED). */
+export function issueViewFromRest(issue: RestIssueLike): IssueViewData {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state.toUpperCase(),
+    authorLogin: issue.user?.login ?? null,
+    labels: issue.labels
+      .map((label) => (typeof label === "string" ? label : (label.name ?? "")))
+      .filter(Boolean),
+    url: issue.html_url,
+    body: issue.body ?? null,
+  };
+}
+
 /** The REST review fields the prior-reviews block reads (GitHub `GET /pulls/{n}/reviews`). */
 export interface RestReviewLike {
   user?: { login: string } | null;
@@ -156,6 +193,20 @@ export function renderPrView(pr: PrViewData): string {
   ];
   const header = fields.map(([k, v]) => `${k}:\t${v ?? ""}`).join("\n");
   return `${header}\n--\n${(pr.body ?? "").trim()}`;
+}
+
+/** gh's non-TTY `issue view` shape: `key:\tvalue` lines, `--`, then the body. */
+export function renderIssueView(issue: IssueViewData): string {
+  const fields: Array<[string, string | number | null]> = [
+    ["title", issue.title],
+    ["state", issue.state],
+    ["author", issue.authorLogin ?? ""],
+    ["labels", issue.labels.join(", ")],
+    ["number", issue.number],
+    ["url", issue.url],
+  ];
+  const header = fields.map(([k, v]) => `${k}:\t${v ?? ""}`).join("\n");
+  return `${header}\n--\n${(issue.body ?? "").trim()}`;
 }
 
 /**
