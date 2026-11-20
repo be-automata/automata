@@ -2,12 +2,13 @@ import { env } from "@terragon/env/apps-www";
 import type { DB } from "@terragon/shared/db";
 import { normalizeCellBrokerHost } from "@terragon/shared/model/cell-egress";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import { getOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
 
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 
 /**
  * Whether cells are on, and the two facts every cell route derives from the
- * deployment. Env and flags only: it imports no provider, reconciler or
+ * deployment. Env, flags and the org row only: it imports no provider, reconciler or
  * authority code, so dispatch and the routes can load it cheaply.
  */
 
@@ -71,18 +72,31 @@ export function opensandboxConfigured(): boolean {
   return resolveOpenSandboxEnv().state === "ok";
 }
 
-/** Configured and the per-user `opensandboxCells` flag is on. */
-export async function cellsEnabledForUser({
+/**
+ * #708: cells run for this run only when the deployment is configured, the
+ * run's org has `cells_enabled` and the user's `opensandboxCells` flag is on.
+ * An org-less run is never eligible (a cell step's org is a foreign key). The
+ * reads short-circuit in that order, so an unconfigured deployment reads
+ * nothing, and both are per call, so an admin toggle applies on the next one.
+ */
+export async function cellsEnabledForRun({
   db,
   userId,
+  organizationId,
 }: {
   db: DB;
   userId: string;
+  organizationId: string | null | undefined;
 }): Promise<boolean> {
-  return (
-    opensandboxConfigured() &&
-    (await getFeatureFlagForUser({ db, userId, flagName: "opensandboxCells" }))
-  );
+  if (!organizationId || !opensandboxConfigured()) return false;
+  if (!(await getOrganizationCellsEnabled({ db, organizationId }))) {
+    return false;
+  }
+  return await getFeatureFlagForUser({
+    db,
+    userId,
+    flagName: "opensandboxCells",
+  });
 }
 
 /** This deployment's public host, as the compiled egress set allows it. */

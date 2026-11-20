@@ -29,6 +29,7 @@ import {
   upsertExecutionProfile,
 } from "@terragon/shared/model/execution-profiles";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
+import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
 import {
   createTestOrg,
   createTestThread,
@@ -195,6 +196,11 @@ describe("POST /api/daemon/cell-plan", () => {
     vi.mocked(getClaudeOauthAccessToken).mockResolvedValue(OAUTH_TOKEN);
     userId = (await createTestUser({ db })).user.id;
     orgId = await createTestOrg({ db });
+    await setOrganizationCellsEnabled({
+      db,
+      organizationId: orgId,
+      enabled: true,
+    });
     apiKeyId = nanoid(32).replace(/[^A-Za-z0-9]/g, "a");
     const t = await newThread({ organizationId: orgId });
     threadId = t.threadId;
@@ -494,7 +500,7 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(await steps()).toEqual([]);
     });
 
-    it("403 org_required for an org-less thread", async () => {
+    it("404 cells_disabled for an org-less thread (#708: the gate needs an org)", async () => {
       const t = await newThread();
       threadId = t.threadId;
       threadChatId = t.threadChatId;
@@ -502,8 +508,22 @@ describe("POST /api/daemon/cell-plan", () => {
         ctx({ organizationId: null }),
       );
       const res = await POST(req(body()));
-      expect(res.status).toBe(403);
-      expect(await res.json()).toEqual({ error: "org_required" });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "cells_disabled" });
+      expect(getFeatureFlagForUser).not.toHaveBeenCalled();
+    });
+
+    it("404 cells_disabled when the thread's org is off, with the flag on (#708)", async () => {
+      await setOrganizationCellsEnabled({
+        db,
+        organizationId: orgId,
+        enabled: false,
+      });
+      const res = await POST(req(body()));
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "cells_disabled" });
+      expect(await steps()).toEqual([]);
+      expect(getFeatureFlagForUser).not.toHaveBeenCalled();
     });
 
     it("404 cells_disabled when the flag is off or the env is unset", async () => {

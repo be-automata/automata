@@ -14,7 +14,7 @@ import {
 import {
   OPENSANDBOX_RUNC_PROFILE_ID,
   cellBrokerHost,
-  cellsEnabledForUser,
+  cellsEnabledForRun,
 } from "@/server-lib/compute/cell-gate";
 import { isAgentWorking } from "@/agent/thread-status";
 import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
@@ -99,8 +99,15 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (!parsed.success) return reply({ error: "invalid_body" }, 400);
   const { worker, epoch, requestId } = parsed.data;
 
-  // Gate: the env and the per-user flag. Off means off: 404.
-  if (!(await cellsEnabledForUser({ db, userId: ctx.userId }))) {
+  // Gate: the env, the thread's org and the per-user flag (#708). Off means
+  // off: 404, an org-less thread included.
+  if (
+    !(await cellsEnabledForRun({
+      db,
+      userId: ctx.userId,
+      organizationId: thread.organizationId,
+    }))
+  ) {
     return reply({ error: "cells_disabled" }, 404);
   }
   if (ctx.apiKeyId === null) return reply({ error: "no_run_key" }, 403);
