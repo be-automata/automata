@@ -53,6 +53,7 @@ import {
   type ReadFileSync,
   readMemoryAnon,
 } from "./run-memory";
+import { filterRepoEnv, repoEnvDroppedNote } from "./repo-env";
 import type { RunPaths } from "./run-owned-paths";
 import { runTelemetrySettingsEnv } from "./run-telemetry";
 import { getProcessWorkerId } from "./run-namespace";
@@ -559,16 +560,22 @@ export class ContainerDaemonProcess
         { mode: 0o600 },
       );
     }
+    // The owner's repo env, under the cell's reserved rule (#717): names
+    // only in the log, never values.
+    const ownerEnv = filterRepoEnv(this.deps.secrets.repoEnv);
+    const droppedNote = repoEnvDroppedNote(ownerEnv);
+    if (droppedNote) {
+      this.log(
+        `container.repo_env ${JSON.stringify({ thread: this.input.threadId, note: droppedNote })}`,
+      );
+    }
     const runEnv = buildContainerRunEnv({
       policy: this.policy,
       botLogin: this.config.botLogin,
       anthropicApiKey: this.config.anthropicApiKey,
       credentialDelivered: this.credentials.delivered,
       credentialEnv: this.credentials.env,
-      repoEnv: {
-        ...this.routed.testEnv,
-        ...(this.deps.secrets.repoEnv ?? {}),
-      },
+      repoEnv: { ...this.routed.testEnv, ...ownerEnv.env },
       egressProxyUrl: this.routed.egressProxyUrl,
       broker: this.routed.broker,
       toolFailureStreakLimit:

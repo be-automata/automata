@@ -246,6 +246,59 @@ describe("ContainerDaemonProcess (ADR-013 Run path 2-7, fake runtime)", () => {
     expect(fs.existsSync(path.join(run.home, ".automata-run"))).toBe(false);
   });
 
+  // card: protects=#717: on a box run the owner's repo env loses the names the cell also reserves (the batteries image's SOMNIO_ROOT/VENDOR_SKILLS_ROOT among them), the run logs those names once and never a value; fails_when=a reserved name reaches run.env, the drop is silent, or a log line holds the value; no_claim=the image ENV the sourced file would have overridden (container-entry.test.ts sources it)
+  it("box repo env: reserved names dropped from run.env, logged by name only", async () => {
+    const canary = "canary-box-717";
+    const rt = fakeRuntime();
+    const lines: string[] = [];
+    await make("task", rt, {
+      secrets: {
+        daemonToken: "daemon-token-secret",
+        repoEnv: {
+          SOMNIO_ROOT: canary,
+          vendor_skills_root: canary,
+          ROBOREV_TELEMETRY_ENABLED: "1",
+          "NOT-A-NAME": canary,
+          MY_VAR: "kept",
+        },
+      },
+      log: (l: string) => lines.push(l),
+    }).start();
+    const runEnv = rt.copied[0]?.[".automata-run/run.env"] ?? "";
+    expect(runEnv).toContain("export MY_VAR='kept'");
+    expect(runEnv).not.toContain(canary);
+    expect(runEnv).not.toMatch(/SOMNIO_ROOT|vendor_skills_root|ROBOREV/);
+    const noted = lines.filter((l) => l.startsWith("container.repo_env "));
+    expect(noted).toEqual([
+      `container.repo_env ${JSON.stringify({ thread: input.threadId, note: "repo env names not set (reserved): ROBOREV_TELEMETRY_ENABLED, SOMNIO_ROOT, vendor_skills_root (+1 not an env name)" })}`,
+    ]);
+    expect(lines.join("\n")).not.toContain(canary);
+  });
+
+  // card: protects=a clean repo env logs nothing about it, and the box test-service env still reaches run.env under the owner's same-named var; fails_when=a note appears for a clean env or the precedence flips; no_claim=the test-services file format (box-test-services.test.ts)
+  it("box repo env: no note when nothing is dropped; the owner's var beats the test-service env", async () => {
+    const envPath = path.join(root, "test-services.env");
+    fs.writeFileSync(
+      envPath,
+      `TEST_SERVICES_REPOS=${input.repoFullName}\nTEST_REDIS_HTTP_URL=http://box-redis\nTEST_REDIS_HTTP_TOKEN=box-token\n`,
+      { mode: 0o600 },
+    );
+    const rt = fakeRuntime();
+    const lines: string[] = [];
+    await make("task", rt, {
+      secrets: {
+        daemonToken: "daemon-token-secret",
+        repoEnv: { TEST_REDIS_HTTP_URL: "http://owner-redis" },
+      },
+      boxTestServicesEnvPath: envPath,
+      log: (l: string) => lines.push(l),
+    }).start();
+    const runEnv = rt.copied[0]?.[".automata-run/run.env"] ?? "";
+    expect(runEnv).toContain("export TEST_REDIS_HTTP_URL='http://owner-redis'");
+    expect(runEnv).toContain("export TEST_REDIS_HTTP_TOKEN='box-token'");
+    expect(lines.some((l) => l.startsWith("container.repo_env "))).toBe(false);
+  });
+
   // card: protects=a review container gets deny-only settings, no batteries copy-out, and an env file with no GitHub credential; fails_when=a review gets hooks or a token; no_claim=C3 sockets (none exist yet)
   it("review copy-in: denies only, no batteries hooks, no GitHub credential", async () => {
     const rt = fakeRuntime();
