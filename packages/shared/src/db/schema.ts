@@ -138,6 +138,11 @@ export const organization = pgTable("organization", {
   // team org. Declared to the Better Auth plugin as an additionalField with
   // input: false (apps/www/src/lib/auth.ts), so the API cannot set it.
   isPersonal: boolean("is_personal").notNull().default(false),
+  // #708: OpenSandbox cells run for this org's runs (with the deployment
+  // configured and the owner's `opensandboxCells` flag on). Off by default; only
+  // the admin page sets it. Declared to the Better Auth plugin with input: false
+  // (apps/www/src/lib/auth.ts), so the API cannot set it.
+  cellsEnabled: boolean("cells_enabled").notNull().default(false),
 });
 
 export const member = pgTable(

@@ -11,10 +11,13 @@ import {
   getMembershipByOrganizationSlug,
   getOrganizationById,
   getOrganizationBySlug,
+  getOrganizationCellsEnabled,
   getOrganizationMembers,
   getOrganizationOwnerUserId,
   getOrganizationsForUser,
+  listOrganizationsForAdmin,
   removeOrganizationMember,
+  setOrganizationCellsEnabled,
 } from "./organizations";
 
 const db = createDb(env.DATABASE_URL!);
@@ -263,5 +266,79 @@ describe("organizations", () => {
         userId: owner.id,
       }),
     ).toBeUndefined();
+  });
+
+  describe("cells gate (#708)", () => {
+    it("is off by default and round-trips on and off", async () => {
+      const org = await createOrganization({
+        db,
+        name: "Cells",
+        slug: uniqueSlug("cells"),
+      });
+      expect(org.cellsEnabled).toBe(false);
+      expect(
+        await getOrganizationCellsEnabled({ db, organizationId: org.id }),
+      ).toBe(false);
+
+      expect(
+        await setOrganizationCellsEnabled({
+          db,
+          organizationId: org.id,
+          enabled: true,
+        }),
+      ).toBe(true);
+      expect(
+        await getOrganizationCellsEnabled({ db, organizationId: org.id }),
+      ).toBe(true);
+
+      await setOrganizationCellsEnabled({
+        db,
+        organizationId: org.id,
+        enabled: false,
+      });
+      expect(
+        await getOrganizationCellsEnabled({ db, organizationId: org.id }),
+      ).toBe(false);
+    });
+
+    it("a missing org reads off and cannot be set", async () => {
+      const missing = `missing-${nanoid()}`;
+      expect(
+        await getOrganizationCellsEnabled({ db, organizationId: missing }),
+      ).toBe(false);
+      expect(
+        await setOrganizationCellsEnabled({
+          db,
+          organizationId: missing,
+          enabled: true,
+        }),
+      ).toBe(false);
+    });
+
+    it("lists orgs with their gate", async () => {
+      const on = await createOrganization({
+        db,
+        name: "On",
+        slug: uniqueSlug("on"),
+      });
+      const off = await createOrganization({
+        db,
+        name: "Off",
+        slug: uniqueSlug("off"),
+      });
+      await setOrganizationCellsEnabled({
+        db,
+        organizationId: on.id,
+        enabled: true,
+      });
+      const rows = await listOrganizationsForAdmin({ db });
+      expect(rows.find((r) => r.id === on.id)?.cellsEnabled).toBe(true);
+      expect(rows.find((r) => r.id === off.id)).toMatchObject({
+        name: "Off",
+        slug: off.slug,
+        isPersonal: false,
+        cellsEnabled: false,
+      });
+    });
   });
 });
