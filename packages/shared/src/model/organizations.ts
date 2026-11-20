@@ -259,7 +259,6 @@ export interface AdminOrganizationRow {
   slug: string;
   isPersonal: boolean;
   cellsEnabled: boolean;
-  createdAt: Date;
 }
 
 /** Every org with its cells gate, for the admin page, by name. */
@@ -275,7 +274,6 @@ export async function listOrganizationsForAdmin({
       slug: organization.slug,
       isPersonal: organization.isPersonal,
       cellsEnabled: organization.cellsEnabled,
-      createdAt: organization.createdAt,
     })
     .from(organization)
     .orderBy(organization.name, organization.id);

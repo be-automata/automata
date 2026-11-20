@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -10,54 +10,45 @@ import { DataTable } from "@/components/ui/data-table";
 import { Switch } from "@/components/ui/switch";
 import { usePageBreadcrumbs } from "@/hooks/usePageBreadcrumbs";
 import { setOrganizationCellsEnabledAction } from "@/server-actions/admin/organization";
+import type { AdminOrganizationRow } from "@terragon/shared/model/organizations";
 
-export interface AdminOrganizationCellsRow {
-  id: string;
-  name: string;
-  slug: string;
-  isPersonal: boolean;
-  cellsEnabled: boolean;
-}
-
-function CellsToggle({ org }: { org: AdminOrganizationCellsRow }) {
+function CellsToggle({ org }: { org: AdminOrganizationRow }) {
   const router = useRouter();
-  const [pending, setPending] = useState(false);
-  const [refreshing, startRefresh] = useTransition();
+  // One transition covers the save and the refresh: the switch stays disabled
+  // until the refreshed row arrives, so a second click never toggles from the
+  // stale value.
+  const [pending, startTransition] = useTransition();
 
-  const onChange = async (enabled: boolean) => {
-    setPending(true);
-    try {
-      const result = await setOrganizationCellsEnabledAction({
-        organizationId: org.id,
-        enabled,
-      });
-      if (!result.ok) {
-        toast.error(`Failed to update ${org.name}: ${result.error}`);
-        return;
+  const onChange = (enabled: boolean) =>
+    startTransition(async () => {
+      try {
+        const result = await setOrganizationCellsEnabledAction({
+          organizationId: org.id,
+          enabled,
+        });
+        if (!result.ok) {
+          toast.error(`Failed to update ${org.name}: ${result.error}`);
+          return;
+        }
+        toast.success(`Cells ${enabled ? "on" : "off"} for ${org.name}`);
+        router.refresh();
+      } catch (error) {
+        console.error(error);
+        toast.error(`Failed to update ${org.name}`);
       }
-      toast.success(`Cells ${enabled ? "on" : "off"} for ${org.name}`);
-      // Stay disabled until the refreshed row arrives, so a second click
-      // never toggles from the stale value.
-      startRefresh(() => router.refresh());
-    } catch (error) {
-      console.error(error);
-      toast.error(`Failed to update ${org.name}`);
-    } finally {
-      setPending(false);
-    }
-  };
+    });
 
   return (
     <Switch
       checked={org.cellsEnabled}
-      disabled={pending || refreshing}
-      onCheckedChange={(checked) => void onChange(checked)}
+      disabled={pending}
+      onCheckedChange={onChange}
       aria-label={`Cells for ${org.name}`}
     />
   );
 }
 
-const columns: ColumnDef<AdminOrganizationCellsRow>[] = [
+const columns: ColumnDef<AdminOrganizationRow>[] = [
   {
     accessorKey: "name",
     header: "Name",
@@ -90,7 +81,7 @@ const columns: ColumnDef<AdminOrganizationCellsRow>[] = [
 export function AdminOrganizationsCells({
   organizations,
 }: {
-  organizations: AdminOrganizationCellsRow[];
+  organizations: AdminOrganizationRow[];
 }) {
   usePageBreadcrumbs([
     { label: "Admin", href: "/internal/admin" },
