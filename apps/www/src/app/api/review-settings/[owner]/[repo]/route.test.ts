@@ -2,7 +2,10 @@ import { describe, it, vi, beforeEach, expect } from "vitest";
 import { NextRequest } from "next/server";
 import { PUT, DELETE } from "./route";
 import { egressPolicyFromRow } from "@/server-lib/egress/resolve-egress-policy";
-import { getTenantContextOrNull } from "@/lib/auth-server";
+import {
+  ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+  getTenantContextOrNull,
+} from "@/lib/auth-server";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import {
   upsertRepoReviewSetting,
@@ -16,7 +19,9 @@ import {
 vi.mock("@/lib/org-role", () => ({
   isOrgAdmin: vi.fn().mockResolvedValue(true),
 }));
-vi.mock("@/lib/auth-server", () => ({
+// Partial: the route reads ACTIVE_ORGANIZATION_CHANGED_MESSAGE for its 409.
+vi.mock("@/lib/auth-server", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   getTenantContextOrNull: vi.fn(),
 }));
 
@@ -848,6 +853,109 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo]", () => {
       expect(ok.status).toBe(200);
       expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
         expect.objectContaining({ patch: { egressPolicy: "domain" } }),
+      );
+    });
+  });
+
+  describe("explicit org (#728 AC-13)", () => {
+    function deleteReq(query: string) {
+      return new NextRequest(
+        `http://localhost/api/review-settings/acme/widgets${query}`,
+        { method: "DELETE" },
+      );
+    }
+
+    it("PUT: a body organizationId equal to the active org writes that org", async () => {
+      const res = await PUT(
+        putReq({ blockTolerance: "error", organizationId: ORG }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId: ORG,
+          patch: { blockTolerance: "error" },
+        }),
+      );
+    });
+
+    it("PUT: a body organizationId that differs from the active org is 409 active_org_changed, nothing read or written", async () => {
+      const res = await PUT(
+        putReq({ blockTolerance: "error", organizationId: "org_other" }),
+        { params },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "active_org_changed",
+        message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+      });
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+      expect(getRepoReviewSetting).not.toHaveBeenCalled();
+      expect(captureMock).not.toHaveBeenCalled();
+    });
+
+    it("PUT: the mismatch is refused before the body is validated", async () => {
+      const res = await PUT(
+        putReq({ blockTolerance: "nope", organizationId: "org_other" }),
+        { params },
+      );
+      expect(res.status).toBe(409);
+    });
+
+    it("PUT: a non-string or empty organizationId is 400", async () => {
+      for (const organizationId of [42, null, "", { id: ORG }]) {
+        const res = await PUT(
+          putReq({ blockTolerance: "error", organizationId }),
+          { params },
+        );
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: "organizationId must be a string",
+        });
+      }
+      expect(upsertRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("PUT: no organizationId keeps today's behaviour (the active org)", async () => {
+      const res = await PUT(putReq({ blockTolerance: "error" }), { params });
+      expect(res.status).toBe(200);
+      expect(upsertRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: ORG }),
+      );
+    });
+
+    it("DELETE: ?organizationId= equal to the active org clears that org", async () => {
+      const res = await DELETE(deleteReq(`?organizationId=${ORG}`), { params });
+      expect(res.status).toBe(200);
+      expect(removeRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: ORG }),
+      );
+    });
+
+    it("DELETE: a different ?organizationId= is 409 active_org_changed, nothing removed", async () => {
+      const res = await DELETE(deleteReq("?organizationId=org_other"), {
+        params,
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: "active_org_changed",
+        message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+      });
+      expect(removeRepoReviewSetting).not.toHaveBeenCalled();
+      expect(getRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("DELETE: an empty ?organizationId= is 400", async () => {
+      const res = await DELETE(deleteReq("?organizationId="), { params });
+      expect(res.status).toBe(400);
+      expect(removeRepoReviewSetting).not.toHaveBeenCalled();
+    });
+
+    it("DELETE: no ?organizationId= keeps today's behaviour (the active org)", async () => {
+      const res = await DELETE(deleteReq(""), { params });
+      expect(res.status).toBe(200);
+      expect(removeRepoReviewSetting).toHaveBeenCalledWith(
+        expect.objectContaining({ organizationId: ORG }),
       );
     });
   });

@@ -14,7 +14,11 @@ import {
   upsertRepoReviewSetting,
 } from "@terragon/shared/model/repo-review-settings";
 
-vi.mock("@/lib/auth-server", () => ({ getTenantContextOrNull: vi.fn() }));
+// Partial: the route reads ACTIVE_ORGANIZATION_CHANGED_MESSAGE for its 409.
+vi.mock("@/lib/auth-server", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getTenantContextOrNull: vi.fn(),
+}));
 vi.mock("@/lib/repo-admin", () => ({ checkRepoAdmin: vi.fn() }));
 
 const REPO = "acme/widgets";
@@ -277,6 +281,80 @@ describe("PUT/DELETE /api/review-settings/[owner]/[repo] — permissions + confl
         repoFullName: REPO,
       });
       expect(egressPolicyFromRow(clearedRow, "worker")).toBeNull();
+    });
+  });
+
+  describe("explicit org (#728 AC-13): the org-switch drift bug", () => {
+    // The motivating bug: a page loaded for org A, another tab switched the
+    // session to org B, and the save landed in B. The page names A now.
+    async function twoOrgsActiveB() {
+      userId = (await createTestUser({ db })).user.id;
+      const orgA = (await createTestOrganization({ db, userId, name: "Org A" }))
+        .organization.id;
+      const orgB = (await createTestOrganization({ db, userId, name: "Org B" }))
+        .organization.id;
+      vi.mocked(getTenantContextOrNull).mockResolvedValue({
+        userId,
+        organizationId: orgB,
+      });
+      for (const organizationId of [orgA, orgB]) {
+        await upsertRepoReviewSetting({
+          db,
+          organizationId,
+          repoFullName: REPO,
+          patch: {
+            supersedePolicy: "newest-wins",
+            egressPolicy: "domain",
+            egressAllowlist: ["registry.npmjs.org"],
+          },
+        });
+      }
+      const read = (organizationId: string) =>
+        getRepoReviewSetting({ db, organizationId, repoFullName: REPO });
+      return { orgA, orgB, read };
+    }
+
+    it("PUT naming org A while the session is on org B is 409 and neither row changes", async () => {
+      const { orgA, orgB, read } = await twoOrgsActiveB();
+      const [beforeA, beforeB] = [await read(orgA), await read(orgB)];
+      const res = await put({
+        organizationId: orgA,
+        supersedePolicy: "complete-run-discard",
+        egressPolicy: null,
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        "active_org_changed",
+      );
+      expect(await read(orgA)).toEqual(beforeA);
+      expect(await read(orgB)).toEqual(beforeB);
+    });
+
+    it("DELETE naming org A while the session is on org B is 409 and neither row changes", async () => {
+      const { orgA, orgB, read } = await twoOrgsActiveB();
+      const [beforeA, beforeB] = [await read(orgA), await read(orgB)];
+      const res = await DELETE(
+        new NextRequest(
+          `http://localhost/api/review-settings/acme/widgets?organizationId=${orgA}`,
+          { method: "DELETE" },
+        ),
+        { params },
+      );
+      expect(res.status).toBe(409);
+      expect(await read(orgA)).toEqual(beforeA);
+      expect(await read(orgB)).toEqual(beforeB);
+    });
+
+    it("PUT naming the active org writes only that org's row", async () => {
+      const { orgA, orgB, read } = await twoOrgsActiveB();
+      const beforeA = await read(orgA);
+      const res = await put({
+        organizationId: orgB,
+        supersedePolicy: "complete-run-discard",
+      });
+      expect(res.status).toBe(200);
+      expect((await read(orgB))?.supersedePolicy).toBe("complete-run-discard");
+      expect(await read(orgA)).toEqual(beforeA);
     });
   });
 });

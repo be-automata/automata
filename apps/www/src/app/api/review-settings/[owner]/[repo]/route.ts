@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import type { DB } from "@terragon/shared/db";
-import { getTenantContextOrNull } from "@/lib/auth-server";
+import {
+  ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+  getTenantContextOrNull,
+} from "@/lib/auth-server";
 import {
   upsertRepoReviewSetting,
   removeRepoReviewSetting,
@@ -29,8 +32,7 @@ import {
   type SelfHealField,
   type SelfHealFieldsPatch,
 } from "@terragon/shared/model/self-heal-settings";
-import { isOrgAdmin } from "@/lib/org-role";
-import { checkRepoAdmin } from "@/lib/repo-admin";
+import { checkRepoWriteAccess } from "@/lib/repo-write-access";
 import {
   BLOCK_TOLERANCES,
   isBlockTolerance,
@@ -52,10 +54,40 @@ function repoFromParams(owner: string, repo: string): string {
 }
 
 /**
+ * #728 (AC-13): the caller may name the org it means (`organizationId` in the
+ * PUT body, `?organizationId=` on DELETE). When it differs from the session's
+ * active org — another tab switched orgs — the request is refused before any
+ * read or write, so it can never land in the wrong org. Absent keeps today's
+ * behaviour (the OD-5 grace period). Returns a NextResponse to send, or null.
+ */
+function findOrgMismatchResponse(
+  requested: unknown,
+  activeOrganizationId: string,
+): NextResponse | null {
+  if (requested === undefined) return null;
+  if (typeof requested !== "string" || requested.length === 0) {
+    return NextResponse.json(
+      { error: "organizationId must be a string" },
+      { status: 400 },
+    );
+  }
+  if (requested !== activeOrganizationId) {
+    return NextResponse.json(
+      {
+        error: "active_org_changed",
+        message: ACTIVE_ORGANIZATION_CHANGED_MESSAGE,
+      },
+      { status: 409 },
+    );
+  }
+  return null;
+}
+
+/**
  * #125 C6 two-level permission for repo-level writes (all three settings of
- * the family, plus the phase 4 review-agent family): an ORG admin may write any repo's override; anyone else must
- * administer THAT repo on GitHub (caller's own token; fail-closed). Returns
- * a NextResponse to send, or null when allowed.
+ * the family, plus the phase 4 review-agent family), decided by
+ * {@link checkRepoWriteAccess} and rendered here as this route's human 403
+ * copy. Returns a NextResponse to send, or null when allowed.
  */
 async function requireRepoWriteAccess({
   userId,
@@ -66,10 +98,14 @@ async function requireRepoWriteAccess({
   organizationId: string;
   repoFullName: string;
 }): Promise<NextResponse | null> {
-  if (await isOrgAdmin({ db, organizationId, userId })) return null;
-  const repoCheck = await checkRepoAdmin({ userId, repoFullName });
-  if (repoCheck === "admin") return null;
-  if (repoCheck === "lookup-failed") {
+  const access = await checkRepoWriteAccess({
+    db,
+    userId,
+    organizationId,
+    repoFullName,
+  });
+  if (access === "allowed") return null;
+  if (access === "lookup_failed") {
     return NextResponse.json(
       {
         error:
@@ -111,12 +147,18 @@ export async function PUT(
     egressAllowlist?: unknown;
     cellEgressRegistries?: unknown;
     expectedUpdatedAt?: unknown;
+    organizationId?: unknown;
   } & Partial<Record<ReviewAgentField | SelfHealField, unknown>>;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });
   }
+  const orgMismatch = findOrgMismatchResponse(
+    body.organizationId,
+    ctx.organizationId,
+  );
+  if (orgMismatch) return orgMismatch;
 
   const patch: {
     blockTolerance?: string;
@@ -308,6 +350,14 @@ export async function DELETE(
       { status: 400 },
     );
   }
+  const searchParams = request.nextUrl.searchParams;
+  const orgMismatch = findOrgMismatchResponse(
+    searchParams.has("organizationId")
+      ? searchParams.get("organizationId")
+      : undefined,
+    ctx.organizationId,
+  );
+  if (orgMismatch) return orgMismatch;
 
   const { owner, repo } = await params;
   const repoFullName = repoFromParams(owner, repo);
@@ -320,7 +370,7 @@ export async function DELETE(
   if (denied) return denied;
 
   // Optional CAS on the reset path too (?expectedUpdatedAt=<iso>).
-  const expectedRaw = request.nextUrl.searchParams.get("expectedUpdatedAt");
+  const expectedRaw = searchParams.get("expectedUpdatedAt");
   const expectedUpdatedAt = expectedRaw ? new Date(expectedRaw) : undefined;
   if (expectedUpdatedAt && Number.isNaN(expectedUpdatedAt.getTime())) {
     return NextResponse.json(
