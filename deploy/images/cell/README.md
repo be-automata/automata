@@ -86,7 +86,9 @@ not `/etc/ssl`, `/etc/ssl/private`, `/etc/ca-certificates*` or `/usr/share/ca-ce
 what `update-ca-certificates` writes (the copied CA, the `<name>.pem` links, the rebuilt
 `ca-certificates.crt` and the `<hash>.0` links); it needs no ownership of the root-owned files in
 them, because replacing an entry needs only write on the directory. `verify.sh` checks the
-ownership (`ca-store-owner`) and the whole path with a throwaway CA: a Dart fetch fails before the
+ownership (`ca-store-owner`); that no `update.d` hook or store subdirectory (a JDK's
+`java/cacerts`) has appeared (`ca-store-no-hooks`), because a failing hook only prints `E:` and the
+install still exits 0; and the whole path with a throwaway CA: a Dart fetch fails before the
 install (`dart-trust-control`), the bootstrap sequence exits 0 as uid 10001 (`dart-trust-install`),
 the fetch then passes (`dart-trust`), and after a rotation to a new CA with the same subject and file
 name the new generation passes and the old one is refused (`dart-trust-rotation`). A stock image
@@ -109,7 +111,7 @@ Two settings stay, for clients that do not read the system store:
 | Node (daemon, Claude) | `NODE_EXTRA_CA_CERTS`, the MITM CA under `/opt/opensandbox`                                      |
 | git                   | `GIT_SSL_CAINFO`, the merged bundle                                                              |
 | pip, requests         | `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, the merged bundle                                        |
-| curl, OpenSSL tools   | the system store (`/etc/ssl/certs`)                                                              |
+| curl, `gh`, OpenSSL   | `SSL_CERT_FILE` (the merged bundle) once bootstrap sets it, else the system store                |
 | Dart, Flutter         | the system store only; `DART_VM_OPTIONS` is ignored                                              |
 | Java                  | `cacerts`; there is no JDK in the image today. A JDK added later needs the same treatment (OD-2) |
 

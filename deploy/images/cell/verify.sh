@@ -147,6 +147,13 @@ assert ca-store-owner "/etc/ssl/certs and /usr/local/share/ca-certificates are a
   bash -c "$(declare -f own); own /etc/ssl/certs && own /usr/local/share/ca-certificates"
 assert ca-store-rest-root "/etc/ssl, /etc/ssl/private, /usr/share/ca-certificates stay root" \
   bash -c 'for d in /etc/ssl /etc/ssl/private /usr/share/ca-certificates; do test "$(stat -c %U "$d")" = root || exit 1; done'
+# update-ca-certificates runs /etc/ca-certificates/update.d hooks (a JDK's
+# ca-certificates-java writes /etc/ssl/certs/java/cacerts) and only prints
+# "E: ..." when one fails, so a hook or a store subdirectory brought in by a
+# base bump would leave that client untrusted with the install still exiting 0.
+# Both must stay absent until that client gets the same grant (OD-2).
+assert ca-store-no-hooks "no update.d hook and no subdirectory under /etc/ssl/certs" \
+  bash -c 'test -z "$(ls -A /etc/ca-certificates/update.d 2>/dev/null)" && test -z "$(find /etc/ssl/certs -mindepth 1 -type d)"'
 
 DART=/opt/flutter/bin/dart
 cad="$(mktemp -d)"
@@ -199,16 +206,22 @@ install_ca() { # as bootstrap.sh does (_sudo falls back to a direct call)
 
 if mkca g1 >/dev/null 2>&1 && mkca g2 >/dev/null 2>&1 && serve g1; then
   dart_fails dart-trust-control "a Dart fetch of an unknown CA fails CERTIFICATE_VERIFY_FAILED"
-  if install_ca g1 >"$cad/install.txt" 2>&1; then
+  if install_ca g1 >"$cad/install.txt" 2>&1 && ! grep -q '^E: ' "$cad/install.txt"; then
     ok dart-trust-install "mkdir, cp and update-ca-certificates exit 0 as uid 10001"
     dart_passes dart-trust "a Dart fetch trusts the installed CA"
     unserve
-    if install_ca g2 >"$cad/install2.txt" 2>&1 && serve g2; then
+    if ! install_ca g2 >"$cad/install2.txt" 2>&1 || grep -q '^E: ' "$cad/install2.txt"; then
+      bad dart-trust-rotation "the rotation install failed: $(tail -n 3 "$cad/install2.txt" | tr '\n' ' ')"
+    elif ! serve g2; then
+      bad dart-trust-rotation "s_server did not start for the new generation"
+    else
       dart_passes dart-trust-rotation "after a rotation the new generation is trusted"
       unserve
-      serve g1 && dart_fails dart-trust-rotation-old "after a rotation the old generation is refused"
-    else
-      bad dart-trust-rotation "the rotation install failed: $(tail -n 3 "$cad/install2.txt" | tr '\n' ' ')"
+      if serve g1; then
+        dart_fails dart-trust-rotation-old "after a rotation the old generation is refused"
+      else
+        bad dart-trust-rotation-old "s_server did not start for the old generation"
+      fi
     fi
   else
     bad dart-trust-install "update-ca-certificates failed: $(tail -n 3 "$cad/install.txt" | tr '\n' ' ')"
