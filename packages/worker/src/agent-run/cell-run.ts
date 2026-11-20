@@ -6,7 +6,7 @@ import {
   type CellCreatePlan,
   type ICellProvider,
 } from "@terragon/types/cell";
-import { redactSecrets } from "@terragon/utils/redact";
+import { createValueRedactor } from "@terragon/utils/redact";
 
 import {
   claimAbnormalEnd,
@@ -25,6 +25,7 @@ import {
   cellEntrypoint,
   cellGitConfigArgv,
 } from "./cell-image";
+import { cellRepoEnv, type CellRepoEnv } from "./cell-repo-env";
 import { teardownCellRun } from "./cell-teardown";
 import {
   CellPlanRefusedError,
@@ -205,6 +206,10 @@ interface CellRunState {
   abnormal: AbnormalEndState;
   provider: ICellProvider | null;
   cellId: string | null;
+  /** The owner's repo env, filtered for a cell (#706). Its values are never logged. */
+  repoEnv: CellRepoEnv;
+  /** The 4+ char repo env value scrub for exec text, run on the whole text before a cut. */
+  scrub: (text: string) => string;
   st: {
     fenced: boolean;
     stopRequested: boolean;
@@ -227,7 +232,15 @@ async function runCell(
 ): Promise<AgentRunOutput> {
   const { input, ctx, config, wwwOpts, runKey, abnormal, cellConfig } = args;
   const runSignal = ctx.abortController?.signal;
-  const step = (msg: string) => ctx.log(`[agent-run ${input.threadId}] ${msg}`);
+  // The repo env value scrub (#706), the dropped values too (a dropped value
+  // can still be echoed). Exec text, which can echo anything, is scrubbed from
+  // 4 chars; every cell log line from 8, so a common short value (`agent`,
+  // `true`) cannot blank the platform's own words in every line.
+  const repoValues = Object.values(args.secrets.repoEnv ?? {});
+  const scrub = createValueRedactor(repoValues);
+  const scrubLine = createValueRedactor(repoValues, 8);
+  const step = (msg: string) =>
+    ctx.log(scrubLine(`[agent-run ${input.threadId}] ${msg}`));
   const ids = { threadId: input.threadId, threadChatId: input.threadChatId };
 
   // A poll slower than a quarter of the stale window could let a healthy
@@ -317,6 +330,8 @@ async function runCell(
     abnormal,
     provider: null,
     cellId: null,
+    repoEnv: cellRepoEnv(args.secrets.repoEnv),
+    scrub,
     st: {
       fenced: false,
       stopRequested: false,
@@ -429,6 +444,14 @@ async function runCell(
       step(
         `next-message: got message (agent=${pulled.agent}, model=${pulled.model})`,
       );
+      // The settings `env` block is read by the Claude CLI only: say so
+      // rather than drop the repo env silently for another agent.
+      if (
+        pulled.agent !== "claudeCode" &&
+        Object.keys(r.repoEnv.env).length > 0
+      ) {
+        step(`cell: repo env not delivered (agent=${pulled.agent})`);
+      }
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
       await putFile(
@@ -683,7 +706,7 @@ async function execOk(
     // The message write's stderr is never logged: it may echo the staged message.
     r.step(
       logStderr
-        ? `cell setup: ${label} failed (exit ${out.exitCode}): ${redactSecrets(out.stderr).slice(-EXEC_STDERR_TAIL)}`
+        ? `cell setup: ${label} failed (exit ${out.exitCode}): ${r.scrub(out.stderr).slice(-EXEC_STDERR_TAIL)}`
         : `cell setup: ${label} failed (exit ${out.exitCode})`,
     );
     throw new Error(`cell setup: ${label} failed (exit ${out.exitCode})`);
@@ -744,11 +767,26 @@ async function bootstrap(r: CellRunState): Promise<void> {
   } catch {
     // Absent or unparseable: the hooks are simply not merged (as on the box).
   }
+  // The owner's repo env rides in the settings `env` block (#706, OD-1): the
+  // CLI applies it to the agent's process env. Names only in the log.
+  const { env: repoEnv, dropped, invalidNames } = r.repoEnv;
+  const delivered = Object.keys(repoEnv).length;
+  if (dropped.length > 0 || invalidNames > 0) {
+    r.step(
+      `cell: repo env names not set (reserved): ${dropped.join(", ") || "none"}` +
+        (invalidNames > 0 ? ` (+${invalidNames} not an env name)` : ""),
+    );
+  }
+  if (delivered > 0) r.step(`cell: repo env: ${delivered} names`);
   await putFile(
     r,
     `${HOME_CLAUDE_DIR}/settings.json`,
     JSON.stringify(
-      composeContainerSettings(containerLanePolicy("task"), batteries),
+      composeContainerSettings(
+        containerLanePolicy("task"),
+        batteries,
+        delivered > 0 ? repoEnv : null,
+      ),
       null,
       2,
     ),

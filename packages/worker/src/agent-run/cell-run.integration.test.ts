@@ -23,7 +23,10 @@ import {
   CELL_WRITE_MESSAGE_SH,
   cellEntrypoint,
 } from "./cell-image";
+import { cellRepoEnv } from "./cell-repo-env";
 import { teardownCellRun } from "./cell-teardown";
+import { containerLanePolicy } from "./container-argv";
+import { composeContainerSettings } from "./container-policy";
 
 /**
  * IT-E1 (#656 PR-E): the cell executor's pieces against a REAL OpenSandbox
@@ -278,6 +281,70 @@ describe.skipIf(!IT || IMAGE === "")(
         expect(inspect.stdout).not.toContain(CANARY);
         const logs = await dind(["sh", "-c", `docker logs ${id} 2>&1 || true`]);
         expect(logs.stdout).not.toContain(CANARY);
+      }
+    });
+
+    // card: protects=AC 2 of #706: a repo env value in a settings env block built by the same helpers cell-run.ts uses (cellRepoEnv, composeContainerSettings) and copied in is in that file and nowhere in docker inspect or the logs of the server, the egress sidecar or the cell; fails_when=the file lacks it or any inspect or log holds it; no_claim=bootstrap's own call order (cell-run.test.ts) or the CLI applying the block (UAT)
+    it("(e) a repo env value is in the agent's settings only, never in inspect or logs (#706)", async () => {
+      const value = `repo-env-canary-${randomBytes(8).toString("hex")}`;
+      const { env } = cellRepoEnv({ FOO_TOKEN: value });
+      const path = "/home/agent/.claude/settings.json";
+      await provider.exec(cellId, [
+        "/bin/mkdir",
+        "-p",
+        "-m",
+        "700",
+        "/home/agent/.claude",
+      ]);
+      await provider.copyIn(
+        cellId,
+        path,
+        new TextEncoder().encode(
+          JSON.stringify(
+            composeContainerSettings(containerLanePolicy("task"), null, env),
+          ),
+        ),
+        { mode: 600, owner: "agent", group: "agent" },
+      );
+      const back = JSON.parse(
+        new TextDecoder().decode(await provider.copyOut(cellId, path)),
+      ) as { env?: Record<string, string> };
+      expect(back.env?.FOO_TOKEN).toBe(value);
+      const stat = await provider.exec(cellId, [
+        "/usr/bin/stat",
+        "-c",
+        "%a %U",
+        path,
+      ]);
+      expect(stat.stdout.trim()).toBe("600 agent");
+      // execd's own records in the guest (a log file, a process env): the same
+      // split-canary scan as (a), with the settings file itself left out. No
+      // CLI runs here, so no process may hold it.
+      const half = Math.floor(value.length / 2);
+      const guest = await provider.exec(
+        cellId,
+        [
+          "/bin/bash",
+          "-c",
+          `c="$1$2"; find / -xdev \\( -path /proc -o -path /sys \\) -prune -o -type f -newer /proc/1 ! -path "$3" -print0 2>/dev/null | xargs -0 -r grep -lF -- "$c" 2>/dev/null; for f in /proc/[0-9]*/environ /proc/[0-9]*/cmdline; do grep -aqF -- "$c" "$f" 2>/dev/null && echo "$f"; done; true`,
+          "scan",
+          value.slice(0, half),
+          value.slice(half),
+          path,
+        ],
+        { timeoutMs: 5 * 60_000 },
+      );
+      expect(guest.stdout).toBe("");
+      const ids = (await dind(["docker", "ps", "-aq"])).stdout
+        .split("\n")
+        .filter(Boolean);
+      // The server, the egress sidecar and the cell, at least.
+      expect(ids.length).toBeGreaterThanOrEqual(3);
+      for (const id of ids) {
+        const inspect = await dind(["docker", "inspect", id]);
+        expect(inspect.stdout).not.toContain(value);
+        const logs = await dind(["sh", "-c", `docker logs ${id} 2>&1 || true`]);
+        expect(logs.stdout).not.toContain(value);
       }
     });
 
