@@ -19,14 +19,6 @@ import { isReservedRepoEnvKey } from "./daemon-env";
  * (`CELL_OWNER_OVERRIDABLE`). Pure.
  */
 
-/** Set by the daemon on the agent (daemon.ts childEnv, claude-adapter.ts bashTimeoutEnv). */
-const CELL_RESERVED_KEYS = new Set([
-  "DAEMON_TOKEN",
-  "BASH_MAX_TIMEOUT_MS",
-  "BASH_DEFAULT_TIMEOUT_MS",
-]);
-const CELL_RESERVED_PREFIXES = ["OPENSANDBOX_"];
-
 /** Names in `CELL_DAEMON_ENV` an owner may still set: build-tool settings with no platform role. */
 export const CELL_OWNER_OVERRIDABLE: readonly string[] = [
   "CI",
@@ -37,20 +29,23 @@ export const CELL_OWNER_OVERRIDABLE: readonly string[] = [
   "DART_SUPPRESS_ANALYTICS",
 ];
 
-const CELL_RUNTIME_KEYS = new Set(
-  CELL_DAEMON_ENV.filter((n) => !CELL_OWNER_OVERRIDABLE.includes(n)).map((n) =>
-    n.toUpperCase(),
+/** Upper-cased: the daemon's own agent env (daemon.ts childEnv, claude-adapter.ts bashTimeoutEnv) and the entry's. */
+const CELL_RESERVED_KEYS = new Set([
+  "DAEMON_TOKEN",
+  "BASH_MAX_TIMEOUT_MS",
+  "BASH_DEFAULT_TIMEOUT_MS",
+  ...CELL_DAEMON_ENV.filter((n) => !CELL_OWNER_OVERRIDABLE.includes(n)).map(
+    (n) => n.toUpperCase(),
   ),
-);
+]);
+const CELL_RESERVED_PREFIXES = ["OPENSANDBOX_"];
 
-/** Case-insensitive, as the box. A name that is not an identifier is reserved too. */
+/** Case-insensitive, as the box. Name shape is checked by `cellRepoEnv`. */
 export function isReservedCellRepoEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
   return (
-    !ENV_NAME.test(key) ||
     isReservedRepoEnvKey(key) ||
     CELL_RESERVED_KEYS.has(upper) ||
-    CELL_RUNTIME_KEYS.has(upper) ||
     CELL_RESERVED_PREFIXES.some((prefix) => upper.startsWith(prefix))
   );
 }
