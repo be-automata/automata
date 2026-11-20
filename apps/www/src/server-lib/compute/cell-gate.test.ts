@@ -170,22 +170,17 @@ describe("cellsEnabledForRun", () => {
 });
 
 describe("cellAgentSupported (#718)", () => {
-  it("is true only for claudeCode", () => {
-    expect(cellAgentSupported("claudeCode")).toBe(true);
-    for (const agent of [
-      "codex",
-      "gemini",
-      "amp",
-      "opencode",
-      "",
-      "ClaudeCode",
-    ]) {
-      expect(cellAgentSupported(agent)).toBe(false);
-    }
-  });
-
-  it("fails closed on null and undefined", () => {
-    expect(cellAgentSupported(null)).toBe(false);
-    expect(cellAgentSupported(undefined)).toBe(false);
+  it.each([
+    ["claudeCode", true],
+    ["codex", false],
+    ["gemini", false],
+    ["amp", false],
+    ["opencode", false],
+    ["", false],
+    ["ClaudeCode", false],
+    [null, false],
+    [undefined, false],
+  ] as const)("%s -> %s (null and undefined fail closed)", (agent, ok) => {
+    expect(cellAgentSupported(agent)).toBe(ok);
   });
 });

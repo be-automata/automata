@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { db } from "@/lib/db";
 import { env } from "@terragon/env/apps-www";
@@ -13,7 +21,10 @@ import {
   insertProfileEvidenceRows,
   upsertExecutionProfile,
 } from "@terragon/shared/model/execution-profiles";
-import { setOrganizationCellsEnabled } from "@terragon/shared/model/organizations";
+import {
+  getOrganizationCellsEnabled,
+  setOrganizationCellsEnabled,
+} from "@terragon/shared/model/organizations";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
@@ -51,10 +62,9 @@ vi.mock("@/server-lib/compute/cell-evidence-status", async (importOriginal) => {
 
 // Evidence rows cannot be deleted and sibling test files share the database,
 // so what dispatch reads is steered here: the real rows, none, or the real
-// rows with a different expiry.
-const evidenceMode = vi.hoisted(() => ({
-  mode: "real" as "real" | "none" | "expired" | "expiring",
-}));
+// rows with their expiry moved to `shiftDays` from now.
+type EvidenceMode = "real" | "none" | { shiftDays: number };
+const evidence = vi.hoisted(() => ({ mode: "real" as EvidenceMode }));
 vi.mock("@terragon/shared/model/execution-profiles", async (importOriginal) => {
   const actual =
     await importOriginal<
@@ -65,30 +75,30 @@ vi.mock("@terragon/shared/model/execution-profiles", async (importOriginal) => {
     getCurrentProfileEvidence: async (
       args: Parameters<typeof actual.getCurrentProfileEvidence>[0],
     ) => {
+      const mode = evidence.mode;
+      if (mode === "none") return [];
       const rows = await actual.getCurrentProfileEvidence(args);
-      const DAY = 86_400_000;
-      switch (evidenceMode.mode) {
-        case "none":
-          return [];
-        case "expired":
-          return rows.map((r) => ({
-            ...r,
-            expiresAt: new Date(Date.now() - DAY),
-          }));
-        case "expiring":
-          return rows.map((r) => ({
-            ...r,
-            expiresAt: new Date(Date.now() + 2 * DAY),
-          }));
-        default:
-          return rows;
-      }
+      if (mode === "real") return rows;
+      const expiresAt = new Date(Date.now() + mode.shiftDays * 86_400_000);
+      return rows.map((r) => ({ ...r, expiresAt }));
     },
   };
 });
 
 const OAUTH_SENTINEL = "oauth-token-sentinel-4d2c81";
 const PROFILE_ID = "opensandbox/runc";
+
+// Pass-through spy: the real read runs, and a test can assert it was skipped.
+vi.mock("@terragon/shared/model/organizations", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@terragon/shared/model/organizations")
+    >();
+  return {
+    ...actual,
+    getOrganizationCellsEnabled: vi.fn(actual.getOrganizationCellsEnabled),
+  };
+});
 
 vi.mock("@terragon/shared/model/feature-flags", async (importOriginal) => ({
   ...(await importOriginal<
@@ -120,10 +130,8 @@ describe("dispatchAgentRun: cell marker", () => {
     process.env.NEXT_PUBLIC_APP_URL = appUrl;
   });
 
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    evidenceMode.mode = "real";
-    vi.mocked(getClaudeOauthAccessToken).mockResolvedValue(OAUTH_SENTINEL);
+  // Once: evidence rows cannot be deleted, and every test reads the same ones.
+  beforeAll(async () => {
     await upsertExecutionProfile({
       db,
       id: PROFILE_ID,
@@ -143,6 +151,12 @@ describe("dispatchAgentRun: cell marker", () => {
         required: RUNC_REQUIRED_CHECKS,
       }),
     });
+  });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    evidence.mode = "real";
+    vi.mocked(getClaudeOauthAccessToken).mockResolvedValue(OAUTH_SENTINEL);
     // The cell broker host is a public hostname (cell-gate.ts); a cell
     // egress set never compiles for a localhost one.
     process.env.NEXT_PUBLIC_APP_URL = "https://app.example.test";
@@ -157,10 +171,10 @@ describe("dispatchAgentRun: cell marker", () => {
     });
   });
 
-  /** `chat` defaults to a claudeCode chat; pass `{}` to omit the agent. */
+  /** `chat` defaults to a claudeCode chat. */
   async function dispatchPlain(
     overrides: { organizationId?: string } = {},
-    chat: { agent?: string | null } = { agent: "claudeCode" },
+    chat: { agent: string | null | undefined } = { agent: "claudeCode" },
   ) {
     const t = await createTestThread({
       db,
@@ -176,7 +190,7 @@ describe("dispatchAgentRun: cell marker", () => {
         threadChatId: t.threadChatId,
         repoFullName: "be-automata/automata",
         branch: "main",
-        ...chat,
+        agent: chat.agent,
       });
       return triggerBody(mock).input;
     } finally {
@@ -312,7 +326,7 @@ describe("dispatchAgentRun: cell marker", () => {
     const logged = () =>
       JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
 
-    it.each([["codex"], ["gemini"], [null]])(
+    it.each([["codex"], ["gemini"], [null], [undefined]])(
       "agent %s is not marked and logs the code only",
       async (agent) => {
         const input = await dispatchPlain({ organizationId: orgId }, { agent });
@@ -320,11 +334,6 @@ describe("dispatchAgentRun: cell marker", () => {
         expect(logged()).toContain("agent_not_supported");
       },
     );
-
-    it("an omitted agent fails closed", async () => {
-      const input = await dispatchPlain({ organizationId: orgId }, {});
-      expect(input).not.toHaveProperty("cell");
-    });
 
     it("an unknown profile is not marked", async () => {
       vi.mocked(readCellEvidenceStatus).mockResolvedValueOnce({
@@ -337,13 +346,13 @@ describe("dispatchAgentRun: cell marker", () => {
       expect(logged()).toContain("unknown_profile");
     });
 
-    it.each([
-      ["none", "evidence_missing"],
-      ["expired", "evidence_expired"],
-    ] as const)(
+    it.each<[string, EvidenceMode, string]>([
+      ["no", "none", "evidence_missing"],
+      ["expired", { shiftDays: -1 }, "evidence_expired"],
+    ])(
       "%s evidence is not marked (reason %s, no secrets)",
-      async (mode, reason) => {
-        evidenceMode.mode = mode;
+      async (_label, mode, reason) => {
+        evidence.mode = mode;
         const input = await dispatchPlain({ organizationId: orgId });
         expect(input).not.toHaveProperty("cell");
         expect(logged()).toContain("egress_not_enforced");
@@ -364,7 +373,7 @@ describe("dispatchAgentRun: cell marker", () => {
     });
 
     it("expiring evidence is still marked", async () => {
-      evidenceMode.mode = "expiring";
+      evidence.mode = { shiftDays: 2 };
       const input = await dispatchPlain({ organizationId: orgId });
       expect(input.cell).toBe("opensandbox");
     });
@@ -397,35 +406,52 @@ describe("dispatchAgentRun: cell marker", () => {
       );
     });
 
-    it("the checks short-circuit: flag off reads no evidence and no credential", async () => {
-      vi.mocked(getFeatureFlagForUser).mockResolvedValue(false);
-      await dispatchPlain({ organizationId: orgId });
-      expect(readCellEvidenceStatus).not.toHaveBeenCalled();
-      expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
-    });
+    it.each<[string, () => Promise<void>, string, number]>([
+      [
+        "flag off",
+        async () => {
+          vi.mocked(getFeatureFlagForUser).mockResolvedValue(false);
+        },
+        "claudeCode",
+        0,
+      ],
+      [
+        "refused egress",
+        async () => {
+          await upsertRepoReviewSetting({
+            db,
+            organizationId: orgId,
+            repoFullName: "be-automata/automata",
+            patch: { egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5"] },
+          });
+        },
+        "claudeCode",
+        0,
+      ],
+      ["a wrong agent", async () => undefined, "codex", 0],
+      [
+        "refused evidence",
+        async () => {
+          evidence.mode = { shiftDays: -1 };
+        },
+        "claudeCode",
+        1,
+      ],
+    ])(
+      "the checks short-circuit: %s never reaches the credential lookup",
+      async (_label, arrange, agent, evidenceReads) => {
+        await arrange();
+        await dispatchPlain({ organizationId: orgId }, { agent });
+        expect(readCellEvidenceStatus).toHaveBeenCalledTimes(evidenceReads);
+        expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
+      },
+    );
 
-    it("the checks short-circuit: refused egress reads no evidence and no credential", async () => {
-      await upsertRepoReviewSetting({
-        db,
-        organizationId: orgId,
-        repoFullName: "be-automata/automata",
-        patch: { egressPolicy: "ip_port", egressAllowlist: ["10.0.0.5"] },
-      });
-      await dispatchPlain({ organizationId: orgId });
-      expect(readCellEvidenceStatus).not.toHaveBeenCalled();
-      expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
-    });
-
-    it("the checks short-circuit: a wrong agent reads no evidence and no credential", async () => {
+    it("the agent check refuses before any DB read", async () => {
       await dispatchPlain({ organizationId: orgId }, { agent: "codex" });
+      expect(getOrganizationCellsEnabled).not.toHaveBeenCalled();
+      expect(getFeatureFlagForUser).not.toHaveBeenCalled();
       expect(readCellEvidenceStatus).not.toHaveBeenCalled();
-      expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
-    });
-
-    it("the checks short-circuit: refused evidence reads no credential", async () => {
-      evidenceMode.mode = "expired";
-      await dispatchPlain({ organizationId: orgId });
-      expect(readCellEvidenceStatus).toHaveBeenCalledTimes(1);
       expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
     });
   });
@@ -451,6 +477,7 @@ describe("dispatchAgentRun: cell marker", () => {
         threadChatId: t.threadChatId,
         repoFullName: "be-automata/automata",
         branch: "feature-marker",
+        agent: "claudeCode",
       });
       expect(triggerBody(mock).input).not.toHaveProperty("cell");
     } finally {

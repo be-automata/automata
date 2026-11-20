@@ -97,6 +97,7 @@ describe("dispatch golden (payload contract)", () => {
     vi.stubGlobal("fetch", mock);
     try {
       await dispatchAgentRun({
+        agent: "claudeCode",
         userId: user.id,
         threadId: args.threadId,
         threadChatId: args.threadChatId,

@@ -33,9 +33,9 @@ import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
 import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
+import { cellEligibilityAtDispatch } from "@/server-lib/compute/cell-eligibility";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
-  RepoReviewSetting,
   ThreadSourceMetadata,
   ThreadTrustContext,
 } from "@terragon/shared/db/types";
@@ -806,157 +806,6 @@ function resolvePlaneKey(): PlanePublicKey {
 }
 
 /**
- * OpenSandbox is configured, the run's org has cells on and the
- * `opensandboxCells` flag is on for the user (#708). A lookup failure means
- * "not eligible" (logged without values): the cell marker must never fail a
- * dispatch.
- */
-async function cellEligibleForRun(
-  userId: string,
-  organizationId: string,
-): Promise<boolean> {
-  try {
-    const { cellsEnabledForRun } = await import(
-      "@/server-lib/compute/cell-gate"
-    );
-    return await cellsEnabledForRun({ db, userId, organizationId });
-  } catch (error) {
-    console.warn("[hatchet] cell eligibility lookup failed (not eligible)", {
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
- * #705: the repo's cell egress compiles (the same pure check cell-plan runs).
- * A refusal or a failure means "not eligible" (logged by code only): the cell
- * marker must never fail a dispatch.
- */
-async function cellEgressCompiles(
-  repoFullName: string,
-  row: RepoReviewSetting | undefined,
-): Promise<boolean> {
-  try {
-    const [{ cellBrokerHost }, { planCellEgressForRepo }] = await Promise.all([
-      import("@/server-lib/compute/cell-gate"),
-      import("@terragon/shared/model/cell-egress-catalog"),
-    ]);
-    const plan = planCellEgressForRepo({
-      repoFullName,
-      row,
-      brokerHost: cellBrokerHost(),
-    });
-    if (!plan.ok) {
-      console.log("[hatchet] cell egress refused (run stays on the box)", {
-        code: plan.code,
-        reason: plan.reason,
-      });
-    }
-    return plan.ok;
-  } catch (error) {
-    console.warn("[hatchet] cell egress check failed (not eligible)", {
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
- * #718: the chat's agent is one a cell can run. The same predicate cell-plan
- * uses; an absent agent (a caller that did not pass it) is not eligible.
- */
-async function cellAgentEligible(
-  agent: string | null | undefined,
-): Promise<boolean> {
-  try {
-    const { cellAgentSupported } = await import(
-      "@/server-lib/compute/cell-gate"
-    );
-    if (cellAgentSupported(agent)) return true;
-    console.log("[hatchet] cell agent refused (run stays on the box)", {
-      code: "agent_not_supported",
-    });
-    return false;
-  } catch (error) {
-    console.warn("[hatchet] cell agent check failed (not eligible)", {
-      code: "agent_check_failed",
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
- * #718: the `opensandbox/runc` profile and its evidence pass the same guard
- * cell-plan runs (`readCellEvidenceStatus`); only `ok` and `expiring` are
- * eligible. A refusal or a failure means "not eligible" (logged by code, plus
- * the guard's reason).
- */
-async function cellEvidenceEnforced(): Promise<boolean> {
-  try {
-    const { readCellEvidenceStatus } = await import(
-      "@/server-lib/compute/cell-evidence-status"
-    );
-    const status = await readCellEvidenceStatus({
-      db,
-      now: new Date(),
-      configured: true,
-    });
-    if (status.status === "ok" || status.status === "expiring") return true;
-    // cell-plan's own codes: `unknown_profile` with no row, else the guard's
-    // reason under `egress_not_enforced`.
-    const reason = status.status === "refused" ? status.reason : status.status;
-    console.log("[hatchet] cell evidence refused (run stays on the box)", {
-      code:
-        reason === "unknown_profile"
-          ? "unknown_profile"
-          : "egress_not_enforced",
-      reason,
-    });
-    return false;
-  } catch (error) {
-    console.warn("[hatchet] cell evidence check failed (not eligible)", {
-      code: "evidence_check_failed",
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
- * #718: the user has a Claude OAuth credential, the check cell-plan makes
- * (`no_model_credential`). Only `!== null` is read: the value is a live
- * credential and is never held, logged or put in the input. A failed lookup
- * (it can refresh the token over the network) means "not eligible".
- */
-async function cellModelCredentialPresent(
-  userId: string,
-  organizationId: string,
-): Promise<boolean> {
-  try {
-    const { getClaudeOauthAccessToken } = await import(
-      "@/agent/msg/claudeCredentials"
-    );
-    if (
-      (await getClaudeOauthAccessToken({ userId, organizationId })) !== null
-    ) {
-      return true;
-    }
-    console.log("[hatchet] cell credential refused (run stays on the box)", {
-      code: "no_model_credential",
-    });
-    return false;
-  } catch (error) {
-    console.warn("[hatchet] cell credential check failed (not eligible)", {
-      code: "credential_lookup_failed",
-      error: error instanceof Error ? error.name : "unknown",
-    });
-    return false;
-  }
-}
-
-/**
  * #380: the one place a secret meets the wire. Every run secret —
  * installationToken, githubReadToken, daemonToken, the owner's repoEnv and the
  * self-heal token — is sealed to the plane key (AAD = SHA-256 of the whole
@@ -1014,9 +863,9 @@ export async function dispatchAgentRun({
   branch: string;
   /**
    * #718: the chat's agent (`threadChat.agent`). Dispatch loads no thread-chat
-   * columns, so the caller passes it; absent means a cell run is never marked.
+   * columns, so the caller passes it; null or undefined is never marked.
    */
-  agent?: string | null;
+  agent: string | null | undefined;
   /**
    * #127: the originating webhook's `X-GitHub-Delivery` id, when this dispatch
    * descends from a GitHub webhook (plumbed webhook → automation → thread →
@@ -1356,14 +1205,19 @@ export async function dispatchAgentRun({
     // (OD-1) or one the cell cannot express (a wildcard, a non-443 port, over
     // the cap) is never marked and stays on the box; cell-plan refuses the
     // same sets as a backstop.
+    // #718: and only for a cell agent, enforced evidence and a Claude OAuth
+    // credential (cell-eligibility.ts).
     const cellMarker =
       isPlainTaskRun &&
       thread?.organizationId &&
-      (await cellEligibleForRun(userId, thread.organizationId)) &&
-      (await cellEgressCompiles(repoFullName, orgSettings?.rows.repo)) &&
-      (await cellAgentEligible(agent)) &&
-      (await cellEvidenceEnforced()) &&
-      (await cellModelCredentialPresent(userId, thread.organizationId))
+      (await cellEligibilityAtDispatch({
+        db,
+        userId,
+        organizationId: thread.organizationId,
+        repoFullName,
+        row: orgSettings?.rows.repo,
+        agent,
+      }))
         ? ({ cell: "opensandbox" } as const)
         : {};
     const input: AgentRunInput = {

@@ -1,5 +1,9 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
-import type { CellCreatePlan } from "@terragon/types/cell";
+import {
+  isCellEgressReason,
+  type CellCreatePlan,
+  type CellEgressGuardReason,
+} from "@terragon/types/cell";
 
 import { abortableSleep } from "./abort-sleep";
 import {
@@ -29,43 +33,24 @@ const MAX_ATTEMPT = 1_000;
 export type CellPlanResult =
   | { ok: true; attempt: number; plan: CellCreatePlan }
   /** Refused, final: the code is the route's `error` (or `unknown`); `reason` is an allowlisted egress reason (#718). */
-  | { ok: false; code: string; status: number; reason?: CellEgressReason }
+  | { ok: false; code: string; status: number; reason?: CellEgressGuardReason }
   | {
       ok: false;
-      code: "cell_plan_unavailable" | "cell_plan_superseded";
+      code: CellPlanUnavailableCode;
       status: number;
       reason?: undefined;
     };
 
 /** Codes `fetchCellPlan` itself reports: retries exhausted, not a route refusal. */
-export const CELL_PLAN_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
+export const CELL_PLAN_UNAVAILABLE = [
   "cell_plan_unavailable",
   "cell_plan_superseded",
-]);
-
-/**
- * #718: the egress guard's reasons the worker may show a thread. A mirror of
- * `CELL_EGRESS_GUARD_REASONS` (packages/shared/src/model/cell-egress-guard.ts):
- * the worker does not depend on `@terragon/shared`, so a reason outside this
- * list is dropped rather than echoed.
- */
-export const CELL_EGRESS_REASONS = [
-  "unknown_profile",
-  "egress_mode_missing",
-  "egress_mode_observe",
-  "egress_mode_unknown",
-  "egress_not_allowlist",
-  "allowlist_empty",
-  "evidence_missing",
-  "evidence_not_from_conformance",
-  "evidence_invalid",
-  "evidence_expired",
 ] as const;
 
-export type CellEgressReason = (typeof CELL_EGRESS_REASONS)[number];
+export type CellPlanUnavailableCode = (typeof CELL_PLAN_UNAVAILABLE)[number];
 
-const CELL_EGRESS_REASON_SET: ReadonlySet<string> = new Set(
-  CELL_EGRESS_REASONS,
+export const CELL_PLAN_UNAVAILABLE_CODES: ReadonlySet<string> = new Set(
+  CELL_PLAN_UNAVAILABLE,
 );
 
 /** A refused plan (AC-2). The message carries the code and status only. */
@@ -74,7 +59,7 @@ export class CellPlanRefusedError extends NonRetryableError {
     public readonly code: string,
     public readonly status: number,
     /** The egress guard's reason, allowlisted by `fetchCellPlan`. */
-    public readonly reason?: CellEgressReason,
+    public readonly reason?: CellEgressGuardReason,
   ) {
     super(`cell plan refused: ${code} (HTTP ${status})`);
     this.name = "CellPlanRefusedError";
@@ -84,7 +69,7 @@ export class CellPlanRefusedError extends NonRetryableError {
 /** The plan could not be fetched in its retry budget (5xx, transport, superseded). */
 export class CellPlanUnavailableError extends NonRetryableError {
   constructor(
-    public readonly code: "cell_plan_unavailable" | "cell_plan_superseded",
+    public readonly code: CellPlanUnavailableCode,
     public readonly status: number,
   ) {
     super(`${code} (HTTP ${status})`);
@@ -103,19 +88,10 @@ export interface CellWwwDeps {
 
 const codeOf = (body: unknown): string => readErrorCode(body) ?? "unknown";
 
-const REASON_SHAPE = /^[a-z_]{1,40}$/;
-
-/** The body's optional egress `reason`: the code's shape AND a member of the allowlist, else nothing. */
-function reasonOf(body: unknown): CellEgressReason | undefined {
-  if (typeof body !== "object" || body === null || !("reason" in body)) {
-    return undefined;
-  }
-  const reason = (body as { reason: unknown }).reason;
-  return typeof reason === "string" &&
-    REASON_SHAPE.test(reason) &&
-    CELL_EGRESS_REASON_SET.has(reason)
-    ? (reason as CellEgressReason)
-    : undefined;
+/** The body's optional egress `reason` (#718): a member of the guard's allowlist, else nothing. */
+function reasonOf(body: unknown): CellEgressGuardReason | undefined {
+  const reason = readErrorCode(body, "reason");
+  return isCellEgressReason(reason) ? reason : undefined;
 }
 
 /** Reads a response body as JSON under a byte cap; `undefined` when unreadable or over the cap. */

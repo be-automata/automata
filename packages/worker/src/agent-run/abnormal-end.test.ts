@@ -158,19 +158,13 @@ describe("abnormalEndInfo (#437 Part A2)", () => {
     const o = { starvation: null, runExecutionTimeoutMs: LIMIT_MS };
     const infoFor = (error: unknown) =>
       abnormalEndInfo("run-failed-unreported", { ...o, thrown: { error } });
-    const errorFor = (code: string) =>
-      code === "cells_unconfigured" || code === "cell_lane_refused"
-        ? new CellRunRefusedError(code)
-        : code === "cell_plan_unavailable" || code === "cell_plan_superseded"
-          ? new CellPlanUnavailableError(code, 503)
-          : new CellPlanRefusedError(code, 409);
 
     it.each(Object.entries(CELL_REFUSAL_KINDS))(
       "%s names the code (%s guidance) within the www bound",
       (code, kind) => {
         // protects=AC-1/AC-2 for every code in the map; fails_when=a code has no
         // text, the line passes 300 chars (www 400s) or a named code offers a resend.
-        const info = infoFor(errorFor(code));
+        const info = infoFor(new CellPlanRefusedError(code, 409));
         expect(info).toContain(`(${code})`);
         expect(info!.length).toBeLessThanOrEqual(TERMINAL_INFO_MAX_CHARS);
         expect(info!.includes("Send the message again")).toBe(

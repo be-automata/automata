@@ -154,8 +154,9 @@ describe("fetchCellPlan", () => {
       status: 409,
     });
     expect(out).not.toHaveProperty("reason");
+    if (out.ok) throw new Error("unreachable");
     const info = cellRefusalInfo(
-      new CellPlanRefusedError("egress_not_enforced", 409),
+      new CellPlanRefusedError(out.code, out.status, out.reason),
     );
     expect(info).toBe(
       "The cell refused this run before it started (egress_not_enforced). Send the message again: it runs where it is allowed now.",

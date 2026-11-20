@@ -23,6 +23,7 @@ import {
   CELL_RUN_TTL_MS,
   cellStepKey,
   isCellLabelValue,
+  type CellPlanRefusalCode,
 } from "@terragon/types/cell";
 import {
   mintBearer,
@@ -121,7 +122,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
 
   /** Logs the outcome code only (never a body or a value) and answers no-store. */
   const refuse = (
-    code: string,
+    code: CellPlanRefusalCode,
     status: number,
     extra: Record<string, unknown> = {},
   ): NextResponse => {

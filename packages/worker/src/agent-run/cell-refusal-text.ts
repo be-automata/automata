@@ -1,9 +1,14 @@
 import {
-  CELL_EGRESS_REASONS,
+  isCellEgressReason,
+  type CellPlanRefusalCode,
+} from "@terragon/types/cell";
+
+import {
   CellPlanRefusedError,
   CellPlanUnavailableError,
+  type CellPlanUnavailableCode,
 } from "./cell-www-client";
-import { CellRunRefusedError } from "./run-executor";
+import { CellRunRefusedError, type CellRunRefusedCode } from "./run-executor";
 
 /**
  * #718: the worker-authored line a thread shows when a marked run was refused
@@ -19,7 +24,22 @@ import { CellRunRefusedError } from "./run-executor";
  */
 export type CellRefusalKind = "resend" | "named";
 
-export const CELL_REFUSAL_KINDS = {
+/**
+ * Every code a refused cell run can carry: the route's (less `superseded`,
+ * which fetchCellPlan retries and reports as `cell_plan_superseded`), the
+ * worker's own, and `unknown` for anything else. Keyed so the compiler holds
+ * the map complete.
+ */
+export type CellRefusalCode =
+  | Exclude<CellPlanRefusalCode, "superseded">
+  | CellRunRefusedCode
+  | CellPlanUnavailableCode
+  | "cell_plan_mismatch"
+  | "unknown";
+
+export const CELL_REFUSAL_KINDS: Readonly<
+  Record<CellRefusalCode, CellRefusalKind>
+> = {
   // Resend helps: the next dispatch re-checks and routes the run elsewhere.
   cells_disabled: "resend",
   agent_not_supported: "resend",
@@ -48,9 +68,7 @@ export const CELL_REFUSAL_KINDS = {
   egress_wildcard: "named",
   cell_plan_mismatch: "named",
   unknown: "named",
-} as const satisfies Record<string, CellRefusalKind>;
-
-export type CellRefusalCode = keyof typeof CELL_REFUSAL_KINDS;
+};
 
 const RESEND_LINE = "Send the message again: it runs where it is allowed now.";
 const CELLS_UNCONFIGURED_HINT =
@@ -77,9 +95,7 @@ export function cellRefusalInfo(err: unknown): string | undefined {
   // Re-checked here, not only in fetchCellPlan: the allowlist holds whoever
   // built the error.
   const reason =
-    err instanceof CellPlanRefusedError &&
-    err.reason !== undefined &&
-    (CELL_EGRESS_REASONS as readonly string[]).includes(err.reason)
+    err instanceof CellPlanRefusedError && isCellEgressReason(err.reason)
       ? err.reason
       : undefined;
   const head = `The cell refused this run before it started (${

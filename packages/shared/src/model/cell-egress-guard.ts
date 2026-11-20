@@ -1,4 +1,9 @@
 import {
+  CELL_EGRESS_GUARD_REASONS,
+  type CellEgressGuardReason,
+} from "@terragon/types/cell";
+
+import {
   parseRfc3339Ns,
   type CellPolicyProfile,
 } from "../cell-policy/cell-policy";
@@ -10,20 +15,10 @@ import {
  * nothing is logged.
  */
 
-export const CELL_EGRESS_GUARD_REASONS = [
-  "unknown_profile", // null, undefined, {} or no id
-  "egress_mode_missing", // configuration.egress_mode absent
-  "egress_mode_observe", // configuration.egress_mode is "observe"
-  "egress_mode_unknown", // configuration.egress_mode is any other value than "enforce"
-  "egress_not_allowlist", // capabilities.egress !== "allowlist"
-  "allowlist_empty", // capabilities.egress_allowlist not a non-empty list of non-blank strings
-  "evidence_missing", // no evidence.expires_at
-  "evidence_not_from_conformance", // evidence.source !== "conformance"
-  "evidence_invalid", // expires_at not RFC 3339
-  "evidence_expired", // expires_at <= now
-] as const;
+// The reasons live in @terragon/types/cell so the worker reads the same list.
+export { CELL_EGRESS_GUARD_REASONS };
 
-export type CellEgressRefusal = (typeof CELL_EGRESS_GUARD_REASONS)[number];
+export type CellEgressRefusal = CellEgressGuardReason;
 
 export class CellEgressNotEnforcedError extends Error {
   readonly reason: CellEgressRefusal;
