@@ -143,10 +143,11 @@ export function missingBranchMentionReply(opts: {
       `if it still exists, mention me again.`
     );
   }
-  const named = safeGitRef(opts.branch);
+  // An unsafe name is simply left out.
+  const branch = branchLabel(opts.branch, "");
   return (
     `I couldn't find this repository's default branch` +
-    `${named === null ? "" : ` \`${named}\``}, so I didn't start on this ` +
+    `${branch === "" ? "" : ` ${branch}`}, so I didn't start on this ` +
     `issue. Mention me again once it is reachable.`
   );
 }
@@ -512,16 +513,16 @@ export async function handleOrgLaneMention(
     return true;
   }
   // Every no-thread answer names its reason in one greppable log line.
-  const reply = async (
-    body: string,
-    what: string,
-    reason: MentionNoThreadReason,
-  ) => {
+  // One greppable line per no-thread answer, with the reason as a field too.
+  const reply = async (body: string, reason: MentionNoThreadReason) => {
     if (shadow) {
-      log(`[shadow] ${what} reason=${reason} — reply suppressed`, meta);
+      log(`[shadow] no thread reason=${reason} — reply suppressed`, {
+        ...meta,
+        reason,
+      });
       return;
     }
-    log(`${what} reason=${reason} — replying`, meta);
+    log(`no thread reason=${reason} — replying`, { ...meta, reason });
     try {
       await replyToMention({
         octokit,
@@ -541,7 +542,7 @@ export async function handleOrgLaneMention(
   };
 
   if (mention.instruction === null) {
-    await reply(emptyMentionReply(slug), "empty mention", "empty_instruction");
+    await reply(emptyMentionReply(slug), "empty_instruction");
     return true;
   }
 
@@ -569,11 +570,7 @@ export async function handleOrgLaneMention(
       // The run clones THIS repo at the head ref: a head that lives in a
       // fork would check out (and push to) a same-named branch here instead.
       if (isCrossRepoPull(pr)) {
-        await reply(
-          CROSS_REPO_MENTION_REPLY,
-          "cross-repo pull request",
-          "cross_repo",
-        );
+        await reply(CROSS_REPO_MENTION_REPLY, "cross_repo");
         return true;
       }
       // OD-4: a merged or closed PR gets its reason and no thread; there is
@@ -585,7 +582,6 @@ export async function handleOrgLaneMention(
       if (merged || pr.state === "closed") {
         await reply(
           closedPrMentionReply({ merged, headRef: pr.head.ref }),
-          merged ? "merged pull request" : "closed pull request",
           merged ? "pr_merged" : "pr_closed",
         );
         return true;
@@ -695,12 +691,11 @@ export async function handleOrgLaneMention(
           branch: branchName,
           isPullRequest: input.isPullRequest,
         }),
-        "no thread started: branch missing",
         input.isPullRequest ? "head_branch_missing" : "branch_missing",
       );
       return true;
     }
-    await reply(MENTION_NOT_STARTED_REPLY, "no thread started", "start_failed");
+    await reply(MENTION_NOT_STARTED_REPLY, "start_failed");
     return true;
   }
   log("thread created", {

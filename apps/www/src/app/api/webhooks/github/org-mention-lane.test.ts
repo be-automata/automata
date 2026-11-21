@@ -326,6 +326,26 @@ describe("routing: org lane vs the legacy per-user path", () => {
     vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
   });
 
+  /** The body of the first top-level reply posted. */
+  const firstCommentBody = (): string =>
+    (
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0] as {
+        body: string;
+      }
+    ).body;
+  /** The lane logged this no-thread reason, as text and as a field. */
+  const expectLoggedReason = (
+    logs: ReturnType<typeof vi.spyOn>,
+    reason: string,
+  ) =>
+    expect(
+      logs.mock.calls.some(
+        (c) =>
+          String(c[0]).includes(`reason=${reason}`) &&
+          (c[1] as { reason?: string } | undefined)?.reason === reason,
+      ),
+    ).toBe(true);
+
   it("no org-lane automation → the legacy path runs, unchanged", async () => {
     const { repoFullName } = await repoWithLane({ orgLane: false });
     await handleIssueCommentEvent(issueComment({ repoFullName }));
@@ -953,37 +973,17 @@ describe("routing: org lane vs the legacy per-user path", () => {
 
   // card: protects=#729 B AC-7/AC-8 (OD-4): a mention on a merged (branch gone or not) or closed PR names the state and branch, starts no thread, adds no reaction and never says "Mention me again"; fails_when=runAutomation runs, a reaction is added, or the generic reply is posted; no_claim=GitHub's real PR states
   it.each([
-    [
-      "merged, head branch deleted",
-      { state: "closed", merged: true },
-      "pr_merged",
-      404,
-    ],
-    [
-      "merged, head branch still there",
-      { state: "closed", merged: true },
-      "pr_merged",
-      200,
-    ],
-    [
-      "closed without merging",
-      { state: "closed", merged: false },
-      "pr_closed",
-      200,
-    ],
+    ["merged", { state: "closed", merged: true }, "pr_merged"],
+    ["closed without merging", { state: "closed", merged: false }, "pr_closed"],
   ])(
     "#729 a mention on a PR that is %s gets the named reason and no thread",
-    async (_label, prState, reason, branchStatus) => {
+    async (_label, prState, reason) => {
       const { repoFullName } = await repoWithLane();
       octokit.rest.pulls.get.mockResolvedValueOnce({
         data: prData(prState),
       } as never);
       // The PR state alone decides: the branch is never looked up.
-      const getBranch = vi.fn(async () => {
-        if (branchStatus === 404)
-          throw Object.assign(new Error("Not Found"), { status: 404 });
-        return { data: { name: "feature/x" } };
-      });
+      const getBranch = vi.fn();
       (octokit.rest.repos as Record<string, unknown>).getBranch = getBranch;
       const logs = vi.spyOn(console, "log");
       await handleIssueCommentEvent(issueComment({ repoFullName }));
@@ -993,20 +993,14 @@ describe("routing: org lane vs the legacy per-user path", () => {
         octokit.rest.reactions.createForIssueComment,
       ).not.toHaveBeenCalled();
       expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
-      const body = (
-        (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0] as {
-          body: string;
-        }
-      ).body;
+      const body = firstCommentBody();
       expect(body).toBe(
         `@alice ${closedPrMentionReply({ merged: prState.merged, headRef: "feature/x" })}`,
       );
       expect(body).toContain("`feature/x`");
       expect(body).toContain("on the issue");
       expect(body).not.toContain("Mention me again");
-      expect(
-        logs.mock.calls.some((c) => String(c[0]).includes(`reason=${reason}`)),
-      ).toBe(true);
+      expectLoggedReason(logs, reason);
       expect(getBranch).not.toHaveBeenCalled();
     },
   );
@@ -1027,11 +1021,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
       }),
     } as never);
     await handleIssueCommentEvent(issueComment({ repoFullName }));
-    const body = (
-      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0] as {
-        body: string;
-      }
-    ).body;
+    const body = firstCommentBody();
     expect(body).not.toContain("@mallory");
     expect(body).not.toContain("`");
     expect(body).toContain("its branch");
@@ -1057,11 +1047,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
     ).toMatchObject({
       body: `@alice ${missingBranchMentionReply({ branch: "feature/x", isPullRequest: true })}`,
     });
-    expect(
-      logs.mock.calls.some((c) =>
-        String(c[0]).includes("reason=head_branch_missing"),
-      ),
-    ).toBe(true);
+    expectLoggedReason(logs, "head_branch_missing");
   });
 
   // card: protects=#729 B: an issue mention whose default branch is missing names it (branch_missing), the issue wording; fails_when=the PR wording or the generic reply; no_claim=none
@@ -1093,9 +1079,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
     expect(
       (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0],
     ).toMatchObject({ body: `@alice ${MENTION_NOT_STARTED_REPLY}` });
-    expect(
-      logs.mock.calls.some((c) => String(c[0]).includes("reason=start_failed")),
-    ).toBe(true);
+    expectLoggedReason(logs, "start_failed");
   });
 
   // card: protects=#729 B AC-9: a redelivered merged-PR mention is answered once (the intake claim holds the refusal); fails_when=a second reply; no_claim=Redis TTL
@@ -1150,9 +1134,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
         body: closedPrMentionReply({ merged: true, headRef: "feature/x" }),
       }),
     );
-    expect(
-      logs.mock.calls.some((c) => String(c[0]).includes("reason=pr_merged")),
-    ).toBe(true);
+    expectLoggedReason(logs, "pr_merged");
   });
 
   // card: protects=#729 B: the refusal keys on GitHub's state, tolerating payloads where `merged` is absent (merged_at still says merged) or contradicts `state`; fails_when=a merged PR is called "closed without being merged", an open PR missing `merged` is refused, or the lane crashes; no_claim=which shapes GitHub actually sends (REST always sets merged)
@@ -1183,11 +1165,7 @@ describe("routing: org lane vs the legacy per-user path", () => {
       ).toMatchObject({
         body: `@alice ${closedPrMentionReply({ merged, headRef: "feature/x" })}`,
       });
-      expect(
-        logs.mock.calls.some((c) =>
-          String(c[0]).includes(`reason=${merged ? "pr_merged" : "pr_closed"}`),
-        ),
-      ).toBe(true);
+      expectLoggedReason(logs, merged ? "pr_merged" : "pr_closed");
     },
   );
 
