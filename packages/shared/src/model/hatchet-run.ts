@@ -1,3 +1,9 @@
+import {
+  CELL_TEARDOWN_MARGIN,
+  SCHEDULE_TIMEOUT,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
+
 import { DB } from "../db";
 import { hatchetRun } from "../db/schema";
 import { HatchetRun } from "../db/types";
@@ -30,13 +36,19 @@ import { normalizeRepo, type SupersedeSnapshot } from "./repo-review-settings";
  * `repo-review-settings` — a case-mismatched slug must never silently miss a live run.
  */
 
-/** Only in_flight rows this recent are supersede candidates (≈ the 75m stalled cutoff). */
-export const SUPERSEDE_FRESHNESS_MS = 75 * 60 * 1000;
+/**
+ * Only in_flight rows this recent are sweep candidates. It must cover every
+ * lane's worst case from dispatch: a task run can wait the schedule timeout and
+ * then run its refreshed 60-minute budget (#742), plus the teardown margin —
+ * the same bound as www's stalled cutoff, derived from the same constants.
+ */
+export const SUPERSEDE_FRESHNESS_MS =
+  SCHEDULE_TIMEOUT + TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN;
 
 /**
  * Rows older than this are dead weight: far past SUPERSEDE_FRESHNESS_MS, they can
  * never again be a supersede candidate, so the hourly prune deletes them to bound
- * table growth. 24h keeps a generous debugging window (~19x the freshness window).
+ * table growth. 24h keeps a generous debugging window (~14x the freshness window).
  */
 export const HATCHET_RUN_PRUNE_AFTER_MS = 24 * 60 * 60 * 1000;
 
