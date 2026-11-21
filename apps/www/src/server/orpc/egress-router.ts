@@ -8,7 +8,10 @@ import {
 } from "@terragon/shared/model/repo-review-settings";
 
 import { db } from "@/lib/db";
-import { getRepoEgressView } from "@/server-lib/egress/repo-egress-view";
+import {
+  getRepoEgressView,
+  storedEgressLevel,
+} from "@/server-lib/egress/repo-egress-view";
 
 import {
   assertRepoInOrg,
@@ -64,6 +67,8 @@ interface HistoryCursor {
   id: string;
 }
 
+const CURSOR_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 /** The cursor is opaque on the wire: base64url of `{createdAt, id}`. */
 function encodeCursor(cursor: HistoryCursor): string {
   const json = JSON.stringify({
@@ -81,8 +86,14 @@ function decodeCursor(raw: string): HistoryCursor | null {
     if (typeof parsed !== "object" || parsed === null) return null;
     const { createdAt, id } = parsed as { createdAt?: unknown; id?: unknown };
     if (typeof createdAt !== "string" || typeof id !== "string") return null;
+    // Only the form encodeCursor writes, for a year Postgres can hold: an
+    // expanded (`+275760-…`) or year-0 date would fail the query with a 500.
+    if (!CURSOR_DATE.test(createdAt)) return null;
     const date = new Date(createdAt);
-    return Number.isNaN(date.getTime()) ? null : { createdAt: date, id };
+    if (Number.isNaN(date.getTime()) || date.toISOString() !== createdAt) {
+      return null;
+    }
+    return date.getUTCFullYear() >= 1 ? { createdAt: date, id } : null;
   } catch {
     return null;
   }
@@ -94,8 +105,8 @@ function historyEntry(row: RepoEgressAuditLog) {
     createdAt: row.createdAt.toISOString(),
     actorUserId: row.actorUserId,
     authKind: row.authKind,
-    levelBefore: row.levelBefore as "none" | "ip_port" | "domain" | null,
-    levelAfter: row.levelAfter as "none" | "ip_port" | "domain" | null,
+    levelBefore: storedEgressLevel(row.levelBefore),
+    levelAfter: storedEgressLevel(row.levelAfter),
     hostsAdded: row.hostsAdded,
     hostsRemoved: row.hostsRemoved,
     registriesBefore: row.registriesBefore,
@@ -148,7 +159,7 @@ const list = base.egress.list.handler(async ({ input, context, errors }) => {
     )
     .map((row) => ({
       repo: row.repoFullName,
-      level: row.egressPolicy as "none" | "ip_port" | "domain" | null,
+      level: storedEgressLevel(row.egressPolicy),
       allowlistCount: row.egressAllowlist?.length ?? 0,
       registries: row.cellEgressRegistries,
       updatedAt: row.updatedAt.toISOString(),

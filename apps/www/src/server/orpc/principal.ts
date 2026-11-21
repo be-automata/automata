@@ -66,13 +66,20 @@ const BEARER = /^Bearer\s+(\S+)$/i;
 
 /**
  * The API key in the request: `X-Daemon-Token`, else `Authorization: Bearer`.
- * A Bearer value is always an API key, never a session (spec §8 fix 6).
+ * `undefined` when neither header is sent; `null` when one is sent but holds
+ * no usable key (empty, another scheme, a malformed Bearer). A Bearer value
+ * is always an API key, never a session (spec §8 fix 6), and a request that
+ * sends either header never reaches the cookie: Better Auth's `bearer()`
+ * plugin would otherwise read an `Authorization` header as a session.
  */
-function apiKeyFromHeaders(headers: Headers): string | null {
-  const direct = headers.get("X-Daemon-Token")?.trim();
-  if (direct) return direct;
-  const bearer = BEARER.exec(headers.get("Authorization")?.trim() ?? "");
-  return bearer?.[1] ?? null;
+function apiKeyFromHeaders(headers: Headers): string | null | undefined {
+  const direct = headers.get("X-Daemon-Token");
+  if (direct?.trim()) return direct.trim();
+  const authorization = headers.get("Authorization");
+  if (authorization !== null) {
+    return BEARER.exec(authorization.trim())?.[1] ?? null;
+  }
+  return direct === null ? undefined : null;
 }
 
 async function principalFromApiKey(
@@ -109,7 +116,17 @@ async function principalFromSession(
   headers: Headers,
   errors: PrincipalErrors,
 ): Promise<EgressPrincipal> {
-  const session = await auth.api.getSession({ headers });
+  let session: Awaited<ReturnType<typeof auth.api.getSession>>;
+  try {
+    session = await auth.api.getSession({ headers });
+  } catch (error) {
+    // The session store failed: retryable, never a 500. Only the error's name
+    // is logged: a failed-query message can carry the session token.
+    console.error("Egress session lookup failed", {
+      error: error instanceof Error ? error.name : typeof error,
+    });
+    throw errors.SERVICE_UNAVAILABLE({ data: { reason: "auth_unavailable" } });
+  }
   if (!session) throw errors.UNAUTHORIZED();
   return {
     userId: session.user.id,
@@ -120,8 +137,9 @@ async function principalFromSession(
 }
 
 /**
- * Step 1, the credential. A token that is present but unknown is a 401 with no
- * fallback to the cookie. No token: the session, on the `/api/v1` mount only.
+ * Step 1, the credential. A credential header that is present but unknown or
+ * unusable is a 401 with no fallback to the cookie. No credential header: the
+ * session, on the `/api/v1` mount only.
  */
 export async function resolveEgressPrincipal(
   context: EgressRequestContext,
@@ -129,7 +147,7 @@ export async function resolveEgressPrincipal(
 ): Promise<EgressPrincipal> {
   const token = apiKeyFromHeaders(context.headers);
   if (token) return principalFromApiKey(token, errors);
-  if (!context.allowSession) throw errors.UNAUTHORIZED();
+  if (token === null || !context.allowSession) throw errors.UNAUTHORIZED();
   return principalFromSession(context.headers, errors);
 }
 

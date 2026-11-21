@@ -145,6 +145,38 @@ describe("/api/v1 REST mount", () => {
     expect(badRepo.status).toBe(400);
   });
 
+  it("not-found parity: the same status, headers and body bytes for every not-in-org cause", async () => {
+    vi.mocked(isRepoInOrganizationScope).mockResolvedValue(false);
+    const other = (await createTestOrganization({ db, userId, name: "Beta" }))
+      .organization;
+    // A row only in ANOTHER org for the same repo.
+    await upsertRepoReviewSetting({
+      db,
+      organizationId: other.id,
+      repoFullName: "acme/widgets",
+      patch: { egressPolicy: "none" },
+    });
+    const snapshot = async (path: string) => {
+      const res = await get(path, { "X-Daemon-Token": key });
+      const headers = [...res.headers.entries()].filter(
+        ([name]) => name !== "date",
+      );
+      return { status: res.status, headers, body: await res.text() };
+    };
+    const rowElsewhere = await snapshot(
+      `${EGRESS}/${org.id}/repos/acme/widgets/egress`,
+    );
+    const absent = await snapshot(
+      `${EGRESS}/${org.id}/repos/acme/nothing/egress`,
+    );
+    const historyAbsent = await snapshot(
+      `${EGRESS}/${org.id}/repos/acme/nothing/egress/history`,
+    );
+    expect(rowElsewhere.status).toBe(404);
+    expect(absent).toEqual(rowElsewhere);
+    expect(historyAbsent).toEqual(rowElsewhere);
+  });
+
   it("lists exactly the three egress operations in openapi.json", async () => {
     const res = await get("/api/v1/openapi.json");
     expect(res.status).toBe(200);

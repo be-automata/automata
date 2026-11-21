@@ -163,6 +163,45 @@ describe("resolveEgressPrincipal (step 1: the credential)", () => {
     });
   });
 
+  it("never falls back to the cookie when a credential header is present but unusable", async () => {
+    const getSession = vi.spyOn(auth.api, "getSession").mockResolvedValue({
+      user: { id: "u_cookie" },
+      session: { id: "sess_cookie" },
+    } as never);
+    const unusable: [string, string][] = [
+      ["X-Daemon-Token", ""],
+      ["Authorization", "Basic dXNlcjpwYXNz"],
+      ["Authorization", "Bearer"],
+      ["Authorization", "Bearer two tokens"],
+    ];
+    for (const init of unusable) {
+      const error = await refusal(
+        resolveEgressPrincipal(
+          { headers: new Headers([init]), allowSession: true },
+          errors,
+        ),
+      );
+      expect(error.code).toBe("UNAUTHORIZED");
+    }
+    expect(getSession).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 auth_unavailable when the session store fails", async () => {
+    vi.spyOn(auth.api, "getSession").mockRejectedValue(
+      new Error("connection refused"),
+    );
+    const error = await refusal(
+      resolveEgressPrincipal(
+        { headers: new Headers(), allowSession: true },
+        errors,
+      ),
+    );
+    expect(error).toMatchObject({
+      code: "SERVICE_UNAVAILABLE",
+      data: { reason: "auth_unavailable" },
+    });
+  });
+
   it("refuses a cookie-less request on the session mount with 401", async () => {
     vi.spyOn(auth.api, "getSession").mockResolvedValue(null);
     const error = await refusal(

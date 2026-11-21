@@ -147,6 +147,24 @@ function cellView(
   return { cell: cellFromPlan(plan, brokerHost, repoHosts), brokerHost };
 }
 
+type StoredLevel = EgressView["stored"]["level"];
+const KNOWN_LEVELS: ReadonlySet<string> = new Set([
+  "none",
+  "ip_port",
+  "domain",
+]);
+
+/**
+ * A stored level the contract knows, else null. Only a raw SQL write can put
+ * another value there (both writers validate it); reporting it as null keeps
+ * the read a 200, and `box.error: "invalid_policy"` still says the row is bad.
+ */
+export function storedEgressLevel(value: string | null): StoredLevel {
+  return value !== null && KNOWN_LEVELS.has(value)
+    ? (value as NonNullable<StoredLevel>)
+    : null;
+}
+
 /**
  * The effective egress of one repo in one org: what is stored, what the box
  * enforces, what a cell would compile, the advisory warnings and the cell's
@@ -161,7 +179,7 @@ export function getRepoEgressView(args: {
   readOnlyReason: EgressView["readOnlyReason"];
 }): EgressView {
   const { org, repoFullName, row } = args;
-  const level = (row?.egressPolicy ?? null) as EgressView["stored"]["level"];
+  const level = storedEgressLevel(row?.egressPolicy ?? null);
   const allowlist = row?.egressAllowlist ?? [];
   const registries = row?.cellEgressRegistries ?? null;
   const repoHosts = new Set(canonicalizeEgressEntries(allowlist));

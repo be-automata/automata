@@ -1,4 +1,5 @@
 import { createRouterClient, ORPCError } from "@orpc/server";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -239,9 +240,15 @@ describe("egress router: reads", () => {
         before: { level: null, allowlist: null, registries: null },
         after: { level: "domain", allowlist: [host], registries: null },
       });
-    await record(orgA.id, "one.example.org");
+    const one = await record(orgA.id, "one.example.org");
     await record(orgA.id, "two.example.org");
     await record(orgB.id, "other.example.org");
+    // Two inserts can share a millisecond; the tie order is the random id, so
+    // pin "one" older to keep "newest first" deterministic.
+    await db
+      .update(repoEgressAuditLog)
+      .set({ createdAt: new Date("2026-01-01T00:00:00.000Z") })
+      .where(eq(repoEgressAuditLog.id, one.id));
     const client = tokenClient(keyA);
     const first = await client.egress.history({
       org: orgA.id,
@@ -279,6 +286,70 @@ describe("egress router: reads", () => {
       status: 400,
       data: { errors: [{ code: "invalid_input" }] },
     });
+  });
+
+  it("history: a well-formed cursor whose date Postgres cannot hold is BAD_REQUEST, not a 500", async () => {
+    for (const createdAt of [
+      "+275760-09-13T00:00:00.000Z",
+      "-000001-01-01T00:00:00.000Z",
+      "0000-01-01T00:00:00.000Z",
+    ]) {
+      const before = Buffer.from(
+        JSON.stringify({ createdAt, id: "x" }),
+      ).toString("base64url");
+      const error = await failure(
+        tokenClient(keyA).egress.history({
+          org: orgA.id,
+          ...PATH,
+          limit: 10,
+          before,
+        }),
+      );
+      expect(error).toMatchObject({
+        code: "BAD_REQUEST",
+        data: { errors: [{ code: "invalid_input" }] },
+      });
+    }
+  });
+
+  it("history: rows that share a createdAt are each returned exactly once across pages", async () => {
+    const ids: string[] = [];
+    for (const host of [
+      "one.example.org",
+      "two.example.org",
+      "three.example.org",
+    ]) {
+      const row = await recordRepoEgressChange({
+        db,
+        organizationId: orgA.id,
+        repoFullName: REPO,
+        actorUserId: userId,
+        authKind: "api_key",
+        credentialId: "key_1",
+        before: { level: null, allowlist: null, registries: null },
+        after: { level: "domain", allowlist: [host], registries: null },
+      });
+      ids.push(row.id);
+    }
+    await db
+      .update(repoEgressAuditLog)
+      .set({ createdAt: new Date("2026-11-20T10:00:00.000Z") })
+      .where(eq(repoEgressAuditLog.organizationId, orgA.id));
+    const client = tokenClient(keyA);
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const out = await client.egress.history({
+        org: orgA.id,
+        ...PATH,
+        limit: 1,
+        ...(before ? { before } : {}),
+      });
+      seen.push(...out.entries.map((e) => e.id));
+      if (!out.nextBefore) break;
+      before = out.nextBefore;
+    }
+    expect(seen).toEqual([...ids].sort().reverse());
   });
 
   it("list: the org's repos with egress fields, none from another org", async () => {

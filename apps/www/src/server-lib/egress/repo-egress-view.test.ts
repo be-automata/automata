@@ -126,6 +126,12 @@ describe("getRepoEgressView", () => {
     expect(v.box.enforced).toBe(true);
   });
 
+  it("an unknown stored level reads as null with box invalid_policy, never a 500", () => {
+    const v = view(row({ egressPolicy: "everything", egressAllowlist: [] }));
+    expect(v.stored.level).toBeNull();
+    expect(v.box.error).toBe("invalid_policy");
+  });
+
   it("a stored value the box builder throws on is invalid_policy, not a 500", () => {
     const v = view(
       row({ egressPolicy: "domain", egressAllowlist: ["not a host"] }),
