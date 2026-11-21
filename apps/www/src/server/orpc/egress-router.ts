@@ -226,7 +226,7 @@ function projectedRow(row: EgressRow | undefined, after: EgressFields) {
     egressPolicy: after.level,
     egressAllowlist: after.allowlist,
     cellEgressRegistries: after.registries,
-    updatedAt: row?.updatedAt ?? new Date(0),
+    updatedAt: row?.updatedAt ?? null,
     updatedByUserId: row?.updatedByUserId ?? null,
   } satisfies EgressRow;
 }
@@ -272,7 +272,7 @@ interface UpdateScope {
 /** Step 3, the compare-and-set: a sent token must still name the stored version. */
 function assertExpectedVersion(
   expected: string | null | undefined,
-  stored: EgressRow | undefined,
+  stored: RepoReviewSetting | undefined,
   errors: UpdateErrors,
 ): void {
   if (expected === undefined) return;
@@ -294,7 +294,7 @@ function assertExpectedVersion(
 async function writeChange(
   scope: UpdateScope,
   txDb: DB,
-  stored: (EgressRow & { updatedAt: Date }) | undefined,
+  stored: RepoReviewSetting | undefined,
   fields: { before: EgressFields; after: EgressFields },
 ): Promise<UpdateOutcome> {
   const { org, repoFullName, principal } = scope;

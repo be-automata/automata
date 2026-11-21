@@ -127,6 +127,18 @@ describe("contract conformance (rule 6)", () => {
     expect(declaredByAll(cliAPIContract)).toContain("BAD_REQUEST");
   });
 
+  it("every egress procedure is built from the one middleware-carrying base (spec 4.4)", () => {
+    const source = read("egress-router.ts");
+    // The only direct use of `base.egress` is the middleware mount itself.
+    expect(source.match(/\bbase\.egress\b/g)).toEqual(["base.egress"]);
+    expect(source).toMatch(/const egressBase = base\.egress\.use\(/);
+    for (const name of Object.keys(cliAPIContract.egress)) {
+      expect(source, name).toMatch(
+        new RegExp(`const ${name} = egressBase\\.${name}\\.handler\\(`),
+      );
+    }
+  });
+
   it("SERVICE_UNAVAILABLE is declared on every procedure, threads and auth included", () => {
     expect(declaredByAll(cliAPIContract)).toContain("SERVICE_UNAVAILABLE");
   });

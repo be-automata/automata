@@ -1,5 +1,5 @@
 import { createRouterClient, ORPCError } from "@orpc/server";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
@@ -709,5 +709,254 @@ describe("egress.update", () => {
       .from(repoReviewSettings)
       .where(eq(repoReviewSettings.organizationId, orgA.id));
     expect(rows).toHaveLength(1);
+  });
+
+  it("dryRun on a repo with no row reports no version: after.stored.updatedAt is null", async () => {
+    const preview = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: "domain",
+      add: ["a.example.org"],
+      dryRun: true,
+    });
+    expect(preview.before.stored.updatedAt).toBeNull();
+    expect(preview.after.stored.updatedAt).toBeNull();
+    expect(preview.after.stored.updatedByUserId).toBeNull();
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it("CAS holds at millisecond precision against a stamp written with microseconds", async () => {
+    await seed(orgA.id, {
+      egressPolicy: "domain",
+      egressAllowlist: ["a.example.org"],
+    });
+    await db.execute(
+      sql`UPDATE repo_review_settings SET updated_at = '2026-11-20 10:00:00.123999' WHERE organization_id = ${orgA.id}`,
+    );
+    const read = await tokenClient(keyA).egress.get({ org: orgA.id, ...PATH });
+    expect(read.stored.updatedAt).toBe("2026-11-20T10:00:00.123Z");
+    const ok = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      add: ["b.example.org"],
+      expectedUpdatedAt: read.stored.updatedAt,
+    });
+    expect(ok.applied).toBe(true);
+    const stale = await failure(
+      tokenClient(keyA).egress.update({
+        org: orgA.id,
+        ...PATH,
+        add: ["c.example.org"],
+        expectedUpdatedAt: "2026-11-20T10:00:00.124Z",
+      }),
+    );
+    expect(stale).toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("an expectedUpdatedAt that is not a date is invalid_input and writes nothing", async () => {
+    const error = await failure(
+      tokenClient(keyA).egress.update({
+        org: orgA.id,
+        ...PATH,
+        level: "domain",
+        expectedUpdatedAt: "yesterday",
+      }),
+    );
+    expect(error).toMatchObject({
+      code: "BAD_REQUEST",
+      data: { errors: [{ code: "invalid_input" }] },
+    });
+    expect(await rowCount()).toBe(0);
+  });
+
+  it("two racing first writes that both read no row: one applies, the other is CONFLICT", async () => {
+    const client = tokenClient(keyA);
+    const results = await Promise.allSettled(
+      ["x.example.org", "y.example.org"].map((host) =>
+        client.egress.update({
+          org: orgA.id,
+          ...PATH,
+          level: "domain",
+          add: [host],
+          expectedUpdatedAt: null,
+        }),
+      ),
+    );
+    const applied = results.filter((r) => r.status === "fulfilled");
+    const refused = results.filter((r) => r.status === "rejected");
+    expect(applied).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: "CONFLICT",
+      data: { currentUpdatedAt: expect.any(String) },
+    });
+    expect(await auditCount()).toBe(1);
+  });
+
+  it("the advisory lock is per (org, repo): org B is not held up by org A's lock on the same repo", async () => {
+    const keyB = await mintKey(userId, orgB.id);
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked = () => {};
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const locker = db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${orgA.id}/${REPO}`}, 0))`,
+      );
+      locked();
+      await held;
+    });
+    await isLocked;
+    const settled = (p: Promise<unknown>, ms: number) =>
+      Promise.race([
+        p.then(() => "settled"),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), ms)),
+      ]);
+    try {
+      const writeB = tokenClient(keyB).egress.update({
+        org: orgB.id,
+        ...PATH,
+        level: "domain",
+      });
+      expect(await settled(writeB, 2000)).toBe("settled");
+      const writeA = tokenClient(keyA).egress.update({
+        org: orgA.id,
+        ...PATH,
+        level: "domain",
+      });
+      expect(await settled(writeA, 300)).toBe("pending");
+      release();
+      await expect(writeA).resolves.toMatchObject({ applied: true });
+    } finally {
+      release();
+      await locker;
+    }
+  });
+
+  it("a key request is never origin-checked, even with a foreign Origin", async () => {
+    const result = await clientFor(
+      new Headers({
+        "X-Daemon-Token": keyA,
+        Origin: "https://evil.example.test",
+      }),
+      true,
+    ).egress.update({ org: orgA.id, ...PATH, level: "domain" });
+    expect(result.applied).toBe(true);
+  });
+
+  it("a session Origin of null is refused; a scheme-less trusted origin is accepted over https only", async () => {
+    mockSession(userId);
+    for (const origin of ["null", "http://terragonlabs.com"]) {
+      expect(
+        await failure(
+          clientFor(new Headers({ Origin: origin }), true).egress.update({
+            org: orgA.id,
+            ...PATH,
+            level: "domain",
+          }),
+        ),
+      ).toMatchObject({
+        code: "FORBIDDEN",
+        data: { reason: "origin_mismatch" },
+      });
+    }
+    expect(await rowCount()).toBe(0);
+    const ok = await clientFor(
+      new Headers({ Origin: "https://terragonlabs.com" }),
+      true,
+    ).egress.update({ org: orgA.id, ...PATH, level: "domain" });
+    expect(ok.applied).toBe(true);
+  });
+
+  it("the audit row names the actor and credential: a key's id for a key, the session's id for a session", async () => {
+    await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: "domain",
+    });
+    mockSession(userId);
+    await clientFor(new Headers({ Origin: APP }), true).egress.update({
+      org: orgA.id,
+      ...PATH,
+      add: ["a.example.org"],
+    });
+    const rows = await db
+      .select()
+      .from(repoEgressAuditLog)
+      .where(eq(repoEgressAuditLog.organizationId, orgA.id));
+    const byKind = Object.fromEntries(rows.map((r) => [r.authKind, r]));
+    expect(rows).toHaveLength(2);
+    expect(byKind.session).toMatchObject({
+      actorUserId: userId,
+      credentialId: "sess_1",
+    });
+    expect(byKind.api_key?.actorUserId).toBe(userId);
+    expect(byKind.api_key?.credentialId).toEqual(expect.any(String));
+    expect(byKind.api_key?.credentialId).not.toBe(keyA);
+    expect(byKind.api_key?.credentialId).not.toBe("sess_1");
+  });
+
+  it("a failing analytics client never fails a committed write", async () => {
+    capture.mockImplementation(() => {
+      throw new Error("posthog down");
+    });
+    const first = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: "domain",
+    });
+    expect(first.applied).toBe(true);
+    vi.mocked(getPostHogServer).mockImplementation(() => {
+      throw new Error("no client");
+    });
+    const second = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      add: ["a.example.org"],
+    });
+    expect(second.applied).toBe(true);
+    expect(await auditCount()).toBe(2);
+  });
+
+  it("no analytics event and no rate-limit charge for a refused write", async () => {
+    await failure(
+      tokenClient(keyA).egress.update({
+        org: orgA.id,
+        ...PATH,
+        level: "domain",
+        add: ["10.0.0.1"],
+      }),
+    );
+    expect(capture).not.toHaveBeenCalled();
+    const memberId = (await createTestUser({ db })).user.id;
+    const member = await createTestOrganization({
+      db,
+      userId: memberId,
+      role: "member",
+    });
+    await failure(
+      tokenClient(
+        await mintKey(memberId, member.organization.id),
+      ).egress.update({
+        org: member.organization.id,
+        ...PATH,
+        level: "domain",
+      }),
+    );
+    expect(checkCliEgressWriteRateLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("a full replace is canonicalized: case and duplicates collapse to one host", async () => {
+    const result = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: "domain",
+      allowlist: ["Example.COM", "example.com", " example.com "],
+    });
+    expect(result.after.stored.allowlist).toEqual(["example.com"]);
   });
 });

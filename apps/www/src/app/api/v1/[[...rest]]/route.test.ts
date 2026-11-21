@@ -129,6 +129,39 @@ describe("/api/v1 REST mount", () => {
     expect(getSession).not.toHaveBeenCalled();
   });
 
+  it("§4.4 order: the credential is checked before the path shape, and before the Origin", async () => {
+    const bad = `${EGRESS}/${org.id}/repos/acme/wid%20gets/egress`;
+    const credentials: Record<string, string>[] = [
+      {},
+      { "X-Daemon-Token": "bogus" },
+    ];
+    for (const headers of credentials) {
+      expect((await get(bad, headers)).status).toBe(401);
+      expect((await patch(bad, { level: "domain" }, headers)).status).toBe(401);
+      expect(
+        (
+          await patch(
+            `${EGRESS}/${org.id}/repos/acme/widgets/egress`,
+            { level: "domain" },
+            { ...headers, Origin: "https://evil.example.test" },
+          )
+        ).status,
+      ).toBe(401);
+    }
+  });
+
+  it("a session read is never origin-checked, even with a foreign Origin", async () => {
+    mockSession(userId);
+    const res = await get(`${EGRESS}/${org.id}/repos/acme/widgets/egress`, {
+      Origin: "https://evil.example.test",
+    });
+    expect(res.status).toBe(200);
+    const list = await get(`${EGRESS}/${org.id}/egress`, {
+      Origin: "https://evil.example.test",
+    });
+    expect(list.status).toBe(200);
+  });
+
   it("maps an input the schema refuses to the declared invalid_input", async () => {
     const badLimit = await get(
       `${EGRESS}/${org.id}/repos/acme/widgets/egress/history?limit=0`,

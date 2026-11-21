@@ -33,15 +33,17 @@ import {
   systemEgressHosts,
 } from "./resolve-egress-policy";
 
-/** The fields the view reads: a stored row, or a projected one for a dry run. */
+/**
+ * The fields the view reads: a stored row, or a projected one for a dry run.
+ * A projection of a repo with no row has no version yet, so `updatedAt` is null.
+ */
 export type EgressRow = Pick<
   RepoReviewSetting,
   | "egressPolicy"
   | "egressAllowlist"
   | "cellEgressRegistries"
-  | "updatedAt"
   | "updatedByUserId"
->;
+> & { updatedAt: Date | null };
 
 type Row = EgressRow | undefined;
 type EgressView = EgressViewData;
@@ -170,7 +172,7 @@ export function getRepoEgressView(args: {
       level,
       allowlist: [...allowlist],
       registries,
-      updatedAt: row?.updatedAt.toISOString() ?? null,
+      updatedAt: row?.updatedAt?.toISOString() ?? null,
       updatedByUserId: row?.updatedByUserId ?? null,
     },
     box,
