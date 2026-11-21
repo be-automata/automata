@@ -505,12 +505,10 @@ export async function handleMentionReplyAtFinish({
       return;
     }
     const [owner, repo] = parseRepoFullName(stamp.repoFullName);
-    // The chat read and the App client do not depend on the PR open: start
-    // them with the bounded wait, so the wait is not added to them.
-    const [pullRequest, threadChat, octokit] = await Promise.all([
-      remotePullRequest && !stamp.isPullRequest
-        ? awaitPullRequestOutcome(remotePullRequest, { threadId })
-        : null,
+    // The chat read and the App client run first; the PR open is already in
+    // flight, so only the bounded wait starts after them. A failure of either
+    // then ends the reply before any wait (no stray timeout log).
+    const [threadChat, octokit] = await Promise.all([
       readThreadChat({
         db,
         userId,
@@ -520,6 +518,10 @@ export async function handleMentionReplyAtFinish({
       }),
       getOctokitForApp({ owner, repo }),
     ]);
+    const pullRequest =
+      remotePullRequest && !stamp.isPullRequest
+        ? await awaitPullRequestOutcome(remotePullRequest, { threadId })
+        : null;
     const terminalText =
       findLastLeadAgentText(threadChat?.messages ?? null, (text) =>
         text.includes(MENTION_REPLY_KIND),

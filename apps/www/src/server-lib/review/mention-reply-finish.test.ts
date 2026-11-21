@@ -844,6 +844,34 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
       warn.mockRestore();
     });
 
+    // card: protects=roborev 1371: when the App client fails before the wait, no pr_outcome_timeout is logged 20 s later for a reply that never posts; fails_when=the timer starts before the reply's own reads; no_claim=the failure log itself
+    it("a failed App client ends the reply before the wait: no stray timeout log", async () => {
+      vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
+      vi.mocked(getOctokitForApp).mockRejectedValueOnce(
+        new Error("no install"),
+      );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.useFakeTimers();
+      try {
+        await handleMentionReplyAtFinish({
+          ...args,
+          remotePullRequest: new Promise(() => {}),
+        });
+        await vi.advanceTimersByTimeAsync(25_000);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        warn.mock.calls.some((c) =>
+          JSON.stringify(c).includes("pr_outcome_timeout"),
+        ),
+      ).toBe(false);
+      warn.mockRestore();
+      error.mockRestore();
+    });
+
     it("a shadow org posts nothing even with an outcome", async () => {
       vi.mocked(getOrganizationInstallationMode).mockResolvedValueOnce(
         "shadow" as never,
