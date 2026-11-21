@@ -26,12 +26,12 @@
     "update-dockerfile-versions": "bun scripts/update-dockerfile-versions.ts"
   },
   "devDependencies": {
-    "@e2b/cli": "^2.23.0",
+    "@e2b/cli": "^2.24.0",
     "@terragon/tsconfig": "workspace:*",
     "@terragon/types": "workspace:*",
     "@types/node": "^22.10.6",
-    "esbuild": "^0.25.5",
-    "tsx": "^4.20.3",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   },
