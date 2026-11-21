@@ -37,6 +37,7 @@ export const EGRESS_ACCESS_REFUSALS = [
   "org_forbidden",
   "org_required",
   "not_repo_admin",
+  "origin_mismatch", // a session write whose Origin is not this app's (CSRF guard)
 ] as const;
 
 export type EgressAccessRefusal = (typeof EGRESS_ACCESS_REFUSALS)[number];

@@ -14,6 +14,8 @@ import {
   normalizeRepo,
 } from "@terragon/shared/model/repo-review-settings";
 
+import { publicAppUrl } from "@terragon/env/next-public";
+
 import { auth } from "@/lib/auth";
 import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
@@ -67,6 +69,14 @@ export interface ApiKeyErrors {
 export interface PrincipalErrors extends ApiKeyErrors {
   NOT_FOUND: (options: { message: string }) => Error;
   FORBIDDEN: (options: { data: { reason: EgressAccessRefusal } }) => Error;
+}
+
+/** The error factories of the contract that the write-access check throws. */
+export interface WriteAccessErrors {
+  FORBIDDEN: (options: { data: { reason: EgressAccessRefusal } }) => Error;
+  SERVICE_UNAVAILABLE: (options: {
+    data: { reason: "github_unavailable" };
+  }) => Error;
 }
 
 /** Identical for every "not in this org" cause, so the body leaks nothing. */
@@ -305,4 +315,79 @@ export async function readEditAccess({
   const readOnlyReason =
     access === "lookup_failed" ? "permission_unverified" : "not_repo_admin";
   return { canEdit: false, readOnlyReason };
+}
+
+/** `Origin` form of a Better Auth `trustedOrigins` entry (host or URL), or null for a pattern. */
+function originOfTrusted(entry: string): string | null {
+  if (entry.includes("*")) return null;
+  try {
+    return new URL(entry.includes("://") ? entry : `https://${entry}`).origin;
+  } catch {
+    return null;
+  }
+}
+
+/** The origins a browser may send for a session write: the public app origin plus Better Auth's trusted ones. */
+function allowedSessionOrigins(): Set<string> {
+  const origins = new Set<string>();
+  try {
+    origins.add(new URL(publicAppUrl()).origin);
+  } catch {
+    // No usable public URL: only the trusted origins can match.
+  }
+  const trusted = auth.options.trustedOrigins;
+  for (const entry of Array.isArray(trusted) ? trusted : []) {
+    const origin = typeof entry === "string" ? originOfTrusted(entry) : null;
+    if (origin) origins.add(origin);
+  }
+  return origins;
+}
+
+/**
+ * Step 2: a session-authenticated write must come from this app's own origin
+ * (a cookie is sent by any site, so this is the CSRF guard). An API key is
+ * exempt: it is never sent by a browser on its own. Refused with 403
+ * `origin_mismatch` (spec section 8 fix 5).
+ */
+export function assertSessionWriteOrigin(
+  principal: EgressPrincipal,
+  headers: Headers,
+  errors: Pick<PrincipalErrors, "FORBIDDEN">,
+): void {
+  if (principal.authKind !== "session") return;
+  const origin = headers.get("Origin");
+  if (origin === null || !allowedSessionOrigins().has(origin)) {
+    throw errors.FORBIDDEN({ data: { reason: "origin_mismatch" } });
+  }
+}
+
+/**
+ * Step 5 for writes (`update`, `dryRun` included): the caller must be an org
+ * admin or a GitHub admin of the repo (OD-7). A lookup that cannot answer is
+ * a retryable 503, never an allow.
+ */
+export async function assertRepoWriteAccess({
+  userId,
+  organizationId,
+  repoFullName,
+  errors,
+}: {
+  userId: string;
+  organizationId: string;
+  repoFullName: string;
+  errors: WriteAccessErrors;
+}): Promise<void> {
+  const access = await checkRepoWriteAccess({
+    db,
+    userId,
+    organizationId,
+    repoFullName,
+  });
+  if (access === "allowed") return;
+  if (access === "lookup_failed") {
+    throw errors.SERVICE_UNAVAILABLE({
+      data: { reason: "github_unavailable" },
+    });
+  }
+  throw errors.FORBIDDEN({ data: { reason: "not_repo_admin" } });
 }

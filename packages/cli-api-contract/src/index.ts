@@ -26,7 +26,9 @@ const oc = ocBase.errors({
   SERVICE_UNAVAILABLE: {
     status: 503,
     message: "Service temporarily unavailable",
-    data: z.object({ reason: z.enum(["auth_unavailable"]) }).optional(),
+    data: z
+      .object({ reason: z.enum(["auth_unavailable", "github_unavailable"]) })
+      .optional(),
   },
   // A request that fails its input schema. The server maps oRPC's own
   // validation error to this shape (`mapInputValidationError`), so it holds
@@ -135,6 +137,13 @@ const egressOc = oc.errors({
     message: "Invalid egress settings",
     data: z.object({ errors: z.array(EntryErrorSchema).min(1) }),
   },
+  // Declared at the egress base like the others; only `update` throws it
+  // (a stale `expectedUpdatedAt`, or a racing legacy write).
+  CONFLICT: {
+    status: 409,
+    message: "Changed by someone else",
+    data: z.object({ currentUpdatedAt: z.string().nullable() }),
+  },
 });
 
 const REPO_SEGMENT = /^[A-Za-z0-9_.-]+$/;
@@ -218,6 +227,42 @@ const egressGet = egressOc
   .input(RepoPath)
   .output(EgressView);
 
+const EntryList = z.string().max(253);
+
+const egressUpdate = egressOc
+  .route({
+    method: "PATCH",
+    path: "/v1/orgs/{org}/repos/{owner}/{repo}/egress",
+    summary: "Change a repo's egress settings",
+  })
+  .input(
+    RepoPath.extend({
+      // null = no policy. `ip_port` passes the schema and is refused by the
+      // handler with `level_unsupported_in_cell` (OD-1, OD-2).
+      level: Level.nullable().optional(),
+      // full replace; exclusive with add/remove
+      allowlist: z.array(EntryList).max(200).optional(),
+      // up to 200 so the 101-host case reaches the classifier's
+      // `too_many_entries` instead of a schema error (spec section 8 fix 8)
+      add: z.array(EntryList).max(200).optional(),
+      remove: z.array(EntryList).max(200).optional(),
+      registries: z.boolean().optional(),
+      // the compare-and-set token; null = "I read no row"
+      expectedUpdatedAt: z.string().max(64).nullable().optional(),
+      // compute before/after and write nothing (UI preview, CLI --dry-run)
+      dryRun: z.boolean().optional(),
+    }),
+  )
+  .output(
+    z.object({
+      // false for a dry run and for a change that changes nothing
+      applied: z.boolean(),
+      before: EgressView,
+      after: EgressView,
+      auditId: z.string().nullable(),
+    }),
+  );
+
 const HistoryEntry = z.object({
   id: z.string(),
   createdAt: z.string(),
@@ -287,6 +332,7 @@ export const cliAPIContract = {
   },
   egress: {
     get: egressGet,
+    update: egressUpdate,
     history: egressHistory,
     list: egressList,
   },

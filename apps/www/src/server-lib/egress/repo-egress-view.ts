@@ -33,7 +33,17 @@ import {
   systemEgressHosts,
 } from "./resolve-egress-policy";
 
-type Row = RepoReviewSetting | undefined;
+/** The fields the view reads: a stored row, or a projected one for a dry run. */
+export type EgressRow = Pick<
+  RepoReviewSetting,
+  | "egressPolicy"
+  | "egressAllowlist"
+  | "cellEgressRegistries"
+  | "updatedAt"
+  | "updatedByUserId"
+>;
+
+type Row = EgressRow | undefined;
 type EgressView = EgressViewData;
 type CellView = EgressCellData;
 type EgressLayer = EgressLayerData;
