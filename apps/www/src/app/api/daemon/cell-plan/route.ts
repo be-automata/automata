@@ -18,10 +18,7 @@ import {
   cellsEnabledForRun,
 } from "@/server-lib/compute/cell-gate";
 import { isAgentWorking } from "@/agent/thread-status";
-import {
-  isMentionPullRequestThread,
-  taskRunPushBranch,
-} from "@/server-lib/task/remote-task-pr";
+import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import {
   CELL_RUN_TTL_MS,
   cellStepKey,
@@ -204,7 +201,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     prNumber: thread.githubPRNumber ?? undefined,
     branch: thread.branchName ?? thread.repoBaseBranchName,
     baseBranch: thread.repoBaseBranchName,
-    isMentionPullRequest: isMentionPullRequestThread(thread.sourceMetadata),
+    sourceMetadata: thread.sourceMetadata,
   });
   if (pushBranch === null) return refuse("work_branch_unresolved", 409);
 

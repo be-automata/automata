@@ -34,10 +34,7 @@ import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
 import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
-import {
-  isMentionPullRequestThread,
-  taskRunPushBranch,
-} from "@/server-lib/task/remote-task-pr";
+import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import { cellEligibilityAtDispatch } from "@/server-lib/compute/cell-eligibility";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
@@ -856,23 +853,20 @@ async function sealWireInput({
 
 /**
  * The ref a mention-lane run may push (#729), or undefined for any other
- * thread: an issue mention pushes its work branch, a PR mention the PR head it
- * checked out. A branch that is not a valid ref throws (the dispatch catch
+ * thread: the run's one push branch (an issue mention's work branch, a PR
+ * mention's head). A branch that is not a valid ref throws (the dispatch catch
  * revokes the token and fails the thread); the raw branch name is untrusted
  * text and stays out of the message.
  */
 function mentionPushRef({
   sourceMetadata,
   push,
-  branch,
 }: {
   sourceMetadata: ThreadSourceMetadata | null | undefined;
   push: string | null;
-  branch: string | null | undefined;
 }): string | undefined {
   if (!isMentionLaneStamp(sourceMetadata)) return undefined;
-  const target = sourceMetadata.mention.isPullRequest ? branch : push;
-  const ref = target ? `refs/heads/${target}` : "";
+  const ref = push ? `refs/heads/${push}` : "";
   if (!isBranchRef(ref)) {
     throw new Error("mention dispatch refused: no valid ref to push to");
   }
@@ -1226,7 +1220,7 @@ export async function dispatchAgentRun({
       prNumber,
       branch,
       baseBranch: thread?.repoBaseBranchName,
-      isMentionPullRequest: isMentionPullRequestThread(thread?.sourceMetadata),
+      sourceMetadata: thread?.sourceMetadata,
     });
     const workBranch =
       isPlainTaskRun && push !== null && push !== branch ? push : undefined;
@@ -1236,7 +1230,6 @@ export async function dispatchAgentRun({
     const pushRef = mentionPushRef({
       sourceMetadata: thread?.sourceMetadata,
       push,
-      branch,
     });
     // #380: the self-heal plan's single-use token is split off here — the
     // wire shape carries the plan, the envelope carries the token.

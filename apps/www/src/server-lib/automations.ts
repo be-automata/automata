@@ -359,6 +359,13 @@ export async function runAutomation({
           parts: [{ type: "text", text }],
           timestamp: new Date().toISOString(),
         };
+        // The mention lane decides checkpointing itself (#729): off on a PR,
+        // on for an issue; the companion lane is always off.
+        const mention = options?.stampExtra?.mention;
+        const disableGitCheckpointing = mention
+          ? mention.isPullRequest
+          : options?.stampExtra?.companion !== undefined ||
+            (automation.disableGitCheckpointing ?? false);
         const newThreadResult = await createNewThread({
           userId: automation.userId,
           organizationId: automation.organizationId,
@@ -412,10 +419,7 @@ export async function runAutomation({
           trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
-          disableGitCheckpointing: options?.stampExtra?.mention
-            ? options.stampExtra.mention.isPullRequest
-            : options?.stampExtra?.companion !== undefined ||
-              (automation.disableGitCheckpointing ?? false),
+          disableGitCheckpointing,
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
         });

@@ -2,6 +2,7 @@ import type { Octokit } from "octokit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DBMessage } from "@terragon/shared/db/db-message";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import {
   getThread,
   updateThread,
@@ -17,10 +18,13 @@ import * as schema from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db";
+import {
+  mentionSourceMetadata,
+  mentionStamp,
+} from "@/test-helpers/mention-stamp";
 
 import {
   openRemoteTaskPullRequest,
-  RemoteTaskPrRecordError,
   remoteTaskBranchName,
   isMentionPullRequestThread,
   mentionPullRequestPolicy,
@@ -145,6 +149,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(app, user)).resolves.toEqual({
       status: "opened",
       prNumber: 77,
+      recorded: true,
     });
     expect(user.created).toHaveLength(1);
     expect(app.created).toHaveLength(0);
@@ -164,6 +169,7 @@ describe("openRemoteTaskPullRequest", () => {
       await expect(run(app, user)).resolves.toEqual({
         status: "opened",
         prNumber: 77,
+        recorded: true,
       });
       expect(app.created).toHaveLength(1);
     },
@@ -181,6 +187,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(gh)).resolves.toEqual({
       status: "opened",
       prNumber: 77,
+      recorded: true,
     });
     expect(gh.created).toHaveLength(1);
     expect(gh.created[0]).toMatchObject({
@@ -250,20 +257,13 @@ describe("openRemoteTaskPullRequest", () => {
   });
 
   describe("a thread an issue mention started (OD-2, OD-5)", () => {
-    const issueStamp = {
-      type: "automation-skill",
-      skillName: "github-mention",
-      contentSha: "sha",
-      source: "org",
-      mention: {
+    const issueStamp = mentionSourceMetadata(
+      mentionStamp({
+        isPullRequest: false,
         repoFullName: REPO,
         issueOrPrNumber: 42,
-        isPullRequest: false,
-        commentId: 1,
-        commentKind: "issue",
-        commenterLogin: "octocat",
-      },
-    } as never;
+      }),
+    );
 
     beforeEach(async () => {
       await updateThread({
@@ -335,8 +335,9 @@ describe("openRemoteTaskPullRequest", () => {
     });
   });
 
-  it("a failure recording the PR still names it: the error carries the opened PR", async () => {
+  it("a failure recording the PR still names it, flagged unrecorded and logged", async () => {
     const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     // The thread row vanishes after the PR is created: the writes then fail.
     const github = gh.octokit.rest.pulls.create as unknown as ReturnType<
       typeof vi.fn
@@ -347,15 +348,16 @@ describe("openRemoteTaskPullRequest", () => {
         data: { number: 77, state: "open", draft: true, merged: false },
       };
     });
-    const failure = await run(gh).then(
-      () => null,
-      (error: unknown) => error,
-    );
-    expect(failure).toBeInstanceOf(RemoteTaskPrRecordError);
-    expect((failure as RemoteTaskPrRecordError).recordedOutcome).toEqual({
+    await expect(run(gh)).resolves.toEqual({
       status: "opened",
       prNumber: 77,
+      recorded: false,
     });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[remote-task-pr] PR opened but not recorded",
+      expect.objectContaining({ threadId, prNumber: 77 }),
+    );
+    errorSpy.mockRestore();
   });
 
   it("a plain task thread keeps the owner's prType and gets no Refs line", async () => {
@@ -374,6 +376,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(gh)).resolves.toEqual({
       status: "adopted",
       prNumber: 12,
+      recorded: true,
     });
     expect(gh.created).toHaveLength(0);
   });
@@ -433,13 +436,18 @@ describe("remoteTaskBranchName", () => {
   });
 });
 
+const prMention = mentionSourceMetadata(mentionStamp({ isPullRequest: true }));
+const issueMention = mentionSourceMetadata(
+  mentionStamp({ isPullRequest: false }),
+);
+
 describe("taskRunPushBranch", () => {
   const threadId = "abcdef12-0000-0000-0000-000000000000";
   const push = (patch: {
     prNumber?: number;
     branch?: string | null;
     baseBranch?: string | null;
-    isMentionPullRequest?: boolean;
+    sourceMetadata?: ThreadSourceMetadata;
   }) =>
     taskRunPushBranch({
       threadId,
@@ -465,7 +473,7 @@ describe("taskRunPushBranch", () => {
         prNumber: 7,
         branch: "feat/pr-head",
         baseBranch: "feat/pr-head",
-        isMentionPullRequest: true,
+        sourceMetadata: prMention,
       }),
     ).toBe("feat/pr-head");
   });
@@ -475,7 +483,7 @@ describe("taskRunPushBranch", () => {
         prNumber: 7,
         branch: "feat/pr-head",
         baseBranch: "feat/pr-head",
-        isMentionPullRequest: false,
+        sourceMetadata: issueMention,
       }),
     ).toBeNull();
     expect(
@@ -484,7 +492,7 @@ describe("taskRunPushBranch", () => {
   });
   it("a mention PR thread never resolves to a blank branch", () => {
     expect(
-      push({ prNumber: 7, branch: null, isMentionPullRequest: true }),
+      push({ prNumber: 7, branch: null, sourceMetadata: prMention }),
     ).toBeNull();
   });
   it("the base branch with a PR, or a blank branch, is null", () => {
@@ -495,27 +503,16 @@ describe("taskRunPushBranch", () => {
 });
 
 describe("isMentionPullRequestThread", () => {
-  const stamp = (mention: unknown) =>
-    ({
+  it("matches only a mention stamp on a pull request", () => {
+    const noMention = {
       type: "automation-skill",
       skillName: "github-mention",
       contentSha: "sha",
       source: "org",
-      ...(mention === undefined ? {} : { mention }),
-    }) as never;
-  const mention = (isPullRequest: boolean) => ({
-    repoFullName: "acme/widgets",
-    issueOrPrNumber: 4,
-    isPullRequest,
-    commentId: 1,
-    commentKind: "issue",
-    commenterLogin: "octocat",
-  });
-
-  it("matches only a mention stamp on a pull request", () => {
-    expect(isMentionPullRequestThread(stamp(mention(true)))).toBe(true);
-    expect(isMentionPullRequestThread(stamp(mention(false)))).toBe(false);
-    expect(isMentionPullRequestThread(stamp(undefined))).toBe(false);
+    } as ThreadSourceMetadata;
+    expect(isMentionPullRequestThread(prMention)).toBe(true);
+    expect(isMentionPullRequestThread(issueMention)).toBe(false);
+    expect(isMentionPullRequestThread(noMention)).toBe(false);
     expect(isMentionPullRequestThread(null)).toBe(false);
     expect(isMentionPullRequestThread(undefined)).toBe(false);
     expect(isMentionPullRequestThread({ type: "manual" } as never)).toBe(false);
@@ -523,25 +520,12 @@ describe("isMentionPullRequestThread", () => {
 });
 
 describe("mentionPullRequestPolicy", () => {
-  const stamp = (isPullRequest: boolean) =>
-    ({
-      type: "automation-skill",
-      skillName: "github-mention",
-      contentSha: "sha",
-      source: "org",
-      mention: {
-        repoFullName: REPO,
-        issueOrPrNumber: 9,
-        isPullRequest,
-        commentId: 1,
-        commentKind: "issue",
-        commenterLogin: "octocat",
-      },
-    }) as never;
-
   it("names the issue for an issue mention only", () => {
-    expect(mentionPullRequestPolicy(stamp(false))).toEqual({ issueNumber: 9 });
-    expect(mentionPullRequestPolicy(stamp(true))).toBeNull();
+    const issue = mentionSourceMetadata(
+      mentionStamp({ isPullRequest: false, issueOrPrNumber: 9 }),
+    );
+    expect(mentionPullRequestPolicy(issue)).toEqual({ issueNumber: 9 });
+    expect(mentionPullRequestPolicy(prMention)).toBeNull();
     expect(mentionPullRequestPolicy(null)).toBeNull();
     expect(mentionPullRequestPolicy({ type: "manual" } as never)).toBeNull();
   });

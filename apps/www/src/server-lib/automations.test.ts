@@ -1,3 +1,4 @@
+import { mentionStamp } from "@/test-helpers/mention-stamp";
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import * as z from "zod/v4";
 import { db } from "@/lib/db";
@@ -1211,15 +1212,6 @@ describe("runAutomation — the mention stamp decides git checkpointing (#729)",
   const SKILL_BODY =
     "Review {{repoFullName}} against origin/{{baseBranch}}.\n" +
     '```json\n{ "verdict": "approve" }\n```\n';
-  const mention = (isPullRequest: boolean) => ({
-    repoFullName: "acme/widgets",
-    issueOrPrNumber: 7,
-    isPullRequest,
-    commentId: 1,
-    commentKind: "issue" as const,
-    commenterLogin: "alice",
-  });
-
   // card: protects=an issue mention checkpoints (its finish opens one draft PR) while a PR mention never does, whatever the onboarded row says; fails_when=the row's disableGitCheckpointing wins for a mention, or a PR mention turns checkpointing on; no_claim=what the finish does with the flag (remote-task-pr suite)
   async function disableFlagFor({
     rowDisables,
@@ -1273,34 +1265,41 @@ describe("runAutomation — the mention stamp decides git checkpointing (#729)",
     return vi.mocked(createNewThread).mock.calls[0]![0].disableGitCheckpointing;
   }
 
-  it("an issue mention checkpoints even when the automation row disables it", async () => {
-    expect(
-      await disableFlagFor({
-        rowDisables: true,
-        stampExtra: { mention: mention(false) },
-      }),
-    ).toBe(false);
-  });
-
-  it("a PR mention never checkpoints, whatever the row says (AC-6)", async () => {
-    for (const rowDisables of [true, false]) {
-      expect(
-        await disableFlagFor({
-          rowDisables,
-          stampExtra: { mention: mention(true) },
-        }),
-      ).toBe(true);
-    }
-  });
-
-  it("a thread with no mention stamp keeps the row's value; a companion is always off", async () => {
-    expect(await disableFlagFor({ rowDisables: true })).toBe(true);
-    expect(await disableFlagFor({ rowDisables: false })).toBe(false);
-    expect(
-      await disableFlagFor({
-        rowDisables: false,
-        stampExtra: { companion: { kind: "flutter" } as never },
-      }),
-    ).toBe(true);
+  it.each([
+    [
+      "an issue mention checkpoints, row disables it",
+      true,
+      { mention: false },
+      false,
+    ],
+    [
+      "an issue mention checkpoints, row allows it",
+      false,
+      { mention: false },
+      false,
+    ],
+    [
+      "a PR mention never checkpoints, row disables it (AC-6)",
+      true,
+      { mention: true },
+      true,
+    ],
+    [
+      "a PR mention never checkpoints, row allows it (AC-6)",
+      false,
+      { mention: true },
+      true,
+    ],
+    ["no stamp keeps the row's value (on)", true, {}, true],
+    ["no stamp keeps the row's value (off)", false, {}, false],
+    ["a companion is always off", false, { companion: true }, true],
+  ] as const)("%s", async (_name, rowDisables, stamp, expected) => {
+    const stampExtra =
+      "mention" in stamp
+        ? { mention: mentionStamp({ isPullRequest: stamp.mention }) }
+        : "companion" in stamp
+          ? { companion: { kind: "flutter" } as never }
+          : undefined;
+    expect(await disableFlagFor({ rowDisables, stampExtra })).toBe(expected);
   });
 });

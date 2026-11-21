@@ -724,7 +724,7 @@ export function isDeliveryAsk(instruction: string): boolean {
  */
 export function buildMentionStamp(
   input: OrgMentionInput,
-  instruction?: string | null,
+  instruction: string | null,
 ): MentionLaneStamp {
   const { comment } = input;
   return {

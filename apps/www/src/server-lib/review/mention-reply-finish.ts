@@ -54,6 +54,7 @@ import {
   reviewReplyTargetId,
 } from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
+import { DELIVERY_LABEL } from "@/server-lib/delivery/delivery-effects";
 import type { RemoteTaskPrOutcome } from "@/server-lib/task/remote-task-pr";
 import type { MentionTerminalTarget } from "./mention-terminal-reply";
 
@@ -185,9 +186,6 @@ type Logger = ReviewLogger;
 /** How long a reply waits for the pull request the same finish is opening. */
 export const PR_OUTCOME_WAIT_MS = 20_000;
 
-/** The label the issue-delivery lane already listens for (delivery-effects). */
-export const DELIVERY_LABEL = "automata:deliver";
-
 const DELIVERY_HINT = `For the full delivery pipeline (spec, gated implementation and the fix loop), add the \`${DELIVERY_LABEL}\` label to this issue.`;
 
 /**
@@ -242,8 +240,16 @@ export function renderMentionReply(
   if (reply.commit && !reply.reply.includes(reply.commit.slice(0, 7))) {
     parts.push(`_Pushed \`${reply.commit}\`._`);
   }
-  parts.push(...extras, mentionReplyMarker(commentId));
-  return parts.join("\n\n");
+  return joinReply(parts, extras, commentId);
+}
+
+/** The one shape of every reply: text parts, extra lines, then the marker. */
+function joinReply(
+  parts: readonly string[],
+  extras: readonly string[],
+  commentId: number,
+): string {
+  return [...parts, ...extras, mentionReplyMarker(commentId)].join("\n\n");
 }
 
 /**
@@ -363,14 +369,14 @@ export async function executeMentionReply({
   const provider = parsed.ok ? null : (providerUnavailable ?? null);
   const cause = parsed.ok || provider ? null : (terminalCause ?? null);
   const extras = mentionReplyExtras(stamp, pullRequest);
-  const notice = (text: string) => [text, ...extras, marker].join("\n\n");
+  const noticeText = provider
+    ? renderMentionProviderNotice(provider)
+    : cause
+      ? renderMentionTerminalNotice(cause)
+      : MENTION_REPLY_NOTICE;
   const body = parsed.ok
     ? renderMentionReply(parsed.value, stamp.commentId, extras)
-    : provider
-      ? notice(renderMentionProviderNotice(provider))
-      : cause
-        ? notice(renderMentionTerminalNotice(cause))
-        : notice(MENTION_REPLY_NOTICE);
+    : joinReply([noticeText], extras, stamp.commentId);
   try {
     if (inThread) {
       await github.replyToReviewComment(
@@ -498,25 +504,28 @@ export async function handleMentionReplyAtFinish({
       logger.info("[shadow] reply suppressed", { threadId });
       return;
     }
-    const pullRequest =
+    const [owner, repo] = parseRepoFullName(stamp.repoFullName);
+    // The chat read and the App client do not depend on the PR open: start
+    // them with the bounded wait, so the wait is not added to them.
+    const [pullRequest, threadChat, octokit] = await Promise.all([
       remotePullRequest && !stamp.isPullRequest
-        ? await awaitPullRequestOutcome(remotePullRequest, { threadId })
-        : null;
-    const chatId =
-      threadChatId ??
-      (await resolveThreadChatId({ db, threadId, version: thread.version }));
-    const threadChat =
-      chatId === null
-        ? undefined
-        : await getThreadChat({ db, threadId, threadChatId: chatId, userId });
+        ? awaitPullRequestOutcome(remotePullRequest, { threadId })
+        : null,
+      readThreadChat({
+        db,
+        userId,
+        threadId,
+        version: thread.version,
+        threadChatId,
+      }),
+      getOctokitForApp({ owner, repo }),
+    ]);
     const terminalText =
       findLastLeadAgentText(threadChat?.messages ?? null, (text) =>
         text.includes(MENTION_REPLY_KIND),
       ) ??
       findLastLeadAgentText(threadChat?.messages ?? null, () => true) ??
       "";
-    const [owner, repo] = parseRepoFullName(stamp.repoFullName);
-    const octokit = await getOctokitForApp({ owner, repo });
     const outcome = await executeMentionReply({
       github: createOctokitMentionReplyClient(octokit, stamp.repoFullName),
       stamp,
@@ -561,6 +570,27 @@ export async function handleMentionReplyAtFinish({
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/** The finished chat: the one the event named, else resolved from the thread. */
+async function readThreadChat({
+  db,
+  userId,
+  threadId,
+  version,
+  threadChatId,
+}: {
+  db: DB;
+  userId: string;
+  threadId: string;
+  version: number;
+  threadChatId: string | null;
+}) {
+  const chatId =
+    threadChatId ?? (await resolveThreadChatId({ db, threadId, version }));
+  return chatId === null
+    ? undefined
+    : await getThreadChat({ db, threadId, threadChatId: chatId, userId });
 }
 
 /**

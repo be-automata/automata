@@ -18,6 +18,7 @@ import {
   parseRepoFullName,
 } from "@/lib/github";
 import { generatePRContent } from "@/server-lib/generate-pr-content";
+import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 
 import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
 
@@ -72,8 +73,8 @@ export function isMentionPullRequestThread(
   sourceMetadata: ThreadSourceMetadata | null | undefined,
 ): boolean {
   return (
-    sourceMetadata?.type === "automation-skill" &&
-    sourceMetadata.mention?.isPullRequest === true
+    isMentionLaneStamp(sourceMetadata) &&
+    sourceMetadata.mention.isPullRequest === true
   );
 }
 
@@ -84,7 +85,7 @@ export function isMentionPullRequestThread(
  * - otherwise (an existing PR or a non-base branch) → `branch`;
  * - the base branch with a PR, or a blank branch → null: a run never gets its
  *   base branch as a push target;
- * - except a mention thread on a PR (`isMentionPullRequest`): its stored
+ * - except a mention thread on a PR (read from `sourceMetadata`): its stored
  *   "base" is the PR head it checked out, which is what it pushes. The PR's
  *   real base branch is never stored on it, so it can never be returned.
  */
@@ -93,19 +94,19 @@ export function taskRunPushBranch({
   prNumber,
   branch,
   baseBranch,
-  isMentionPullRequest = false,
+  sourceMetadata,
 }: {
   threadId: string;
   prNumber: number | undefined;
   branch: string | null | undefined;
   baseBranch: string | null | undefined;
-  isMentionPullRequest?: boolean;
+  sourceMetadata?: ThreadSourceMetadata | null;
 }): string | null {
   if (!branch || branch.trim() === "") return null;
   const isBase = branch === baseBranch;
   if (isBase) {
     if (prNumber === undefined) return remoteTaskBranchName(threadId);
-    return isMentionPullRequest ? branch : null;
+    return isMentionPullRequestThread(sourceMetadata) ? branch : null;
   }
   return branch;
 }
@@ -118,11 +119,11 @@ export function taskRunPushBranch({
 export function mentionPullRequestPolicy(
   sourceMetadata: ThreadSourceMetadata | null | undefined,
 ): { issueNumber: number } | null {
-  if (sourceMetadata?.type !== "automation-skill") return null;
-  const mention = sourceMetadata.mention;
-  return mention && !mention.isPullRequest
-    ? { issueNumber: mention.issueOrPrNumber }
-    : null;
+  if (!isMentionLaneStamp(sourceMetadata)) return null;
+  const { mention } = sourceMetadata;
+  return mention.isPullRequest
+    ? null
+    : { issueNumber: mention.issueOrPrNumber };
 }
 
 const ISSUE_REF =
@@ -187,12 +188,14 @@ function splitCode(body: string): Piece[] {
  * such line is left, whatever the agent's own body said.
  */
 export function withIssueReference(body: string, issueNumber: number): string {
-  const rewritten = splitCode(body)
-    .map(([text, isCode]) =>
+  const pieces = splitCode(body).map(
+    ([text, isCode]): Piece => [
       isCode ? text : text.replace(CLOSING_REF, "Refs $1"),
-    )
-    .join("");
-  const prose = splitCode(rewritten)
+      isCode,
+    ],
+  );
+  const rewritten = pieces.map(([text]) => text).join("");
+  const prose = pieces
     .filter(([, isCode]) => !isCode)
     .map(([text]) => text)
     .join("");
@@ -203,7 +206,12 @@ export function withIssueReference(body: string, issueNumber: number): string {
 }
 
 export type RemoteTaskPrOutcome =
-  | { status: "opened" | "adopted"; prNumber: number }
+  | {
+      status: "opened" | "adopted";
+      prNumber: number;
+      /** False when the PR exists on GitHub but recording it on the thread failed. */
+      recorded: boolean;
+    }
   | {
       status: "skipped";
       reason:
@@ -214,30 +222,6 @@ export type RemoteTaskPrOutcome =
         | "no_branch"
         | "no_changes";
     };
-
-/**
- * The PR exists on GitHub but recording it on the thread failed. The finish
- * hook logs it and still tells the mention reply which PR it is (a later run
- * adopts the open PR, so nothing is stranded).
- */
-export class RemoteTaskPrRecordError extends Error {
-  constructor(
-    /** What GitHub did; the PR number is known. */
-    readonly recordedOutcome: {
-      status: "opened" | "adopted";
-      prNumber: number;
-    },
-    cause: unknown,
-  ) {
-    super(
-      `pull request #${recordedOutcome.prNumber} ${recordedOutcome.status} but not recorded: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
-      { cause },
-    );
-    this.name = "RemoteTaskPrRecordError";
-  }
-}
 
 interface CompareFile {
   filename: string;
@@ -479,7 +463,14 @@ export async function openRemoteTaskPullRequest({
       }),
     ]);
   } catch (error) {
-    throw new RemoteTaskPrRecordError({ status, prNumber: pr.number }, error);
+    // The PR exists (a later run adopts the open PR), so the outcome still
+    // names it; the caller skips what depends on the record. No untrusted text.
+    console.error("[remote-task-pr] PR opened but not recorded", {
+      threadId,
+      prNumber: pr.number,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status, prNumber: pr.number, recorded: false };
   }
-  return { status, prNumber: pr.number };
+  return { status, prNumber: pr.number, recorded: true };
 }

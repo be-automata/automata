@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MentionLaneStamp } from "@terragon/shared";
+import { mentionStamp } from "@/test-helpers/mention-stamp";
+import type { RemoteTaskPrOutcome } from "@/server-lib/task/remote-task-pr";
+import { DELIVERY_LABEL } from "@/server-lib/delivery/delivery-effects";
 import { getOctokitForApp } from "@/lib/github";
 import { LEGACY_THREAD_CHAT_ID } from "@terragon/shared/utils/thread-utils";
 import {
@@ -9,7 +12,6 @@ import {
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import {
-  DELIVERY_LABEL,
   MENTION_REPLY_NOTICE,
   executeMentionReply,
   handleMentionRepliesAtTerminal,
@@ -17,7 +19,6 @@ import {
   mentionReplyMarker,
   parseMentionReply,
   renderMentionTerminalNotice,
-  renderPullRequestLine,
   type MentionReplyGitHub,
 } from "./mention-reply-finish";
 import { MENTION_SKILL_NAME, validateSkillBody } from "./review-skill";
@@ -69,19 +70,13 @@ vi.mock("./resolve-approve-floor", () => ({
   resolveApproveFloor: vi.fn(async () => undefined),
 }));
 
-const ISSUE_STAMP: MentionLaneStamp = {
-  repoFullName: "acme/widgets",
-  issueOrPrNumber: 7,
+const ISSUE_STAMP = mentionStamp({
   isPullRequest: true,
   commentId: 101,
-  commentKind: "issue",
   commenterLogin: "alice",
-};
+});
 /** The ISSUE mention (ISSUE_STAMP above is, despite its name, a PR one). */
-const ISSUE_MENTION: MentionLaneStamp = {
-  ...ISSUE_STAMP,
-  isPullRequest: false,
-};
+const ISSUE_MENTION = mentionStamp({ ...ISSUE_STAMP, isPullRequest: false });
 const REVIEW_STAMP: MentionLaneStamp = {
   ...ISSUE_STAMP,
   commentId: 202,
@@ -381,7 +376,7 @@ describe("executeMentionReply", () => {
     const runReview = vi.fn();
     await executeMentionReply({
       github,
-      stamp: { ...ISSUE_STAMP, isPullRequest: false },
+      stamp: ISSUE_MENTION,
       terminalText: block({
         kind: "mention-reply",
         reply: "Answer.",
@@ -408,34 +403,43 @@ describe("the pull request outcome in an issue mention's reply (#729)", () => {
   };
 
   it("opened → links the draft PR, before the marker", async () => {
-    expect(await post({ status: "opened", prNumber: 55 })).toBe(
+    expect(await post({ status: "opened", prNumber: 55, recorded: true })).toBe(
       `issue:Done it.\n\nOpened a draft pull request: ${URL}\n\n${mentionReplyMarker(101)}`,
     );
   });
 
-  it("adopted → links the open PR", async () => {
-    expect(await post({ status: "adopted", prNumber: 55 })).toContain(
+  it.each([
+    [
+      "opened but not recorded → still links the PR",
+      { status: "opened", prNumber: 55, recorded: false },
+      `Opened a draft pull request: ${URL}`,
+    ],
+    [
+      "adopted → links the open PR",
+      { status: "adopted", prNumber: 55, recorded: true },
       `Updated the open pull request: ${URL}`,
-    );
+    ],
+    [
+      "auto_create_off → says automatic PRs are off (OD-7)",
+      { status: "skipped", reason: "auto_create_off" },
+      "automatic pull requests are turned off",
+    ],
+    [
+      "no_changes → only the no-changes line (AC-5)",
+      { status: "skipped", reason: "no_changes" },
+      "_No pull request was opened: no changes were pushed._",
+    ],
+    [
+      "no_branch → only the no-changes line (AC-5)",
+      { status: "skipped", reason: "no_branch" },
+      "_No pull request was opened: no changes were pushed._",
+    ],
+  ] as const)("%s", async (_name, outcome, line) => {
+    const body = await post(outcome);
+    expect(body).toContain("Done it.");
+    expect(body).toContain(line);
+    if (outcome.status === "skipped") expect(body).not.toContain("github.com");
   });
-
-  it("auto_create_off → says automatic PRs are off (OD-7)", async () => {
-    expect(
-      await post({ status: "skipped", reason: "auto_create_off" }),
-    ).toContain("automatic pull requests are turned off");
-  });
-
-  it.each(["no_changes", "no_branch"] as const)(
-    "%s → answers the question with only the no-changes line (AC-5)",
-    async (reason) => {
-      const body = await post({ status: "skipped", reason });
-      expect(body).toContain("Done it.");
-      expect(body).toContain(
-        "_No pull request was opened: no changes were pushed._",
-      );
-      expect(body).not.toContain("github.com");
-    },
-  );
 
   it.each([
     null,
@@ -455,7 +459,7 @@ describe("the pull request outcome in an issue mention's reply (#729)", () => {
       commit: "abcdef1234567",
     });
     const body = await post(
-      { status: "opened", prNumber: 55 },
+      { status: "opened", prNumber: 55, recorded: true },
       { ...ISSUE_MENTION, asksForDelivery: true },
       withCommit,
     );
@@ -472,38 +476,41 @@ describe("the pull request outcome in an issue mention's reply (#729)", () => {
     ).toContain(`add the \`${DELIVERY_LABEL}\` label to this issue`);
   });
 
-  it("the line rides every body: provider notice, terminal notice, generic notice", async () => {
-    const bodies = await Promise.all([
-      post({ status: "opened", prNumber: 55 }, ISSUE_MENTION, "no block"),
-    ]);
-    expect(bodies[0]).toContain(MENTION_REPLY_NOTICE);
-    expect(bodies[0]).toContain(URL);
-    const { github, calls } = fakeGitHub();
-    await executeMentionReply({
-      github,
-      stamp: ISSUE_MENTION,
-      terminalText: "no block",
-      terminalCause: "timeout" as never,
-      pullRequest: { status: "opened", prNumber: 55 },
-    });
-    expect(calls[0]).toContain(URL);
-    expect(calls[0]).toContain(mentionReplyMarker(101));
-  });
+  it.each([
+    ["generic notice", {}, MENTION_REPLY_NOTICE],
+    [
+      "terminal notice",
+      { terminalCause: "timeout" as const },
+      "hit its time limit",
+    ],
+    [
+      "provider notice",
+      { providerUnavailable: { kind: "auth_rejected" as const } },
+      "Nothing was changed",
+    ],
+  ])(
+    "the PR line rides the %s too, before the marker",
+    async (_name, causes, expected) => {
+      const { github, calls } = fakeGitHub();
+      await executeMentionReply({
+        github,
+        stamp: ISSUE_MENTION,
+        terminalText: "no block",
+        pullRequest: { status: "opened", prNumber: 55, recorded: true },
+        ...causes,
+      });
+      expect(calls[0]).toContain(expected);
+      expect(calls[0]).toContain(URL);
+      expect(calls[0]).toMatch(new RegExp(`${mentionReplyMarker(101)}$`));
+    },
+  );
 
   it("a PR mention never gets a PR line or the hint", async () => {
     const body = await post(
-      { status: "opened", prNumber: 55 },
+      { status: "opened", prNumber: 55, recorded: true },
       { ...ISSUE_STAMP, asksForDelivery: true },
     );
     expect(body).toBe(`issue:Done it.\n\n${mentionReplyMarker(101)}`);
-  });
-
-  it("renderPullRequestLine builds the URL from the stamp's repo", () => {
-    expect(
-      renderPullRequestLine("acme/widgets", { status: "opened", prNumber: 1 }),
-    ).toBe(
-      "Opened a draft pull request: https://github.com/acme/widgets/pull/1",
-    );
   });
 });
 
@@ -790,17 +797,14 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
 
     it("an issue mention's reply is written after the PR outcome and links it", async () => {
       vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
-      let resolvePr!: (v: { status: "opened"; prNumber: number }) => void;
-      const remotePullRequest = new Promise<{
-        status: "opened";
-        prNumber: number;
-      }>((resolve) => {
+      let resolvePr!: (v: RemoteTaskPrOutcome) => void;
+      const remotePullRequest = new Promise<RemoteTaskPrOutcome>((resolve) => {
         resolvePr = resolve;
       });
       const done = handleMentionReplyAtFinish({ ...args, remotePullRequest });
       await new Promise((r) => setTimeout(r, 20));
       expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
-      resolvePr({ status: "opened", prNumber: 55 });
+      resolvePr({ status: "opened", prNumber: 55, recorded: true });
       await done;
       expect(lastBody()).toContain(
         "Opened a draft pull request: https://github.com/acme/widgets/pull/55",
@@ -847,7 +851,11 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
       vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
       await handleMentionReplyAtFinish({
         ...args,
-        remotePullRequest: Promise.resolve({ status: "opened", prNumber: 55 }),
+        remotePullRequest: Promise.resolve({
+          status: "opened",
+          prNumber: 55,
+          recorded: true,
+        }),
       });
       expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
     });

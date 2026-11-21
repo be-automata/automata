@@ -1,4 +1,8 @@
 import {
+  mentionSourceMetadata,
+  mentionStamp,
+} from "@/test-helpers/mention-stamp";
+import {
   describe,
   it,
   vi,
@@ -1632,51 +1636,52 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
         userId: user.id,
         overrides: {
           organizationId: orgId,
-          sourceMetadata: {
-            type: "automation-skill",
-            skillName: "github-mention",
-            contentSha: "sha",
-            source: "org",
-            mention: {
-              repoFullName: REPO,
-              issueOrPrNumber: 7,
-              isPullRequest,
-              commentId: 1,
-              commentKind: "issue",
-              commenterLogin: "octocat",
-            },
-          },
+          sourceMetadata: mentionSourceMetadata(
+            mentionStamp({ isPullRequest, repoFullName: REPO }),
+          ),
           ...overrides,
         } as never,
       });
 
-    it("an issue mention is fenced to its work branch", async () => {
-      const t = await mentionThread(false);
-      const input = await dispatchAndRead(t, "main");
-      expect(input.pushRef).toBe(
-        `refs/heads/${remoteTaskBranchName(t.threadId)}`,
-      );
-      expect(input.workBranch).toBe(remoteTaskBranchName(t.threadId));
-    });
-
-    it("an issue mention whose PR the finish opened keeps its work branch fence", async () => {
-      const t = await mentionThread(false, {
-        githubPRNumber: 9,
-        branchName: "automata/task-abc12345",
-      });
-      const input = await dispatchAndRead(t, "automata/task-abc12345");
-      expect(input.pushRef).toBe("refs/heads/automata/task-abc12345");
-    });
-
-    it("a PR mention is fenced to the PR head it checked out, with no work branch", async () => {
-      const t = await mentionThread(true, {
-        githubPRNumber: 7,
-        branchName: null,
-        repoBaseBranchName: "feat/pr-head",
-      });
-      const input = await dispatchAndRead(t, "feat/pr-head");
-      expect(input.pushRef).toBe("refs/heads/feat/pr-head");
-      expect("workBranch" in input).toBe(false);
+    it.each([
+      {
+        name: "an issue mention is fenced to its work branch",
+        isPullRequest: false,
+        overrides: {},
+        branch: "main",
+        ref: "refs/heads/<task>",
+        workBranch: "<task>",
+      },
+      {
+        name: "an issue mention whose PR the finish opened keeps its work branch fence",
+        isPullRequest: false,
+        overrides: {
+          githubPRNumber: 9,
+          branchName: "automata/task-abc12345",
+        },
+        branch: "automata/task-abc12345",
+        ref: "refs/heads/automata/task-abc12345",
+        workBranch: undefined,
+      },
+      {
+        name: "a PR mention is fenced to the PR head it checked out, with no work branch",
+        isPullRequest: true,
+        overrides: {
+          githubPRNumber: 7,
+          branchName: null,
+          repoBaseBranchName: "feat/pr-head",
+        },
+        branch: "feat/pr-head",
+        ref: "refs/heads/feat/pr-head",
+        workBranch: undefined,
+      },
+    ])("$name", async (c) => {
+      const t = await mentionThread(c.isPullRequest, c.overrides);
+      const taskBranch = remoteTaskBranchName(t.threadId);
+      const input = await dispatchAndRead(t, c.branch);
+      expect(input.pushRef).toBe(c.ref.replace("<task>", taskBranch));
+      if (c.workBranch) expect(input.workBranch).toBe(taskBranch);
+      else expect("workBranch" in input).toBe(false);
     });
 
     it("a PR head that is not a valid ref is refused, never dispatched unfenced", async () => {

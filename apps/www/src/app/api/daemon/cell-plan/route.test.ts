@@ -1,3 +1,7 @@
+import {
+  mentionSourceMetadata,
+  mentionStamp,
+} from "@/test-helpers/mention-stamp";
 import { NextRequest } from "next/server";
 import { and, eq, like } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -442,20 +446,10 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(await steps()).toEqual([]);
     });
 
-    const mentionStamp = (isPullRequest: boolean) => ({
-      type: "automation-skill",
-      skillName: "github-mention",
-      contentSha: "sha",
-      source: "org",
-      mention: {
-        repoFullName: "acme/widgets",
-        issueOrPrNumber: 5,
-        isPullRequest,
-        commentId: 1,
-        commentKind: "issue",
-        commenterLogin: "octocat",
-      },
-    });
+    const mentionThreadStamp = (isPullRequest: boolean) =>
+      mentionSourceMetadata(
+        mentionStamp({ isPullRequest, issueOrPrNumber: 5 }),
+      );
 
     it("a PR-mention step opens with allowedRef on the PR head, never the base", async () => {
       // A PR mention stores the PR head as repoBaseBranchName, no branchName.
@@ -464,7 +458,7 @@ describe("POST /api/daemon/cell-plan", () => {
         githubPRNumber: 5,
         branchName: null,
         repoBaseBranchName: "feat/pr-head",
-        sourceMetadata: mentionStamp(true),
+        sourceMetadata: mentionThreadStamp(true),
       });
       threadId = t.threadId;
       threadChatId = t.threadChatId;
@@ -477,7 +471,7 @@ describe("POST /api/daemon/cell-plan", () => {
       const t = await newThread({
         organizationId: orgId,
         branchName: null,
-        sourceMetadata: mentionStamp(false),
+        sourceMetadata: mentionThreadStamp(false),
       });
       threadId = t.threadId;
       threadChatId = t.threadChatId;
