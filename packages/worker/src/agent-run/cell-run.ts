@@ -902,21 +902,22 @@ async function writeGhNote(r: CellRunState): Promise<void> {
       timeoutMs: PGREP_TIMEOUT_MS,
     }),
   );
-  let existing = "";
-  if (probe.exitCode !== 1) {
-    const bytes =
-      probe.exitCode === 0
-        ? await raceLive(r, provider.copyOut(r.cellId as string, path)).catch(
-            () => null,
-          )
-        : null;
-    ensureLive(r);
-    if (bytes === null) {
-      r.step("cell: gh note not added (~/.claude/CLAUDE.md could not be read)");
-      return;
-    }
-    existing = new TextDecoder().decode(bytes);
+  if (probe.exitCode === 1) {
+    await putFile(r, path, CELL_GH_NOTE, 600);
+    return;
   }
+  const bytes =
+    probe.exitCode === 0
+      ? await raceLive(r, provider.copyOut(r.cellId as string, path)).catch(
+          () => null,
+        )
+      : null;
+  ensureLive(r);
+  if (bytes === null) {
+    r.step("cell: gh note not added (~/.claude/CLAUDE.md could not be read)");
+    return;
+  }
+  const existing = new TextDecoder().decode(bytes);
   await putFile(
     r,
     path,
@@ -950,7 +951,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
   }
   await execOk(
     r,
-    ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR],
+    ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR, CELL_GH_CONFIG_DIR],
     "mkdir home",
   );
   let batteries: unknown = null;
@@ -981,11 +982,6 @@ async function bootstrap(r: CellRunState): Promise<void> {
     repoFullName: input.repoFullName,
     botLogin: config.botLogin,
   });
-  await execOk(
-    r,
-    ["/bin/mkdir", "-p", "-m", "700", CELL_GH_CONFIG_DIR],
-    "mkdir gh config",
-  );
   await putFile(r, `${CELL_GH_CONFIG_DIR}/hosts.yml`, gh.hostsYml, 600);
   await writeGhNote(r);
   // GH_* is reserved for repo env, so the owner's names never collide.

@@ -113,6 +113,16 @@ function graphql(
 
 const gql = (query: string) => JSON.stringify({ query });
 
+/** The REST status the handler answers for one request. */
+async function allowed(
+  h: Pick<ReturnType<typeof harness>, "handler">,
+  path: string,
+  token: string,
+  method = "GET",
+): Promise<number> {
+  return (await h.handler(rest(path, token, { method }), "rest")).status;
+}
+
 describe("gh broker REST", () => {
   it("AC6 forwards reads to api.github.com, bytes, status and query intact; HEAD works", async () => {
     const f = await fixture();
@@ -163,9 +173,7 @@ describe("gh broker REST", () => {
       "/rate_limit",
       "/meta",
     ]) {
-      expect((await h.handler(rest(path, f.token), "rest")).status, path).toBe(
-        200,
-      );
+      expect(await allowed(h, path, f.token), path).toBe(200);
     }
     for (const path of [
       "",
@@ -216,8 +224,7 @@ describe("gh broker REST", () => {
       "/repos/o%00r/issues",
       "/repos/o%0Ar/issues",
     ]) {
-      const res = await h.handler(rest(path, f.token), "rest");
-      expect(res.status, path).toBe(403);
+      expect(await allowed(h, path, f.token), path).toBe(403);
     }
     expect(h.fetchImpl).not.toHaveBeenCalled();
   });
@@ -230,7 +237,7 @@ describe("gh broker REST", () => {
       "/repos/acme/widgets/x/%2e%2e/issues",
       "/repos/acme/widgets/x/%2E./issues",
     ]) {
-      await h.handler(rest(path, f.token), "rest");
+      await allowed(h, path, f.token);
     }
     // `Request` resolves raw and percent-encoded dot segments before the
     // handler runs, so these arrive as /api/v3/repos/acme/widgets/issues.
@@ -241,11 +248,9 @@ describe("gh broker REST", () => {
     ]);
     expect(h.calls.every((c) => !/\.\.|%2e/i.test(c.url))).toBe(true);
     // A dot segment that climbs out of the repo lands outside it: refused.
-    const out = await h.handler(
-      rest("/repos/acme/widgets/../../user", f.token),
-      "rest",
+    expect(await allowed(h, "/repos/acme/widgets/../../user", f.token)).toBe(
+      403,
     );
-    expect(out.status).toBe(403);
   });
 
   it("answers 400 for a malformed percent escape", async () => {
@@ -311,30 +316,30 @@ describe("gh broker REST", () => {
   it("OD-3 edges: HEAD, trailing slash, query, empty segment, case, dots and underscores", async () => {
     const h = harness();
     const f = await fixture();
-    const allowed = async (path: string, token: string, method = "GET") =>
-      (await h.handler(rest(path, token, { method }), "rest")).status;
-    expect(await allowed("/repos/acme/other", f.token, "HEAD")).toBe(403);
-    expect(await allowed("/user", f.token, "HEAD")).toBe(403);
-    expect(await allowed("/repos/acme/widgets/", f.token)).toBe(200);
-    expect(await allowed("/rate_limit/", f.token)).toBe(200);
-    expect(await allowed("/rate_limit?x=y", f.token)).toBe(200);
-    expect(await allowed("/repos//acme/widgets", f.token)).toBe(403);
-    expect(await allowed("/repos/acme//widgets", f.token)).toBe(403);
-    expect(await allowed("/repos/acme/widgets.git", f.token)).toBe(403);
+    expect(await allowed(h, "/repos/acme/other", f.token, "HEAD")).toBe(403);
+    expect(await allowed(h, "/user", f.token, "HEAD")).toBe(403);
+    expect(await allowed(h, "/repos/acme/widgets/", f.token)).toBe(200);
+    expect(await allowed(h, "/rate_limit/", f.token)).toBe(200);
+    expect(await allowed(h, "/rate_limit?x=y", f.token)).toBe(200);
+    expect(await allowed(h, "/repos//acme/widgets", f.token)).toBe(403);
+    expect(await allowed(h, "/repos/acme//widgets", f.token)).toBe(403);
+    expect(await allowed(h, "/repos/acme/widgets.git", f.token)).toBe(403);
 
     const upper = await fixture("Acme/Widgets");
-    expect(await allowed("/repos/acme/widgets/issues", upper.token)).toBe(200);
-    expect(await allowed("/repos/ACME/WIDGETS", upper.token)).toBe(200);
-
-    const dotted = await fixture("acme/my.repo");
-    expect(await allowed("/repos/acme/my.repo/issues/1", dotted.token)).toBe(
+    expect(await allowed(h, "/repos/acme/widgets/issues", upper.token)).toBe(
       200,
     );
-    expect(await allowed("/repos/acme/my-repo", dotted.token)).toBe(403);
-    expect(await allowed("/repos/acme/myxrepo", dotted.token)).toBe(403);
+    expect(await allowed(h, "/repos/ACME/WIDGETS", upper.token)).toBe(200);
+
+    const dotted = await fixture("acme/my.repo");
+    expect(await allowed(h, "/repos/acme/my.repo/issues/1", dotted.token)).toBe(
+      200,
+    );
+    expect(await allowed(h, "/repos/acme/my-repo", dotted.token)).toBe(403);
+    expect(await allowed(h, "/repos/acme/myxrepo", dotted.token)).toBe(403);
     const under = await fixture("acme/my_repo");
-    expect(await allowed("/repos/acme/my_repo", under.token)).toBe(200);
-    expect(await allowed("/repos/acme/my-repo", under.token)).toBe(403);
+    expect(await allowed(h, "/repos/acme/my_repo", under.token)).toBe(200);
+    expect(await allowed(h, "/repos/acme/my-repo", under.token)).toBe(403);
 
     expect(h.calls.map((c) => c.url)).toEqual([
       "https://api.github.com/repos/acme/widgets",

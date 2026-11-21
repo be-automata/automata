@@ -113,16 +113,20 @@ export function isForbiddenCellEnvName(name: string): boolean {
 export const CELL_BROKER_HOST_PATTERN =
   /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$/;
 
+function assertBrokerHost(host: string): void {
+  if (!CELL_BROKER_HOST_PATTERN.test(host)) {
+    throw new Error(
+      `cell broker host ${JSON.stringify(host)} is not a lowercase host[:port]`,
+    );
+  }
+}
+
 /**
  * The provider entrypoint for a deployment's broker host. Throws on a host the
  * entry would refuse, so a bad host fails in the worker, not in a cell.
  */
 export function cellEntrypoint(brokerHost: string): string[] {
-  if (!CELL_BROKER_HOST_PATTERN.test(brokerHost)) {
-    throw new Error(
-      `cell broker host ${JSON.stringify(brokerHost)} is not a lowercase host[:port]`,
-    );
-  }
+  assertBrokerHost(brokerHost);
   return [CELL_ENTRY, "--url", `https://${brokerHost}`];
 }
 
@@ -239,11 +243,7 @@ export function cellCloneArgv(opts: {
   workBranch?: string | null;
   baseBranch?: string | null;
 }): string[][] {
-  if (!CELL_BROKER_HOST_PATTERN.test(opts.brokerHost)) {
-    throw new Error(
-      `cell broker host ${JSON.stringify(opts.brokerHost)} is not a lowercase host[:port]`,
-    );
-  }
+  assertBrokerHost(opts.brokerHost);
   const [owner, repo] = plainRepo(opts.repoFullName);
   assertRef("branch", opts.branch);
   const argvs: string[][] = [
@@ -315,11 +315,7 @@ export function cellGhSetup(opts: {
   repoFullName: string;
   botLogin: string;
 }): { hostsYml: string; env: Record<string, string> } {
-  if (!CELL_BROKER_HOST_PATTERN.test(opts.brokerHost)) {
-    throw new Error(
-      `cell broker host ${JSON.stringify(opts.brokerHost)} is not a lowercase host[:port]`,
-    );
-  }
+  assertBrokerHost(opts.brokerHost);
   const [owner, repo] = plainRepo(opts.repoFullName);
   if (!/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.botLogin)) {
     throw new Error("cell bot login is not a GitHub login");

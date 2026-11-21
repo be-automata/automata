@@ -17,6 +17,7 @@ import {
 import {
   CELL_DAEMON_TOKEN_HEADER,
   CELL_DAEMON_TOKEN_PLACEHOLDER,
+  CELL_GH_TOKEN_PLACEHOLDER,
   type CellVaultEntry,
   type OpenSandboxCellCreatePlan,
   type OpenSandboxNetworkPolicy,
@@ -941,7 +942,7 @@ describe(
       // gh sends `Authorization: token <hosts.yml oauth_token>`. Two bindings
       // tell the two possible configs apart: the production shape (bearer, no
       // placeholder) and a bearer with a header substitution.
-      const GH_PLACEHOLDER = "automata-cell-gh-placeholder";
+      const GH_PLACEHOLDER = CELL_GH_TOKEN_PLACEHOLDER;
       const plain: CellVaultEntry = {
         name: "gh-plain",
         hosts: [ALLOWED],
@@ -964,35 +965,31 @@ describe(
           url: `https://${ALLOWED}${path}`,
           headers: { Authorization: `token ${GH_PLACEHOLDER}` },
           // httpbin joins a repeated header, so an append would show both.
-          markers: [canary, GH_PLACEHOLDER, `token ${GH_PLACEHOLDER}`],
+          markers: [canary, GH_PLACEHOLDER],
         });
         const r = await probe(id, [
           gh("/anything/plain/api/v3/repos/acme/app", CANARY_A),
           gh("/anything/subst/api/v3/repos/acme/app", CANARY_C),
         ]);
         const verdict = (x: ProbeResult | undefined) => {
-          const [canary, placeholder, tokenForm] = x?.markersFound ?? [];
-          return {
-            ...brief(x),
-            status: x?.status,
-            canary,
-            placeholder,
-            tokenForm,
-          };
+          const [canary, placeholder] = x?.markersFound ?? [];
+          return { ...brief(x), status: x?.status, canary, placeholder };
         };
-        NOTES.gh_bearer_plain = verdict(r[0]);
-        NOTES.gh_bearer_substituted = verdict(r[1]);
         const replaced = (v: ReturnType<typeof verdict>) =>
           v.status === 200 && v.canary === true && v.placeholder === false;
+        const plainVerdict = verdict(r[0]);
+        const substitutedVerdict = verdict(r[1]);
+        NOTES.gh_bearer_plain = plainVerdict;
+        NOTES.gh_bearer_substituted = substitutedVerdict;
         // The production broker binding (bearer, no placeholder) is what the
         // cell's gh relies on: it must overwrite gh's header, not add one.
         expect(
-          replaced(NOTES.gh_bearer_plain as ReturnType<typeof verdict>),
-          `production shape replaces gh's header ${JSON.stringify(NOTES.gh_bearer_plain)}`,
+          replaced(plainVerdict),
+          `production shape replaces gh's header ${JSON.stringify(plainVerdict)}`,
         ).toBe(true);
         expect(
-          replaced(NOTES.gh_bearer_substituted as ReturnType<typeof verdict>),
-          `a substitution binding also replaces it ${JSON.stringify(NOTES.gh_bearer_substituted)}`,
+          replaced(substitutedVerdict),
+          `a substitution binding also replaces it ${JSON.stringify(substitutedVerdict)}`,
         ).toBe(true);
       } finally {
         await destroy(id);

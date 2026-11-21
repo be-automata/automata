@@ -171,7 +171,9 @@ export function isUnsafeSegment(seg: string, mode: "git" | "gh"): boolean {
   if (mode === "git") {
     return seg === "" || seg.includes("/") || seg.includes("%");
   }
-  return false;
+  // A gh segment may hold an encoded slash (`feat%2Fx`); a dot component
+  // behind one could climb out of the repo at an upstream that decodes `%2F`.
+  return seg.split("/").some((p) => p === "." || p === "..");
 }
 
 // The cell's own envelope and edge headers never go upstream.
