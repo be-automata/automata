@@ -579,14 +579,14 @@ export async function handleOrgLaneMention(
       // OD-4: a merged or closed PR gets its reason and no thread; there is
       // no fallback to the base branch. A head deleted on an open PR fails
       // thread creation with BranchDoesNotExistError, named below.
-      if (pr.merged || pr.state === "closed") {
+      // `merged_at` backs up `merged`, so a payload without it is not
+      // called "closed without being merged".
+      const merged = pr.merged === true || Boolean(pr.merged_at);
+      if (merged || pr.state === "closed") {
         await reply(
-          closedPrMentionReply({
-            merged: pr.merged === true,
-            headRef: pr.head.ref,
-          }),
-          pr.merged ? "merged pull request" : "closed pull request",
-          pr.merged ? "pr_merged" : "pr_closed",
+          closedPrMentionReply({ merged, headRef: pr.head.ref }),
+          merged ? "merged pull request" : "closed pull request",
+          merged ? "pr_merged" : "pr_closed",
         );
         return true;
       }
