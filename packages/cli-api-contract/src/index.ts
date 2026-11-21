@@ -3,6 +3,7 @@ import { AIModelExternalSchema } from "@terragon/agent/types";
 import {
   EGRESS_ACCESS_REFUSALS,
   EGRESS_ENTRY_CODES,
+  EGRESS_POLICY_LEVELS,
   EGRESS_WARNING_CODES,
 } from "@terragon/types/egress";
 import * as z from "zod/v4";
@@ -26,6 +27,25 @@ const oc = ocBase.errors({
     status: 503,
     message: "Service temporarily unavailable",
     data: z.object({ reason: z.enum(["auth_unavailable"]) }).optional(),
+  },
+  // A request that fails its input schema. The server maps oRPC's own
+  // validation error to this shape (`mapInputValidationError`), so it holds
+  // for every procedure; `egressOc` widens the entry codes.
+  BAD_REQUEST: {
+    status: 400,
+    message: "Invalid input",
+    data: z.object({
+      errors: z
+        .array(
+          z.object({
+            code: z.literal("invalid_input"),
+            message: z.string(),
+            entry: z.null(),
+            index: z.null(),
+          }),
+        )
+        .min(1),
+    }),
   },
 });
 
@@ -126,12 +146,32 @@ const RepoPath = z.object({
   repo: z.string().min(1).max(100).regex(REPO_SEGMENT),
 });
 
-const Level = z.enum(["none", "ip_port", "domain"]);
+const Level = z.enum(EGRESS_POLICY_LEVELS);
 const Layer = z.enum(["system", "platform", "registries", "repo"]);
 const HostEntry = z.object({ host: z.string(), layer: Layer });
+const OrgRef = z.object({ id: z.string(), slug: z.string() });
+const ReadOnlyReason = z.enum(["not_repo_admin", "permission_unverified"]);
+
+const EgressCell = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    entries: z.array(HostEntry),
+    bundles: z.array(z.string()),
+    digest: z.string(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    code: z.enum([
+      "egress_level_unsupported",
+      "egress_compile_failed",
+      "broker_host_unavailable",
+    ]),
+    reason: z.string().nullable(),
+  }),
+]);
 
 const EgressView = z.object({
-  org: z.object({ id: z.string(), slug: z.string() }),
+  org: OrgRef,
   // lowercased owner/name
   repo: z.string(),
   stored: z.object({
@@ -148,23 +188,7 @@ const EgressView = z.object({
     // a stored value the box builder throws on
     error: z.literal("invalid_policy").nullable(),
   }),
-  cell: z.discriminatedUnion("ok", [
-    z.object({
-      ok: z.literal(true),
-      entries: z.array(HostEntry),
-      bundles: z.array(z.string()),
-      digest: z.string(),
-    }),
-    z.object({
-      ok: z.literal(false),
-      code: z.enum([
-        "egress_level_unsupported",
-        "egress_compile_failed",
-        "broker_host_unavailable",
-      ]),
-      reason: z.string().nullable(),
-    }),
-  ]),
+  cell: EgressCell,
   warnings: z.array(
     z.object({
       code: z.enum(EGRESS_WARNING_CODES),
@@ -173,12 +197,17 @@ const EgressView = z.object({
   ),
   // drives the read-only state of the UI
   canEdit: z.boolean(),
-  readOnlyReason: z
-    .enum(["not_repo_admin", "permission_unverified"])
-    .nullable(),
+  readOnlyReason: ReadOnlyReason.nullable(),
   // used = rendered cell entries (platform + registries + repo, deduped)
   budget: z.object({ used: z.number().int(), max: z.number().int() }),
 });
+
+export type EgressViewData = z.infer<typeof EgressView>;
+export type EgressCellData = z.infer<typeof EgressCell>;
+export type EgressHostEntryData = z.infer<typeof HostEntry>;
+export type EgressLayerData = z.infer<typeof Layer>;
+export type EgressReadOnlyReason = z.infer<typeof ReadOnlyReason>;
+export type EgressOrgRef = z.infer<typeof OrgRef>;
 
 const egressGet = egressOc
   .route({
@@ -232,7 +261,7 @@ const egressList = egressOc
   .input(z.object({ org: RepoPath.shape.org }))
   .output(
     z.object({
-      org: z.object({ id: z.string(), slug: z.string() }),
+      org: OrgRef,
       repos: z.array(
         z.object({
           repo: z.string(),

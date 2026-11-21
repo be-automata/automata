@@ -1,10 +1,9 @@
-import { nanoid } from "nanoid";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
+import { mintKey, mockSession } from "@/test-helpers/egress-api";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
   createTestOrganization,
@@ -24,18 +23,6 @@ vi.mock("@/server-lib/user-repos", () => ({
 
 const ORIGIN = "https://app.example.test";
 const EGRESS = "/api/v1/orgs";
-
-async function mintKey(userId: string, organizationId: string) {
-  const created = await auth.api.createApiKey({
-    body: {
-      name: `cli-${nanoid(8)}`,
-      userId,
-      expiresIn: 60 * 60 * 24,
-      metadata: { organizationId },
-    },
-  });
-  return created.key;
-}
 
 function get(path: string, headers: Record<string, string> = {}) {
   return GET(new Request(`${ORIGIN}${path}`, { headers }));
@@ -112,10 +99,7 @@ describe("/api/v1 REST mount", () => {
   });
 
   it("a session works on this mount, and a Bearer is never read as a session", async () => {
-    const getSession = vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: userId },
-      session: { id: "sess_1" },
-    } as never);
+    const getSession = mockSession(userId);
     const ok = await get(`${EGRESS}/${org.id}/repos/acme/widgets/egress`);
     expect(ok.status).toBe(200);
     getSession.mockClear();
@@ -233,10 +217,7 @@ describe("/api/cli RPC mount, egress", () => {
     expect((await res.json()).json).toMatchObject({ repo: "acme/widgets" });
 
     // A cookie never authenticates this mount (it sends a wildcard CORS header).
-    const getSession = vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: userId },
-      session: { id: "sess_1" },
-    } as never);
+    const getSession = mockSession(userId);
     const cookieOnly = await call({ cookie: "better-auth.session_token=x" });
     expect(cookieOnly.status).toBe(401);
     expect(getSession).not.toHaveBeenCalled();

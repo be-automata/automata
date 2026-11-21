@@ -6,8 +6,9 @@ import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { mintDaemonToken } from "@/lib/daemon-token";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
-import * as authServer from "@/lib/auth-server";
+import * as daemonApiKey from "@/lib/daemon-api-key";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
+import { mintKey, mockSession, rejection } from "@/test-helpers/egress-api";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
   createTestOrganization,
@@ -44,26 +45,8 @@ const errors: PrincipalErrors = {
   SERVICE_UNAVAILABLE: (o) => new Refusal("SERVICE_UNAVAILABLE", o.data),
 };
 
-async function mintKey(
-  userId: string,
-  metadata?: Record<string, unknown>,
-): Promise<string> {
-  const created = await auth.api.createApiKey({
-    body: {
-      name: `cli-${nanoid(8)}`,
-      userId,
-      expiresIn: 60 * 60 * 24,
-      ...(metadata ? { metadata } : {}),
-    },
-  });
-  return created.key;
-}
-
 async function refusal(promise: Promise<unknown>): Promise<Refusal> {
-  const error = await promise.then(
-    () => null,
-    (e: unknown) => e,
-  );
+  const error = await rejection(promise);
   expect(error).toBeInstanceOf(Refusal);
   return error as Refusal;
 }
@@ -73,7 +56,7 @@ describe("resolveEgressPrincipal (step 1: the credential)", () => {
 
   it("accepts X-Daemon-Token and Authorization: Bearer the same way", async () => {
     const { user } = await createTestUser({ db });
-    const key = await mintKey(user.id, { organizationId: "org_x" });
+    const key = await mintKey(user.id, "org_x");
     const forms = [
       new Headers({ "X-Daemon-Token": key }),
       new Headers({ Authorization: `Bearer ${key}` }),
@@ -122,7 +105,7 @@ describe("resolveEgressPrincipal (step 1: the credential)", () => {
   });
 
   it("answers 503 auth_unavailable when the auth store fails", async () => {
-    vi.spyOn(authServer, "getDaemonTokenContext").mockRejectedValue(
+    vi.spyOn(daemonApiKey, "verifyDaemonApiKey").mockRejectedValue(
       new DaemonAuthUnavailableError("down"),
     );
     const error = await refusal(
@@ -139,13 +122,7 @@ describe("resolveEgressPrincipal (step 1: the credential)", () => {
 
   it("uses the session only when the mount allows it", async () => {
     const { user } = await createTestUser({ db });
-    const getSession = vi
-      .spyOn(auth.api, "getSession")
-      // Partial session: only the fields the principal reads.
-      .mockResolvedValue({
-        user: { id: user.id },
-        session: { id: "sess_1" },
-      } as never);
+    const getSession = mockSession(user.id);
     const none = await refusal(
       resolveEgressPrincipal({ headers: new Headers() }, errors),
     );
@@ -164,10 +141,7 @@ describe("resolveEgressPrincipal (step 1: the credential)", () => {
   });
 
   it("never falls back to the cookie when a credential header is present but unusable", async () => {
-    const getSession = vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: "u_cookie" },
-      session: { id: "sess_cookie" },
-    } as never);
+    const getSession = mockSession("u_cookie", { id: "sess_cookie" });
     const unusable: [string, string][] = [
       ["X-Daemon-Token", ""],
       ["Authorization", "Basic dXNlcjpwYXNz"],
@@ -318,7 +292,10 @@ describe("assertRepoInOrg (step 4) and readEditAccess (step 5)", () => {
         repo: "Widgets",
         errors,
       }),
-    ).resolves.toBe("acme/widgets");
+    ).resolves.toMatchObject({
+      repoFullName: "acme/widgets",
+      row: { repoFullName: "acme/widgets" },
+    });
   });
 
   it("answers one identical NOT_FOUND for every not-in-org cause", async () => {
@@ -359,8 +336,10 @@ describe("assertRepoInOrg (step 4) and readEditAccess (step 5)", () => {
       userId: member.user.id,
       role: "member",
     });
-    const org = { id: organization.id, slug: organization.slug };
-    const args = { org, repoFullName: "acme/widgets" };
+    const args = {
+      organizationId: organization.id,
+      repoFullName: "acme/widgets",
+    };
     await expect(readEditAccess({ userId: user.id, ...args })).resolves.toEqual(
       { canEdit: true, readOnlyReason: null },
     );

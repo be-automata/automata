@@ -1,4 +1,9 @@
+import type {
+  EgressOrgRef,
+  EgressReadOnlyReason,
+} from "@terragon/cli-api-contract";
 import type { EgressAccessRefusal } from "@terragon/types/egress";
+import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import {
   getMembership,
   getMembershipByOrganizationSlug,
@@ -10,8 +15,12 @@ import {
 } from "@terragon/shared/model/repo-review-settings";
 
 import { auth } from "@/lib/auth";
-import { getDaemonTokenContext } from "@/lib/auth-server";
+import { verifyDaemonApiKey } from "@/lib/daemon-api-key";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
+import {
+  daemonTokenContextFromApiKey,
+  type DaemonTokenContext,
+} from "@/lib/daemon-token-context";
 import { db } from "@/lib/db";
 import { checkRepoWriteAccess } from "@/lib/repo-write-access";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
@@ -44,19 +53,20 @@ export interface EgressPrincipal {
   keyOrganizationId: string | null;
 }
 
-export interface EgressOrg {
-  id: string;
-  slug: string;
-}
+export type EgressOrg = EgressOrgRef;
 
-/** The error factories of the contract that the checks below throw. */
-export interface PrincipalErrors {
+/** The error factories of the contract that the API-key check throws. */
+export interface ApiKeyErrors {
   UNAUTHORIZED: () => Error;
-  NOT_FOUND: (options: { message: string }) => Error;
-  FORBIDDEN: (options: { data: { reason: EgressAccessRefusal } }) => Error;
   SERVICE_UNAVAILABLE: (options: {
     data: { reason: "auth_unavailable" };
   }) => Error;
+}
+
+/** The error factories of the contract that the checks below throw. */
+export interface PrincipalErrors extends ApiKeyErrors {
+  NOT_FOUND: (options: { message: string }) => Error;
+  FORBIDDEN: (options: { data: { reason: EgressAccessRefusal } }) => Error;
 }
 
 /** Identical for every "not in this org" cause, so the body leaks nothing. */
@@ -82,16 +92,19 @@ function apiKeyFromHeaders(headers: Headers): string | null | undefined {
   return direct === null ? undefined : null;
 }
 
-async function principalFromApiKey(
-  token: string,
-  errors: PrincipalErrors,
-): Promise<EgressPrincipal> {
-  let tenant: Awaited<ReturnType<typeof getDaemonTokenContext>>;
+/**
+ * The one API-key check of both mounts: verify the key, answer 503 when the
+ * auth store fails (never a 401), and refuse an unknown key or a daemon-scoped
+ * token (ADR-003 F1). Callers decide where the key is read from.
+ */
+export async function verifyApiKeyOrRefuse(
+  apiKey: string,
+  errors: ApiKeyErrors,
+): Promise<DaemonTokenContext> {
+  let tenant: DaemonTokenContext | null = null;
   try {
-    // One verifier: the Bearer form is fed to the same `X-Daemon-Token` reader.
-    tenant = await getDaemonTokenContext({
-      headers: new Headers({ "X-Daemon-Token": token }),
-    });
+    const key = await verifyDaemonApiKey(apiKey);
+    tenant = key ? daemonTokenContextFromApiKey(key) : null;
   } catch (error) {
     if (error instanceof DaemonAuthUnavailableError) {
       throw errors.SERVICE_UNAVAILABLE({
@@ -100,10 +113,15 @@ async function principalFromApiKey(
     }
     throw error;
   }
-  // ADR-003 F1: a daemon-scoped token never grants API access.
-  if (!tenant || tenant.tokenType === "daemon") {
-    throw errors.UNAUTHORIZED();
-  }
+  if (!tenant || tenant.tokenType === "daemon") throw errors.UNAUTHORIZED();
+  return tenant;
+}
+
+async function principalFromApiKey(
+  token: string,
+  errors: PrincipalErrors,
+): Promise<EgressPrincipal> {
+  const tenant = await verifyApiKeyOrRefuse(token, errors);
   return {
     userId: tenant.userId,
     authKind: "api_key",
@@ -168,21 +186,22 @@ async function orgForApiKey(
   if (!principal.keyOrganizationId) {
     throw errors.FORBIDDEN({ data: { reason: "org_required" } });
   }
+  const organizationId = principal.keyOrganizationId;
+  // Both reads depend on the key only; the decisions below keep their order.
+  const [row, membership] = await Promise.all([
+    getOrganizationById({ db, organizationId }),
+    getMembership({ db, organizationId, userId: principal.userId }),
+  ]);
   // Decided from the key's own org only, so it says nothing about other orgs.
-  const org = await orgOrRefuse(principal.keyOrganizationId, errors);
-  if (orgParam !== org.id && orgParam !== org.slug) {
+  if (!row) throw errors.FORBIDDEN({ data: { reason: "org_forbidden" } });
+  if (orgParam !== row.id && orgParam !== row.slug) {
     throw errors.FORBIDDEN({ data: { reason: "org_mismatch" } });
   }
   // A key keeps its org after its user leaves it: check the live membership.
-  const membership = await getMembership({
-    db,
-    organizationId: org.id,
-    userId: principal.userId,
-  });
   if (!membership) {
     throw errors.FORBIDDEN({ data: { reason: "org_forbidden" } });
   }
-  return org;
+  return { id: row.id, slug: row.slug };
 }
 
 async function orgForSession(
@@ -234,7 +253,7 @@ export async function assertRepoInOrg({
   owner: string;
   repo: string;
   errors: PrincipalErrors;
-}): Promise<string> {
+}): Promise<RepoInOrg> {
   const repoFullName = normalizeRepo(`${owner}/${repo}`);
   const row = await getRepoReviewSetting({
     db,
@@ -248,12 +267,18 @@ export async function assertRepoInOrg({
       repoFullName,
     }));
   if (!inScope) throw errors.NOT_FOUND({ message: REPO_NOT_FOUND_MESSAGE });
-  return repoFullName;
+  return { repoFullName, row };
+}
+
+/** The repo's normalized name and its settings row, when the org has one. */
+export interface RepoInOrg {
+  repoFullName: string;
+  row: RepoReviewSetting | undefined;
 }
 
 export interface ReadEditAccess {
   canEdit: boolean;
-  readOnlyReason: "not_repo_admin" | "permission_unverified" | null;
+  readOnlyReason: EgressReadOnlyReason | null;
 }
 
 /**
@@ -263,17 +288,17 @@ export interface ReadEditAccess {
  */
 export async function readEditAccess({
   userId,
-  org,
+  organizationId,
   repoFullName,
 }: {
   userId: string;
-  org: EgressOrg;
+  organizationId: string;
   repoFullName: string;
 }): Promise<ReadEditAccess> {
   const access = await checkRepoWriteAccess({
     db,
     userId,
-    organizationId: org.id,
+    organizationId,
     repoFullName,
   });
   if (access === "allowed") return { canEdit: true, readOnlyReason: null };

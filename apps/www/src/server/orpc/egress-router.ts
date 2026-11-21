@@ -1,11 +1,6 @@
-import { implement } from "@orpc/server";
-import { cliAPIContract } from "@terragon/cli-api-contract";
 import type { RepoEgressAuditLog } from "@terragon/shared/db/types";
 import { listRepoEgressChanges } from "@terragon/shared/model/repo-egress-audit-log";
-import {
-  getRepoReviewSetting,
-  listRepoReviewSettings,
-} from "@terragon/shared/model/repo-review-settings";
+import { listRepoReviewSettings } from "@terragon/shared/model/repo-review-settings";
 
 import { db } from "@/lib/db";
 import {
@@ -13,6 +8,8 @@ import {
   storedEgressLevel,
 } from "@/server-lib/egress/repo-egress-view";
 
+import { orpcBase as base } from "./base";
+import { invalidInputError } from "./api-version";
 import {
   assertRepoInOrg,
   readEditAccess,
@@ -22,14 +19,23 @@ import {
   type EgressPrincipal,
   type EgressRequestContext,
   type PrincipalErrors,
+  type RepoInOrg,
 } from "./principal";
 
-const base = implement(cliAPIContract).$context<EgressRequestContext>();
-
-interface RepoTarget {
+interface OrgTarget {
   principal: EgressPrincipal;
   org: EgressOrg;
-  repoFullName: string;
+}
+
+/** Steps 1 and 3 of the principal: credential, then `{org}`. */
+async function authorizeOrg(
+  context: EgressRequestContext,
+  orgParam: string,
+  errors: PrincipalErrors,
+): Promise<OrgTarget> {
+  const principal = await resolveEgressPrincipal(context, errors);
+  const org = await resolveEgressOrg(principal, orgParam, errors);
+  return { principal, org };
 }
 
 /** Steps 1, 3 and 4 of the principal: credential, `{org}`, repo in the org. */
@@ -37,28 +43,28 @@ async function authorizeRepo(
   context: EgressRequestContext,
   input: { org: string; owner: string; repo: string },
   errors: PrincipalErrors,
-): Promise<RepoTarget> {
-  const principal = await resolveEgressPrincipal(context, errors);
-  const org = await resolveEgressOrg(principal, input.org, errors);
-  const repoFullName = await assertRepoInOrg({
-    org,
+): Promise<OrgTarget & RepoInOrg> {
+  const target = await authorizeOrg(context, input.org, errors);
+  const repo = await assertRepoInOrg({
+    org: target.org,
     owner: input.owner,
     repo: input.repo,
     errors,
   });
-  return { principal, org, repoFullName };
+  return { ...target, ...repo };
 }
 
 const get = base.egress.get.handler(async ({ input, context, errors }) => {
-  const { principal, org, repoFullName } = await authorizeRepo(
+  const { principal, org, repoFullName, row } = await authorizeRepo(
     context,
     input,
     errors,
   );
-  const [row, access] = await Promise.all([
-    getRepoReviewSetting({ db, organizationId: org.id, repoFullName }),
-    readEditAccess({ userId: principal.userId, org, repoFullName }),
-  ]);
+  const access = await readEditAccess({
+    userId: principal.userId,
+    organizationId: org.id,
+    repoFullName,
+  });
   return getRepoEgressView({ org, repoFullName, row, ...access });
 });
 
@@ -80,20 +86,18 @@ function encodeCursor(cursor: HistoryCursor): string {
 
 function decodeCursor(raw: string): HistoryCursor | null {
   try {
-    const parsed: unknown = JSON.parse(
+    const { createdAt, id } = (JSON.parse(
       Buffer.from(raw, "base64url").toString("utf8"),
-    );
-    if (typeof parsed !== "object" || parsed === null) return null;
-    const { createdAt, id } = parsed as { createdAt?: unknown; id?: unknown };
+    ) ?? {}) as { createdAt?: unknown; id?: unknown };
     if (typeof createdAt !== "string" || typeof id !== "string") return null;
-    // Only the form encodeCursor writes, for a year Postgres can hold: an
+    // Only the form encodeCursor writes (the regex, then a round trip; an
+    // invalid date throws into the catch), for a year Postgres can hold: an
     // expanded (`+275760-…`) or year-0 date would fail the query with a 500.
     if (!CURSOR_DATE.test(createdAt)) return null;
     const date = new Date(createdAt);
-    if (Number.isNaN(date.getTime()) || date.toISOString() !== createdAt) {
-      return null;
-    }
-    return date.getUTCFullYear() >= 1 ? { createdAt: date, id } : null;
+    const valid =
+      date.toISOString() === createdAt && date.getUTCFullYear() >= 1;
+    return valid ? { createdAt: date, id } : null;
   } catch {
     return null;
   }
@@ -105,8 +109,8 @@ function historyEntry(row: RepoEgressAuditLog) {
     createdAt: row.createdAt.toISOString(),
     actorUserId: row.actorUserId,
     authKind: row.authKind,
-    levelBefore: storedEgressLevel(row.levelBefore),
-    levelAfter: storedEgressLevel(row.levelAfter),
+    levelBefore: row.levelBefore,
+    levelAfter: row.levelAfter,
     hostsAdded: row.hostsAdded,
     hostsRemoved: row.hostsRemoved,
     registriesBefore: row.registriesBefore,
@@ -120,16 +124,9 @@ const history = base.egress.history.handler(
     const before = input.before ? decodeCursor(input.before) : undefined;
     if (before === null) {
       throw errors.BAD_REQUEST({
-        data: {
-          errors: [
-            {
-              code: "invalid_input",
-              message: "before is not a cursor returned by this endpoint",
-              entry: null,
-              index: null,
-            },
-          ],
-        },
+        data: invalidInputError([
+          "before is not a cursor returned by this endpoint",
+        ]),
       });
     }
     const page = await listRepoEgressChanges({
@@ -147,8 +144,7 @@ const history = base.egress.history.handler(
 );
 
 const list = base.egress.list.handler(async ({ input, context, errors }) => {
-  const principal = await resolveEgressPrincipal(context, errors);
-  const org = await resolveEgressOrg(principal, input.org, errors);
+  const { org } = await authorizeOrg(context, input.org, errors);
   const rows = await listRepoReviewSettings({ db, organizationId: org.id });
   const repos = rows
     .filter(

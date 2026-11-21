@@ -1,3 +1,10 @@
+import type {
+  EgressCellData,
+  EgressLayerData,
+  EgressOrgRef,
+  EgressReadOnlyReason,
+  EgressViewData,
+} from "@terragon/cli-api-contract";
 import type { RepoReviewSetting } from "@terragon/shared/db/types";
 import {
   CELL_EGRESS_CATALOG,
@@ -9,12 +16,15 @@ import {
   cellEgressKey,
   platformCellEgressBundle,
 } from "@terragon/shared/model/cell-egress";
-import { canonicalizeEgressEntries } from "@terragon/shared/model/egress-policy";
+import {
+  canonicalizeEgressEntries,
+  isEgressPolicyLevel,
+} from "@terragon/shared/model/egress-policy";
 import {
   classifyEgressEntries,
   egressWarnings,
 } from "@terragon/shared/model/egress-entries";
-import type { EgressWarningCode } from "@terragon/types/egress";
+import type { EgressLevel } from "@terragon/types/egress";
 
 import { cellBrokerHost } from "@/server-lib/compute/cell-gate";
 
@@ -23,52 +33,10 @@ import {
   systemEgressHosts,
 } from "./resolve-egress-policy";
 
-export type EgressLayer = "system" | "platform" | "registries" | "repo";
-
-export interface EgressHostEntry {
-  host: string;
-  layer: EgressLayer;
-}
-
-export type CellView =
-  | {
-      ok: true;
-      entries: EgressHostEntry[];
-      bundles: string[];
-      digest: string;
-    }
-  | {
-      ok: false;
-      code:
-        | "egress_level_unsupported"
-        | "egress_compile_failed"
-        | "broker_host_unavailable";
-      reason: string | null;
-    };
-
-export interface EgressView {
-  org: { id: string; slug: string };
-  repo: string;
-  stored: {
-    level: "none" | "ip_port" | "domain" | null;
-    allowlist: string[];
-    registries: boolean | null;
-    updatedAt: string | null;
-    updatedByUserId: string | null;
-  };
-  box: {
-    enforced: boolean;
-    allowlist: EgressHostEntry[];
-    error: "invalid_policy" | null;
-  };
-  cell: CellView;
-  warnings: { code: EgressWarningCode; entry: string | null }[];
-  canEdit: boolean;
-  readOnlyReason: "not_repo_admin" | "permission_unverified" | null;
-  budget: { used: number; max: number };
-}
-
 type Row = RepoReviewSetting | undefined;
+type EgressView = EgressViewData;
+type CellView = EgressCellData;
+type EgressLayer = EgressLayerData;
 
 /** The box the worker enforces for this row; the builder's own refusal is `invalid_policy`. */
 function boxView(row: Row): EgressView["box"] {
@@ -147,22 +115,13 @@ function cellView(
   return { cell: cellFromPlan(plan, brokerHost, repoHosts), brokerHost };
 }
 
-type StoredLevel = EgressView["stored"]["level"];
-const KNOWN_LEVELS: ReadonlySet<string> = new Set([
-  "none",
-  "ip_port",
-  "domain",
-]);
-
 /**
  * A stored level the contract knows, else null. Only a raw SQL write can put
  * another value there (both writers validate it); reporting it as null keeps
  * the read a 200, and `box.error: "invalid_policy"` still says the row is bad.
  */
-export function storedEgressLevel(value: string | null): StoredLevel {
-  return value !== null && KNOWN_LEVELS.has(value)
-    ? (value as NonNullable<StoredLevel>)
-    : null;
+export function storedEgressLevel(value: string | null): EgressLevel | null {
+  return value !== null && isEgressPolicyLevel(value) ? value : null;
 }
 
 /**
@@ -172,11 +131,11 @@ export function storedEgressLevel(value: string | null): StoredLevel {
  * holds no second copy of any rule.
  */
 export function getRepoEgressView(args: {
-  org: { id: string; slug: string };
+  org: EgressOrgRef;
   repoFullName: string;
   row: Row;
   canEdit: boolean;
-  readOnlyReason: EgressView["readOnlyReason"];
+  readOnlyReason: EgressReadOnlyReason | null;
 }): EgressView {
   const { org, repoFullName, row } = args;
   const level = storedEgressLevel(row?.egressPolicy ?? null);

@@ -1,12 +1,11 @@
 import { createRouterClient, ORPCError } from "@orpc/server";
 import { eq } from "drizzle-orm";
-import { nanoid } from "nanoid";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
+import { mintKey, mockSession, rejection } from "@/test-helpers/egress-api";
 import { repoEgressAuditLog } from "@terragon/shared/db/schema";
 import { recordRepoEgressChange } from "@terragon/shared/model/repo-egress-audit-log";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
@@ -25,18 +24,6 @@ vi.mock("@/server-lib/user-repos", () => ({
 const REPO = "acme/widgets";
 const PATH = { owner: "acme", repo: "widgets" };
 
-async function mintKey(userId: string, organizationId?: string) {
-  const created = await auth.api.createApiKey({
-    body: {
-      name: `cli-${nanoid(8)}`,
-      userId,
-      expiresIn: 60 * 60 * 24,
-      ...(organizationId ? { metadata: { organizationId } } : {}),
-    },
-  });
-  return created.key;
-}
-
 function clientFor(headers: Headers, allowSession = false) {
   return createRouterClient(
     { egress: egressRouter },
@@ -48,10 +35,7 @@ const tokenClient = (key: string) =>
   clientFor(new Headers({ "X-Daemon-Token": key }));
 
 async function failure(promise: Promise<unknown>) {
-  const error = await promise.then(
-    () => null,
-    (e: unknown) => e,
-  );
+  const error = await rejection(promise);
   expect(error).toBeInstanceOf(ORPCError);
   const e = error as ORPCError<string, unknown>;
   return { code: e.code, status: e.status, data: e.data, message: e.message };
@@ -147,10 +131,7 @@ describe("egress router: reads", () => {
 
   it("AC-4: a session whose active org is B reads org A by path, and a non-member is refused", async () => {
     // Active org is B; the path names A. The principal never reads it.
-    vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: userId },
-      session: { id: "sess_1", activeOrganizationId: orgB.id },
-    } as never);
+    mockSession(userId, { activeOrganizationId: orgB.id });
     await upsertRepoReviewSetting({
       db,
       organizationId: orgA.id,
@@ -163,10 +144,7 @@ describe("egress router: reads", () => {
     expect(view.stored.level).toBe("none");
 
     const outsider = (await createTestUser({ db })).user.id;
-    vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: outsider },
-      session: { id: "sess_2", activeOrganizationId: orgA.id },
-    } as never);
+    mockSession(outsider, { id: "sess_2", activeOrganizationId: orgA.id });
     expect(
       await failure(
         clientFor(new Headers(), true).egress.get({ org: orgA.id, ...PATH }),
@@ -175,10 +153,7 @@ describe("egress router: reads", () => {
   });
 
   it("a session is not accepted where the mount does not allow it", async () => {
-    const spy = vi.spyOn(auth.api, "getSession").mockResolvedValue({
-      user: { id: userId },
-      session: { id: "sess_1" },
-    } as never);
+    const spy = mockSession(userId);
     expect(
       await failure(
         clientFor(new Headers()).egress.get({ org: orgA.id, ...PATH }),

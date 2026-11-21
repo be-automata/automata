@@ -1,4 +1,8 @@
+import { EGRESS_POLICY_LEVELS } from "@terragon/types/egress";
+
 import type { EgressPolicyLevel } from "../db/types";
+
+export { EGRESS_POLICY_LEVELS };
 
 /**
  * The ONE egress artifact that crosses the plane boundary (#66, spec §3.2).
@@ -22,8 +26,6 @@ export type EgressPolicyShape = {
   /** FINAL, fully resolved control-plane-side; includes system entries. */
   allowlist: string[];
 };
-
-export const EGRESS_POLICY_LEVELS = ["none", "ip_port", "domain"] as const;
 
 export function isEgressPolicyLevel(value: string): value is EgressPolicyLevel {
   return (EGRESS_POLICY_LEVELS as readonly string[]).includes(value);

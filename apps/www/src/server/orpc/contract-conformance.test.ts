@@ -71,7 +71,8 @@ describe("contract conformance (rule 6)", () => {
     const body = source.slice(source.indexOf("function validationFailure"));
     const end = body.indexOf("\n}\n");
     expect(body.slice(0, end)).toContain('new ORPCError("BAD_REQUEST"');
-    expect(declaredByAll(cliAPIContract.egress)).toContain("BAD_REQUEST");
+    // Every procedure, threads and auth included: the interceptor is mounted on both.
+    expect(declaredByAll(cliAPIContract)).toContain("BAD_REQUEST");
   });
 
   it("SERVICE_UNAVAILABLE is declared on every procedure, threads and auth included", () => {
