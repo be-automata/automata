@@ -42,6 +42,12 @@ export const CELL_DAEMON_EVENT_PATH = "/api/daemon-event";
 export const CELL_DAEMON_TOKEN_HEADER = "X-Daemon-Token";
 /** The fixed, non-secret value the guest sends in that header; the sidecar swaps in the real token. */
 export const CELL_DAEMON_TOKEN_PLACEHOLDER = "automata-cell-daemon-token";
+/**
+ * The non-secret token a cell's gh sends (`Authorization: token <x>`, from its
+ * `hosts.yml`); the broker binding overwrites the header with the run's bearer
+ * at egress (#727 B).
+ */
+export const CELL_GH_TOKEN_PLACEHOLDER = "automata-cell-gh-placeholder";
 
 interface CellVaultEntryBase {
   name: string;

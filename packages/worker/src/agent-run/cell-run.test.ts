@@ -16,7 +16,7 @@ import {
   CELL_SETUP_STAMP_MS,
   type CellExecutorDeps,
 } from "./cell-run";
-import { cellEntrypoint } from "./cell-image";
+import { cellEntrypoint, cellGhSetup } from "./cell-image";
 import {
   CELL_PG_BIN,
   CELL_TEST_DB_DIR,
@@ -152,7 +152,7 @@ function setup(
         stderr: over.execStderr?.(argv) ?? "",
       };
     }),
-    copyOut: vi.fn(async () => {
+    copyOut: vi.fn(async (_id: string, _path: string): Promise<Uint8Array> => {
       throw new Error("absent");
     }),
     copyIn: vi.fn(
@@ -335,6 +335,12 @@ function setup(
   };
 }
 
+/** The bootstrap's existence probe for the user memory file (#727 B). */
+const isMemoryProbe = (a: string[]) =>
+  a[0] === "/usr/bin/test" &&
+  a[1] === "-e" &&
+  a[2] === "/home/agent/.claude/CLAUDE.md";
+
 const idx = (calls: string[], name: string, from = 0) =>
   calls.indexOf(name, from);
 
@@ -356,6 +362,14 @@ function expectTeardownOrder(calls: string[]) {
 }
 
 beforeEach(() => vi.restoreAllMocks());
+
+/** The gh setup every cell's settings env carries (#727 B); repo-env and test-db tests read the rest. */
+const GH = cellGhSetup({
+  brokerHost: "www.example.org",
+  repoFullName: "acme/widgets",
+  botLogin: "bot[bot]",
+});
+const GH_ENV = GH.env;
 
 describe("the cell run: success, plan, create", () => {
   // card: protects=a clean run goes plan, create, bootstrap, message, poll and then the ordered teardown with the server's attempt everywhere; fails_when=the attempt differs between poll, revoke and readback or the order moves; no_claim=a live cell (IT-E1)
@@ -510,6 +524,148 @@ describe("the cell run: bootstrap and message", () => {
     const login = s.files.find((f) => f.path.endsWith("/.credentials.json"));
     expect(login?.text).not.toContain(VAULT);
     expect(login?.text).not.toContain(DAEMON);
+  });
+
+  // card: protects=#727 B (AC-5, AC-7 worker half): an absent user CLAUDE.md gets the note alone, unread; gh's host login is the broker host with the placeholder, 600 agent, and no file carries the vault bearer or daemon token; the agent note says reads only; fails_when=a real credential lands in a gh file, the host differs from the clone's, or the note is missing; no_claim=gh honouring the files (IT)
+  it("writes gh's host login with the placeholder only, and the read-only note", async () => {
+    const s = setup({ execExit: (a) => (isMemoryProbe(a) ? 1 : 0) });
+    await s.executor.run(s.args);
+    expect(s.execs).toContainEqual([
+      "/bin/mkdir",
+      "-p",
+      "-m",
+      "700",
+      "/home/agent/.claude",
+      "/home/agent/.config/gh",
+    ]);
+    const hosts = s.files.find(
+      (f) => f.path === "/home/agent/.config/gh/hosts.yml",
+    );
+    expect(hosts?.text).toBe(
+      cellGhSetup({
+        brokerHost: "www.example.org",
+        repoFullName: "acme/widgets",
+        botLogin: s.args.config.botLogin,
+      }).hostsYml,
+    );
+    expect(hosts?.text).toContain("oauth_token: automata-cell-gh-placeholder");
+    expect(hosts?.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
+    const note = s.files.find(
+      (f) => f.path === "/home/agent/.claude/CLAUDE.md",
+    );
+    // Absent (the probe exits 1): the note alone, and nothing was read.
+    expect(note?.text.startsWith("# GitHub access in this run")).toBe(true);
+    expect(note?.text).toContain("read-only broker");
+    expect(note?.text).toContain("refused with a 403");
+    expect(
+      s.provider.copyOut.mock.calls.some(
+        ([, path]) => path === "/home/agent/.claude/CLAUDE.md",
+      ),
+    ).toBe(false);
+    for (const f of s.files) {
+      expect(f.text).not.toContain(VAULT);
+      expect(f.text).not.toContain(DAEMON);
+    }
+  });
+
+  // card: protects=#727 B: an image's own ~/.claude/CLAUDE.md is kept and the gh note appended; fails_when=the image's memory is overwritten or the note is missing; no_claim=the CLI loading it
+  it("appends the gh note to an existing user CLAUDE.md", async () => {
+    const s = setup();
+    s.provider.copyOut.mockImplementation(async (_id: string, path: string) => {
+      if (path === "/home/agent/.claude/CLAUDE.md") {
+        return new TextEncoder().encode("# image memory\n\nkeep me\n");
+      }
+      throw new Error("absent");
+    });
+    await s.executor.run(s.args);
+    const note = s.files.find(
+      (f) => f.path === "/home/agent/.claude/CLAUDE.md",
+    );
+    expect(
+      note?.text.startsWith(
+        "# image memory\n\nkeep me\n\n# GitHub access in this run",
+      ),
+    ).toBe(true);
+  });
+
+  // card: protects=#727 B: a ~/.claude/CLAUDE.md that exists but cannot be read is left as it is (the note is skipped and said so), never overwritten by the note alone; fails_when=the file is written after a failed read, or the run fails on it; no_claim=why the read failed
+  it("leaves an existing CLAUDE.md it could not read untouched, and says so", async () => {
+    const s = setup();
+    s.provider.copyOut.mockImplementation(async () => {
+      throw new Error("http_error");
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(
+      s.files.some((f) => f.path === "/home/agent/.claude/CLAUDE.md"),
+    ).toBe(false);
+    expect(s.logs.join("\n")).toContain(
+      "cell: gh note not added (~/.claude/CLAUDE.md could not be read)",
+    );
+  });
+
+  // card: protects=#727 B ordering: the gh files are in place before settings.json (whose env names them) and before the daemon socket wait; fails_when=settings or the socket wait comes first; no_claim=the entry's own start
+  it("writes the gh files before settings.json and before the socket wait", async () => {
+    const s = setup({ execExit: (a) => (isMemoryProbe(a) ? 1 : 0) });
+    await s.executor.run(s.args);
+    const execAt = (pred: (a: string[]) => boolean) => {
+      const i = s.provider.exec.mock.calls.findIndex(([, a]) => pred(a));
+      return s.provider.exec.mock.invocationCallOrder[i] ?? -1;
+    };
+    const fileAt = (path: string) => {
+      const i = s.provider.copyIn.mock.calls.findIndex(([, p]) => p === path);
+      return s.provider.copyIn.mock.invocationCallOrder[i] ?? -1;
+    };
+    const mkdirGh = execAt((a) => a.includes("/home/agent/.config/gh"));
+    const hosts = fileAt("/home/agent/.config/gh/hosts.yml");
+    const note = fileAt("/home/agent/.claude/CLAUDE.md");
+    const settings = fileAt("/home/agent/.claude/settings.json");
+    const socket = execAt((a) => a[0] === "/usr/bin/test" && a[1] === "-S");
+    expect([mkdirGh, hosts, note, settings].every((n) => n > 0)).toBe(true);
+    expect(mkdirGh).toBeLessThan(hosts);
+    expect(hosts).toBeLessThan(settings);
+    expect(note).toBeLessThan(settings);
+    expect(settings).toBeLessThan(socket);
+  });
+
+  // card: protects=#727 B: a failed gh config mkdir or hosts.yml write ends the run like any bootstrap step: one abnormal end, one ordered teardown, no settings.json and no socket wait; fails_when=the run goes on, posts twice or skips the teardown; no_claim=the message text
+  it("a failed gh mkdir or hosts.yml write fails the run once, torn down", async () => {
+    const m = setup({
+      execExit: (a) => (a.includes("/home/agent/.config/gh") ? 1 : 0),
+    });
+    await expect(m.executor.run(m.args)).rejects.toThrow("mkdir home failed");
+    const h = setup();
+    const copyIn = h.provider.copyIn.getMockImplementation();
+    h.provider.copyIn.mockImplementation(async (id, path, bytes, opts) => {
+      if (path.endsWith("/hosts.yml")) throw new Error("upload failed");
+      return copyIn?.(id, path, bytes, opts);
+    });
+    await expect(h.executor.run(h.args)).rejects.toThrow("upload failed");
+    for (const s of [m, h]) {
+      expectTeardownOrder(s.calls);
+      expect(s.www.abnormalPosts).toBe(1);
+      expect(s.files.some((f) => f.path.endsWith("/settings.json"))).toBe(
+        false,
+      );
+      expect(
+        s.execs.some((a) => a[0] === "/usr/bin/test" && a[1] === "-S"),
+      ).toBe(false);
+    }
+  });
+
+  // card: protects=#727 B AC-7: nothing gh-related is logged with a value (the host login, the placeholder, GH_REPO); fails_when=a log line carries one; no_claim=other modules' logs
+  it("logs no gh value", async () => {
+    const s = setup();
+    await s.executor.run(s.args);
+    const all = s.logs.join("\n");
+    for (const v of [
+      "automata-cell-gh-placeholder",
+      "oauth_token",
+      "www.example.org/acme/widgets",
+      "GH_REPO",
+    ]) {
+      expect(all).not.toContain(v);
+    }
   });
 
   // card: protects=a 204 is nothing-to-run with a clean teardown and no abnormal post; fails_when=the poll runs or a terminal is posted; no_claim=www's 204 rule
@@ -1202,7 +1358,7 @@ describe("the cell run: the owner's repo env (#706)", () => {
       }),
     );
     const { file, json } = settingsOf(s);
-    expect(json.env).toEqual({ FOO_TOKEN: VALUE, PLAIN: "x" });
+    expect(json.env).toEqual({ FOO_TOKEN: VALUE, PLAIN: "x", ...GH_ENV });
     expect(file.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
   });
 
@@ -1234,7 +1390,7 @@ describe("the cell run: the owner's repo env (#706)", () => {
         OK: "fine",
       }),
     );
-    expect(settingsOf(s).json.env).toEqual({ OK: "fine" });
+    expect(settingsOf(s).json.env).toEqual({ OK: "fine", ...GH_ENV });
     const lines = s.logs.filter((l) => l.includes("repo env names not set"));
     expect(lines).toEqual([
       "[agent-run thr_1] cell: repo env names not set (reserved): ANTHROPIC_API_KEY, DAEMON_TOKEN (+1 not an env name)",
@@ -1314,15 +1470,24 @@ describe("the cell run: the owner's repo env (#706)", () => {
     expect(s.logs.join("\n")).not.toContain(half);
   });
 
-  // card: protects=no repo env is no change: the settings file has no env key and no repo env line is logged; fails_when=either appears; no_claim=none
-  it("absent or fully dropped repo env leaves the settings as today", async () => {
+  // card: protects=no repo env is no change: the settings env holds the gh names only and no repo env line is logged; fails_when=another name appears; no_claim=none
+  it("absent or fully dropped repo env leaves only the gh names", async () => {
     const s = setup();
     await s.executor.run(s.args);
-    expect(settingsOf(s).json).not.toHaveProperty("env");
+    expect(settingsOf(s).json.env).toEqual(GH_ENV);
     expect(s.logs.join("\n")).not.toContain("repo env");
     const d = setup();
     await d.executor.run(withRepoEnv(d, { PATH: "/x" }));
-    expect(settingsOf(d).json).not.toHaveProperty("env");
+    expect(settingsOf(d).json.env).toEqual(GH_ENV);
+  });
+
+  // card: protects=#727 B: an owner's GH_* names never reach the env (reserved prefix), so they cannot repoint gh; fails_when=the owner's GH_HOST or GH_REPO wins; no_claim=gh honouring the env (IT)
+  it("an owner's GH_HOST or GH_REPO is dropped, the broker's stays", async () => {
+    const s = setup();
+    await s.executor.run(
+      withRepoEnv(s, { GH_HOST: "github.com", GH_REPO: "evil/repo" }),
+    );
+    expect(settingsOf(s).json.env).toEqual(GH_ENV);
   });
 });
 
@@ -1358,6 +1523,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(pw?.text).toBe(TEST_DB_PASSWORD);
     expect(pw?.opts).toEqual({ mode: 600, owner: "agent", group: "agent" });
     expect(settingsEnv(s)).toEqual({
+      ...GH_ENV,
       TEST_DATABASE_ADMIN_URL: TEST_DB_URL,
     });
     const order = s.files.map((f) => f.path);
@@ -1401,7 +1567,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
       expect(s.files.map((f) => f.path)).not.toContain(
         CELL_TEST_DB_PASSWORD_FILE,
       );
-      expect(settingsEnv(s)).toBeUndefined();
+      expect(settingsEnv(s)).toEqual(GH_ENV);
       expect(s.logs.join("\n")).not.toContain("test database");
     }
   });
@@ -1417,7 +1583,10 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
         repoEnv: { TEST_DATABASE_ADMIN_URL: owner },
       },
     } as RunExecutorInput);
-    expect(settingsEnv(s)).toEqual({ TEST_DATABASE_ADMIN_URL: owner });
+    expect(settingsEnv(s)).toEqual({
+      ...GH_ENV,
+      TEST_DATABASE_ADMIN_URL: owner,
+    });
     expect(s.execs.filter(isPg)).toEqual([]);
     expect(s.logs).toContain(
       "[agent-run thr_1] cell: test database not started (the owner's TEST_DATABASE_ADMIN_URL wins)",
@@ -1456,7 +1625,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(out.outcome).toBe("completed");
     expect(probes).toBe(61);
     expect(s.execs.some((a) => a[2] === CELL_TEST_DB_ROLE_SH)).toBe(false);
-    expect(settingsEnv(s)).toBeUndefined();
+    expect(settingsEnv(s)).toEqual(GH_ENV);
     expect(s.logs).toContain(
       "[agent-run thr_1] cell: test database not started; the run goes on without it (cell test database not ready after 30000ms)",
     );
@@ -1479,7 +1648,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(all).toContain(
       "cell setup: test database start failed (exit 1): initdb: echo <redacted>",
     );
-    expect(settingsEnv(s)).toBeUndefined();
+    expect(settingsEnv(s)).toEqual(GH_ENV);
   });
 
   // card: protects=a fence during the readiness probe ends the run as fenced at once, not degraded: no "not started" line, no role, no cleanup, no settings file; fails_when=the abort is swallowed into the degrade path; no_claim=the other abort kinds (they share the same catch)
@@ -1525,7 +1694,7 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
       "-c",
       CELL_TEST_DB_STOP_SH,
     ]);
-    expect(settingsEnv(s)).toBeUndefined();
+    expect(settingsEnv(s)).toEqual(GH_ENV);
   });
 
   // card: protects=a non-Claude agent is told apart, not silently left without the URL; fails_when=no line is logged for it; no_claim=the other agent's behaviour

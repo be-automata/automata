@@ -44,7 +44,36 @@ type Built =
   | { ok: true; url: URL; body?: Uint8Array }
   | { ok: false; response: Response };
 
-function restTarget(request: Request, url: URL): Built {
+/**
+ * #727 OD-3: REST reads stay on the run's repository. `/rate_limit` and
+ * `/meta` are what gh calls outside a repo. The token already bounds what
+ * GitHub returns; this keeps a cell from reading other public repos.
+ */
+const REPO_FREE_REST_PATHS: ReadonlySet<string> = new Set([
+  "rate_limit",
+  "meta",
+]);
+
+/** `owner` and `repo` are the bearer's step repo, already lowercased. */
+function restPathAllowed(
+  segments: readonly string[],
+  owner: string,
+  repo: string,
+): boolean {
+  const [first, segOwner, segRepo] = segments;
+  if (segments.length === 1) return REPO_FREE_REST_PATHS.has(first ?? "");
+  return (
+    first === "repos" &&
+    segOwner?.toLowerCase() === owner &&
+    segRepo?.toLowerCase() === repo
+  );
+}
+
+function restTarget(
+  request: Request,
+  url: URL,
+  scope: { owner: string; repo: string },
+): Built {
   if (request.method !== "GET" && request.method !== "HEAD") {
     return { ok: false, response: brokerError(403, "forbidden_method") };
   }
@@ -52,7 +81,10 @@ function restTarget(request: Request, url: URL): Built {
   if (!decoded.ok) {
     return { ok: false, response: brokerError(400, "bad_request") };
   }
-  if (decoded.segments.some((segment) => isUnsafeSegment(segment, "gh"))) {
+  if (
+    decoded.segments.some((segment) => isUnsafeSegment(segment, "gh")) ||
+    !restPathAllowed(decoded.segments, scope.owner, scope.repo)
+  ) {
     return { ok: false, response: brokerError(403, "forbidden_path") };
   }
   const upstream = new URL("https://api.github.com");
@@ -118,7 +150,7 @@ export function createGhBrokerHandler(
     const url = new URL(request.url);
     const target =
       kind === "rest"
-        ? restTarget(request, url)
+        ? restTarget(request, url, auth)
         : await graphqlTarget(
             request,
             deps.maxGraphqlBytes ?? MAX_GRAPHQL_BYTES,
@@ -155,6 +187,9 @@ export function createGhBrokerHandler(
     } catch {
       return brokerError(502, "upstream_error");
     }
-    return passThrough(upstream, { rewriteLinkHost: url.host });
+    return passThrough(upstream, {
+      rewriteLinkHost: url.host,
+      linkRepo: { owner: auth.owner, repo: auth.repo },
+    });
   };
 }

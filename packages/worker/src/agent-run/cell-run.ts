@@ -17,12 +17,15 @@ import {
 import {
   CELL_DAEMON_BUNDLE,
   CELL_DAEMON_SOCKET,
+  CELL_GH_CONFIG_DIR,
+  CELL_GH_NOTE,
   CELL_MESSAGE_DIR,
   CELL_SELF_CHECK_ARGV,
   CELL_WORKSPACE,
   CELL_WRITE_MESSAGE_SH,
   cellCloneArgv,
   cellEntrypoint,
+  cellGhSetup,
   cellGitConfigArgv,
 } from "./cell-image";
 import {
@@ -883,6 +886,48 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
   return { [CELL_TEST_DB_ENV]: testDb.url };
 }
 
+/**
+ * The gh note as user memory (#727 B), appended, never replacing what the
+ * image ships. A probe tells absent (exit 1: the note is the whole file) from
+ * present; a present file that cannot be read is left alone and the note
+ * skipped, since `copyOut` cannot tell "absent" from a failed read.
+ */
+async function writeGhNote(r: CellRunState): Promise<void> {
+  const path = `${HOME_CLAUDE_DIR}/CLAUDE.md`;
+  const provider = r.provider as ICellProvider;
+  ensureLive(r);
+  const probe = await raceLive(
+    r,
+    provider.exec(r.cellId as string, ["/usr/bin/test", "-e", path], {
+      timeoutMs: PGREP_TIMEOUT_MS,
+    }),
+  );
+  if (probe.exitCode === 1) {
+    await putFile(r, path, CELL_GH_NOTE, 600);
+    return;
+  }
+  const bytes =
+    probe.exitCode === 0
+      ? await raceLive(r, provider.copyOut(r.cellId as string, path)).catch(
+          () => null,
+        )
+      : null;
+  ensureLive(r);
+  if (bytes === null) {
+    r.step("cell: gh note not added (~/.claude/CLAUDE.md could not be read)");
+    return;
+  }
+  const existing = new TextDecoder().decode(bytes);
+  await putFile(
+    r,
+    path,
+    existing.trim() === ""
+      ? CELL_GH_NOTE
+      : `${existing.trimEnd()}\n\n${CELL_GH_NOTE}`,
+    600,
+  );
+}
+
 /** The clone, the git identity, HOME (settings, trust seed, placeholder login), and the entry's socket. */
 async function bootstrap(r: CellRunState): Promise<void> {
   const { input, config } = r.args;
@@ -906,7 +951,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
   }
   await execOk(
     r,
-    ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR],
+    ["/bin/mkdir", "-p", "-m", "700", HOME_CLAUDE_DIR, CELL_GH_CONFIG_DIR],
     "mkdir home",
   );
   let batteries: unknown = null;
@@ -930,7 +975,17 @@ async function bootstrap(r: CellRunState): Promise<void> {
   // TEST_DATABASE_ADMIN_URL wins, as on the box (planCellTestDb starts none then).
   const testDbEnv = await startTestDb(r);
   r.testDbDelivered = Object.keys(testDbEnv).length > 0;
-  const settingsEnv = { ...testDbEnv, ...repoEnv };
+  // gh reads GitHub through the broker (#727 B): the host login holds the
+  // placeholder only; the vault's broker binding puts the bearer on the wire.
+  const gh = cellGhSetup({
+    brokerHost: r.deployment,
+    repoFullName: input.repoFullName,
+    botLogin: config.botLogin,
+  });
+  await putFile(r, `${CELL_GH_CONFIG_DIR}/hosts.yml`, gh.hostsYml, 600);
+  await writeGhNote(r);
+  // GH_* is reserved for repo env, so the owner's names never collide.
+  const settingsEnv = { ...testDbEnv, ...repoEnv, ...gh.env };
   await putFile(
     r,
     `${HOME_CLAUDE_DIR}/settings.json`,
