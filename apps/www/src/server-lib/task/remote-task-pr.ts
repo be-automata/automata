@@ -1,6 +1,7 @@
 import type { Octokit } from "octokit";
 
 import type { DB } from "@terragon/shared/db";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import { getGithubPRStatus } from "@terragon/shared/github-api/helpers";
 import { upsertGithubPR } from "@terragon/shared/model/github";
 import {
@@ -17,6 +18,7 @@ import {
   parseRepoFullName,
 } from "@/lib/github";
 import { generatePRContent } from "@/server-lib/generate-pr-content";
+import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 
 import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
 
@@ -61,34 +63,155 @@ export function remoteTaskBranchName(threadId: string): string {
 }
 
 /**
+ * True for a thread an org mention on a PR started (the stamp the lane wrote,
+ * `isPullRequest: true`). Such a thread checks out the PR's HEAD branch and
+ * stores it as `repoBaseBranchName` (with `githubPRNumber` set), so its head is
+ * the one branch it may push. Review, companion and delivery PR threads carry
+ * no mention stamp and are not matched.
+ */
+export function isMentionPullRequestThread(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): boolean {
+  return (
+    isMentionLaneStamp(sourceMetadata) &&
+    sourceMetadata.mention.isPullRequest === true
+  );
+}
+
+/**
  * The one branch a task run may push, shared by dispatch (the worker's work
  * branch) and `cell-plan` (the step's `allowedRef`):
  * - no PR and `branch` is the base → the thread's own task branch;
  * - otherwise (an existing PR or a non-base branch) → `branch`;
  * - the base branch with a PR, or a blank branch → null: a run never gets its
- *   base branch as a push target.
+ *   base branch as a push target;
+ * - except a mention thread on a PR (read from `sourceMetadata`): its stored
+ *   "base" is the PR head it checked out, which is what it pushes. The PR's
+ *   real base branch is never stored on it, so it can never be returned.
  */
 export function taskRunPushBranch({
   threadId,
   prNumber,
   branch,
   baseBranch,
+  sourceMetadata,
 }: {
   threadId: string;
   prNumber: number | undefined;
   branch: string | null | undefined;
   baseBranch: string | null | undefined;
+  sourceMetadata?: ThreadSourceMetadata | null;
 }): string | null {
   if (!branch || branch.trim() === "") return null;
   const isBase = branch === baseBranch;
   if (isBase) {
-    return prNumber === undefined ? remoteTaskBranchName(threadId) : null;
+    if (prNumber === undefined) return remoteTaskBranchName(threadId);
+    return isMentionPullRequestThread(sourceMetadata) ? branch : null;
   }
   return branch;
 }
 
+/**
+ * The PR policy of a thread an org mention on an ISSUE started (OD-2, OD-5):
+ * the issue the PR references. Null for every other thread, whose PRs keep the
+ * owner's `prType` and the agent's own wording.
+ */
+export function mentionPullRequestPolicy(
+  sourceMetadata: ThreadSourceMetadata | null | undefined,
+): { issueNumber: number } | null {
+  if (!isMentionLaneStamp(sourceMetadata)) return null;
+  const { mention } = sourceMetadata;
+  return mention.isPullRequest
+    ? null
+    : { issueNumber: mention.issueOrPrNumber };
+}
+
+const ISSUE_REF =
+  "https?://github\\.com/[\\w.-]+/[\\w.-]+/issues/\\d+|(?:[\\w.-]+/[\\w.-]+)?#\\d+";
+/** GitHub's closing keywords in front of an issue reference. */
+const CLOSING_REF = new RegExp(
+  `\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b(?::[ \\t]*|[ \\t]+)(${ISSUE_REF})`,
+  "gi",
+);
+/**
+ * An inline code span: a backtick run closed by a run of the same length,
+ * within one paragraph (a blank line ends it, so a stray backtick never pairs
+ * with one paragraphs later and hides the prose between them).
+ */
+const INLINE_CODE = /(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g;
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+
+type Piece = [text: string, isCode: boolean];
+
+function splitInline(text: string): Piece[] {
+  const pieces: Piece[] = [];
+  let last = 0;
+  for (const m of text.matchAll(INLINE_CODE)) {
+    pieces.push([text.slice(last, m.index), false], [m[0], true]);
+    last = m.index + m[0].length;
+  }
+  pieces.push([text.slice(last), false]);
+  return pieces;
+}
+
+function closesFence(line: string, fence: string): boolean {
+  const t = line.trim();
+  return t.length >= fence.length && t === fence[0]?.repeat(t.length);
+}
+
+/** Splits a body into pieces (fenced blocks, inline code, prose) that rejoin to it. */
+function splitCode(body: string): Piece[] {
+  const groups: Array<{ lines: string[]; code: boolean }> = [];
+  let fence: string | null = null;
+  for (const line of body.split("\n")) {
+    let code = fence !== null;
+    if (fence === null) {
+      fence = FENCE_OPEN.exec(line)?.[1] ?? null;
+      code = fence !== null;
+    } else if (closesFence(line, fence)) {
+      fence = null;
+    }
+    const last = groups.at(-1);
+    if (last && last.code === code) last.lines.push(line);
+    else groups.push({ lines: [line], code });
+  }
+  return groups.flatMap((g, i) => {
+    const text = g.lines.join("\n") + (i < groups.length - 1 ? "\n" : "");
+    return g.code ? [[text, true] as Piece] : splitInline(text);
+  });
+}
+
+/**
+ * A mention PR never auto-closes its issue on merge (OD-5): every closing
+ * keyword before an issue reference becomes `Refs <ref>` (prose only, never in
+ * a code fence or inline code), and `Refs #<issueNumber>` is appended when no
+ * such line is left, whatever the agent's own body said.
+ */
+export function withIssueReference(body: string, issueNumber: number): string {
+  const pieces = splitCode(body).map(
+    ([text, isCode]): Piece => [
+      isCode ? text : text.replace(CLOSING_REF, "Refs $1"),
+      isCode,
+    ],
+  );
+  const rewritten = pieces.map(([text]) => text).join("");
+  const prose = pieces
+    .filter(([, isCode]) => !isCode)
+    .map(([text]) => text)
+    .join("");
+  const hasRef = new RegExp(`(?<![\\w/])Refs #${issueNumber}(?!\\d)`).test(
+    prose,
+  );
+  return hasRef ? rewritten : `${rewritten}\n\nRefs #${issueNumber}`;
+}
+
 export type RemoteTaskPrOutcome =
-  | { status: "opened" | "adopted"; prNumber: number }
+  | {
+      status: "opened" | "adopted";
+      prNumber: number;
+      /** False when the PR exists on GitHub but recording it on the thread failed. */
+      recorded: boolean;
+    }
   | {
       status: "skipped";
       reason:
@@ -158,6 +281,7 @@ async function createPullRequest({
   repoFullName,
   taskTitle,
   draft,
+  issueNumber,
   files,
   commits,
   agentContent,
@@ -175,6 +299,8 @@ async function createPullRequest({
   repoFullName: string;
   taskTitle: string;
   draft: boolean;
+  /** A mention PR's issue: the body is made to reference it, never close it. */
+  issueNumber?: number;
   files: readonly CompareFile[];
   commits: readonly CompareCommit[];
   /** The agent's own `json pull-request` block; wins over generation. */
@@ -205,6 +331,7 @@ async function createPullRequest({
       );
     }
   }
+  if (issueNumber !== undefined) body = withIssueReference(body, issueNumber);
   body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
   const params = { owner, repo, title, body, head: branch, base, draft };
   try {
@@ -258,6 +385,7 @@ export async function openRemoteTaskPullRequest({
   if (!settings.autoCreatePRs) {
     return { status: "skipped", reason: "auto_create_off" };
   }
+  const mentionPolicy = mentionPullRequestPolicy(thread.sourceMetadata);
   const branch = remoteTaskBranchName(threadId);
   const base = thread.repoBaseBranchName;
   const [owner, repo] = parseRepoFullName(thread.githubRepoFullName);
@@ -307,7 +435,9 @@ export async function openRemoteTaskPullRequest({
         threadId,
         repoFullName: thread.githubRepoFullName,
         taskTitle: thread.name ?? "Automated task",
-        draft: settings.prType !== "ready",
+        // A mention PR is always a draft (OD-2); a task run follows the owner.
+        draft: mentionPolicy !== null || settings.prType !== "ready",
+        issueNumber: mentionPolicy?.issueNumber,
         files: compare.data.files ?? [],
         commits: compare.data.commits,
         agentContent: parseAgentPrContent(threadChat?.messages ?? null),
@@ -316,20 +446,31 @@ export async function openRemoteTaskPullRequest({
     ).data as unknown as NonNullable<typeof existing>);
   const status = existing ? "adopted" : "opened";
 
-  await Promise.all([
-    upsertGithubPR({
-      db,
-      repoFullName: thread.githubRepoFullName,
-      number: pr.number,
+  try {
+    await Promise.all([
+      upsertGithubPR({
+        db,
+        repoFullName: thread.githubRepoFullName,
+        number: pr.number,
+        threadId,
+        updates: { status: getGithubPRStatus(pr) },
+      }),
+      updateThread({
+        db,
+        userId,
+        threadId,
+        updates: { branchName: branch, githubPRNumber: pr.number },
+      }),
+    ]);
+  } catch (error) {
+    // The PR exists (a later run adopts the open PR), so the outcome still
+    // names it; the caller skips what depends on the record. No untrusted text.
+    console.error("[remote-task-pr] PR opened but not recorded", {
       threadId,
-      updates: { status: getGithubPRStatus(pr) },
-    }),
-    updateThread({
-      db,
-      userId,
-      threadId,
-      updates: { branchName: branch, githubPRNumber: pr.number },
-    }),
-  ]);
-  return { status, prNumber: pr.number };
+      prNumber: pr.number,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status, prNumber: pr.number, recorded: false };
+  }
+  return { status, prNumber: pr.number, recorded: true };
 }

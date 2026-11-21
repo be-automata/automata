@@ -231,6 +231,12 @@ export type MentionLaneStamp = {
    * prompt stated (#504). Read by the no-verdict rule of a mention review.
    */
   isDraft?: boolean;
+  /**
+   * Issue mentions only, written only when true: the instruction asked to
+   * "implement this issue", so the reply also names the `automata:deliver`
+   * label (#729 OD-6).
+   */
+  asksForDelivery?: true;
   /** Review comments only: the anchor and the (clipped) diff hunk. */
   path?: string;
   line?: number | null;

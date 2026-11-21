@@ -844,6 +844,26 @@ describe("runSelfHealAuditStep (FORGE-01 / OBS-01 / SKEW-01)", () => {
   });
 });
 
+describe("pushRefFence (#729 mention fence)", () => {
+  it.each(["refs/heads/automata/task-abcd1234", "refs/heads/feat/pr-head"])(
+    "fences a run to exactly %s",
+    (ref) => {
+      expect(wf.pushRefFence(ref)).toEqual({ exactRef: ref });
+    },
+  );
+
+  it("no pushRef means no fence", () => {
+    expect(wf.pushRefFence(undefined)).toBeUndefined();
+  });
+
+  it.each(["", "  ", "main", "refs/tags/v1", "refs/heads/", "refs/heads/a..b"])(
+    "fails closed on %j instead of running unfenced",
+    (ref) => {
+      expect(() => wf.pushRefFence(ref)).toThrow(/pushRef is not a refs/);
+    },
+  );
+});
+
 describe("selfHealRefFence (FENCE-01 wiring)", () => {
   const fix = (branch: string) => ({
     kind: "fix" as const,

@@ -15,6 +15,9 @@ import type { DeliveryNeedsHumanReason } from "./decide-delivery-step";
  * and the DB write never posts twice.
  */
 
+/** The label the issue-delivery lane listens for. */
+export const DELIVERY_LABEL = "automata:deliver";
+
 export type DeliveryCommentKind =
   | "merge-ready"
   | "needs-human"
@@ -203,6 +206,6 @@ export function renderRefsFollowup({
     "",
     ...listed,
     "",
-    "Re-label this issue `automata:deliver` to deliver the rest.",
+    `Re-label this issue \`${DELIVERY_LABEL}\` to deliver the rest.`,
   ].join("\n");
 }

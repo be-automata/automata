@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, vi, expect } from "vitest";
+import { describe, it, beforeEach, afterEach, vi, expect } from "vitest";
 import { db } from "@/lib/db";
 import {
   createTestUser,
@@ -13,7 +13,11 @@ import {
 } from "@terragon/shared/model/threads";
 import { handleDaemonEvent } from "./handle-daemon-event";
 import { handleAuditFindingsAtFinish } from "@/server-lib/audit/audit-finish";
-import { openRemoteTaskPullRequest } from "@/server-lib/task/remote-task-pr";
+import {
+  openRemoteTaskPullRequest,
+  type RemoteTaskPrOutcome,
+} from "@/server-lib/task/remote-task-pr";
+import { handleMentionReplyAtFinish } from "./review/mention-reply-finish";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { extendSandboxLife } from "@terragon/sandbox";
@@ -35,6 +39,9 @@ vi.mock("@/server-lib/task/remote-task-pr", () => ({
   openRemoteTaskPullRequest: vi
     .fn()
     .mockResolvedValue({ status: "skipped", reason: "no_branch" }),
+}));
+vi.mock("./review/mention-reply-finish", () => ({
+  handleMentionReplyAtFinish: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/server-lib/audit/audit-finish", () => ({
   handleAuditFindingsAtFinish: vi.fn().mockResolvedValue(undefined),
@@ -58,14 +65,29 @@ vi.mock("@terragon/sandbox", async (importOriginal) => {
 describe("handleDaemonEvent for sandbox-less remote threads", () => {
   let user: User;
   let session: Session;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const testUserResult = await createTestUser({ db });
     user = testUserResult.user;
     session = testUserResult.session;
     await mockWaitUntil();
   });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  /** A working sandbox-less remote thread of the test user. */
+  const remoteThread = (overrides: Record<string, unknown> = {}) =>
+    createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote", ...overrides },
+      chatOverrides: { status: "working" },
+    });
 
   const finishThread = async ({
     threadId,
@@ -86,12 +108,7 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
   };
 
   it("completes a remote thread without checkpointing or stamping sandbox-not-found", async () => {
-    const { threadId, threadChatId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { sandboxProvider: "hatchet-remote" },
-      chatOverrides: { status: "working" },
-    });
+    const { threadId, threadChatId } = await remoteThread();
 
     await finishThread({ threadId, threadChatId });
 
@@ -110,12 +127,7 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
   });
 
   it("schedules the audit finish hook exactly once for a thread with no PR number", async () => {
-    const { threadId, threadChatId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { sandboxProvider: "hatchet-remote" },
-      chatOverrides: { status: "working" },
-    });
+    const { threadId, threadChatId } = await remoteThread();
 
     await finishThread({ threadId, threadChatId });
 
@@ -127,12 +139,7 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
   });
 
   it("asks for the work branch's pull request when a remote task run finishes", async () => {
-    const { threadId, threadChatId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { sandboxProvider: "hatchet-remote" },
-      chatOverrides: { status: "working" },
-    });
+    const { threadId, threadChatId } = await remoteThread();
 
     await finishThread({ threadId, threadChatId });
 
@@ -142,13 +149,84 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
     );
   });
 
-  it("opens no pull request when the user stopped the run", async () => {
-    const { threadId, threadChatId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: { sandboxProvider: "hatchet-remote" },
-      chatOverrides: { status: "working" },
+  it("hands the mention reply the PR open's outcome, awaited by the reply (#729)", async () => {
+    let resolvePr!: (outcome: RemoteTaskPrOutcome) => void;
+    vi.mocked(openRemoteTaskPullRequest).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePr = resolve;
+      }),
+    );
+    const { threadId, threadChatId } = await remoteThread();
+    const finish = finishThread({ threadId, threadChatId });
+    await vi.waitFor(() =>
+      expect(handleMentionReplyAtFinish).toHaveBeenCalledTimes(1),
+    );
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    let settled = false;
+    void passed.then(() => {
+      settled = true;
     });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+    resolvePr({ status: "opened", prNumber: 55, recorded: true });
+    await expect(passed).resolves.toEqual({
+      status: "opened",
+      prNumber: 55,
+      recorded: true,
+    });
+    await finish;
+  });
+
+  it("the outcome promise never rejects: a failed open resolves null", async () => {
+    vi.mocked(openRemoteTaskPullRequest).mockRejectedValueOnce(
+      new Error("github down"),
+    );
+    const { threadId, threadChatId } = await remoteThread();
+    await finishThread({ threadId, threadChatId });
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    await expect(passed).resolves.toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[remote-task-pr] finish-hook failed (non-fatal)",
+      expect.objectContaining({ threadId }),
+    );
+  });
+
+  it("a PR opened but not recorded still reaches the reply, and is not enrolled", async () => {
+    const outcome: RemoteTaskPrOutcome = {
+      status: "opened",
+      prNumber: 56,
+      recorded: false,
+    };
+    vi.mocked(openRemoteTaskPullRequest).mockResolvedValueOnce(outcome);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { threadId, threadChatId } = await remoteThread();
+    await finishThread({ threadId, threadChatId });
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    await expect(passed).resolves.toEqual(outcome);
+    expect(logSpy).not.toHaveBeenCalledWith(
+      "[remote-task-pr]",
+      expect.anything(),
+    );
+    logSpy.mockRestore();
+  });
+
+  it("a PR thread hands the mention hook no outcome promise", async () => {
+    const { threadId, threadChatId } = await remoteThread({
+      githubRepoFullName: "acme/widgets",
+      githubPRNumber: 7,
+    });
+    await finishThread({ threadId, threadChatId });
+    expect(openRemoteTaskPullRequest).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0].remotePullRequest,
+    ).toBeUndefined();
+  });
+
+  it("opens no pull request when the user stopped the run", async () => {
+    const { threadId, threadChatId } = await remoteThread();
 
     await handleDaemonEvent({
       threadId,
@@ -164,15 +242,9 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
   });
 
   it("schedules both the review effect and the audit hook for a PR thread", async () => {
-    const { threadId, threadChatId } = await createTestThread({
-      db,
-      userId: user.id,
-      overrides: {
-        sandboxProvider: "hatchet-remote",
-        githubRepoFullName: "acme/widgets",
-        githubPRNumber: 7,
-      },
-      chatOverrides: { status: "working" },
+    const { threadId, threadChatId } = await remoteThread({
+      githubRepoFullName: "acme/widgets",
+      githubPRNumber: 7,
     });
 
     await finishThread({ threadId, threadChatId });

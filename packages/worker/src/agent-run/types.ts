@@ -182,6 +182,13 @@ export type AgentRunInput = {
    */
   workBranch?: string;
   /**
+   * The one fully-qualified ref (`refs/heads/<branch>`) this run may push; set
+   * by dispatch for mention-lane threads only. The box's git broker is fenced to
+   * it (a cell fences through its own `allowedRef`). Mirror of www
+   * AgentRunInput.pushRef.
+   */
+  pushRef?: string;
+  /**
    * #634 S4: set by dispatch for plain org task runs when OpenSandbox cells are on
    * for the user. A reference only; the worker ignores it until S5. Mirror of www
    * AgentRunInput.cell.

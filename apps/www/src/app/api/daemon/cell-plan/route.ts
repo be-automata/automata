@@ -201,6 +201,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
     prNumber: thread.githubPRNumber ?? undefined,
     branch: thread.branchName ?? thread.repoBaseBranchName,
     baseBranch: thread.repoBaseBranchName,
+    sourceMetadata: thread.sourceMetadata,
   });
   if (pushBranch === null) return refuse("work_branch_unresolved", 409);
 

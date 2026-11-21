@@ -2,6 +2,7 @@ import type { Octokit } from "octokit";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DBMessage } from "@terragon/shared/db/db-message";
+import type { ThreadSourceMetadata } from "@terragon/shared/db/types";
 import {
   getThread,
   updateThread,
@@ -13,12 +14,22 @@ import {
 } from "@terragon/shared/model/test-helpers";
 import { updateUserSettings } from "@terragon/shared/model/user";
 
+import * as schema from "@terragon/shared/db/schema";
+import { eq } from "drizzle-orm";
+
 import { db } from "@/lib/db";
+import {
+  mentionSourceMetadata,
+  mentionStamp,
+} from "@/test-helpers/mention-stamp";
 
 import {
   openRemoteTaskPullRequest,
   remoteTaskBranchName,
+  isMentionPullRequestThread,
+  mentionPullRequestPolicy,
   taskRunPushBranch,
+  withIssueReference,
 } from "./remote-task-pr";
 
 const generateContent = vi.fn(async () => ({
@@ -138,6 +149,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(app, user)).resolves.toEqual({
       status: "opened",
       prNumber: 77,
+      recorded: true,
     });
     expect(user.created).toHaveLength(1);
     expect(app.created).toHaveLength(0);
@@ -157,6 +169,7 @@ describe("openRemoteTaskPullRequest", () => {
       await expect(run(app, user)).resolves.toEqual({
         status: "opened",
         prNumber: 77,
+        recorded: true,
       });
       expect(app.created).toHaveLength(1);
     },
@@ -174,6 +187,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(gh)).resolves.toEqual({
       status: "opened",
       prNumber: 77,
+      recorded: true,
     });
     expect(gh.created).toHaveLength(1);
     expect(gh.created[0]).toMatchObject({
@@ -242,6 +256,118 @@ describe("openRemoteTaskPullRequest", () => {
     expect(gh.created[0]).toMatchObject({ draft: false });
   });
 
+  describe("a thread an issue mention started (OD-2, OD-5)", () => {
+    const issueStamp = mentionSourceMetadata(
+      mentionStamp({
+        isPullRequest: false,
+        repoFullName: REPO,
+        issueOrPrNumber: 42,
+      }),
+    );
+
+    beforeEach(async () => {
+      await updateThread({
+        db,
+        userId,
+        threadId,
+        updates: { sourceMetadata: issueStamp },
+      });
+    });
+
+    it("opens a draft even when the owner's PR type is ready, ending in Refs #N", async () => {
+      await updateUserSettings({ db, userId, updates: { prType: "ready" } });
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(gh.created[0]).toMatchObject({ draft: true });
+      const body = String(gh.created[0]?.body);
+      expect(body).toContain("Generated body.\n\nRefs #42");
+      expect(body).toContain(`/task/${threadId}`);
+    });
+
+    it("keeps the agent's own block and still references the issue", async () => {
+      await finishWith(
+        pullRequestBlock({ title: "feat: a", body: "## Summary\n- Did it." }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(String(gh.created[0]?.body)).toMatch(
+        /^## Summary\n- Did it\.\n\nRefs #42\n\n---/,
+      );
+    });
+
+    it("rewrites a closing keyword in the agent's block, so the PR never closes the issue", async () => {
+      await finishWith(
+        pullRequestBlock({
+          title: "feat: a",
+          body: "Closes #42 and fixes acme/widgets#42.",
+        }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      const body = String(gh.created[0]?.body);
+      expect(body).toContain("Refs #42 and Refs acme/widgets#42.");
+      expect(body).not.toMatch(/closes|fixes/i);
+    });
+
+    it("skips when the owner turned automatic PRs off, without calling GitHub (OD-7)", async () => {
+      await updateUserSettings({
+        db,
+        userId,
+        updates: { autoCreatePRs: false },
+      });
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await expect(run(gh)).resolves.toEqual({
+        status: "skipped",
+        reason: "auto_create_off",
+      });
+      expect(
+        vi.mocked(gh.octokit.rest.repos.compareCommitsWithBasehead),
+      ).not.toHaveBeenCalled();
+    });
+
+    it("a question run (branch never ahead) opens nothing", async () => {
+      const gh = fakeGitHub({ compare: { ahead_by: 0 } });
+      await expect(run(gh)).resolves.toEqual({
+        status: "skipped",
+        reason: "no_changes",
+      });
+      expect(gh.created).toHaveLength(0);
+    });
+  });
+
+  it("a failure recording the PR still names it, flagged unrecorded and logged", async () => {
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The thread row vanishes after the PR is created: the writes then fail.
+    const github = gh.octokit.rest.pulls.create as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    github.mockImplementationOnce(async () => {
+      await db.delete(schema.thread).where(eq(schema.thread.id, threadId));
+      return {
+        data: { number: 77, state: "open", draft: true, merged: false },
+      };
+    });
+    await expect(run(gh)).resolves.toEqual({
+      status: "opened",
+      prNumber: 77,
+      recorded: false,
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[remote-task-pr] PR opened but not recorded",
+      expect.objectContaining({ threadId, prNumber: 77 }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("a plain task thread keeps the owner's prType and gets no Refs line", async () => {
+    await updateUserSettings({ db, userId, updates: { prType: "ready" } });
+    const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+    await run(gh);
+    expect(gh.created[0]).toMatchObject({ draft: false });
+    expect(String(gh.created[0]?.body)).not.toContain("Refs #");
+  });
+
   it("adopts an open PR for the branch instead of opening a second one", async () => {
     const gh = fakeGitHub({
       compare: { ahead_by: 1 },
@@ -250,6 +376,7 @@ describe("openRemoteTaskPullRequest", () => {
     await expect(run(gh)).resolves.toEqual({
       status: "adopted",
       prNumber: 12,
+      recorded: true,
     });
     expect(gh.created).toHaveLength(0);
   });
@@ -309,12 +436,18 @@ describe("remoteTaskBranchName", () => {
   });
 });
 
+const prMention = mentionSourceMetadata(mentionStamp({ isPullRequest: true }));
+const issueMention = mentionSourceMetadata(
+  mentionStamp({ isPullRequest: false }),
+);
+
 describe("taskRunPushBranch", () => {
   const threadId = "abcdef12-0000-0000-0000-000000000000";
   const push = (patch: {
     prNumber?: number;
     branch?: string | null;
     baseBranch?: string | null;
+    sourceMetadata?: ThreadSourceMetadata;
   }) =>
     taskRunPushBranch({
       threadId,
@@ -333,9 +466,146 @@ describe("taskRunPushBranch", () => {
   it("a non-base branch with no PR pushes that branch", () => {
     expect(push({ branch: "feat/x" })).toBe("feat/x");
   });
+  it("a mention thread on a PR pushes the PR head it checked out, never null", () => {
+    // The thread stores the PR head as its "base" and as the branch.
+    expect(
+      push({
+        prNumber: 7,
+        branch: "feat/pr-head",
+        baseBranch: "feat/pr-head",
+        sourceMetadata: prMention,
+      }),
+    ).toBe("feat/pr-head");
+  });
+  it("other PR threads (review, companion, delivery fix) keep null", () => {
+    expect(
+      push({
+        prNumber: 7,
+        branch: "feat/pr-head",
+        baseBranch: "feat/pr-head",
+        sourceMetadata: issueMention,
+      }),
+    ).toBeNull();
+    expect(
+      push({ prNumber: 7, branch: "feat/pr-head", baseBranch: "feat/pr-head" }),
+    ).toBeNull();
+  });
+  it("a mention PR thread never resolves to a blank branch", () => {
+    expect(
+      push({ prNumber: 7, branch: null, sourceMetadata: prMention }),
+    ).toBeNull();
+  });
   it("the base branch with a PR, or a blank branch, is null", () => {
     expect(push({ prNumber: 7 })).toBeNull();
     expect(push({ branch: null })).toBeNull();
     expect(push({ branch: "  " })).toBeNull();
+  });
+});
+
+describe("isMentionPullRequestThread", () => {
+  it("matches only a mention stamp on a pull request", () => {
+    const noMention = {
+      type: "automation-skill",
+      skillName: "github-mention",
+      contentSha: "sha",
+      source: "org",
+    } as ThreadSourceMetadata;
+    expect(isMentionPullRequestThread(prMention)).toBe(true);
+    expect(isMentionPullRequestThread(issueMention)).toBe(false);
+    expect(isMentionPullRequestThread(noMention)).toBe(false);
+    expect(isMentionPullRequestThread(null)).toBe(false);
+    expect(isMentionPullRequestThread(undefined)).toBe(false);
+    expect(isMentionPullRequestThread({ type: "manual" } as never)).toBe(false);
+  });
+});
+
+describe("mentionPullRequestPolicy", () => {
+  it("names the issue for an issue mention only", () => {
+    const issue = mentionSourceMetadata(
+      mentionStamp({ isPullRequest: false, issueOrPrNumber: 9 }),
+    );
+    expect(mentionPullRequestPolicy(issue)).toEqual({ issueNumber: 9 });
+    expect(mentionPullRequestPolicy(prMention)).toBeNull();
+    expect(mentionPullRequestPolicy(null)).toBeNull();
+    expect(mentionPullRequestPolicy({ type: "manual" } as never)).toBeNull();
+  });
+});
+
+describe("withIssueReference", () => {
+  it("appends Refs #N when the body has none", () => {
+    expect(withIssueReference("Body.", 5)).toBe("Body.\n\nRefs #5");
+  });
+
+  it("keeps an existing Refs #N and does not repeat it", () => {
+    expect(withIssueReference("Body.\n\nRefs #5", 5)).toBe("Body.\n\nRefs #5");
+  });
+
+  it.each([
+    "Closes #5",
+    "closed #5",
+    "FIXES: #5",
+    "Resolves #5",
+    "fix #5",
+    "Closes acme/widgets#5",
+    "Fixes https://github.com/acme/widgets/issues/5",
+  ])("rewrites %s to a Refs line", (text) => {
+    const out = withIssueReference(text, 5);
+    expect(out.startsWith("Refs ")).toBe(true);
+    expect(out).not.toMatch(/\b(close|fix|resolve)/i);
+  });
+
+  it("rewrites the full-URL form to Refs <url>", () => {
+    expect(
+      withIssueReference("Closes https://github.com/acme/widgets/issues/7", 5),
+    ).toBe("Refs https://github.com/acme/widgets/issues/7\n\nRefs #5");
+  });
+
+  it("leaves fenced code and inline code untouched", () => {
+    const body = [
+      "Real: Fixes #5",
+      "```text",
+      "Closes #5",
+      "```",
+      "Inline `Resolves #5` stays.",
+      "~~~",
+      "fixes #5",
+      "~~~",
+    ].join("\n");
+    const out = withIssueReference(body, 5);
+    expect(out).toContain("Real: Refs #5");
+    expect(out).toContain("```text\nCloses #5\n```");
+    expect(out).toContain("`Resolves #5`");
+    expect(out).toContain("~~~\nfixes #5\n~~~");
+  });
+
+  it("does not count a Refs line inside a fence", () => {
+    const out = withIssueReference("```\nRefs #5\n```", 5);
+    expect(out.endsWith("\n\nRefs #5")).toBe(true);
+  });
+
+  it("an unpaired backtick never hides a closing keyword in a later paragraph", () => {
+    // A code span ends at its paragraph: the stray ` in the first paragraph
+    // must not pair with the one in the last and swallow "Closes #5".
+    const body = "Use the ` key.\n\nCloses #5\n\nRun `pnpm test`.";
+    const out = withIssueReference(body, 5);
+    expect(out).toContain("\n\nRefs #5\n\n");
+    expect(out).not.toMatch(/closes/i);
+    expect(out).toContain("`pnpm test`");
+  });
+
+  it("an inline code span may still wrap a single line break", () => {
+    const out = withIssueReference("See `Closes\n#5` here.", 5);
+    expect(out).toContain("`Closes\n#5`");
+  });
+
+  it("rewrites a keyword with a colon and no space before the reference", () => {
+    const out = withIssueReference("Closes:#5", 5);
+    expect(out).toBe("Refs #5");
+  });
+
+  it("does not touch words that merely contain a keyword", () => {
+    expect(withIssueReference("Prefixes #5 are fine.", 5)).toContain(
+      "Prefixes #5 are fine.",
+    );
   });
 });

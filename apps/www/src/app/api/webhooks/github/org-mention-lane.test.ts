@@ -31,6 +31,7 @@ import {
   missingBranchMentionReply,
   authorizeCommenter,
   emptyMentionReply,
+  isDeliveryAsk,
   mentionSlug,
 } from "./org-mention-lane";
 
@@ -107,6 +108,28 @@ describe("analyseMention (legacy whole-token match)", () => {
     expect(mentionSlug("automata-ai[bot]")).toBe("automata-ai");
     expect(mentionSlug("  ")).toBeNull();
     expect(mentionSlug()).toBe(SLUG);
+  });
+});
+
+describe("isDeliveryAsk (#729 OD-6)", () => {
+  it.each([
+    "implement this issue",
+    "please implement the issue as written",
+    "Implement issue #12",
+    "IMPLEMENT THIS ISSUE and open a PR",
+  ])("%s asks for delivery", (text) => {
+    expect(isDeliveryAsk(text)).toBe(true);
+  });
+
+  it.each([
+    "how would you implement the cache?",
+    "fix the typo in the README",
+    "what is this issue about?",
+    "implement the new parser, then close the issue when it is done",
+    "can you implement the fix for the issue?",
+    "how would you implement it? the issue is vague",
+  ])("%s does not", (text) => {
+    expect(isDeliveryAsk(text)).toBe(false);
   });
 });
 
@@ -433,6 +456,84 @@ describe("routing: org lane vs the legacy per-user path", () => {
     expect(call.options?.branchName).toBe("main");
     expect(call.options?.stampExtra?.mention?.isPullRequest).toBe(false);
     expect(call.options?.stampExtra?.mention).not.toHaveProperty("isDraft");
+  });
+
+  it("an issue mention asking to implement the issue stamps asksForDelivery (OD-6)", async () => {
+    const { repoFullName } = await repoWithLane();
+    await handleIssueCommentEvent(
+      issueComment({
+        repoFullName,
+        pr: false,
+        body: "@test-app please implement the issue as written",
+      }),
+    );
+    const mention =
+      vi.mocked(runAutomation).mock.calls[0]![0].options?.stampExtra?.mention;
+    expect(mention?.asksForDelivery).toBe(true);
+  });
+
+  it("every other stamp keeps its keys: no asksForDelivery on a question, a PR mention or a plain issue ask", async () => {
+    const { repoFullName } = await repoWithLane();
+    await handleIssueCommentEvent(
+      issueComment({
+        repoFullName,
+        pr: false,
+        body: "@test-app how would you implement the cache?",
+      }),
+    );
+    await handleIssueCommentEvent(
+      issueComment({
+        repoFullName,
+        pr: true,
+        body: "@test-app implement this issue",
+      }),
+    );
+    await handleIssueCommentEvent(
+      issueComment({ repoFullName, pr: false, body: "@test-app fix the typo" }),
+    );
+    for (const call of vi.mocked(runAutomation).mock.calls) {
+      expect(call[0].options?.stampExtra?.mention).not.toHaveProperty(
+        "asksForDelivery",
+      );
+    }
+    expect(vi.mocked(runAutomation)).toHaveBeenCalledTimes(3);
+  });
+
+  it("an issue mention from a read-permission commenter starts nothing, claims nothing, says nothing (AC-3)", async () => {
+    const { repoFullName } = await repoWithLane();
+    const event = issueComment({
+      repoFullName,
+      pr: false,
+      body: "@test-app implement this issue",
+    });
+    octokit = fakeOctokit("read");
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+    await handleIssueCommentEvent(event);
+    expect(runAutomation).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(octokit.rest.reactions.createForIssueComment).not.toHaveBeenCalled();
+    // No intake claim was taken: the same comment, once the commenter is
+    // allowed, still starts its thread.
+    octokit = fakeOctokit("write");
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+    await handleIssueCommentEvent(event);
+    expect(runAutomation).toHaveBeenCalledTimes(1);
+  });
+
+  it("an issue mention whose permission lookup fails starts nothing (fail-closed)", async () => {
+    const { repoFullName } = await repoWithLane();
+    octokit.rest.repos.getCollaboratorPermissionLevel.mockRejectedValue(
+      new Error("boom"),
+    );
+    await handleIssueCommentEvent(
+      issueComment({
+        repoFullName,
+        pr: false,
+        body: "@test-app implement this issue",
+      }),
+    );
+    expect(runAutomation).not.toHaveBeenCalled();
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
   });
 
   it("repo-level hook: no installation in the payload → looked up from the App", async () => {

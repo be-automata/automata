@@ -505,7 +505,7 @@ export async function handleOrgLaneMention(
     return true;
   }
 
-  const stamp = buildMentionStamp(input);
+  const stamp = buildMentionStamp(input, mention.instruction);
   // One redelivered webhook must not answer twice — the empty-mention reply
   // included — so the claim comes before anything is posted.
   if (!(await claimIntake(input))) {
@@ -706,8 +706,26 @@ export async function handleOrgLaneMention(
   return true;
 }
 
-/** The stamp a mention-lane thread carries: the comment it answers. */
-export function buildMentionStamp(input: OrgMentionInput): MentionLaneStamp {
+/**
+ * An instruction that asks the agent to deliver the whole issue ("implement
+ * this issue", "please implement the issue as written", "implement issue #12").
+ * Its reply also names the `automata:deliver` label (#729 OD-6). At most two
+ * words may sit between "implement" and "issue", so a question that merely
+ * contains both ("implement the fix for the issue?") does not match.
+ */
+export function isDeliveryAsk(instruction: string): boolean {
+  return /\bimplement\s+(?:[\w-]+\s+){0,2}?issue\b/i.test(instruction);
+}
+
+/**
+ * The stamp a mention-lane thread carries: the comment it answers. An issue
+ * mention whose instruction asks for delivery also carries `asksForDelivery`
+ * (written only then, so every other stamp keeps its keys).
+ */
+export function buildMentionStamp(
+  input: OrgMentionInput,
+  instruction: string | null,
+): MentionLaneStamp {
   const { comment } = input;
   return {
     repoFullName: input.repoFullName,
@@ -716,6 +734,9 @@ export function buildMentionStamp(input: OrgMentionInput): MentionLaneStamp {
     commentId: comment.id,
     commentKind: input.commentKind,
     commenterLogin: comment.user.login,
+    ...(!input.isPullRequest && instruction && isDeliveryAsk(instruction)
+      ? { asksForDelivery: true as const }
+      : {}),
     ...(input.commentKind === "review_comment"
       ? {
           path: comment.path ?? undefined,

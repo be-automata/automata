@@ -848,6 +848,22 @@ export function selfHealRefFence(
   return { exactRef: `refs/heads/${branch}` };
 }
 
+/**
+ * The git-broker ref fence of a mention-lane run (#729): exactly the ref
+ * dispatch named in `pushRef`, or undefined for every run without one. Fails
+ * closed on a blank value or anything that is not a `refs/heads/` ref (a tag,
+ * a bare name): a mention is never run unfenced because its fence was wrong.
+ */
+export function pushRefFence(
+  pushRef: AgentRunInput["pushRef"],
+): { exactRef: string } | undefined {
+  if (pushRef === undefined) return undefined;
+  if (!isBranchRef(pushRef)) {
+    throw new Error("mention run: pushRef is not a refs/heads/ branch ref");
+  }
+  return { exactRef: pushRef };
+}
+
 const DEFAULT_SELF_HEAL_DEPS: SelfHealAuditStepDeps = {
   runChecks: runSelfHealChecks,
   postReport: (args) => postSelfHealAuditChecks(args),
@@ -1203,13 +1219,15 @@ async function runAgentInner(
   // fail, so the journal can be matched to a GitHub review without timestamps.
   step(formatRunStartLine(input));
 
-  // FENCE-01: a self-heal fix run may push only its own attempt branch, and
-  // that fence lives in the git broker. Decide it before the clone, and refuse
-  // a fix run on a box whose agents would hold the raw token instead.
-  const refFence = selfHealRefFence(input.selfHeal);
+  // FENCE-01: a self-heal fix run may push only its own attempt branch, and a
+  // mention run (#729) only the ref dispatch named; that fence lives in the git
+  // broker. Decide it before the clone, and refuse a fenced run on a box whose
+  // agents would hold the raw token instead.
+  const refFence =
+    selfHealRefFence(input.selfHeal) ?? pushRefFence(input.pushRef);
   if (refFence && config.credentialBroker !== "on") {
     throw new Error(
-      "self-heal fix run requires the credential broker (WORKER_CREDENTIAL_BROKER=on): the ref fence lives in the git broker",
+      "a fenced run requires the credential broker (WORKER_CREDENTIAL_BROKER=on): the ref fence lives in the git broker",
     );
   }
 

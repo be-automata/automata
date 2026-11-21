@@ -1,3 +1,7 @@
+import {
+  mentionSourceMetadata,
+  mentionStamp,
+} from "@/test-helpers/mention-stamp";
 import { NextRequest } from "next/server";
 import { and, eq, like } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -440,6 +444,42 @@ describe("POST /api/daemon/cell-plan", () => {
       expect(await res.json()).toEqual({ error: "work_branch_unresolved" });
       expect(getClaudeOauthAccessToken).not.toHaveBeenCalled();
       expect(await steps()).toEqual([]);
+    });
+
+    const mentionThreadStamp = (isPullRequest: boolean) =>
+      mentionSourceMetadata(
+        mentionStamp({ isPullRequest, issueOrPrNumber: 5 }),
+      );
+
+    it("a PR-mention step opens with allowedRef on the PR head, never the base", async () => {
+      // A PR mention stores the PR head as repoBaseBranchName, no branchName.
+      const t = await newThread({
+        organizationId: orgId,
+        githubPRNumber: 5,
+        branchName: null,
+        repoBaseBranchName: "feat/pr-head",
+        sourceMetadata: mentionThreadStamp(true),
+      });
+      threadId = t.threadId;
+      threadChatId = t.threadChatId;
+      vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
+      expect((await POST(req(body()))).status).toBe(200);
+      expect((await steps())[0]?.allowedRef).toBe("refs/heads/feat/pr-head");
+    });
+
+    it("an issue-mention step opens with allowedRef on the thread's task branch", async () => {
+      const t = await newThread({
+        organizationId: orgId,
+        branchName: null,
+        sourceMetadata: mentionThreadStamp(false),
+      });
+      threadId = t.threadId;
+      threadChatId = t.threadChatId;
+      vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
+      expect((await POST(req(body()))).status).toBe(200);
+      expect((await steps())[0]?.allowedRef).toBe(
+        `refs/heads/automata/task-${threadId.slice(0, 8).toLowerCase()}`,
+      );
     });
 
     it("an existing PR on a work branch pushes that branch", async () => {
