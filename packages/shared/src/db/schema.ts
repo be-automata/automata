@@ -3143,10 +3143,12 @@ export const repoEgressAuditLog = pgTable(
       .notNull(),
   },
   (table) => [
+    // `id` last: the history's keyset `(created_at, id) < (…)` reads this index in order.
     index("repo_egress_audit_log_org_repo_created_index").on(
       table.organizationId,
       table.repoFullName,
       table.createdAt,
+      table.id,
     ),
   ],
 );

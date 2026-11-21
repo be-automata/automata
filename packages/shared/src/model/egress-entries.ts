@@ -236,22 +236,40 @@ export function classifyEgressEntries(input: {
  * ANYONE's bucket there, not only the repo's. Frozen on purpose: widening it
  * is a reviewed code change.
  */
-const MULTI_TENANT_EXACT_HOSTS: ReadonlySet<string> = new Set([
-  "storage.googleapis.com",
-  "s3.amazonaws.com",
-]);
-const MULTI_TENANT_SUFFIXES: readonly string[] = Object.freeze([
-  ".storage.googleapis.com", // virtual-hosted GCS buckets
-]);
+const GCS_HOST = "storage.googleapis.com";
 const AWS_APEX = "amazonaws.com";
+/** Labels that may sit between an S3 label and `amazonaws.com`: a region or `dualstack`. */
+const S3_TAIL_LABEL_RE = /^(dualstack|[a-z]{2}(-[a-z]+)+-[0-9]+)$/;
 
 /**
- * True for a GCS or S3 upload host: `storage.googleapis.com` (and buckets under
- * it), `s3.amazonaws.com`, any `amazonaws.com` name with an `s3` or `s3-…`
- * label (`s3.<region>`, `s3-<region>`, `<bucket>.s3.<region>`,
- * `s3-accelerate`), and the `*.amazonaws.com` wildcard. A `:443` port and a
- * trailing dot are ignored; a wildcard over one of them (even a public-suffix
- * one) counts; any other entry the cell cannot read is not a host.
+ * An S3 name: an `s3` or `s3-…` label (`s3`, `s3-<region>`, `s3-accelerate`,
+ * `s3-website`, `s3-accesspoint`, …) followed only by region or `dualstack`
+ * labels before `amazonaws.com`, with anything (a bucket) to its left. So
+ * `s3-proxy-1.us-east-1.elb.amazonaws.com`, a load balancer someone named
+ * `s3-proxy`, is not one.
+ */
+function isS3Name(name: string): boolean {
+  if (!name.endsWith(`.${AWS_APEX}`)) return false;
+  const labels = name.slice(0, -(AWS_APEX.length + 1)).split(".");
+  return labels.some(
+    (label, i) =>
+      (label === "s3" || label.startsWith("s3-")) &&
+      labels.slice(i + 1).every((tail) => S3_TAIL_LABEL_RE.test(tail)),
+  );
+}
+
+function isMultiTenantName(name: string): boolean {
+  return name === GCS_HOST || name.endsWith(`.${GCS_HOST}`) || isS3Name(name);
+}
+
+/**
+ * True for a GCS or S3 upload host: `storage.googleapis.com` and buckets under
+ * it, and S3 names (`s3.amazonaws.com`, `s3.<region>`, `s3-<region>`,
+ * `<bucket>.s3.<region>`, `s3.dualstack.<region>`, `s3-accelerate`, see
+ * `isS3Name`). A wildcard counts when it covers one (`*.amazonaws.com`,
+ * `*.us-east-1.amazonaws.com`, `*.googleapis.com`), even a public-suffix one
+ * (`*.s3.amazonaws.com`). A `:443` port, case and a trailing dot are ignored;
+ * any other entry the cell cannot read is not a host.
  */
 export function detectMultiTenantUploadHost(entry: string): boolean {
   let normalized: CellEgressEntry;
@@ -265,14 +283,9 @@ export function detectMultiTenantUploadHost(entry: string): boolean {
     normalized = { name: error.entry.slice(2), wildcard: true };
   }
   const { name, wildcard } = normalized;
-  if (wildcard && name === AWS_APEX) return true;
-  if (MULTI_TENANT_EXACT_HOSTS.has(name)) return true;
-  if (MULTI_TENANT_SUFFIXES.some((suffix) => name.endsWith(suffix))) {
-    return true;
-  }
-  if (!name.endsWith(`.${AWS_APEX}`)) return false;
-  const labels = name.slice(0, -(AWS_APEX.length + 1)).split(".");
-  return labels.some((label) => label === "s3" || label.startsWith("s3-"));
+  // `*.x` covers `s3.x` and `storage.x`: when either is an upload host, so is the wildcard.
+  const covered = wildcard ? [name, `s3.${name}`, `storage.${name}`] : [name];
+  return covered.some(isMultiTenantName);
 }
 
 export interface EgressWarning {

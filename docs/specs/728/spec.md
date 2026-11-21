@@ -445,9 +445,12 @@ brokerHost: "broker.invalid" })`. `reason: "too_many_entries"` → one `too_many
 
 Message words are the validators' own (G19, G13) so the API, UI and CLI say the same thing.
 
-`detectMultiTenantUploadHost(host)`: exact `storage.googleapis.com`; any host equal to
-`s3.amazonaws.com`, matching `s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`, or ending in
-`.s3.amazonaws.com` / `.s3.<region>.amazonaws.com`; `*.amazonaws.com`. The list is a frozen
+`detectMultiTenantUploadHost(host)`: `storage.googleapis.com` and buckets under it; an S3 name,
+i.e. an `s3` or `s3-…` label followed only by region or `dualstack` labels before
+`amazonaws.com` (`s3.amazonaws.com`, `s3.<region>`, `s3-<region>`, `<bucket>.s3.<region>`,
+`s3.dualstack.<region>`, `s3-accelerate`), so a load balancer named `s3-proxy` under
+`elb.amazonaws.com` is not one; and any wildcard that covers one of these (`*.amazonaws.com`,
+`*.<region>.amazonaws.com`, `*.googleapis.com`, `*.s3.amazonaws.com`). The list is a frozen
 constant with a comment linking #719; widening it is a code change with review.
 
 `egressWarnings({ level, entries, registries })` returns, in this order:
@@ -596,6 +599,7 @@ export const repoEgressAuditLog = pgTable(
       table.organizationId,
       table.repoFullName,
       table.createdAt,
+      table.id,
     ),
   ],
 );
@@ -642,7 +646,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- The table is created in this file, so a plain CREATE INDEX blocks no traffic (lint L3).
 CREATE INDEX IF NOT EXISTS "repo_egress_audit_log_org_repo_created_index"
-  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at");
+  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at", "id");
 
 -- Post-migration verification:
 --   \d repo_egress_audit_log

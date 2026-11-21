@@ -116,6 +116,65 @@ describe("classifyEgressEntries: the AC-6 code table", () => {
     ]);
   });
 
+  it("IDNs: punycode is a host, a Unicode name is invalid_host and not echoed", () => {
+    expect(classifyDomain(["xn--bcher-kva.example"]).errors).toEqual([]);
+    expect(classifyDomain(["bücher.example"]).errors).toEqual([
+      expect.objectContaining({ code: "invalid_host", entry: null, index: 0 }),
+    ]);
+  });
+
+  it("case and :443 are canonical forms; the trailing dot is refused in any case", () => {
+    const result = classifyDomain(["API.EXAMPLE.COM", "Api.Example.Com:443"]);
+    // Two stored strings (the list is string-deduped), one rendered host.
+    expect(result.entries).toEqual(["api.example.com", "api.example.com:443"]);
+    expect(result.errors).toEqual([]);
+    expect(result.budget.used).toBe(PLATFORM_HOSTS + 1);
+    expect(classifyDomain(["EXAMPLE.COM."]).errors[0]).toMatchObject({
+      code: "invalid_host",
+      entry: "example.com.",
+    });
+    expect(classifyDomain(["example.com.:443"]).errors[0]?.code).toBe(
+      "invalid_host",
+    );
+  });
+
+  it("IPv6 forms are ipv6_not_allowed; one with a zone id is invalid_host", () => {
+    for (const entry of [
+      "[::1]",
+      "[::1]:443",
+      "2001:db8::1",
+      "::ffff:10.0.0.1",
+    ]) {
+      expect(classifyDomain([entry]).errors.map((e) => e.code)).toEqual([
+        "ipv6_not_allowed",
+      ]);
+    }
+    expect(classifyDomain(["fe80::1%eth0"]).errors[0]).toMatchObject({
+      code: "invalid_host",
+      entry: null,
+    });
+  });
+
+  it("a label over 63 characters is invalid_host; 63 is fine", () => {
+    expect(classifyDomain([`${"a".repeat(63)}.example.com`]).errors).toEqual(
+      [],
+    );
+    expect(
+      classifyDomain([`${"a".repeat(64)}.example.com`]).errors.map(
+        (e) => e.code,
+      ),
+    ).toEqual(["invalid_host"]);
+  });
+
+  it("an empty or whitespace-only input list classifies to nothing", () => {
+    const result = classifyDomain(["", "   ", "\t"]);
+    expect(result).toEqual({
+      entries: [],
+      errors: [],
+      budget: { used: PLATFORM_HOSTS, max: CELL_EGRESS_MAX_ENTRIES },
+    });
+  });
+
   it("classifies entries under null and none too (nothing a cell cannot use is stored)", () => {
     for (const level of [null, "none"] as const) {
       const { errors } = classifyEgressEntries({
@@ -217,6 +276,15 @@ describe("classifyEgressEntries: parity with the box and the cell", () => {
     "-bad.example.com",
     "example.com:",
     "xn--bcher-kva.example",
+    "bücher.example",
+    "EXAMPLE.COM.",
+    "example.com.:443",
+    "[::1]",
+    "2001:db8::1",
+    "::ffff:10.0.0.1",
+    "fe80::1%eth0",
+    `${"a".repeat(63)}.example.com`,
+    `${"a".repeat(64)}.example.com`,
   ];
 
   it.each(PROBES)("%s", (entry) => {
@@ -260,6 +328,15 @@ describe("detectMultiTenantUploadHost", () => {
     "*.amazonaws.com",
     "*.s3.amazonaws.com",
     "S3.AMAZONAWS.COM.",
+    "s3.us-gov-west-1.amazonaws.com",
+    "s3-website-us-east-1.amazonaws.com",
+    "ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com",
+    "s3-accelerate.dualstack.amazonaws.com",
+    // A wildcard that covers an upload host.
+    "*.us-east-1.amazonaws.com",
+    "*.dualstack.us-east-1.amazonaws.com",
+    "*.googleapis.com",
+    "*.storage.googleapis.com",
   ])("%s is multi-tenant", (entry) => {
     expect(detectMultiTenantUploadHost(entry)).toBe(true);
   });
@@ -273,6 +350,14 @@ describe("detectMultiTenantUploadHost", () => {
     "s3.example.com",
     "*.co.uk",
     "exa mple",
+    "",
+    // An `s3-` label that is not S3: a load balancer someone named `s3-proxy`.
+    "s3-proxy-1234.us-east-1.elb.amazonaws.com",
+    "*.elb.amazonaws.com",
+    "*.execute-api.us-east-1.amazonaws.com",
+    "storage.googleapis.com.acme.example",
+    "s3.amazonaws.com.acme.example",
+    "*.example.com",
   ])("%s is not", (entry) => {
     expect(detectMultiTenantUploadHost(entry)).toBe(false);
   });

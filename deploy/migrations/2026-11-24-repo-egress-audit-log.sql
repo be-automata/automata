@@ -29,8 +29,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- The table is created in this file, so a plain CREATE INDEX blocks no traffic (lint L3).
+-- "id" last: the history's keyset cursor (created_at, id) reads this index in order.
 CREATE INDEX IF NOT EXISTS "repo_egress_audit_log_org_repo_created_index"
-  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at");
+  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at", "id");
 
 -- Post-migration verification:
 --   \d repo_egress_audit_log
