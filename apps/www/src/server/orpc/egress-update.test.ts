@@ -470,6 +470,27 @@ describe("egress.update", () => {
     expect(fixed.after.stored.level).toBe("domain");
   });
 
+  // card: protects=roborev 1368: sending level null over an unknown stored level clears it (a real write and one audit row), so the box stops failing those runs; fails_when=it is treated as a no-op; no_claim=the box reading NULL
+  it("level null over an unknown stored level clears it, with one audit row", async () => {
+    await seed(orgA.id, { egressPolicy: "domain", egressAllowlist: [] });
+    await db.execute(
+      sql`UPDATE repo_review_settings SET egress_policy = 'bogus_level' WHERE organization_id = ${orgA.id}`,
+    );
+    const result = await tokenClient(keyA).egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: null,
+    });
+    expect(result.applied).toBe(true);
+    const row = await getRepoReviewSetting({
+      db,
+      organizationId: orgA.id,
+      repoFullName: REPO,
+    });
+    expect(row?.egressPolicy ?? null).toBeNull();
+    expect(await auditCount()).toBe(1);
+  });
+
   it("AC-7: two concurrent adds of different hosts both land, with one audit row each", async () => {
     await seed(orgA.id, {
       egressPolicy: "domain",

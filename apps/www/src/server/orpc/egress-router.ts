@@ -385,7 +385,13 @@ async function updateInTransaction(
     const after = projectedRow(stored, change.after);
     return { before: stored, after, audit: null };
   }
-  if (!change.changed) {
+  // The typed `before` reads an unknown stored level as null, so a level sent
+  // over one (null included) must still write: it replaces the bad value.
+  const replacesUnknownLevel =
+    input.level !== undefined &&
+    stored?.egressPolicy != null &&
+    !isEgressPolicyLevel(stored.egressPolicy);
+  if (!change.changed && !replacesUnknownLevel) {
     return { before: stored, after: stored, audit: null };
   }
   return writeChange(scope, txDb, stored, { before, after: change.after });
