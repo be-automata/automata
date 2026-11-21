@@ -31,8 +31,8 @@
   },
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
-    "@daytonaio/sdk": "0.205.1",
-    "@e2b/code-interpreter": "^2.7.1",
+    "@daytonaio/sdk": "0.232.0",
+    "@e2b/code-interpreter": "^2.9.1",
     "@iarna/toml": "^3.0.0",
     "@terragon/agent": "workspace:*",
     "@terragon/bundled": "workspace:*",
