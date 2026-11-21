@@ -1439,6 +1439,68 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     expect(loadCellConfig).toHaveBeenCalledTimes(1);
   });
 
+  // card: protects=#742 the run fn refreshes a task run's timeout once and hands the effective budget to the abnormal-end state; review, pr and self-heal never refresh and stay at 30; fails_when=the refresh is skipped, repeated or leaks to another lane, or the classifier keeps reading 30 for a task run; no_claim=the engine honouring the refresh (refresh-timeout.integration.test.ts)
+  it.each([
+    ["task", {}, 60, true],
+    ["pr", { prNumber: 7 }, 30, false],
+    [
+      "review",
+      { prKey: "org-1/o/r/7", supersedePolicy: "newest-wins" },
+      30,
+      false,
+    ],
+    [
+      "self-heal",
+      { selfHeal: { kind: "audit", attemptId: "a1", checkToken: "chk-tok" } },
+      30,
+      false,
+    ],
+  ])(
+    "#742 %s run: effective budget %i min, refreshed=%s",
+    async (_n, extra, minutes, refreshed) => {
+      const box = fakeExecutor("box", completed);
+      wf._setRunExecutorsForTests({
+        box: box.executor,
+        cell: fakeExecutor("cell", completed).executor,
+        loadCellConfig: () => ON,
+      });
+      const refreshTimeout = vi.fn(async () => {});
+      const c = { ...ctx(), refreshTimeout };
+      await rawRunFn(await wireInput(extra), c);
+      expect(refreshTimeout).toHaveBeenCalledTimes(refreshed ? 1 : 0);
+      if (refreshed) expect(refreshTimeout).toHaveBeenCalledWith("30m");
+      expect(box.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
+        minutes * 60_000,
+      );
+    },
+  );
+
+  // card: protects=#742 a refresh that rejects never fails the run: it runs at 30 minutes with one log line; fails_when=the rejection propagates or the state says 60; no_claim=the 10 s bound (run-budget.test.ts)
+  it("#742 a rejected refresh leaves the task run at 30 minutes and runs on", async () => {
+    const box = fakeExecutor("box", completed);
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      cell: fakeExecutor("cell", completed).executor,
+      loadCellConfig: () => ON,
+    });
+    const c = {
+      ...ctx(),
+      refreshTimeout: vi.fn(async () => {
+        throw new Error("engine said no");
+      }),
+    };
+    const out = await rawRunFn(await wireInput(), c);
+    expect(out.outcome).toBe("completed");
+    expect(box.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
+      30 * 60_000,
+    );
+    expect(
+      c.log.mock.calls.filter((l) =>
+        String(l[0]).includes("run budget: refresh failed, staying at 30m"),
+      ),
+    ).toHaveLength(1);
+  });
+
   // card: protects=a marked run with the cell config off or invalid fails cells_unconfigured, never on the box, with no cell request; fails_when=it falls back to the box or calls cell-plan; no_claim=the typed terminal's text
   it.each([
     ["off", { kind: "off" } as CellConfig],

@@ -77,12 +77,12 @@ ExecStart=/bin/bash __HOME__/.automata/run-worker.sh
 # Best-effort by design: `--for-stop` always exits 0 (a failed ExecStop= must
 # not wedge a stop or a shutdown), and on its deadline it leaves the worker
 # paused and lets the SIGTERM drain take over, with the ledger behind it. The
-# deadline (1800 s) stays under TimeoutStopSec, which systemd applies to this
+# deadline (4200 s: a task run's 60-minute budget, #742, plus 10 minutes) stays under TimeoutStopSec, which systemd applies to this
 # command and again to the SIGTERM phase. Skipped when the worker already
 # exited on its own ($MAINPID empty): there is nothing to drain.
 # automata-worker-safe-restart is still the way to restart on purpose: it
 # refuses to restart a worker that is still busy, where this cannot refuse.
-ExecStop=/bin/bash -c '[ -n "$MAINPID" ] || exit 0; set -a; . __HOME__/.automata/worker-box.env; set +a; exec node --import tsx scripts/drain-for-restart.ts --for-stop --timeout-s 1800'
+ExecStop=/bin/bash -c '[ -n "$MAINPID" ] || exit 0; set -a; . __HOME__/.automata/worker-box.env; set +a; exec node --import tsx scripts/drain-for-restart.ts --for-stop --timeout-s 4200'
 
 # ── Drain, not kill ────────────────────────────────────────────────────────
 #
@@ -99,9 +99,10 @@ KillMode=mixed
 KillSignal=SIGTERM
 # A real agent run is minutes, and a review can sit behind one. This is the
 # budget before systemd escalates to SIGKILL; too small silently reintroduces
-# the mid-run drop under a different name. It is deliberately above the 30-minute
-# scheduleTimeout other variants wait on (definition.ts).
-TimeoutStopSec=2100
+# the mid-run drop under a different name. It is deliberately above the drain
+# deadline (4200 s) and the task lane's 60-minute run budget (#742), so a
+# task run that started just before the stop can finish inside it.
+TimeoutStopSec=4500
 SendSIGKILL=yes
 
 # Relaunch on graceful exit and on crash, rate-limited the same 15s the launchd

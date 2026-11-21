@@ -15,6 +15,7 @@ import type { CellConfig } from "./cell-config";
 import { loadWorkerConfig } from "./config";
 import type { BoxLock } from "./box-lock";
 import { admitRunSlot, staleSkip, type RunCtx } from "./run-admission";
+import { REGISTERED_EXECUTION_TIMEOUT_MS, applyRunBudget } from "./run-budget";
 import {
   selectRunExecutor,
   type RunExecutor,
@@ -584,9 +585,11 @@ async function runAgentAttempt(
   wire: AgentRunWireInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
-  // TMO-01: the 30-minute execution timeout counts from here; the post-agent
-  // fix check must finish inside it.
+  // TMO-01: the engine's execution timeout counts from here; the post-agent
+  // fix check must finish inside it (self-heal keeps the registered 30
+  // minutes; a task run is extended to 60 right below, #742).
   const runStartedAt = Date.now();
+  const runBudgetMs = await applyRunBudget(wire, ctx);
   const config = loadWorkerConfig();
   // #380: unseal FIRST — before any www call, the staleness check or
   // provisioning. A failure here throws a PayloadSealError naming only the
@@ -614,6 +617,7 @@ async function runAgentAttempt(
       ctx,
       config,
       runStartedAt,
+      runBudgetMs,
     );
   } finally {
     await revoker.revokeOnce();
@@ -628,6 +632,7 @@ async function runAgentResolved(
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   runStartedAt: number,
+  runBudgetMs: number,
 ): Promise<AgentRunOutput> {
   const wwwOpts = wwwOptsFor(input, secrets.daemonToken, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -647,7 +652,7 @@ async function runAgentResolved(
   const abnormal = newAbnormalEndState({
     owns: ownsAbnormalTerminal(input),
     runStartedAt,
-    runExecutionTimeoutMs: RUN_EXECUTION_TIMEOUT_MS,
+    runExecutionTimeoutMs: runBudgetMs,
   });
   // The cancel's own time, not the claim's: a slow teardown must not stretch
   // the timeout tolerance.
@@ -950,8 +955,10 @@ export async function runSelfHealAuditStep({
 /**
  * Mirror of definition.ts `executionTimeout: "30m"` (pinned by a test): the
  * post-agent fix check stops a minute before the engine would cancel the run.
+ * Self-heal runs never refresh their timeout, so this stays the REGISTERED 30
+ * minutes; a task run's effective budget (run-budget.ts) is separate.
  */
-export const RUN_EXECUTION_TIMEOUT_MS = 30 * 60_000;
+export const RUN_EXECUTION_TIMEOUT_MS = REGISTERED_EXECUTION_TIMEOUT_MS;
 const FIX_CHECK_RUN_MARGIN_MS = 60_000;
 
 /** deadlineAt = min(now + 3 min, run start + 30 min − 60 s). */

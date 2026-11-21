@@ -28,8 +28,11 @@ import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
 
 /** A cycle with no thread this long after its start never began. */
 export const DELIVERY_DISPATCH_STALE_MS = 5 * 60_000;
-/** Past the run's 30-minute hard cap with slack: its finish was missed. */
-export const DELIVERY_RUN_STALE_MS = 45 * 60_000;
+/**
+ * Past the task lane's 60-minute run budget (#742) with slack: its finish was
+ * missed. A delivery cycle dispatches a task run, which may now run 60 minutes.
+ */
+export const DELIVERY_RUN_STALE_MS = 75 * 60_000;
 
 export interface DeliveryCycleFinishDeps {
   db: DB;

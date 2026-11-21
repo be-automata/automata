@@ -696,6 +696,25 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     const stopS = Number(unit.match(/^TimeoutStopSec=(\d+)$/m)?.[1]);
     expect(drainS).toBeGreaterThan(0);
     expect(drainS).toBeLessThan(stopS);
+    // #742: the drain outlasts a task run's 60-minute budget (4200 s, the stop 4500 s).
+    expect(drainS).toBe(4200);
+    expect(stopS).toBe(4500);
+    expect(drainS).toBeGreaterThan(60 * 60);
+  });
+
+  // card: protects=#742 the wrapper's default drain is 75 minutes, so a planned restart waits out a 60-minute task run plus teardown; fails_when=the default drops below the task-lane budget or the README stops saying so; no_claim=the drain itself (safe-restart.integration.test.ts)
+  it("the safe-restart default drain budget is 75 minutes, in the script and the README", () => {
+    const drain = fs.readFileSync(
+      path.join(workerRoot, "scripts", "drain-for-restart.ts"),
+      "utf8",
+    );
+    expect(drain).toContain('flag("--timeout-s", 4500)');
+    expect(deployFile("linux", "automata-worker-safe-restart")).toContain(
+      "default 4500 s (75 min",
+    );
+    expect(
+      fs.readFileSync(path.join(workerRoot, "deploy", "README.md"), "utf8"),
+    ).toContain("# default drain budget 75 min");
   });
 
   it("the stop-time drain never fails the stop, while the restart wrapper's drain fails closed", () => {
@@ -728,7 +747,7 @@ describe("packages/worker/deploy/linux — systemd unit + launcher (#192)", () =
     // reintroduces the mid-run SIGKILL under a different name.
     const stop = unit.match(/^TimeoutStopSec=(\d+)$/m);
     expect(stop, unit).toBeTruthy();
-    expect(Number(stop![1])).toBeGreaterThanOrEqual(1800);
+    expect(Number(stop![1])).toBeGreaterThanOrEqual(4500);
   });
 
   // card: protects=ADR-013 P3 keeps the unit's privilege posture unchanged (NoNewPrivileges off) so reverting the release PR is a pure redeploy on a box that still has the host provisioning; fails_when=the posture is tightened in the same PR (a revert would then break the restored sudo spawn); no_claim=the P4 tightening

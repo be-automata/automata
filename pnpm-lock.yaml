@@ -1341,6 +1341,9 @@ importers:
       pg:
         specifier: ^8.16.3
         version: 8.16.3
+      semver:
+        specifier: 7.8.6
+        version: 7.8.6
     devDependencies:
       '@terragon/tsconfig':
         specifier: workspace:*
@@ -1351,6 +1354,9 @@ importers:
       '@types/pg':
         specifier: ^8.15.2
         version: 8.15.2
+      '@types/semver':
+        specifier: ^7.8.0
+        version: 7.8.0
       tsx:
         specifier: 4.20.3
         version: 4.20.3
@@ -5989,6 +5995,9 @@ packages:
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@types/statuses@2.0.6':
     resolution: {integrity: sha512-xMAgYwceFhRA2zY+XbEA7mxYbA093wdiW8Vu6gZPGWy9cmOyU9XesH1tNcEWsKFd5Vzrqx5T3D38PWx1FIIXkA==}
@@ -17140,6 +17149,8 @@ snapshots:
       form-data: 2.5.6
 
   '@types/retry@0.12.0': {}
+
+  '@types/semver@7.8.0': {}
 
   '@types/statuses@2.0.6': {}
 

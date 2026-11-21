@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 
 import {
   CONTAINER_DAEMON_SOCKET,
@@ -457,7 +458,9 @@ describe("opensandbox-server.toml (#656 G0a)", () => {
     const ttl = Number(
       toml.match(/^max_sandbox_timeout_seconds = (\d+)$/m)?.[1],
     );
-    expect(ttl).toBe(3600);
+    // #742: the cap covers the 75-minute cell TTL (and the IT config is in step).
+    expect(ttl * 1000).toBeGreaterThanOrEqual(CELL_RUN_TTL_MS);
+    expect(ttl).toBe(5400);
     expect(keys(toml)).toEqual(
       keys(read("packages/sandbox/opensandbox-it/config.toml")),
     );

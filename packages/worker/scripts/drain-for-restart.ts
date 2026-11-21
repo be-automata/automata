@@ -35,9 +35,10 @@ function flag(name: string, fallback: number): number {
   return v;
 }
 
-// 50 min: a run's 30 min execution timeout plus its 12 min headroom-deferral
-// budget, with room to spare. Anything still running then is stuck.
-const timeoutS = flag("--timeout-s", 3000);
+// 75 min: a task run's 60 min budget (#742; its 12 min headroom-deferral wait is
+// spent inside it) plus the 15 min teardown margin. Anything still running then
+// is stuck.
+const timeoutS = flag("--timeout-s", 4500);
 const pollS = flag("--poll-s", 5);
 
 const forStop = process.argv.includes("--for-stop");

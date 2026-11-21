@@ -60,6 +60,17 @@ import { admitRunSlot } from "./run-admission";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { classifyNextMessageError } from "./retry-classification";
 import { getProcessWorkerId } from "./run-namespace";
+import type { CheckoutProbe } from "./container-entry";
+import {
+  FLUTTER_MARKER_FILES,
+  FLUTTER_SDKS_DIR,
+  detectFlutterRequirementFrom,
+  flutterAgentNote,
+  flutterJournalLine,
+  flutterWrapperArgv,
+  isSafeFlutterVersion,
+  selectFlutterSdk,
+} from "./flutter-sdk";
 import type { RunExecutor, RunExecutorInput } from "./run-executor";
 import type { AgentRunOutput, PulledDaemonMessage } from "./types";
 import type { RunEndMark } from "./run-end-marks";
@@ -101,6 +112,10 @@ const SOCKET_WAIT_MS = 90_000;
 const SOCKET_POLL_MS = 1_000;
 const EXEC_STDERR_TAIL = 512;
 const PGREP_TIMEOUT_MS = 10_000;
+/** A marker file bigger than this is treated as absent (the box path's cap). */
+const FLUTTER_MARKER_MAX_BYTES = 256 * 1024;
+const FLUTTER_EXEC_TIMEOUT_MS = 20_000;
+const IMAGE_PINS_PATH = "/opt/automata/pins.env";
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const CONFIRM_RETRY = { tries: 4, backoffMs: [1_000, 2_000, 4_000] } as const;
 /** The test database's readiness budget (#707): well under one setup stamp. */
@@ -892,8 +907,14 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
  * present; a present file that cannot be read is left alone and the note
  * skipped, since `copyOut` cannot tell "absent" from a failed read.
  */
-async function writeGhNote(r: CellRunState): Promise<void> {
+async function writeGhNote(
+  r: CellRunState,
+  extra: string | null,
+): Promise<void> {
   const path = `${HOME_CLAUDE_DIR}/CLAUDE.md`;
+  // #742: the Flutter SDK note rides with the gh note (one user-memory file).
+  const note =
+    extra === null ? CELL_GH_NOTE : `${CELL_GH_NOTE.trimEnd()}\n\n${extra}\n`;
   const provider = r.provider as ICellProvider;
   ensureLive(r);
   const probe = await raceLive(
@@ -903,7 +924,7 @@ async function writeGhNote(r: CellRunState): Promise<void> {
     }),
   );
   if (probe.exitCode === 1) {
-    await putFile(r, path, CELL_GH_NOTE, 600);
+    await putFile(r, path, note, 600);
     return;
   }
   const bytes =
@@ -921,11 +942,146 @@ async function writeGhNote(r: CellRunState): Promise<void> {
   await putFile(
     r,
     path,
-    existing.trim() === ""
-      ? CELL_GH_NOTE
-      : `${existing.trimEnd()}\n\n${CELL_GH_NOTE}`,
+    existing.trim() === "" ? note : `${existing.trimEnd()}\n\n${note}`,
     600,
   );
+}
+
+/** Rethrow what must stop the setup (a Stop, a fence, the run's cancel). */
+function rethrowAbort(r: CellRunState, error: unknown): void {
+  if (error instanceof SetupAbortedError || r.live.aborted) throw error;
+}
+
+/** The checkout's Flutter marker files via copyOut: absent, unreadable or oversized = none. */
+async function readFlutterMarkers(
+  r: CellRunState,
+): Promise<Record<string, string>> {
+  const provider = r.provider as ICellProvider;
+  const files: Record<string, string> = {};
+  for (const rel of FLUTTER_MARKER_FILES) {
+    try {
+      const raw = await raceLive(
+        r,
+        provider.copyOut(r.cellId as string, `${CELL_WORKSPACE}/${rel}`),
+      );
+      if (raw.length <= FLUTTER_MARKER_MAX_BYTES) {
+        files[rel] = new TextDecoder().decode(raw);
+      }
+    } catch (error) {
+      rethrowAbort(r, error);
+    }
+  }
+  return files;
+}
+
+/** The image's default Flutter version, from its pins file (null when unreadable or unsafe). */
+async function readImageFlutterDefault(
+  r: CellRunState,
+): Promise<string | null> {
+  try {
+    const raw = await raceLive(
+      r,
+      (r.provider as ICellProvider).copyOut(
+        r.cellId as string,
+        IMAGE_PINS_PATH,
+      ),
+    );
+    const v = /^FLUTTER_VERSION=(\S+)$/m.exec(
+      new TextDecoder().decode(raw),
+    )?.[1];
+    return v !== undefined && isSafeFlutterVersion(v) ? v : null;
+  } catch (error) {
+    rethrowAbort(r, error);
+    return null;
+  }
+}
+
+/** The SDK versions the image bakes under /opt/flutter-sdks (none on an older image). */
+async function listImageFlutterSdks(r: CellRunState): Promise<string[]> {
+  const out = await raceLive(
+    r,
+    (r.provider as ICellProvider).exec(
+      r.cellId as string,
+      ["/bin/ls", "-1", FLUTTER_SDKS_DIR],
+      { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
+    ),
+  );
+  return out.exitCode === 0
+    ? out.stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l !== "")
+    : [];
+}
+
+/** Write the wrappers for `version`; a failure keeps the default SDK and says so. */
+async function installFlutterWrappers(
+  r: CellRunState,
+  version: string,
+  defaultVersion: string,
+): Promise<string> {
+  const out = await raceLive(
+    r,
+    (r.provider as ICellProvider).exec(
+      r.cellId as string,
+      flutterWrapperArgv(version),
+      { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
+    ),
+  );
+  if (out.exitCode === 0) {
+    return flutterAgentNote(
+      { kind: "use", version, reason: "pinned" },
+      defaultVersion,
+    ) as string;
+  }
+  r.step(
+    `cell: flutter ${version} wrapper install failed (exit ${out.exitCode}); using ${defaultVersion}`,
+  );
+  return `Flutter: the project pins ${version} but selecting it failed; \`flutter\` is the default SDK ${defaultVersion}.`;
+}
+
+/**
+ * #742 OD-3: the Flutter SDK the project pins, selected from the SDKs the
+ * image bakes. Runs after the clone: reads the markers (CELL-ONLY pubspec
+ * reading; the box path is unchanged), decides in flutter-sdk.ts, and writes the
+ * wrappers into the shim dir the cell image already puts first on PATH. A miss
+ * keeps the default SDK and journals it. Returns the agent's CLAUDE.md note, or
+ * null when there is nothing to say.
+ */
+async function decideFlutterSdk(r: CellRunState): Promise<string | null> {
+  const files = await readFlutterMarkers(r);
+  const probe: CheckoutProbe = {
+    readFile: (rel) => files[rel] ?? null,
+    isDir: () => false,
+    list: () => [],
+  };
+  const req = detectFlutterRequirementFrom(probe);
+  if (req.kind === "none") return null;
+  const defaultVersion = await readImageFlutterDefault(r);
+  if (defaultVersion === null) {
+    r.step("cell: flutter selection skipped (the image default is unknown)");
+    return null;
+  }
+  const sel = selectFlutterSdk(
+    req,
+    await listImageFlutterSdks(r),
+    defaultVersion,
+  );
+  r.step(flutterJournalLine(sel, req, defaultVersion));
+  return sel.kind === "use"
+    ? installFlutterWrappers(r, sel.version, defaultVersion)
+    : flutterAgentNote(sel, defaultVersion);
+}
+
+/** Fails open: a selection error never fails the run (an abort still does). */
+async function selectFlutterSdkForRun(r: CellRunState): Promise<string | null> {
+  try {
+    return await decideFlutterSdk(r);
+  } catch (error) {
+    rethrowAbort(r, error);
+    r.step("cell: flutter selection failed; using the image default SDK");
+    return null;
+  }
 }
 
 /** The clone, the git identity, HOME (settings, trust seed, placeholder login), and the entry's socket. */
@@ -946,6 +1102,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
     await execOk(r, argv, `git ${argv[1] ?? ""}`, CLONE_TIMEOUT_MS);
   }
   r.step("cell: clone complete");
+  const flutterNote = await selectFlutterSdkForRun(r);
   for (const argv of cellGitConfigArgv(config.botLogin)) {
     await execOk(r, argv, "git config");
   }
@@ -983,7 +1140,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
     botLogin: config.botLogin,
   });
   await putFile(r, `${CELL_GH_CONFIG_DIR}/hosts.yml`, gh.hostsYml, 600);
-  await writeGhNote(r);
+  await writeGhNote(r, flutterNote);
   // GH_* is reserved for repo env, so the owner's names never collide.
   const settingsEnv = { ...testDbEnv, ...repoEnv, ...gh.env };
   await putFile(

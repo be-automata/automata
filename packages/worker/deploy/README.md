@@ -308,7 +308,7 @@ On the execution box every planned restart goes through
 never a bare `systemctl restart automata-worker`:
 
 ```bash
-automata-worker-safe-restart              # default drain budget 50 min
+automata-worker-safe-restart              # default drain budget 75 min
 automata-worker-safe-restart --timeout-s 600
 ```
 
@@ -336,7 +336,8 @@ is still running it, which no ledger entry written at the end of a run can stop.
 or `stop`, a reboot, or a package upgrade restarting the unit no longer
 interrupts a run either. Unlike the wrapper it cannot refuse: it is best-effort
 by design. It always exits 0, so a broken engine never wedges a stop or a
-shutdown. At its 30-minute deadline it leaves the worker paused, and the
+shutdown. At its 70-minute deadline (4200 s, under the unit's `TimeoutStopSec=4500`;
+raised from 30 minutes with the task lane's 60-minute run budget, #742) it leaves the worker paused, and the
 SIGTERM drain and the run-terminal ledger take over. Its `drain:` lines appear
 in the unit's journal. A box whose installed unit predates this needs the unit
 re-rendered (`sed` over `__USER__`/`__HOME__`/`__REPO__`, as in

@@ -393,7 +393,7 @@ export interface SweepStaleRunDirsResult {
  * Boot-time sweep of run dirs earlier teardowns could not remove (a worker died
  * mid-run and never reached its finally). Same rm path as a run's own teardown.
  *
- * WHY AGE ALONE IS SAFE. Every run is hard-capped at 30 minutes, so a dir whose
+ * WHY AGE ALONE IS SAFE. Every run is capped at 60 minutes at most (a task run; every other run 30), so a dir whose
  * mtime is older than 24h cannot belong to a live run. Only DIRECT children of the root are considered, only
  * real directories (a symlink is never followed or removed) whose name is a run
  * dir name; the root itself is never touched.

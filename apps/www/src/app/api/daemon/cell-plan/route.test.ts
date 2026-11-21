@@ -251,6 +251,8 @@ describe("POST /api/daemon/cell-plan", () => {
         deployment: cellBrokerHost(),
       });
       expect(plan.ttlMs).toBe(CELL_RUN_TTL_MS);
+      // #742: 4 CPU, memory unchanged (OD-2).
+      expect(plan.resources).toEqual({ cpu: 4, memoryMiB: 4096 });
       expect(plan.networkPolicy.defaultAction).toBe("deny");
       expect(plan.vault.map((v: { name: string }) => v.name).sort()).toEqual([
         "broker",

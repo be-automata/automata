@@ -3,6 +3,12 @@ import { CELL_RUN_TTL_MS } from "@terragon/types/cell";
 
 import { buildAgentRunDefinition } from "./definition";
 import {
+  REGISTERED_EXECUTION_TIMEOUT_MS,
+  TASK_LANE_BUDGET,
+  TASK_LANE_EXECUTION_TIMEOUT_MS,
+  TASK_LANE_REFRESH,
+} from "./run-budget";
+import {
   CELL_ABNORMAL_POST_MAX_MS,
   CELL_TEARDOWN_DEADLINE_MS,
   CELL_TEARDOWN_WORST_CASE_MS,
@@ -39,24 +45,36 @@ function parseDuration(d: unknown): number {
 }
 
 describe("cell TTL pin (T-TTL, AC-16)", () => {
-  let runTimeoutMs: number;
+  let workflowMirrorMs: number;
   beforeAll(async () => {
     const wf = await import("./workflow");
-    runTimeoutMs = wf.RUN_EXECUTION_TIMEOUT_MS;
+    workflowMirrorMs = wf.RUN_EXECUTION_TIMEOUT_MS;
   });
 
-  // card: protects=CELL_RUN_TTL_MS is the run's execution timeout plus the 15 min teardown margin, on both mirrors; fails_when=definition.ts executionTimeout (say 40m) or RUN_EXECUTION_TIMEOUT_MS moves without CELL_RUN_TTL_MS; no_claim=the server-side TTL cap (deploy-assets.test.ts)
-  it("parse(executionTimeout) + 15 min === CELL_RUN_TTL_MS", () => {
+  // card: protects=CELL_RUN_TTL_MS is the TASK-LANE run budget (cells run task runs only) plus the 15 min teardown margin, and that budget is the registered timeout plus the refresh; fails_when=the registered timeout, the refresh, the task budget or CELL_RUN_TTL_MS moves without the others; no_claim=the server-side TTL cap (deploy-assets.test.ts) and the engine honouring the refresh (refresh-timeout.integration.test.ts)
+  it("task-lane budget + 15 min === CELL_RUN_TTL_MS", () => {
     const def = buildAgentRunDefinition("agent-run", null);
-    expect(parseDuration(def.task.executionTimeout)).toBe(30 * 60_000);
-    expect(parseDuration(def.task.executionTimeout) + TEARDOWN_MARGIN_MS).toBe(
+    const registered = parseDuration(def.task.executionTimeout);
+    expect(registered).toBe(30 * 60_000);
+    expect(registered).toBe(REGISTERED_EXECUTION_TIMEOUT_MS);
+    expect(workflowMirrorMs).toBe(registered);
+    // Additive refresh (measured, hatchet-lite v0.94.10): registered + refresh = budget.
+    expect(registered + parseDuration(TASK_LANE_REFRESH)).toBe(
+      parseDuration(TASK_LANE_BUDGET),
+    );
+    expect(parseDuration(TASK_LANE_BUDGET)).toBe(
+      TASK_LANE_EXECUTION_TIMEOUT_MS,
+    );
+    expect(TASK_LANE_EXECUTION_TIMEOUT_MS + TEARDOWN_MARGIN_MS).toBe(
       CELL_RUN_TTL_MS,
     );
-    expect(runTimeoutMs + TEARDOWN_MARGIN_MS).toBe(CELL_RUN_TTL_MS);
+    expect(REGISTERED_EXECUTION_TIMEOUT_MS).toBeLessThan(
+      TASK_LANE_EXECUTION_TIMEOUT_MS,
+    );
   });
 
   // card: protects=the parser reads the definition's own string, so a changed timeout would fail the pin; fails_when=parseDuration ignores its input; no_claim=anything about the engine
-  it("negative control: a 40m timeout would not satisfy the pin", () => {
+  it("negative control: a 40m budget would not satisfy the pin", () => {
     expect(parseDuration("40m") + TEARDOWN_MARGIN_MS).not.toBe(CELL_RUN_TTL_MS);
   });
 

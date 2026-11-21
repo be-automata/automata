@@ -494,6 +494,16 @@ describe("create", () => {
     });
   });
 
+  // card: protects=#742 the cell's 4 CPU / 4096 MiB reach the server as resourceLimits 4000m / 4096Mi; fails_when=the cpu or memory conversion changes; no_claim=the route's chosen resources (cell-plan route.test.ts)
+  it("sends 4 CPU and 4096 MiB as 4000m and 4096Mi", async () => {
+    const { server, provider } = setup();
+    happyRoutes(server);
+    await provider.create(plan({ resources: { cpu: 4, memoryMiB: 4096 } }));
+    expect(server.calls[0]!.body).toMatchObject({
+      resourceLimits: { cpu: "4000m", memory: "4096Mi" },
+    });
+  });
+
   it("omits match.paths when the entry has none and floors cpu at 1m", async () => {
     const { server, provider } = setup();
     happyRoutes(server);

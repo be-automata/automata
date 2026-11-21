@@ -641,16 +641,16 @@ export function loadWorkerConfig(
   const admissionMaxDeferrals = parseMaxDeferrals(
     env.WORKER_ADMISSION_MAX_DEFERRALS,
   );
-  // #371: the deferral wait is spent IN PROCESS inside the run's 30-minute
-  // executionTimeout, so the worst case must leave the agent a usable window
-  // and keep the run inside www's 75-minute stalled cutoff — the inequality
-  // documented on ADMISSION_DEFERRAL_BUDGET_S.
+  // #371: the deferral wait is spent IN PROCESS inside the run's execution
+  // timeout (30 minutes; 60 for a task run, #742), so the worst case must leave
+  // the agent a usable window and keep the run inside www's 105-minute stalled
+  // cutoff — the inequality documented on ADMISSION_DEFERRAL_BUDGET_S.
   const worstCaseS = sumBackoffSeconds(admissionMaxDeferrals);
   if (worstCaseS > ADMISSION_DEFERRAL_BUDGET_S) {
     throw new Error(
       `WORKER_ADMISSION_MAX_DEFERRALS=${admissionMaxDeferrals} waits up to ${worstCaseS}s ` +
         `(2^n s capped at ${ADMISSION_BACKOFF.maxSeconds}s), over the ${ADMISSION_DEFERRAL_BUDGET_S}s budget ` +
-        `that leaves a deferred run its execution window (and www's 75-minute stalled cutoff)`,
+        `that leaves a deferred run its execution window (and www's 105-minute stalled cutoff)`,
     );
   }
   return {

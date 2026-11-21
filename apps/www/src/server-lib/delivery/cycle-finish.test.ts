@@ -168,7 +168,13 @@ describe("#509 delivery fix-cycle finish", () => {
     });
   });
 
-  it("the sweep settles a running cycle past the hard cap whose finish was missed", async () => {
+  it("DELIVERY_RUN_STALE_MS exceeds the task lane's 60-minute run budget (#742)", () => {
+    // A literal, as www does not depend on the worker: 60 min is
+    // TASK_LANE_EXECUTION_TIMEOUT_MS in packages/worker/src/agent-run/run-budget.ts.
+    expect(DELIVERY_RUN_STALE_MS).toBeGreaterThan(60 * 60_000);
+  });
+
+  it("the sweep settles a running cycle past the run budget whose finish was missed", async () => {
     await cycleThread();
     await db
       .update(deliveryFixCycles)

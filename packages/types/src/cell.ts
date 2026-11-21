@@ -93,11 +93,13 @@ export const CELL_SELF_CHECK_BLOCKED_EXIT = 3;
 export const CELL_MIN_TTL_MS = 60_000;
 
 /**
- * A run's execution timeout (30 min,
- * `packages/worker/src/agent-run/definition.ts:200`) plus a 15 min teardown
- * margin (#656 R6). The cell TTL and its bearer share this one bound (ADR-014).
+ * The task lane's run budget (60 min, `TASK_LANE_BUDGET` in
+ * `packages/worker/src/agent-run/run-budget.ts`: the registered 30 min plus a
+ * 30 min `refreshTimeout`, #742) plus a 15 min teardown margin (#656 R6). Cells
+ * run plain task runs only, so one bound serves. The cell TTL and its bearer
+ * share it (ADR-014); the OpenSandbox server cap must stay at or above it.
  */
-export const CELL_RUN_TTL_MS = 45 * 60 * 1000;
+export const CELL_RUN_TTL_MS = 75 * 60 * 1000;
 
 /** A cell attempt unseen this long is dead (#656 R2): ≥ 30 polls at the worker's 5-10 s cadence. */
 export const CELL_LEASE_STALE_MS = 5 * 60 * 1000;
