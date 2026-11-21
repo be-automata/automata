@@ -958,7 +958,37 @@ async function readFlutterMarkers(
 ): Promise<Record<string, string>> {
   const provider = r.provider as ICellProvider;
   const files: Record<string, string> = {};
+  // Read only regular files under the cap: a marker that is a symlink, a
+  // device, a FIFO or oversized (a hostile repo pointing `.fvmrc` at
+  // /dev/zero) is never copied out, so it cannot stall the bootstrap.
+  // `find -P` does not follow symlinks; `-size -Nc` is strictly under N bytes.
+  const probe = await raceLive(
+    r,
+    provider.exec(
+      r.cellId as string,
+      [
+        "/usr/bin/find",
+        "-P",
+        ...FLUTTER_MARKER_FILES.map((rel) => `${CELL_WORKSPACE}/${rel}`),
+        "-maxdepth",
+        "0",
+        "-type",
+        "f",
+        "-size",
+        `-${FLUTTER_MARKER_MAX_BYTES + 1}c`,
+        "-print",
+      ],
+      { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
+    ),
+  );
+  const readable = new Set(
+    probe.stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== ""),
+  );
   for (const rel of FLUTTER_MARKER_FILES) {
+    if (!readable.has(`${CELL_WORKSPACE}/${rel}`)) continue;
     try {
       const raw = await raceLive(
         r,
@@ -1014,11 +1044,15 @@ async function listImageFlutterSdks(r: CellRunState): Promise<string[]> {
     : [];
 }
 
-/** Write the wrappers for `version`; a failure keeps the default SDK and says so. */
+/**
+ * Write the wrappers for `version`. Journals `selected` only once they are in
+ * place; a failure keeps the default SDK and journals that instead (one line).
+ */
 async function installFlutterWrappers(
   r: CellRunState,
   version: string,
   defaultVersion: string,
+  selected: string,
 ): Promise<string> {
   const out = await raceLive(
     r,
@@ -1029,6 +1063,7 @@ async function installFlutterWrappers(
     ),
   );
   if (out.exitCode === 0) {
+    r.step(selected);
     return flutterAgentNote(
       { kind: "use", version, reason: "pinned" },
       defaultVersion,
@@ -1067,10 +1102,12 @@ async function decideFlutterSdk(r: CellRunState): Promise<string | null> {
     await listImageFlutterSdks(r),
     defaultVersion,
   );
-  r.step(flutterJournalLine(sel, req, defaultVersion));
-  return sel.kind === "use"
-    ? installFlutterWrappers(r, sel.version, defaultVersion)
-    : flutterAgentNote(sel, defaultVersion);
+  const line = flutterJournalLine(sel, req, defaultVersion);
+  if (sel.kind === "use") {
+    return installFlutterWrappers(r, sel.version, defaultVersion, line);
+  }
+  r.step(line);
+  return flutterAgentNote(sel, defaultVersion);
 }
 
 /** Fails open: a selection error never fails the run (an abort still does). */

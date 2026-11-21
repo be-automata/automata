@@ -188,7 +188,8 @@ export function flutterAgentNote(
   if (sel.kind === "miss") {
     return `Flutter: the project pins ${sel.wanted}, which is NOT in this image; \`flutter\` is the default SDK ${defaultVersion}. Say so in your report if a result depends on the SDK version.`;
   }
-  return null;
+  if (sel.reason === "no-requirement") return null;
+  return `Flutter: this run uses the image default SDK ${defaultVersion}, which meets the project's pin.`;
 }
 
 /**

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
+import { codeOf, repoRoot } from "./bash-script-hygiene";
 import type { CheckoutProbe } from "./container-entry";
 import {
   FLUTTER_SDKS_DIR,
@@ -106,13 +107,62 @@ describe("#742 detectFlutterRequirementFrom: where the requirement comes from", 
     ).toEqual({ kind: "none" });
   });
 
-  it("a channel in .fvmrc is not a pin and does not fall through to the pubspec (the box's rule)", () => {
+  it("a channel in .fvmrc is not a pin and shadows fvm_config.json (the box's rule); the pubspec still applies", () => {
     expect(
       req({
         ".fvmrc": JSON.stringify({ flutter: "stable" }),
         "pubspec.yaml": pubspec("3.41.2"),
       }),
     ).toEqual({ kind: "pin", version: "3.41.2", source: "pubspec" });
+    expect(
+      req({
+        ".fvmrc": JSON.stringify({ flutter: "stable" }),
+        ".fvm/fvm_config.json": JSON.stringify({ flutterSdkVersion: "3.35.0" }),
+      }),
+    ).toEqual({ kind: "none" });
+  });
+
+  // card: protects=malformed marker files never throw and never produce a pin: bad JSON or a non-string field falls through to the next file, and an unsafe version never becomes a requirement; fails_when=a parse error escapes or raw text survives as a version; no_claim=the cell's reads (cell-run.test.ts)
+  it.each([
+    ["truncated JSON", '{"flutter": "3.41'],
+    ["a JSON array", '["3.41.2"]'],
+    ["a number field", JSON.stringify({ flutter: 3.41 })],
+    ["null", "null"],
+    ["binary noise", "\u0000\u00ff\ufffd{"],
+    ["shell metacharacters", JSON.stringify({ flutter: "3.41.2;$(id)" })],
+    ["a newline-forged version", JSON.stringify({ flutter: "3.41.2\nx: y" })],
+  ])("a malformed .fvmrc (%s) falls through to fvm_config.json", (_n, rc) => {
+    const files = {
+      ".fvmrc": rc,
+      ".fvm/fvm_config.json": JSON.stringify({ flutterSdkVersion: "3.35.0" }),
+    };
+    expect(() => req(files)).not.toThrow();
+    const out = req(files);
+    // A field that IS a string (unsafe text) shadows the legacy file, as on the box.
+    if (out.kind === "pin") {
+      expect(out).toEqual({
+        kind: "pin",
+        version: "3.35.0",
+        source: "fvm_config.json",
+      });
+    } else {
+      expect(out).toEqual({ kind: "none" });
+    }
+  });
+
+  it.each([
+    ["binary noise", "\u0000\u00ff environment:\n  flutter: \u0000"],
+    ["a flow map", "environment: { flutter: 3.41.2 }\n"],
+    ["CRLF line endings", "name: a\r\nenvironment:\r\n  flutter: ^3.41.0\r\n"],
+    ["an unterminated quote", 'environment:\n  flutter: "3.41.2\n'],
+    ["a backtick", "environment:\n  flutter: `id`\n"],
+    ["a huge line", `environment:\n  flutter: ${"9".repeat(5000)}\n`],
+  ])("a malformed pubspec (%s) never throws", (_n, text) => {
+    expect(() => req({ "pubspec.yaml": text })).not.toThrow();
+    const out = req({ "pubspec.yaml": text });
+    if (out.kind === "pin")
+      expect(isSafeFlutterVersion(out.version)).toBe(true);
+    if (out.kind === "constraint") expect(out.range).toBe("^3.41.0");
   });
 });
 
@@ -231,7 +281,7 @@ describe("#742 journal lines, agent note and the safe-version check", () => {
     ).toBe("cell: flutter 3.47.7 (no project pin)");
   });
 
-  it("the agent note says which SDK it got: the pinned one, or the default after a miss, or nothing", () => {
+  it("the agent note says which SDK it got: the pinned one, the default that meets the pin, the default after a miss, or nothing without a pin", () => {
     expect(
       flutterAgentNote(
         { kind: "use", version: "3.41.2", reason: "pinned" },
@@ -245,6 +295,12 @@ describe("#742 journal lines, agent note and the safe-version check", () => {
     expect(
       flutterAgentNote({ kind: "default", reason: "no-requirement" }, DEFAULT),
     ).toBeNull();
+    // A project requirement the default already meets still names the SDK.
+    for (const reason of ["pinned-default", "default-satisfies"] as const) {
+      expect(flutterAgentNote({ kind: "default", reason }, DEFAULT)).toContain(
+        "the image default SDK 3.47.7",
+      );
+    }
   });
 });
 
@@ -324,5 +380,58 @@ describe("#742 the wrapper script (run for real against a fake SDK tree)", () =>
     expect(install("", bad).status).toBe(64);
     expect(install("3.99.9", bad).status).toBe(65);
     expect(fs.existsSync(bad)).toBe(false);
+  });
+});
+
+describe("#742 the batteries image's SDK cache (static)", () => {
+  const dockerfile = fs.readFileSync(
+    path.join(repoRoot, "deploy/images/batteries/Dockerfile"),
+    "utf8",
+  );
+  const verify = fs.readFileSync(
+    path.join(repoRoot, "deploy/images/batteries/verify.sh"),
+    "utf8",
+  );
+  const defaultVersion = /^ARG FLUTTER_VERSION=(\S+)$/m.exec(dockerfile)?.[1];
+  const extras = (
+    /^ARG FLUTTER_EXTRA_SDKS="([^"]*)"$/m.exec(dockerfile)?.[1] ?? ""
+  )
+    .split(/\s+/)
+    .filter((p) => p !== "");
+
+  // card: protects=every baked SDK is fetched by version AND a full sha256, is not the default (whose path is a symlink the mv would write through), and has the per-SDK fixture lock the offline proof needs; fails_when=an entry lacks its digest, repeats the default or ships without a lock; no_claim=that the digest matches the release (the build checks it)
+  it("every extra is VERSION=SHA256, not the default, with a fixture lock", () => {
+    expect(defaultVersion).toBeDefined();
+    expect(extras.length).toBeGreaterThan(0);
+    for (const pin of extras) {
+      const [v, sha] = pin.split("=");
+      expect(isSafeFlutterVersion(v ?? ""), pin).toBe(true);
+      expect(sha, pin).toMatch(/^[0-9a-f]{64}$/);
+      expect(v).not.toBe(defaultVersion);
+      expect(
+        fs.existsSync(
+          path.join(
+            repoRoot,
+            "deploy/images/batteries/flutter-fixture",
+            v ?? "",
+            "pubspec.lock",
+          ),
+        ),
+        v,
+      ).toBe(true);
+    }
+  });
+
+  // card: protects=the build itself refuses an extra equal to the default and fetches each extra through the sha256 check; verify.sh runs the offline flutter test per extra; fails_when=the guard, the digest argument or the offline test is dropped; no_claim=the real build (batteries-image workflow)
+  it("the extras loop guards the default, fetches through fetch-verified with the digest, and verify.sh runs the offline test", () => {
+    const loop = codeOf(dockerfile).slice(
+      codeOf(dockerfile).indexOf("RUN mkdir -p /opt/flutter-sdks"),
+    );
+    expect(loop).toMatch(
+      /\[ "\$\{v\}" != "\$\{FLUTTER_VERSION\}" \] \|\| \{ echo "[^"]*" >&2; exit 1; \}/,
+    );
+    expect(loop).toMatch(/fetch-verified "[^"]+\$\{v\}[^"]+" \\\s+"\$\{sha\}"/);
+    expect(verify).toContain('check "flutter-test-$v" "All tests passed"');
+    expect(verify).toContain('"$sdk/bin/flutter" test');
   });
 });

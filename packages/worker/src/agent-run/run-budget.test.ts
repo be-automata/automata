@@ -35,7 +35,24 @@ const LANES: Array<[string, Record<string, unknown>, number]> = [
     { selfHeal: { kind: "audit", attemptId: "a1", checkToken: "t" } },
     30,
   ],
+  [
+    "task + self-heal fix",
+    {
+      selfHeal: {
+        kind: "fix",
+        attemptId: "a1",
+        branch: "automata/fix-1-deadbeef-a1",
+        baseBranch: "main",
+        checks: [],
+        denyExceptions: [],
+      },
+    },
+    30,
+  ],
   ["pr", { prNumber: 7 }, 30],
+  // A PR companion automation dispatches on the legacy plan with the thread's
+  // PR number and no prKey (dispatch.test.ts): the pr lane.
+  ["pr companion", { prNumber: 300, prKey: undefined }, 30],
   ["review", { prKey: "org-1/o/r/7", supersedePolicy: "newest-wins" }, 30],
 ];
 
@@ -99,7 +116,7 @@ describe("#742 per-lane run budget", () => {
     expect(out).toBe(REGISTERED_EXECUTION_TIMEOUT_MS);
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]![0])).toContain(
-      "run budget: refresh failed, staying at 30m",
+      "run budget: refresh failed (rejected: Error), staying at 30m",
     );
   });
 
@@ -109,6 +126,71 @@ describe("#742 per-lane run budget", () => {
       REGISTERED_EXECUTION_TIMEOUT_MS,
     );
     expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  // card: protects=the fail-open line says WHY the refresh failed (timeout, rejected with the error's class name, or no context) and never carries the error's message; fails_when=the cause is dropped or the message leaks into the journal; no_claim=the engine's error taxonomy
+  it.each([
+    [
+      "a rejection names the error class, never its message",
+      {
+        refreshTimeout: async () => {
+          const e = new TypeError("secret-bearing text tok_abc");
+          throw e;
+        },
+      },
+      "run budget: refresh failed (rejected: TypeError), staying at 30m",
+    ],
+    [
+      "a non-Error rejection is unknown",
+      {
+        refreshTimeout: async () => {
+          throw "tok_abc";
+        },
+      },
+      "run budget: refresh failed (rejected: unknown), staying at 30m",
+    ],
+    [
+      "an Error whose name is not a plain identifier is unknown",
+      {
+        refreshTimeout: async () => {
+          const e = new Error("x");
+          e.name = "Bad name tok_abc";
+          throw e;
+        },
+      },
+      "run budget: refresh failed (rejected: unknown), staying at 30m",
+    ],
+    [
+      "a missing refreshTimeout says no context",
+      {},
+      "run budget: refresh failed (no context), staying at 30m",
+    ],
+  ] as Array<[string, Partial<Parameters<typeof applyRunBudget>[1]>, string]>)(
+    "%s",
+    async (_n, extra, line) => {
+      const log = vi.fn();
+      expect(await applyRunBudget(wire(), { log, ...extra })).toBe(
+        REGISTERED_EXECUTION_TIMEOUT_MS,
+      );
+      expect(log.mock.calls.map((c) => String(c[0]))).toEqual([
+        `[agent-run thr_1] ${line}`,
+      ]);
+      expect(String(log.mock.calls[0]![0])).not.toContain("tok_abc");
+    },
+  );
+
+  it("a refresh cut at 10 s says timeout", async () => {
+    vi.useFakeTimers();
+    const log = vi.fn();
+    const pending = applyRunBudget(wire(), {
+      log,
+      refreshTimeout: () => new Promise<void>(() => {}),
+    });
+    await vi.advanceTimersByTimeAsync(REFRESH_DEADLINE_MS);
+    await pending;
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual([
+      "[agent-run thr_1] run budget: refresh failed (timeout), staying at 30m",
+    ]);
   });
 
   // card: protects=a hung refresh call cannot hold the run past 10 s; fails_when=the race is dropped; no_claim=the engine's own timeout

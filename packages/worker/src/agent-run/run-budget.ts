@@ -44,12 +44,29 @@ export function runExecutionBudgetMs(wire: AgentRunWireInput): number {
     : REGISTERED_EXECUTION_TIMEOUT_MS;
 }
 
+/** Why a refresh failed: a class, never the error's text (it may carry data). */
+type RefreshFailure = "timeout" | "no context";
+
+class RefreshFailedError extends Error {
+  constructor(readonly failure: RefreshFailure) {
+    super(`refresh failed (${failure})`);
+    this.name = "RefreshFailedError";
+  }
+}
+
+/** An error's class name when it is a plain identifier, else `unknown`. */
+function errorClassOf(error: unknown): string {
+  return error instanceof Error && /^[A-Za-z_$][\w$]{0,63}$/.test(error.name)
+    ? error.name
+    : "unknown";
+}
+
 async function boundedRefresh(ctx: BudgetCtx): Promise<void> {
-  if (!ctx.refreshTimeout) throw new Error("no refreshTimeout on the context");
+  if (!ctx.refreshTimeout) throw new RefreshFailedError("no context");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error("refresh timed out")),
+      () => reject(new RefreshFailedError("timeout")),
       REFRESH_DEADLINE_MS,
     );
   });
@@ -63,8 +80,9 @@ async function boundedRefresh(ctx: BudgetCtx): Promise<void> {
 /**
  * Extend a task-lane run to its budget and return the EFFECTIVE budget in ms:
  * the task lane's 60 minutes once the refresh resolved, else the registered 30
- * (a timeout, a rejection or a missing context). Fails open with one log line;
- * a failed refresh never fails the run.
+ * (a timeout, a rejection or a missing context). Fails open with one log line
+ * naming the cause class (`timeout`, `no context`, `rejected: <ErrorName>`),
+ * never the error's message; a failed refresh never fails the run.
  */
 export async function applyRunBudget(
   wire: AgentRunWireInput,
@@ -76,8 +94,12 @@ export async function applyRunBudget(
     await boundedRefresh(ctx);
     ctx.log(`${tag} run budget: ${TASK_LANE_BUDGET} (refreshed)`);
     return TASK_LANE_EXECUTION_TIMEOUT_MS;
-  } catch {
-    ctx.log(`${tag} run budget: refresh failed, staying at 30m`);
+  } catch (error: unknown) {
+    const cause =
+      error instanceof RefreshFailedError
+        ? error.failure
+        : `rejected: ${errorClassOf(error)}`;
+    ctx.log(`${tag} run budget: refresh failed (${cause}), staying at 30m`);
     return REGISTERED_EXECUTION_TIMEOUT_MS;
   }
 }

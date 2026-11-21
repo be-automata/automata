@@ -1725,7 +1725,24 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
   function withProject(
     s: ReturnType<typeof setup>,
     markers: Record<string, string>,
+    // Markers present in the clone but not regular files under the cap
+    // (a symlink, a device, oversized): the find probe does not list them.
+    unreadable: readonly string[] = [],
   ) {
+    const exec = s.provider.exec.getMockImplementation();
+    if (exec === undefined) throw new Error("exec has no implementation");
+    s.provider.exec.mockImplementation(async (id: string, argv: string[]) =>
+      argv[0] === "/usr/bin/find"
+        ? {
+            exitCode: 0,
+            stdout: Object.keys(markers)
+              .filter((rel) => !unreadable.includes(rel))
+              .map((rel) => `/workspace/${rel}\n`)
+              .join(""),
+            stderr: "",
+          }
+        : exec(id, argv),
+    );
     s.provider.copyOut.mockImplementation(async (_id: string, path: string) => {
       if (path === "/opt/automata/pins.env") {
         return new TextEncoder().encode(
@@ -1745,6 +1762,25 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
   const IMAGE = () => `3.41.2\n${DEFAULT_SDK}\n`;
   const note = (s: ReturnType<typeof setup>) =>
     s.files.find((f) => f.path === "/home/agent/.claude/CLAUDE.md")?.text ?? "";
+
+  // card: protects=#742 refinement: a marker the find probe does not list (a symlink to /dev/zero, a FIFO, an oversized file) is never copied out, so a hostile repo cannot stall the bootstrap; fails_when=copyOut is called for it; no_claim=find's own -P/-type f semantics (coreutils)
+  it("a marker that is not a regular file under the cap is never read", async () => {
+    const s = setup({
+      execStdout: (a) => (isSdkList(a) ? IMAGE() : ""),
+      execExit: absentMemory,
+    });
+    withProject(s, { ".fvmrc": JSON.stringify({ flutter: "3.41.2" }) }, [
+      ".fvmrc",
+    ]);
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(
+      s.provider.copyOut.mock.calls.some(([, path]) =>
+        String(path).endsWith("/.fvmrc"),
+      ),
+    ).toBe(false);
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+  });
 
   // card: protects=a project that pins an SDK the image bakes runs on it: the wrapper script is exec'd once with the version argv after the clone and before the first message, the journal names it, and the agent's CLAUDE.md note says which SDK it got; fails_when=the exec is skipped, repeated, mis-ordered or the note is missing; no_claim=the wrapper's behaviour (flutter-sdk.test.ts) and the image (batteries verify.sh)
   it("a pinned SDK the image has: wrappers installed after the clone, journaled, noted", async () => {
@@ -1800,7 +1836,10 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
 
   // card: protects=CELL-ONLY pubspec reading: a constraint the default satisfies installs nothing, and one only a baked SDK satisfies selects it; fails_when=a constraint is ignored or always installs a wrapper; no_claim=the box path (it never reads pubspec.yaml)
   it("reads the pubspec constraint: the default satisfying it keeps the default, otherwise the baked SDK is selected", async () => {
-    const ok = setup({ execStdout: (a) => (isSdkList(a) ? IMAGE() : "") });
+    const ok = setup({
+      execStdout: (a) => (isSdkList(a) ? IMAGE() : ""),
+      execExit: absentMemory,
+    });
     withProject(ok, {
       "pubspec.yaml": "name: a\nenvironment:\n  flutter: ^3.40.0\n",
     });
@@ -1809,6 +1848,7 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
     expect(flutterLogs(ok)).toEqual([
       "[agent-run thr_1] cell: flutter 3.47.7 (default satisfies pubspec)",
     ]);
+    expect(note(ok)).toContain("the image default SDK 3.47.7");
     const old = setup({ execStdout: (a) => (isSdkList(a) ? IMAGE() : "") });
     withProject(old, {
       "pubspec.yaml": 'name: a\nenvironment:\n  flutter: ">=3.41.0 <3.42.0"\n',
@@ -1854,9 +1894,10 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
     withProject(s, { ".fvmrc": JSON.stringify({ flutter: "3.41.2" }) });
     const out = await s.executor.run(s.args);
     expect(out.outcome).toBe("completed");
-    expect(s.logs.join("\n")).toContain(
-      "cell: flutter 3.41.2 wrapper install failed (exit 65); using 3.47.7",
-    );
+    // One line, the failure: never a "flutter 3.41.2" claim it then retracts.
+    expect(flutterLogs(s)).toEqual([
+      "[agent-run thr_1] cell: flutter 3.41.2 wrapper install failed (exit 65); using 3.47.7",
+    ]);
     expect(note(s)).toContain("selecting it failed");
     expect(note(s)).not.toContain("this run uses SDK");
   });

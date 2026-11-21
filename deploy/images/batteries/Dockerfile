@@ -218,6 +218,7 @@ RUN mkdir -p /opt/flutter-sdks; \
     ln -s /opt/flutter "/opt/flutter-sdks/${FLUTTER_VERSION}"; \
     for pin in ${FLUTTER_EXTRA_SDKS}; do \
       v="${pin%%=*}"; sha="${pin#*=}"; \
+      [ "${v}" != "${FLUTTER_VERSION}" ] || { echo "FLUTTER_EXTRA_SDKS repeats the default ${v}" >&2; exit 1; }; \
       fetch-verified "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${v}-stable.tar.xz" \
         "${sha}" /tmp/flutter.tar.xz; \
       mkdir "/tmp/flutter-${v}"; \

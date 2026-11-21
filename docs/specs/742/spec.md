@@ -460,7 +460,8 @@ Binding on the implementation; they override §1–§8 where they differ.
 - **F5 semver.** Add `semver` and `@types/semver` to `packages/worker`. Phase 8 splits into 8a (pure
   pin resolution plus deps and lockfile) and 8b (cell bootstrap).
 - **F6 bounded refresh.** `ctx.refreshTimeout` races a 10 s timer. A timeout, a rejection or a
-  missing context logs one line (`run budget: refresh failed, staying at 30m`) and continues at 30
+  missing context logs one line (`run budget: refresh failed (<cause>), staying at 30m`, the cause
+  `timeout`, `no context` or `rejected: <ErrorName>`, never the error's message) and continues at 30
   minutes. The run is never failed on it.
 - **F7 no unpinned precache.** Drop `flutter precache --universal --linux`. A baked SDK runs only
   `flutter --version`, like the default SDK, and fetches the rest with sha256 pins, or not at all.

@@ -1361,7 +1361,7 @@ What the worker does with them (#656 PR-E):
 - **One box per deployment.** Cells are supported on one box per deployment only. On one box
   the attempts of a run never overlap (systemd stops the old worker before the new one starts,
   and a redelivery waits in-process). Across two boxes attempt _n_ and _n+1_ can overlap, and
-  only www's `superseded` lease fence and the cell TTL (45 min) cover it. Do not run cells on
+  only www's `superseded` lease fence and the cell TTL (75 min, #742) cover it. Do not run cells on
   two boxes of one deployment.
 - **Poll interval.** A marked run refuses with `cell_poll_interval_too_long` when
   `WORKER_POLL_INTERVAL_MS` is over 75 s (a quarter of the 5-min lease window).

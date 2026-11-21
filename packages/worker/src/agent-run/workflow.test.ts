@@ -1475,6 +1475,28 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     },
   );
 
+  // card: protects=#742 the refresh settles BEFORE the executor starts, and the executor is where admission (and its #371 deferral wait) lives, so a deferred task run already holds its 60 minutes and is never refreshed again; fails_when=the refresh moves after admission or into the executor; no_claim=the deferral itself (admission-deferral.integration.test.ts)
+  it("#742 the refresh settles before the executor (admission, deferral) starts, once", async () => {
+    let refreshedAtStart = -1;
+    let settled = false;
+    const refreshTimeout = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      settled = true;
+    });
+    const box = fakeExecutor("box", async (a) => {
+      refreshedAtStart = settled ? refreshTimeout.mock.calls.length : -1;
+      return completed(a);
+    });
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      cell: fakeExecutor("cell", completed).executor,
+      loadCellConfig: () => ON,
+    });
+    await rawRunFn(await wireInput(), { ...ctx(), refreshTimeout });
+    expect(refreshedAtStart).toBe(1);
+    expect(refreshTimeout).toHaveBeenCalledTimes(1);
+  });
+
   // card: protects=#742 a refresh that rejects never fails the run: it runs at 30 minutes with one log line; fails_when=the rejection propagates or the state says 60; no_claim=the 10 s bound (run-budget.test.ts)
   it("#742 a rejected refresh leaves the task run at 30 minutes and runs on", async () => {
     const box = fakeExecutor("box", completed);
@@ -1496,7 +1518,9 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     );
     expect(
       c.log.mock.calls.filter((l) =>
-        String(l[0]).includes("run budget: refresh failed, staying at 30m"),
+        String(l[0]).includes(
+          "run budget: refresh failed (rejected: Error), staying at 30m",
+        ),
       ),
     ).toHaveLength(1);
   });
