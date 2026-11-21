@@ -301,33 +301,25 @@ describe("issueViewFromRest + renderIssueView", () => {
     );
   });
 
-  test("a closed issue, a null user and a null body render empty", () => {
-    const view = issueViewFromRest({
+  test("a closed issue with a null or omitted user and body renders them empty", () => {
+    const base = {
       number: 8,
       title: "Gone",
       state: "closed",
-      user: null,
       labels: [],
       html_url: "u",
-      body: null,
-    });
-    assert.equal(view.state, "CLOSED");
-    assert.equal(view.authorLogin, null);
-    assert.equal(
-      renderIssueView(view),
-      "title:\tGone\nstate:\tCLOSED\nauthor:\t\nlabels:\t\nnumber:\t8\nurl:\tu\n--\n",
-    );
-  });
-
-  test("an omitted user and body are tolerated", () => {
-    const view = issueViewFromRest({
-      number: 9,
-      title: "t",
-      state: "open",
-      labels: [],
-      html_url: "u",
-    });
-    assert.equal(view.authorLogin, null);
-    assert.equal(view.body, null);
+    };
+    for (const view of [
+      issueViewFromRest({ ...base, user: null, body: null }),
+      issueViewFromRest(base),
+    ]) {
+      assert.equal(view.state, "CLOSED");
+      assert.equal(view.authorLogin, null);
+      assert.equal(view.body, null);
+      assert.equal(
+        renderIssueView(view),
+        "title:\tGone\nstate:\tCLOSED\nauthor:\t\nlabels:\t\nnumber:\t8\nurl:\tu\n--\n",
+      );
+    }
   });
 });

@@ -79,8 +79,20 @@ import {
 import {
   NO_PR_REVIEW_CONTEXT,
   prefetchReviewContextForPr,
+  type PrefetchedReviewContext,
 } from "./review/prefetch-review-context";
 import type { RestPullRequestLike } from "@terragon/review/context/render";
+
+/** What a `transformMessage` hook learns about the message it transforms. */
+export interface TransformMessageContext {
+  /**
+   * The skill's context blocks that rendered content (`pr-view`, …); empty
+   * when the body has no directive or no pull request started the run.
+   */
+  renderedContext: ReadonlySet<string>;
+}
+
+const NO_RENDERED_CONTEXT: ReadonlySet<string> = new Set();
 
 /**
  * Effective shadow state for an automation's org: the org's installation mode
@@ -118,7 +130,10 @@ export async function runAutomation({
      * PR #59's review). Falls back to automation.branchName when absent.
      */
     prBaseBranchName?: string;
-    transformMessage?: (message: DBUserMessage) => DBUserMessage;
+    transformMessage?: (
+      message: DBUserMessage,
+      context: TransformMessageContext,
+    ) => DBUserMessage;
     prNumber?: number;
     /**
      * The PR the caller already read (`pulls.get`), when it did: the
@@ -212,7 +227,9 @@ export async function runAutomation({
           organizationId: automation.organizationId,
           shadow,
           message: options?.transformMessage
-            ? options.transformMessage(automation.action.config.message)
+            ? options.transformMessage(automation.action.config.message, {
+                renderedContext: NO_RENDERED_CONTEXT,
+              })
             : automation.action.config.message,
           githubRepoFullName: automation.repoFullName,
           baseBranchName: options?.branchName ?? automation.branchName,
@@ -306,24 +323,24 @@ export async function runAutomation({
         // rendered. Read with the App token here; the agent never touches
         // GitHub (ADR-004).
         const contextFetchers = findReviewContextDirective(renderedBody);
-        const text = contextFetchers
-          ? substituteReviewContext(
-              renderedBody,
-              options?.prNumber !== undefined
-                ? await prefetchReviewContextForPr({
-                    repoFullName: automation.repoFullName,
-                    prNumber: options.prNumber,
-                    fetchers: contextFetchers,
-                    pullRequest: options.pullRequest,
-                    // The org owner's tracker, as the post-merge lane reads it.
-                    ticket: {
-                      organizationId: automation.organizationId,
-                      ownerUserId: automation.userId,
-                      shadow,
-                    },
-                  })
-                : NO_PR_REVIEW_CONTEXT,
-            )
+        const context: PrefetchedReviewContext | undefined = !contextFetchers
+          ? undefined
+          : options?.prNumber !== undefined
+            ? await prefetchReviewContextForPr({
+                repoFullName: automation.repoFullName,
+                prNumber: options.prNumber,
+                fetchers: contextFetchers,
+                pullRequest: options.pullRequest,
+                // The org owner's tracker, as the post-merge lane reads it.
+                ticket: {
+                  organizationId: automation.organizationId,
+                  ownerUserId: automation.userId,
+                  shadow,
+                },
+              })
+            : { text: NO_PR_REVIEW_CONTEXT, rendered: NO_RENDERED_CONTEXT };
+        const text = context
+          ? substituteReviewContext(renderedBody, context.text)
           : renderedBody;
         const message: DBUserMessage = {
           type: "user",
@@ -337,7 +354,9 @@ export async function runAutomation({
           organizationId: automation.organizationId,
           shadow,
           message: options?.transformMessage
-            ? options.transformMessage(message)
+            ? options.transformMessage(message, {
+                renderedContext: context?.rendered ?? NO_RENDERED_CONTEXT,
+              })
             : message,
           githubRepoFullName: automation.repoFullName,
           baseBranchName,

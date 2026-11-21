@@ -162,7 +162,7 @@ describe("runAuditFixAutomation", () => {
       model: null,
       parts: [{ type: "text", text: "skill body" }],
     };
-    const transformed = transform?.(message);
+    const transformed = transform?.(message, { renderedContext: new Set() });
     expect(transformed?.parts).toHaveLength(2);
     expect(JSON.stringify(transformed?.parts[1])).toContain(
       "automata/fix-42-01234567-a1",

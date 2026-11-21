@@ -5,6 +5,7 @@ import {
   renderPriorReviews,
   renderReviewContext,
   renderReviewThreads,
+  unavailableReason,
   type RestPullRequestLike,
   type ReviewContextBlock,
   type ReviewThreadData,
@@ -32,6 +33,16 @@ export { REVIEW_THREAD_PAGE_LIMIT } from "./octokit-review-client";
  */
 
 type Octokit = Awaited<ReturnType<typeof getOctokitForApp>>;
+
+/**
+ * The text that replaces a skill's context directive, and the names of the
+ * blocks in it that rendered content (an `unavailable` block is not one), so
+ * a caller can tell what the agent already sees without parsing the text.
+ */
+export interface PrefetchedReviewContext {
+  text: string;
+  rendered: ReadonlySet<string>;
+}
 
 async function fetchPrView(
   octokit: Octokit,
@@ -139,7 +150,8 @@ const FETCHERS: Record<
 
 /**
  * Fetch and render the requested blocks, in the order the directive names
- * them. Never throws for a single block: a failed one renders as unavailable.
+ * them. Never throws for a single block: a failed one renders as unavailable
+ * and is left out of `rendered`.
  */
 export async function prefetchReviewContext({
   octokit,
@@ -157,7 +169,7 @@ export async function prefetchReviewContext({
   pullRequest?: RestPullRequestLike;
   /** Whose tracker the `ticket` block reads; without it that block is unavailable. */
   ticket?: ReviewTicketScope;
-}): Promise<string> {
+}): Promise<PrefetchedReviewContext> {
   const [owner, repo] = parseRepoFullName(repoFullName);
   const blocks = await Promise.all(
     fetchers.map(async (name): Promise<ReviewContextBlock> => {
@@ -184,18 +196,23 @@ export async function prefetchReviewContext({
               : await FETCHERS[name](octokit, owner, repo, prNumber),
         };
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const reason = unavailableReason(err);
         console.warn("[review-context] fetch failed; rendering unavailable", {
           repoFullName,
           prNumber,
           fetcher: name,
           reason,
         });
-        return { name, unavailable: reason.slice(0, 200) };
+        return { name, unavailable: reason };
       }
     }),
   );
-  return renderReviewContext(blocks);
+  return {
+    text: renderReviewContext(blocks),
+    rendered: new Set(
+      blocks.filter((block) => !("unavailable" in block)).map((b) => b.name),
+    ),
+  };
 }
 
 /**
@@ -217,21 +234,24 @@ export async function prefetchReviewContextForPr({
   pullRequest?: RestPullRequestLike;
   /** Whose tracker the `ticket` block reads; without it that block is unavailable. */
   ticket?: ReviewTicketScope;
-}): Promise<string> {
+}): Promise<PrefetchedReviewContext> {
   let octokit: Octokit;
   try {
     const [owner, repo] = parseRepoFullName(repoFullName);
     octokit = await getOctokitForApp({ owner, repo });
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = unavailableReason(err);
     console.warn("[review-context] no App client; every block unavailable", {
       repoFullName,
       prNumber,
       reason,
     });
-    return renderReviewContext(
-      fetchers.map((name) => ({ name, unavailable: reason.slice(0, 200) })),
-    );
+    return {
+      text: renderReviewContext(
+        fetchers.map((name) => ({ name, unavailable: reason })),
+      ),
+      rendered: new Set(),
+    };
   }
   return prefetchReviewContext({
     octokit,

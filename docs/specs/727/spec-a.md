@@ -279,3 +279,18 @@ Agent37 cells.
 ## 7. Rollback
 
 Revert the www PR. No schema, no stored data, no worker deploy.
+
+## 8. Amendment after /simplify (2026-11-20)
+
+Two mechanisms above changed shape; the outcomes did not.
+
+- **The `pr-view` check no longer reads message text** (supersedes the regex check in OD-A1 and §4).
+  `prefetchReviewContext` / `prefetchReviewContextForPr` return `{ text, rendered }`, where `rendered`
+  names the blocks that rendered content (an `unavailable` block is not one), and `runAutomation`
+  passes it to `transformMessage(message, { renderedContext })`. The lane adds its `## Pull request`
+  block unless `renderedContext.has("pr-view")`. A PR body cannot forge a rendered `pr-view` because
+  the lane never inspects the text.
+- **One truncation note.** The lane's own "was cut to 20,000 characters" sentence is gone; the block's
+  `[block "…" truncated to 20000 chars]` note stays, and the lane adds only the trusted pointer
+  `Read the full text with \`gh issue view <N>\``(or`gh pr view <N>`) when `renderReviewContextBlock`
+  reports the block was cut. The two lead lines are one template over the noun.
