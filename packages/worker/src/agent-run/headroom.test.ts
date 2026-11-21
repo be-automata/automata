@@ -207,6 +207,59 @@ Committed_AS:    6270296 kB
     expect(c.reservedBytes()).toBe(CELL_MEMORY_BYTES + live.runCommitBytes);
   });
 
+  // card: protects=#749 a BUSY cell is counted once: the anon its cgroup already charges (in Committed_AS) comes off its reservation, so a box run still fits beside it; fails_when=the cell's observed memory is ignored and a box run is deferred at real load; no_claim=the sampler's cadence (cell-run.test.ts)
+  it("#749 with a busy cell (5 GiB already charged), a box run is deferred until the cell's usage is observed, then admitted", () => {
+    // The box with the cell's 5 GiB already in Committed_AS and off MemAvailable.
+    const busy = `MemTotal:       15987540 kB
+MemAvailable:    8176624 kB
+CommitLimit:    21178636 kB
+Committed_AS:   11513176 kB
+`;
+    const live: HeadroomPolicy = {
+      floorBytes: 1 * GIB,
+      commitFraction: 0.9,
+      runCommitBytes: 4000 * 1024 ** 2,
+    };
+    let reading = `MemTotal:       15987540 kB
+MemAvailable:   13419504 kB
+CommitLimit:    21178636 kB
+Committed_AS:    6270296 kB
+`;
+    const c = new AdmissionController(live, () => reading);
+    const cell = c.admit({
+      runId: "cell-1",
+      threadId: "t1",
+      attempt: 0,
+      commitBytes: CELL_MEMORY_BYTES,
+    });
+    reading = busy;
+    // Without the cell's sample its 5 GiB is counted twice: the box run waits.
+    expect(() =>
+      c.admit({ runId: "box-1", threadId: "t2", attempt: 0 }),
+    ).toThrow(AdmissionDeferredError);
+    cell.observe(() => 5 * GIB);
+    expect(c.reservedBytes()).toBe(CELL_MEMORY_BYTES - 5 * GIB);
+    c.admit({ runId: "box-1", threadId: "t2", attempt: 0 });
+  });
+
+  // card: protects=#749 a box whose commit ceiling is below a cell's size boots with a warning naming the cell, never a refusal (cells may be off there); fails_when=it boots silent and every cell run later fails its deferral budget; no_claim=whether cells are enabled on that box
+  it("#749 a box too small for one cell boots with a warning that names the cell size", () => {
+    const small = `MemTotal:        7937228 kB
+MemAvailable:    6249396 kB
+CommitLimit:     8000000 kB
+Committed_AS:     500000 kB
+`;
+    const out = assessHeadroomSupport({
+      policy: { ...POLICY, runCommitBytes: 2 * GIB },
+      platform: "linux",
+      readMeminfo: () => small,
+    });
+    expect(out).toMatchObject({ enabled: true });
+    expect((out as { warning?: string }).warning).toMatch(
+      /a cell \(8192M, CELL_RESOURCES\) can never be admitted/,
+    );
+  });
+
   it("#749 a run without commitBytes reserves the policy's runCommitBytes, and the observed fields name the run's own commit", () => {
     const lines: string[] = [];
     const c = new AdmissionController(POLICY, () => MEMINFO);

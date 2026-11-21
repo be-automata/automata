@@ -59,6 +59,8 @@ import { containerLanePolicy } from "./container-argv";
 import { composeContainerSettings } from "./container-policy";
 import { admitRunSlot } from "./run-admission";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
+import type { Reservation } from "./headroom";
+import { parseMemoryAnon } from "./run-memory";
 import { classifyNextMessageError } from "./retry-classification";
 import { getProcessWorkerId } from "./run-namespace";
 import {
@@ -515,6 +517,10 @@ async function runCell(
 
     // 7. Bootstrap: the clone, the git identity, HOME, and the entry's socket.
     await bootstrap(r);
+    // #749: the cell's memory is in its own cgroup, outside this run's; sample
+    // what the kernel already charges it so the reservation holds only the rest
+    // (a busy cell is otherwise counted twice: in Committed_AS and reserved).
+    startCellMemorySampler(r, admitted.reservation);
 
     // 8. The next message, with the real token, from the worker.
     ensureLive(r);
@@ -711,6 +717,43 @@ async function settleTerminalError(
 // ---- the heartbeat -----------------------------------------------------------
 
 /** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
+/** How often a live cell's anonymous memory is re-read for the headroom reservation. */
+export const CELL_MEMORY_SAMPLE_MS = 30_000;
+
+/**
+ * #749: read the cell's own cgroup (`/sys/fs/cgroup/memory.stat`, anon + shmem,
+ * the box path's measure) every CELL_MEMORY_SAMPLE_MS until the heartbeat
+ * stops, and hand admission a synchronous getter for the last sample. Fail
+ * open: a failed read keeps the previous sample (null until the first), which
+ * only ever over-reserves.
+ */
+function startCellMemorySampler(
+  r: CellRunState,
+  reservation: Reservation | null,
+): void {
+  if (reservation === null) return;
+  let sampled: number | null = null;
+  reservation.observe(() => sampled);
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  void (async () => {
+    while (!r.heartbeatStop.signal.aborted) {
+      try {
+        const out = await provider.exec(
+          cellId,
+          ["cat", "/sys/fs/cgroup/memory.stat"],
+          { timeoutMs: 5_000 },
+        );
+        if (out.exitCode === 0)
+          sampled = parseMemoryAnon(out.stdout) ?? sampled;
+      } catch {
+        // Keep the last sample: never fail a run over a memory probe.
+      }
+      await r.deps.sleep(CELL_MEMORY_SAMPLE_MS, r.heartbeatStop.signal);
+    }
+  })();
+}
+
 function startHeartbeat(r: CellRunState): void {
   const { st, live } = r;
   let failures = 0;

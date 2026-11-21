@@ -13,6 +13,7 @@ import { BoundedRunMap } from "./run-end-marks";
 import {
   buildCellMessage,
   createCellExecutor,
+  CELL_MEMORY_SAMPLE_MS,
   CELL_SETUP_STAMP_MS,
   type CellExecutorDeps,
 } from "./cell-run";
@@ -44,6 +45,8 @@ import {
 } from "./www-client";
 
 const released: string[] = [];
+/** #749: the getter the cell run hands the headroom reservation. */
+const observed: { current: (() => number | null) | null } = { current: null };
 vi.mock("./run-admission", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./run-admission")>()),
   admitRunSlot: async () => ({
@@ -59,6 +62,9 @@ vi.mock("./run-admission", async (importOriginal) => ({
     reservation: {
       release: () => {
         released.push("reservation");
+      },
+      observe: (current: () => number | null) => {
+        observed.current = current;
       },
     },
   }),
@@ -248,6 +254,15 @@ function setup(
     },
     makeProvider,
     sleep: async (ms, signal) => {
+      // #749: the memory sampler's interval waits for the run to stop, like
+      // the heartbeat, so its loop never spins on this instant clock.
+      if (ms === CELL_MEMORY_SAMPLE_MS) {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return;
+      }
       if (ms === CELL_SETUP_STAMP_MS) {
         await new Promise<void>((resolve) => {
           hbWaiters.push(resolve);
@@ -376,6 +391,23 @@ const GH = cellGhSetup({
 const GH_ENV = GH.env;
 
 describe("the cell run: success, plan, create", () => {
+  // card: protects=#749 a live cell's own cgroup memory (anon + shmem from /sys/fs/cgroup/memory.stat inside the cell) feeds the headroom reservation, so a busy cell is not counted twice; fails_when=the sampler never runs, reads the wrong file, or hands admission no getter; no_claim=the kernel's accounting on a real box
+  it("#749 samples the cell's memory.stat and hands admission its anon + shmem", async () => {
+    observed.current = null;
+    const s = setup({
+      execStdout: (argv) =>
+        argv.join(" ") === "cat /sys/fs/cgroup/memory.stat"
+          ? "anon 3221225472\nfile 999\nshmem 1048576\n"
+          : "",
+    });
+    await s.executor.run(s.args);
+    expect(
+      s.execs.some((a) => a.join(" ") === "cat /sys/fs/cgroup/memory.stat"),
+    ).toBe(true);
+    const getter = observed.current as (() => number | null) | null;
+    expect(getter?.()).toBe(3221225472 + 1048576);
+  });
+
   // card: protects=a clean run goes plan, create, bootstrap, message, poll and then the ordered teardown with the server's attempt everywhere; fails_when=the attempt differs between poll, revoke and readback or the order moves; no_claim=a live cell (IT-E1)
   it("T-ORDER / T-ATTEMPT: a completed run, attempt 7 everywhere, teardown last", async () => {
     const s = setup();

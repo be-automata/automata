@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { CELL_MEMORY_BYTES } from "@terragon/types/cell";
 import { ADMISSION_EXHAUSTED_PREFIX } from "@terragon/utils/box-capacity";
 
 import { sumBackoffSeconds } from "./admission-retry";
@@ -415,6 +416,14 @@ export function assessHeadroomSupport(opts: {
     reading.committedAs + opts.policy.runCommitBytes > commitCeiling
   ) {
     warning = `with the load observed at boot the memory headroom check would defer every run: Committed_AS ${mib(reading.committedAs)} (as sampled now, not a guaranteed idle baseline) + run commit ${mib(opts.policy.runCommitBytes)} exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)}; if this is the box's resting load, lower the run commit or raise WORKER_HEADROOM_COMMIT_FRACTION — if it is transient, runs will be admitted once it drops`;
+  }
+  // #749: a cell reserves its full size (CELL_MEMORY_BYTES), not the run
+  // commit. A box whose ceiling is below it can run box runs but never a cell:
+  // every cell run would wait out its deferral budget and fail final. Warn
+  // (not refuse): a box with cells off is still a working box.
+  if (opts.policy.commitFraction < 1 && CELL_MEMORY_BYTES > commitCeiling) {
+    const cell = `a cell (${mib(CELL_MEMORY_BYTES)}, CELL_RESOURCES) can never be admitted on this box: it exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)}; turn cells off for this worker or raise the ceiling`;
+    warning = warning ? `${warning}; ${cell}` : cell;
   }
   // Same for the floor arm: a floor at or above the box's memory means
   // `MemAvailable − reserved ≥ floor` can never hold (a typo such as 10G on a
