@@ -206,6 +206,20 @@ export function forwardRequestHeaders(incoming: Headers): Headers {
 }
 
 /**
+ * How `Link` URLs are pointed back at the broker. `linkRepo` also turns
+ * GitHub's id form (`/repositories/<id>/…`, which it uses for pagination) into
+ * `/repos/<owner>/<repo>/…`: the gh broker forwards only the step's repo by
+ * name (#727 OD-3), and an in-repo response only ever links its own repo.
+ */
+export interface LinkRewrite {
+  rewriteLinkHost?: string;
+  linkRepo?: { owner: string; repo: string };
+}
+
+const GITHUB_REPOSITORY_ID_LINK =
+  /https:\/\/api\.github\.com\/repositories\/\d+(?=[/?>])/g;
+
+/**
  * The upstream response headers to hand back to the cell. Framing headers and
  * cookies are dropped, no CORS header is ever added. With `rewriteLinkHost`,
  * `Link` URLs on api.github.com point at this broker so `gh --paginate` stays
@@ -213,7 +227,7 @@ export function forwardRequestHeaders(incoming: Headers): Headers {
  */
 export function responseHeadersForCell(
   upstream: Headers,
-  opts?: { rewriteLinkHost?: string },
+  opts?: LinkRewrite,
 ): Headers {
   const out = new Headers();
   upstream.forEach((value, name) => {
@@ -222,9 +236,16 @@ export function responseHeadersForCell(
     if (lower === "set-cookie" || lower === "www-authenticate") return;
     if (HOP_BY_HOP.has(lower)) return;
     if (lower === "link" && opts?.rewriteLinkHost) {
+      const repo = opts.linkRepo;
+      const scoped = repo
+        ? value.replace(
+            GITHUB_REPOSITORY_ID_LINK,
+            `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}`,
+          )
+        : value;
       out.set(
         name,
-        value.replaceAll(
+        scoped.replaceAll(
           "https://api.github.com/",
           `https://${opts.rewriteLinkHost}/api/v3/`,
         ),
@@ -357,10 +378,7 @@ export async function followAllowedRedirect({
  * Hand GitHub's answer back to the cell, streamed. A redirect is never
  * followed or forwarded: it is a 502.
  */
-export function passThrough(
-  upstream: Response,
-  opts?: { rewriteLinkHost?: string },
-): Response {
+export function passThrough(upstream: Response, opts?: LinkRewrite): Response {
   if (isRedirect(upstream.status)) {
     discard(upstream.body);
     return brokerError(502, "upstream_error");

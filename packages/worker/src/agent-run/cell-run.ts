@@ -886,6 +886,47 @@ async function startTestDb(r: CellRunState): Promise<Record<string, string>> {
   return { [CELL_TEST_DB_ENV]: testDb.url };
 }
 
+/**
+ * The gh note as user memory (#727 B), appended, never replacing what the
+ * image ships. A probe tells absent (exit 1: the note is the whole file) from
+ * present; a present file that cannot be read is left alone and the note
+ * skipped, since `copyOut` cannot tell "absent" from a failed read.
+ */
+async function writeGhNote(r: CellRunState): Promise<void> {
+  const path = `${HOME_CLAUDE_DIR}/CLAUDE.md`;
+  const provider = r.provider as ICellProvider;
+  ensureLive(r);
+  const probe = await raceLive(
+    r,
+    provider.exec(r.cellId as string, ["/usr/bin/test", "-e", path], {
+      timeoutMs: PGREP_TIMEOUT_MS,
+    }),
+  );
+  let existing = "";
+  if (probe.exitCode !== 1) {
+    const bytes =
+      probe.exitCode === 0
+        ? await raceLive(r, provider.copyOut(r.cellId as string, path)).catch(
+            () => null,
+          )
+        : null;
+    ensureLive(r);
+    if (bytes === null) {
+      r.step("cell: gh note not added (~/.claude/CLAUDE.md could not be read)");
+      return;
+    }
+    existing = new TextDecoder().decode(bytes);
+  }
+  await putFile(
+    r,
+    path,
+    existing.trim() === ""
+      ? CELL_GH_NOTE
+      : `${existing.trimEnd()}\n\n${CELL_GH_NOTE}`,
+    600,
+  );
+}
+
 /** The clone, the git identity, HOME (settings, trust seed, placeholder login), and the entry's socket. */
 async function bootstrap(r: CellRunState): Promise<void> {
   const { input, config } = r.args;
@@ -946,26 +987,7 @@ async function bootstrap(r: CellRunState): Promise<void> {
     "mkdir gh config",
   );
   await putFile(r, `${CELL_GH_CONFIG_DIR}/hosts.yml`, gh.hostsYml, 600);
-  // Appended, not replaced: the image may ship its own user memory.
-  let userMemory = "";
-  try {
-    userMemory = new TextDecoder().decode(
-      await raceLive(
-        r,
-        provider.copyOut(cellId, `${HOME_CLAUDE_DIR}/CLAUDE.md`),
-      ),
-    );
-  } catch {
-    // Absent: the note is the whole file.
-  }
-  await putFile(
-    r,
-    `${HOME_CLAUDE_DIR}/CLAUDE.md`,
-    userMemory === ""
-      ? CELL_GH_NOTE
-      : `${userMemory.trimEnd()}\n\n${CELL_GH_NOTE}`,
-    600,
-  );
+  await writeGhNote(r);
   // GH_* is reserved for repo env, so the owner's names never collide.
   const settingsEnv = { ...testDbEnv, ...repoEnv, ...gh.env };
   await putFile(

@@ -47,6 +47,16 @@ vault overwrites gh's header and the broker binding needs no change. Run:
 3. **OD-3 allowlist** (`packages/cell-broker/src/gh.ts`): REST forwards only
    `repos/<step owner>/<step repo>/...` (case-insensitive on the two segments), `rate_limit` and
    `meta`; everything else is `403 forbidden_path` before a token is minted. GraphQL unchanged.
+   A segment's encoded slash may not hide a `.`/`..` component (`..%2F..%2Fother`). GitHub's
+   pagination `Link` names the repo by id (`/repositories/<id>/…`, refused above), so on a REST
+   response the broker rewrites that prefix to `/repos/<step owner>/<step repo>/…` and
+   `gh api --paginate` stays in the repo.
+4. **Host with a port** (dev): gh looks a request's token up by the hostname without the port, so
+   `hosts.yml` is keyed on the bare host while `GH_HOST`/`GH_REPO` keep `host:port`
+   (real-gh "port" case: keyed on `host:port`, gh sent no `Authorization`).
+5. **The note** (`~/.claude/CLAUDE.md`): a `test -e` probe tells absent (exit 1, the note is
+   the whole file) from present (read and append). A present file that cannot be read is
+   left untouched and the note skipped, with a step line; it is never overwritten.
 
 Alternatives checked: `GH_ENTERPRISE_TOKEN` env (refused by `cell-entry.sh`, B8); a vault
 `placeholder` substitution on the broker binding (works, but unneeded per the IT, and it would

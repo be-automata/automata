@@ -335,6 +335,12 @@ function setup(
   };
 }
 
+/** The bootstrap's existence probe for the user memory file (#727 B). */
+const isMemoryProbe = (a: string[]) =>
+  a[0] === "/usr/bin/test" &&
+  a[1] === "-e" &&
+  a[2] === "/home/agent/.claude/CLAUDE.md";
+
 const idx = (calls: string[], name: string, from = 0) =>
   calls.indexOf(name, from);
 
@@ -534,7 +540,7 @@ describe("the cell run: bootstrap and message", () => {
 
   // card: protects=#727 B (AC-5, AC-7 worker half): gh's host login is the broker host with the placeholder, 600 agent, and no file carries the vault bearer or daemon token; the agent note says reads only; fails_when=a real credential lands in a gh file, the host differs from the clone's, or the note is missing; no_claim=gh honouring the files (IT)
   it("writes gh's host login with the placeholder only, and the read-only note", async () => {
-    const s = setup();
+    const s = setup({ execExit: (a) => (isMemoryProbe(a) ? 1 : 0) });
     await s.executor.run(s.args);
     expect(s.execs).toContainEqual([
       "/bin/mkdir",
@@ -585,6 +591,103 @@ describe("the cell run: bootstrap and message", () => {
         "# image memory\n\nkeep me\n\n# GitHub access in this run",
       ),
     ).toBe(true);
+  });
+
+  // card: protects=#727 B: a ~/.claude/CLAUDE.md that exists but cannot be read is left as it is (the note is skipped and said so), never overwritten by the note alone; fails_when=the file is written after a failed read, or the run fails on it; no_claim=why the read failed
+  it("leaves an existing CLAUDE.md it could not read untouched, and says so", async () => {
+    const s = setup();
+    s.provider.copyOut.mockImplementation(async () => {
+      throw new Error("http_error");
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(
+      s.files.some((f) => f.path === "/home/agent/.claude/CLAUDE.md"),
+    ).toBe(false);
+    expect(s.logs.join("\n")).toContain(
+      "cell: gh note not added (~/.claude/CLAUDE.md could not be read)",
+    );
+  });
+
+  // card: protects=#727 B: an absent ~/.claude/CLAUDE.md (the probe exits 1) gets the note alone, without a read; fails_when=it is read or the note is missing; no_claim=none
+  it("writes the note alone when there is no CLAUDE.md, without reading it", async () => {
+    const s = setup({ execExit: (a) => (isMemoryProbe(a) ? 1 : 0) });
+    await s.executor.run(s.args);
+    expect(
+      s.provider.copyOut.mock.calls.some(
+        ([, path]) => path === "/home/agent/.claude/CLAUDE.md",
+      ),
+    ).toBe(false);
+    const note = s.files.find(
+      (f) => f.path === "/home/agent/.claude/CLAUDE.md",
+    );
+    expect(note?.text.startsWith("# GitHub access in this run")).toBe(true);
+  });
+
+  // card: protects=#727 B ordering: the gh files are in place before settings.json (whose env names them) and before the daemon socket wait; fails_when=settings or the socket wait comes first; no_claim=the entry's own start
+  it("writes the gh files before settings.json and before the socket wait", async () => {
+    const s = setup({ execExit: (a) => (isMemoryProbe(a) ? 1 : 0) });
+    await s.executor.run(s.args);
+    const execAt = (pred: (a: string[]) => boolean) => {
+      const i = s.provider.exec.mock.calls.findIndex(([, a]) => pred(a));
+      return s.provider.exec.mock.invocationCallOrder[i] ?? -1;
+    };
+    const fileAt = (path: string) => {
+      const i = s.provider.copyIn.mock.calls.findIndex(([, p]) => p === path);
+      return s.provider.copyIn.mock.invocationCallOrder[i] ?? -1;
+    };
+    const mkdirGh = execAt((a) => a.includes("/home/agent/.config/gh"));
+    const hosts = fileAt("/home/agent/.config/gh/hosts.yml");
+    const note = fileAt("/home/agent/.claude/CLAUDE.md");
+    const settings = fileAt("/home/agent/.claude/settings.json");
+    const socket = execAt((a) => a[0] === "/usr/bin/test" && a[1] === "-S");
+    expect([mkdirGh, hosts, note, settings].every((n) => n > 0)).toBe(true);
+    expect(mkdirGh).toBeLessThan(hosts);
+    expect(hosts).toBeLessThan(settings);
+    expect(note).toBeLessThan(settings);
+    expect(settings).toBeLessThan(socket);
+  });
+
+  // card: protects=#727 B: a failed gh config mkdir or hosts.yml write ends the run like any bootstrap step: one abnormal end, one ordered teardown, no settings.json and no socket wait; fails_when=the run goes on, posts twice or skips the teardown; no_claim=the message text
+  it("a failed gh mkdir or hosts.yml write fails the run once, torn down", async () => {
+    const m = setup({
+      execExit: (a) => (a.includes("/home/agent/.config/gh") ? 1 : 0),
+    });
+    await expect(m.executor.run(m.args)).rejects.toThrow(
+      "mkdir gh config failed",
+    );
+    const h = setup();
+    const copyIn = h.provider.copyIn.getMockImplementation();
+    h.provider.copyIn.mockImplementation(async (id, path, bytes, opts) => {
+      if (path.endsWith("/hosts.yml")) throw new Error("upload failed");
+      return copyIn?.(id, path, bytes, opts);
+    });
+    await expect(h.executor.run(h.args)).rejects.toThrow("upload failed");
+    for (const s of [m, h]) {
+      expectTeardownOrder(s.calls);
+      expect(s.www.abnormalPosts).toBe(1);
+      expect(s.files.some((f) => f.path.endsWith("/settings.json"))).toBe(
+        false,
+      );
+      expect(
+        s.execs.some((a) => a[0] === "/usr/bin/test" && a[1] === "-S"),
+      ).toBe(false);
+    }
+  });
+
+  // card: protects=#727 B AC-7: nothing gh-related is logged with a value (the host login, the placeholder, GH_REPO); fails_when=a log line carries one; no_claim=other modules' logs
+  it("logs no gh value", async () => {
+    const s = setup();
+    await s.executor.run(s.args);
+    const all = s.logs.join("\n");
+    for (const v of [
+      "automata-cell-gh-placeholder",
+      "oauth_token",
+      "www.example.org/acme/widgets",
+      "GH_REPO",
+    ]) {
+      expect(all).not.toContain(v);
+    }
   });
 
   // card: protects=a 204 is nothing-to-run with a clean teardown and no abnormal post; fails_when=the poll runs or a terminal is posted; no_claim=www's 204 rule

@@ -324,8 +324,11 @@ export function cellGhSetup(opts: {
   if (!/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.botLogin)) {
     throw new Error("cell bot login is not a GitHub login");
   }
+  // gh looks a request's token up by the hostname without the port, so a dev
+  // broker on `host:port` is logged in as `host` (GH_HOST keeps the port).
+  const loginHost = opts.brokerHost.replace(/:\d+$/, "");
   const hostsYml = [
-    `${opts.brokerHost}:`,
+    `${loginHost}:`,
     `    oauth_token: ${CELL_GH_TOKEN_PLACEHOLDER}`,
     `    user: ${JSON.stringify(opts.botLogin)}`,
     "    git_protocol: https",

@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 const hasGh = spawnSync("gh", ["--version"]).status === 0;
 const SENTINEL = "ghs_SENTINEL_real_gh";
 const HOST = "cell.test";
+const PORT_HOST = "cell.test:8443";
 
 /**
  * gh speaks HTTPS to an Enterprise host, and a self-signed certificate cannot
@@ -219,6 +220,16 @@ describe.skipIf(!hasGh)(
         });
         const u = new URL(String(input));
         let json: unknown = { number: ISSUE.number, title: ISSUE.title };
+        const extra: Record<string, string> = {};
+        // GitHub paginates by repo id; the broker must keep page 2 in-repo.
+        if (u.pathname.endsWith("/issues/7/comments")) {
+          const page2 = u.searchParams.get("page") === "2";
+          json = [{ id: page2 ? 2 : 1, body: page2 ? "second" : "first" }];
+          if (!page2) {
+            extra.link =
+              '<https://api.github.com/repositories/42/issues/7/comments?page=2>; rel="next", <https://api.github.com/repositories/42/issues/7/comments?page=2>; rel="last"';
+          }
+        }
         if (u.pathname === "/graphql") {
           const repository = body.includes("pullRequest(")
             ? { pullRequest: PR }
@@ -227,7 +238,7 @@ describe.skipIf(!hasGh)(
         }
         return new Response(JSON.stringify(json), {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...extra },
         });
       }) as unknown as typeof fetch;
       const handler = createGhBrokerHandler({
@@ -255,6 +266,25 @@ describe.skipIf(!hasGh)(
       // Test transport only: a cell reaches the broker over HTTPS instead.
       fs.writeFileSync(
         path.join(ghDir, "config.yml"),
+        `version: 1\nhttp_unix_socket: ${socketPath}\n`,
+      );
+      // A broker host with a port (a dev deployment): gh looks a request's
+      // token up by the hostname without the port, so cellGhSetup keys the
+      // login on the bare host while GH_HOST/GH_REPO keep the port.
+      const portDir = path.join(home, "port-gh");
+      fs.mkdirSync(portDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(portDir, "hosts.yml"),
+        [
+          `${HOST}:`,
+          `    oauth_token: ${CELL_GH_TOKEN_PLACEHOLDER}`,
+          '    user: "automata-ai-bot[bot]"',
+          "    git_protocol: https",
+          "",
+        ].join("\n"),
+      );
+      fs.writeFileSync(
+        path.join(portDir, "config.yml"),
         `version: 1\nhttp_unix_socket: ${socketPath}\n`,
       );
       try {
@@ -288,7 +318,7 @@ describe.skipIf(!hasGh)(
       if (home) fs.rmSync(home, { recursive: true, force: true });
     });
 
-    const gh = (...args: string[]) =>
+    const ghAt = (host: string, configDir: string, args: string[]) =>
       execFileAsync("gh", args, {
         timeout: 30_000,
         cwd: home,
@@ -298,13 +328,15 @@ describe.skipIf(!hasGh)(
           PATH: process.env.PATH,
           HOME: home,
           // The settings env block the bootstrap writes (cellGhSetup).
-          GH_HOST: HOST,
-          GH_REPO: `${HOST}/o/r`,
-          GH_CONFIG_DIR: path.join(home, ".config", "gh"),
+          GH_HOST: host,
+          GH_REPO: `${host}/o/r`,
+          GH_CONFIG_DIR: configDir,
           GH_PROMPT_DISABLED: "1",
           GH_NO_UPDATE_NOTIFIER: "1",
         },
       });
+    const gh = (...args: string[]) =>
+      ghAt(HOST, path.join(home, ".config", "gh"), args);
     const refused = (...args: string[]) =>
       gh(...args).then(
         () => null,
@@ -346,6 +378,53 @@ describe.skipIf(!hasGh)(
         upstreamSaw.some(
           (c) => c.url === "https://api.github.com/repos/o/r/issues/7",
         ),
+      ).toBe(true);
+    }, 90_000);
+
+    // card: protects=#727 OD-3 x gh --paginate: page 2 (GitHub links it by repo id) is still served, so the agent can read a long comment thread; fails_when=gh stops at a 403 on /repositories/<id>; no_claim=GitHub's real Link format (unit test pins the rewrite)
+    it("AC-5 `gh api --paginate` follows page 2 inside the repo", async (ctx) => {
+      if (!server) return ctx.skip();
+      const out = await gh(
+        "api",
+        "--paginate",
+        "repos/{owner}/{repo}/issues/7/comments",
+        "--jq",
+        ".[].body",
+      );
+      expect(out.stdout.trim().split("\n")).toEqual(["first", "second"]);
+      expect(
+        upstreamSaw.some(
+          (c) =>
+            c.url ===
+            "https://api.github.com/repos/o/r/issues/7/comments?page=2",
+        ),
+      ).toBe(true);
+    }, 90_000);
+
+    // card: protects=#727 B: a broker host with a port (dev) works as the hosts.yml key, GH_HOST and GH_REPO's host; fails_when=gh misparses `host:port/o/r` or does not find the placeholder login; no_claim=TLS to that port. Keyed on `host:port`, gh sent no Authorization at all
+    it("AC-5 a broker host with a port: hosts.yml, GH_HOST and GH_REPO agree", async (ctx) => {
+      if (!server) return ctx.skip();
+      const before = brokerSaw.length;
+      const issue = await ghAt(PORT_HOST, path.join(home, "port-gh"), [
+        "issue",
+        "view",
+        "7",
+        "--json",
+        "number",
+      ]);
+      expect(JSON.parse(issue.stdout)).toEqual({ number: 7 });
+      const api = await ghAt(PORT_HOST, path.join(home, "port-gh"), [
+        "api",
+        "repos/{owner}/{repo}/issues/7",
+      ]);
+      expect(JSON.parse(api.stdout)).toMatchObject({ number: 7 });
+      const seen = brokerSaw.slice(before);
+      expect(seen.map((c) => c.path)).toEqual([
+        "/api/graphql",
+        "/api/v3/repos/o/r/issues/7",
+      ]);
+      expect(
+        seen.every((c) => c.auth === `token ${CELL_GH_TOKEN_PLACEHOLDER}`),
       ).toBe(true);
     }, 90_000);
 

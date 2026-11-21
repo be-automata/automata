@@ -60,6 +60,11 @@ function restPathAllowed(
   owner: string,
   repo: string,
 ): boolean {
+  // A segment may hold an encoded slash (`feat%2Fx`); a dot component behind
+  // one could climb out of the repo at an upstream that decodes `%2F`.
+  if (segments.some((s) => s.split("/").some((p) => p === "." || p === ".."))) {
+    return false;
+  }
   const [first, segOwner, segRepo] = segments;
   if (segments.length === 1 && first !== undefined) {
     return REPO_FREE_REST_PATHS.has(first);
@@ -189,6 +194,11 @@ export function createGhBrokerHandler(
     } catch {
       return brokerError(502, "upstream_error");
     }
-    return passThrough(upstream, { rewriteLinkHost: url.host });
+    return passThrough(upstream, {
+      rewriteLinkHost: url.host,
+      ...(kind === "rest"
+        ? { linkRepo: { owner: auth.owner, repo: auth.repo } }
+        : {}),
+    });
   };
 }

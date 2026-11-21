@@ -269,9 +269,97 @@ describe("gh broker REST", () => {
       "rest",
     );
     expect(res.headers.get("link")).toBe(
-      `<https://${HOST}/api/v3/repositories/1/pulls?page=2>; rel="next"`,
+      `<https://${HOST}/api/v3/repos/acme/widgets/pulls?page=2>; rel="next"`,
     );
     expect(res.headers.has("set-cookie")).toBe(false);
+  });
+
+  // card: protects=#727 OD-3 x pagination: GitHub's Link names the repo by id (`/repositories/<id>/…`), which OD-3 refuses, so `gh api --paginate` would 403 on page 2; the broker points it back at the step's `/repos/<o>/<r>/…`; fails_when=a next/last link stays on /repositories or following it is refused; no_claim=other repos' ids (never in an in-repo response)
+  it("OD-3 keeps --paginate inside the repo: a /repositories/<id> Link becomes /repos/<owner>/<repo>", async () => {
+    const f = await fixture();
+    const h = harness({
+      headers: {
+        "content-type": "application/json",
+        link: [
+          '<https://api.github.com/repositories/42/issues/7/comments?page=2>; rel="next"',
+          '<https://api.github.com/repositories/42/issues/7/comments?page=5>; rel="last"',
+          '<https://api.github.com/repositories/42>; rel="repo"',
+        ].join(", "),
+      },
+    });
+    const res = await h.handler(
+      rest("/repos/acme/widgets/issues/7/comments", f.token),
+      "rest",
+    );
+    const link = res.headers.get("link") ?? "";
+    expect(link).toBe(
+      [
+        `<https://${HOST}/api/v3/repos/acme/widgets/issues/7/comments?page=2>; rel="next"`,
+        `<https://${HOST}/api/v3/repos/acme/widgets/issues/7/comments?page=5>; rel="last"`,
+        `<https://${HOST}/api/v3/repos/acme/widgets>; rel="repo"`,
+      ].join(", "),
+    );
+    const next = /<([^>]+)>; rel="next"/.exec(link)?.[1] ?? "";
+    const page2 = await h.handler(
+      new Request(next, { headers: { authorization: `token ${f.token}` } }),
+      "rest",
+    );
+    expect(page2.status).toBe(200);
+  });
+
+  // card: protects=#727 OD-3 edge cases: HEAD obeys the same allowlist, a trailing slash and a query keep a read allowed, an empty owner segment is refused, the step repo's own case does not matter, and dotted/underscored repo names match exactly; fails_when=any of these flips; no_claim=GraphQL
+  it("OD-3 edges: HEAD, trailing slash, query, empty segment, case, dots and underscores", async () => {
+    const h = harness();
+    const f = await fixture();
+    const allowed = async (path: string, token: string, method = "GET") =>
+      (await h.handler(rest(path, token, { method }), "rest")).status;
+    expect(await allowed("/repos/acme/other", f.token, "HEAD")).toBe(403);
+    expect(await allowed("/user", f.token, "HEAD")).toBe(403);
+    expect(await allowed("/repos/acme/widgets/", f.token)).toBe(200);
+    expect(await allowed("/rate_limit/", f.token)).toBe(200);
+    expect(await allowed("/rate_limit?x=y", f.token)).toBe(200);
+    expect(await allowed("/repos//acme/widgets", f.token)).toBe(403);
+    expect(await allowed("/repos/acme//widgets", f.token)).toBe(403);
+    expect(await allowed("/repos/acme/widgets.git", f.token)).toBe(403);
+
+    const upper = await fixture("Acme/Widgets");
+    expect(await allowed("/repos/acme/widgets/issues", upper.token)).toBe(200);
+    expect(await allowed("/repos/ACME/WIDGETS", upper.token)).toBe(200);
+
+    const dotted = await fixture("acme/my.repo");
+    expect(await allowed("/repos/acme/my.repo/issues/1", dotted.token)).toBe(
+      200,
+    );
+    expect(await allowed("/repos/acme/my-repo", dotted.token)).toBe(403);
+    expect(await allowed("/repos/acme/myxrepo", dotted.token)).toBe(403);
+    const under = await fixture("acme/my_repo");
+    expect(await allowed("/repos/acme/my_repo", under.token)).toBe(200);
+    expect(await allowed("/repos/acme/my-repo", under.token)).toBe(403);
+
+    expect(h.calls.map((c) => c.url)).toEqual([
+      "https://api.github.com/repos/acme/widgets",
+      "https://api.github.com/rate_limit",
+      "https://api.github.com/rate_limit?x=y",
+      "https://api.github.com/repos/acme/widgets/issues",
+      "https://api.github.com/repos/ACME/WIDGETS",
+      "https://api.github.com/repos/acme/my.repo/issues/1",
+      "https://api.github.com/repos/acme/my_repo",
+    ]);
+  });
+
+  // card: protects=#727 OD-3: a segment with an encoded slash may not carry a dot component, so an upstream that decodes %2F cannot climb out of the step's repo; fails_when=`..%2F` inside a segment reaches GitHub; no_claim=a branch name with a plain encoded slash (still allowed above)
+  it("OD-3 refuses dot components hidden behind an encoded slash", async () => {
+    const f = await fixture();
+    const h = harness();
+    for (const path of [
+      "/repos/acme/widgets/contents/..%2F..%2F..%2Fother%2Frepo",
+      "/repos/acme/widgets/git/ref/heads%2F..%2F..",
+      "/repos/acme/widgets/x/.%2Fy",
+    ]) {
+      const res = await h.handler(rest(path, f.token), "rest");
+      expect(res.status, path).toBe(403);
+    }
+    expect(h.fetchImpl).not.toHaveBeenCalled();
   });
 });
 

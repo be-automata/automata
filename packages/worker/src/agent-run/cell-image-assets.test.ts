@@ -1317,6 +1317,24 @@ describe("cellGhSetup (#727 B)", () => {
     });
   });
 
+  // card: protects=#727 B with a dev broker host:port: gh finds a request's token under the bare hostname, so the login is keyed without the port while GH_HOST/GH_REPO keep it (real-gh "port" case); fails_when=the hosts.yml key carries the port (gh then sends no token) or the env drops it; no_claim=TLS
+  it("keys the login on the bare host when the broker host has a port", () => {
+    const out = cellGhSetup({ ...base, brokerHost: "localhost:8443" });
+    expect(out.hostsYml.split("\n")[0]).toBe("localhost:");
+    expect(out.env.GH_HOST).toBe("localhost:8443");
+    expect(out.env.GH_REPO).toBe("localhost:8443/acme/widgets");
+  });
+
+  // card: protects=repo names with dots and underscores pass through unchanged (GitHub allows them); fails_when=they are refused or rewritten; no_claim=the broker's match (gh.test.ts OD-3 edges)
+  it("keeps dots and underscores in the repo name", () => {
+    expect(
+      cellGhSetup({ ...base, repoFullName: "acme/my.repo" }).env.GH_REPO,
+    ).toBe("www.example.org/acme/my.repo");
+    expect(
+      cellGhSetup({ ...base, repoFullName: "my_org/my_repo" }).env.GH_REPO,
+    ).toBe("www.example.org/my_org/my_repo");
+  });
+
   // card: protects=AC-7: no gh name is a credential name the entry refuses, and none is a GH_TOKEN-style variable; fails_when=a name matches the forbidden pattern; no_claim=cell-entry.sh itself
   it("sets no name the cell entry treats as a credential", () => {
     for (const name of Object.keys(cellGhSetup(base).env)) {
