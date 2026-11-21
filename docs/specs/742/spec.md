@@ -512,3 +512,13 @@ Final phases (each ≤ 5 files):
 8b. Cell bootstrap: `cell-run.ts`, `cell-run.test.ts`.
 9. Second PR, after the batteries digest is on main: `deploy/images/cell/Dockerfile`,
    `cell/verify.sh`, `cell/README.md`.
+
+## 10. Review-fix amendments (2026-11-21, roborev 1373–1376)
+
+These override §1–§9 where they differ.
+
+- **The 60-minute budget is for cell task runs only.** `refreshesRunBudget` requires `task && !selfHeal && wire.cell`. Box task runs stay at 30 minutes. Their git and gh brokers push with the installation token minted at dispatch, which GitHub expires after about an hour, so a 60-minute box run and its timeout salvage push would outlive their credential. A cell's broker mints a token per request. Follow-up: #744 (box brokers re-mint the token, then box task runs get 60).
+- **A refresh that lands after its 10 s bound** raises the recorded budget to 60 minutes through `onLateRefresh`, so the abnormal-end classifier and copy follow what the engine enforces. A late rejection changes nothing.
+- **`SUPERSEDE_FRESHNESS_MS` is 105 minutes**: schedule + task budget + teardown margin. Its only use is the reconcile sweep, which must cover a task run's worst case from dispatch.
+- **`DELIVERY_RUN_STALE_MS` is 105 minutes**, derived the same way, because it is measured from the cycle's creation, not the run's start.
+- **Rollback step 2 (worker):** rolling the worker back returns cell task runs to 30 minutes. Box task runs were never moved.
