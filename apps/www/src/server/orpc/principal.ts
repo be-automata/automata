@@ -317,12 +317,6 @@ export async function readEditAccess({
   return { canEdit: false, readOnlyReason };
 }
 
-/**
- * Step 2: a session-authenticated write must come from this app's own origin
- * (a cookie is sent by any site, so this is the CSRF guard). An API key is
- * exempt: it is never sent by a browser on its own. Refused with 403
- * `origin_mismatch` (spec section 8 fix 5).
- */
 /** The public app origin, or null when the URL cannot be parsed. */
 function appOrigin(): string | null {
   try {
@@ -332,6 +326,12 @@ function appOrigin(): string | null {
   }
 }
 
+/**
+ * Step 2: a session-authenticated write must come from this app's own origin
+ * (a cookie is sent by any site, so this is the CSRF guard). An API key is
+ * exempt: it is never sent by a browser on its own. Refused with 403
+ * `origin_mismatch` (spec section 8 fix 5).
+ */
 export async function assertSessionWriteOrigin(
   principal: EgressPrincipal,
   headers: Headers,
