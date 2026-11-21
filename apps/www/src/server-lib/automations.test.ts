@@ -1,6 +1,7 @@
 import { describe, it, vi, beforeEach, expect } from "vitest";
 import * as z from "zod/v4";
 import { db } from "@/lib/db";
+import { BranchDoesNotExistError } from "@/lib/github";
 import {
   createTestUser,
   createTestAutomation,
@@ -1155,5 +1156,53 @@ describe("runAutomation — skill_message model + review context directive", () 
       options: { prNumber: 9 },
     });
     expect(prefetchReviewContextForPr).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAutomation — onStartFailure (#729 B)", () => {
+  // card: protects=a swallowed start failure reaches the caller's hook with the original error, and the return stays undefined for every caller; fails_when=the hook is not called, gets another error, or a throwing hook escapes; no_claim=which errors callers name
+  it("hands the swallowed error to onStartFailure and still returns undefined", async () => {
+    vi.clearAllMocks();
+    const { user } = await createTestUser({ db });
+    const org = await createOrganization({
+      db,
+      name: "Hook",
+      slug: `hook-${nanoid(8).toLowerCase()}`,
+    });
+    const automation = await createTestAutomation({ db, userId: user.id });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: org.id })
+      .where(eq(automationsTable.id, automation.id));
+    const failure = new BranchDoesNotExistError({
+      repoFullName: "acme/widgets",
+      branchName: "gone",
+    });
+    vi.mocked(createNewThread).mockRejectedValueOnce(failure);
+    const seen: unknown[] = [];
+    const result = await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "manual",
+      options: { onStartFailure: (error) => seen.push(error) },
+    });
+    expect(result).toBeUndefined();
+    expect(seen).toEqual([failure]);
+    // The class survives, so a caller can name it with instanceof.
+    expect(seen[0]).toBeInstanceOf(BranchDoesNotExistError);
+
+    vi.mocked(createNewThread).mockRejectedValueOnce(failure);
+    await expect(
+      runAutomation({
+        userId: user.id,
+        automationId: automation.id,
+        source: "manual",
+        options: {
+          onStartFailure: () => {
+            throw new Error("hook bug");
+          },
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 });

@@ -16,11 +16,18 @@ import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/autom
 import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { db } from "@/lib/db";
-import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
+import {
+  BranchDoesNotExistError,
+  getOctokitForApp,
+  parseRepoFullName,
+} from "@/lib/github";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { isCrossRepoPull, runAutomation } from "@/server-lib/automations";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
-import { renderPrDiffContext } from "@/server-lib/review/pr-diff-context";
+import {
+  renderPrDiffContext,
+  safeGitRef,
+} from "@/server-lib/review/pr-diff-context";
 import { replyToMention } from "@/server-lib/review/mention-target-reply";
 import { addEyesReactionToComment } from "./utils";
 import { requireAppAccess } from "./webhook-skip";
@@ -78,6 +85,72 @@ export const CROSS_REPO_MENTION_REPLY =
 /** The reply when the mention was accepted but no run could be started. */
 export const MENTION_NOT_STARTED_REPLY =
   "I couldn't start on this request. Mention me again to retry.";
+
+/**
+ * Why an accepted mention started no thread (#729 B). Each is logged as
+ * `reason=<value>` and answered with its own reply, so a retry that cannot
+ * help is never suggested.
+ */
+export type MentionNoThreadReason =
+  | "empty_instruction"
+  | "cross_repo"
+  | "pr_merged"
+  | "pr_closed"
+  | "head_branch_missing"
+  | "branch_missing"
+  | "start_failed";
+
+const WHERE_INSTEAD = "Mention me on the issue, or on an open pull request.";
+
+/**
+ * The branch as a code span, or a plain phrase when the name is unsafe to
+ * render: a ref is chosen by whoever pushed it, and a backtick or `@` in it
+ * could close the span and mention someone.
+ */
+function branchLabel(ref: string, fallback: string): string {
+  const safe = safeGitRef(ref);
+  return safe === null ? fallback : `\`${safe}\``;
+}
+
+/** The reply to a mention on a merged or closed pull request (OD-4: explain, start nothing). */
+export function closedPrMentionReply(pr: {
+  merged: boolean;
+  headRef: string;
+}): string {
+  const branch = branchLabel(pr.headRef, "its branch");
+  return pr.merged
+    ? `This pull request is already merged (${branch}), so there is ` +
+        `nothing left for me to work on here. ${WHERE_INSTEAD}`
+    : `This pull request is closed without being merged (${branch}), so ` +
+        `I won't work on it. Reopen it, or mention me on the issue or on an ` +
+        `open pull request.`;
+}
+
+/**
+ * The reply when thread creation could not find the branch to check out.
+ * `ensureBranchExists` raises it for any failed branch read, not only a 404,
+ * so the text does not claim the branch is gone.
+ */
+export function missingBranchMentionReply(opts: {
+  branch: string;
+  isPullRequest: boolean;
+}): string {
+  if (opts.isPullRequest) {
+    const branch = branchLabel(opts.branch, "this pull request's branch");
+    return (
+      `I couldn't find ${branch}, so I didn't start. If it was deleted, ` +
+      `restore it or mention me on the issue or on an open pull request; ` +
+      `if it still exists, mention me again.`
+    );
+  }
+  // An unsafe name is simply left out.
+  const branch = branchLabel(opts.branch, "");
+  return (
+    `I couldn't find this repository's default branch` +
+    `${branch === "" ? "" : ` ${branch}`}, so I didn't start on this ` +
+    `issue. Mention me again once it is reachable.`
+  );
+}
 
 /** The one reply an authorised mention with no instruction gets. */
 export function emptyMentionReply(slug: string): string {
@@ -439,12 +512,16 @@ export async function handleOrgLaneMention(
     log("skip: this comment was already handled (redelivery)", meta);
     return true;
   }
-  const reply = async (body: string, what: string) => {
+  // One greppable line per no-thread answer, with the reason as a field too.
+  const reply = async (body: string, reason: MentionNoThreadReason) => {
     if (shadow) {
-      log(`[shadow] ${what} — reply suppressed`, meta);
+      log(`[shadow] no thread reason=${reason} — reply suppressed`, {
+        ...meta,
+        reason,
+      });
       return;
     }
-    log(`${what} — replying`, meta);
+    log(`no thread reason=${reason} — replying`, { ...meta, reason });
     try {
       await replyToMention({
         octokit,
@@ -464,7 +541,7 @@ export async function handleOrgLaneMention(
   };
 
   if (mention.instruction === null) {
-    await reply(emptyMentionReply(slug), "empty mention");
+    await reply(emptyMentionReply(slug), "empty_instruction");
     return true;
   }
 
@@ -492,7 +569,20 @@ export async function handleOrgLaneMention(
       // The run clones THIS repo at the head ref: a head that lives in a
       // fork would check out (and push to) a same-named branch here instead.
       if (isCrossRepoPull(pr)) {
-        await reply(CROSS_REPO_MENTION_REPLY, "cross-repo pull request");
+        await reply(CROSS_REPO_MENTION_REPLY, "cross_repo");
+        return true;
+      }
+      // OD-4: a merged or closed PR gets its reason and no thread; there is
+      // no fallback to the base branch. A head deleted on an open PR fails
+      // thread creation with BranchDoesNotExistError, named below.
+      // `merged_at` backs up `merged`, so a payload without it is not
+      // called "closed without being merged".
+      const merged = pr.merged === true || Boolean(pr.merged_at);
+      if (merged || pr.state === "closed") {
+        await reply(
+          closedPrMentionReply({ merged, headRef: pr.head.ref }),
+          merged ? "pr_merged" : "pr_closed",
+        );
         return true;
       }
       branchName = pr.head.ref;
@@ -547,6 +637,8 @@ export async function handleOrgLaneMention(
 
   const mentionBlock = renderMentionBlock(stamp, mention.instruction);
   let threadId: string | undefined;
+  // What stopped thread creation, when runAutomation swallowed it.
+  let startFailure: unknown;
   try {
     const result = await runAutomation({
       userId: automation.userId,
@@ -574,10 +666,14 @@ export async function handleOrgLaneMention(
           mention:
             prIsDraft === undefined ? stamp : { ...stamp, isDraft: prIsDraft },
         },
+        onStartFailure: (error) => {
+          startFailure = error;
+        },
       },
     });
     threadId = result?.threadId;
   } catch (error) {
+    startFailure = error;
     console.error("[org-mention] runAutomation failed", {
       ...meta,
       automationId: automation.id,
@@ -588,7 +684,17 @@ export async function handleOrgLaneMention(
     // No thread means no finish writer: answer now rather than leave the
     // person on silence. No reply marker, so a thread that did start after
     // all still posts its own answer.
-    await reply(MENTION_NOT_STARTED_REPLY, "no thread started");
+    if (startFailure instanceof BranchDoesNotExistError) {
+      await reply(
+        missingBranchMentionReply({
+          branch: branchName,
+          isPullRequest: input.isPullRequest,
+        }),
+        input.isPullRequest ? "head_branch_missing" : "branch_missing",
+      );
+      return true;
+    }
+    await reply(MENTION_NOT_STARTED_REPLY, "start_failed");
     return true;
   }
   log("thread created", {
