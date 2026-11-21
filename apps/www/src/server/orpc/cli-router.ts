@@ -1,5 +1,3 @@
-import { implement, ORPCError } from "@orpc/server";
-import { cliAPIContract } from "@terragon/cli-api-contract";
 import { db } from "@/lib/db";
 import {
   getThread,
@@ -15,51 +13,33 @@ import { isAppInstalledOnRepo } from "@terragon/shared/github-app";
 import { getClaudeSessionJSONLOrNull } from "@/server-lib/claude-session";
 import { checkCliTaskCreationRateLimit } from "@/lib/rate-limit";
 import { ensureAgent } from "@terragon/agent/utils";
-import { getDaemonTokenContext } from "@/lib/auth-server";
-import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { combineThreadStatuses } from "@/agent/thread-status";
+import { orpcBase as base } from "@/server/orpc/base";
+import { egressRouter } from "@/server/orpc/egress-router";
+import { verifyApiKeyOrRefuse } from "@/server/orpc/principal";
 
-const os = implement(cliAPIContract)
-  .$context<{
-    headers: Headers;
-    userId: string;
-    // Tenant from the daemon token (WI-5). Nullable during the backfill phase;
-    // threaded into the thread fence on the CLI read path.
-    organizationId: string | null;
-  }>()
-  .use(async ({ context, next, errors }) => {
-    const headers = (context?.headers || new Headers()) as Headers;
-    let tenant: Awaited<ReturnType<typeof getDaemonTokenContext>>;
-    try {
-      tenant = await getDaemonTokenContext({ headers });
-    } catch (error) {
-      // The auth store failed: retryable, never UNAUTHORIZED.
-      if (error instanceof DaemonAuthUnavailableError) {
-        throw new ORPCError("SERVICE_UNAVAILABLE", {
-          status: 503,
-          message: "Authentication temporarily unavailable",
-        });
-      }
-      throw error;
-    }
-    if (!tenant) {
-      throw errors.UNAUTHORIZED();
-    }
-    // ADR-003 F1: a daemon-scoped token (minted for a sandbox/worker agent run)
-    // must NOT grant CLI access — threads.list/detail/CREATE + agent-spawn. A
-    // compromised execution box holds a daemon token; reject it here so its blast
-    // radius stays "one thread's events", not "the whole account's CLI".
-    if (tenant.tokenType === "daemon") {
-      throw errors.UNAUTHORIZED();
-    }
-    return next({
-      context: {
-        headers,
-        userId: tenant.userId,
-        organizationId: tenant.organizationId,
-      },
-    });
+// `threads.*` and `auth.whoami` keep the token-only middleware: no cookie and
+// no Bearer ever authenticates them (this mount sends a wildcard CORS
+// header): `X-Daemon-Token` only. It is applied to those procedures only,
+// never to the router: `egress.*` resolves its own principal
+// (egress-router.ts) and may be authenticated by a session.
+//
+// ADR-003 F1: a daemon-scoped token (minted for a sandbox/worker agent run)
+// must NOT grant CLI access: a compromised execution box holds one, so its
+// blast radius stays "one thread's events", not "the whole account's CLI".
+// `verifyApiKeyOrRefuse` refuses it, and answers 503 when the auth store fails.
+const os = base.use(async ({ context, next, errors }) => {
+  const token = context.headers.get("X-Daemon-Token");
+  if (!token) throw errors.UNAUTHORIZED();
+  const tenant = await verifyApiKeyOrRefuse(token, errors);
+  return next({
+    context: {
+      headers: context.headers,
+      userId: tenant.userId,
+      organizationId: tenant.organizationId,
+    },
   });
+});
 
 // Create procedures
 const listThreads = os.threads.list.handler(async ({ input, context }) => {
@@ -269,7 +249,7 @@ const whoAmI = os.auth.whoami.handler(async ({ context }) => {
 });
 
 // Create the router
-export const cliRouter = os.router({
+export const cliRouter = base.router({
   threads: {
     list: listThreads,
     detail: threadDetail,
@@ -278,4 +258,5 @@ export const cliRouter = os.router({
   auth: {
     whoami: whoAmI,
   },
+  egress: egressRouter,
 });

@@ -40,3 +40,8 @@ export const EGRESS_ACCESS_REFUSALS = [
 ] as const;
 
 export type EgressAccessRefusal = (typeof EGRESS_ACCESS_REFUSALS)[number];
+
+/** The egress policy levels. One list for the box, the API contract and the stored column. */
+export const EGRESS_POLICY_LEVELS = ["none", "ip_port", "domain"] as const;
+
+export type EgressLevel = (typeof EGRESS_POLICY_LEVELS)[number];

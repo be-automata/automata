@@ -862,3 +862,50 @@ after PR-2 merges; the www deploy for PR-3 waits for it.
 15. Additions beyond the ticket, to confirm at validate: `egress.list`, `dryRun`, `canEdit`,
     `budget`, the `invalid_input` and `registries_ignored`/`no_policy_box_open` codes, the
     same-origin rule for session writes, and `lookup_failed` → 503 instead of 403.
+
+---
+
+## 8. Validator amendments for PR-3 (2026-11-20, re-checked at `a4f7b4ed`)
+
+PR-1 (#730) and PR-2 (#732) are merged. PR-3 is cut along the §3 seam:
+
+- **PR-3a** `feat/728-egress-api-read`: `@orpc/openapi@1.14.13` + `@orpc/zod@1.14.13`, base
+  `SERVICE_UNAVAILABLE`, the read procedures `egress.get`, `egress.history`, `egress.list` in the
+  contract, the principal middleware, the effective view, the `/api/v1` mount + `openapi.json`,
+  `x-api-version` on both mounts, tests. AC-1, AC-3 (read paths), AC-4 (read paths), AC-5 (`canEdit`),
+  not-found parity, AC-10 (for the procedures that exist), conformance rows 5, 6, 7, 9, 18.
+- **PR-3b** `feat/728-egress-api-write`: `egress.update` (CAS, advisory lock, same-transaction
+  audit, `dryRun`), `cliEgressWriteRateLimit`, the same-origin rule for session writes, PostHog.
+  AC-2, AC-6 (wire), AC-7, AC-8, AC-9.
+
+The validator's required fixes, binding on both:
+
+1. (Done in PR-2) `repo_egress_audit_log` is in `REHOME_EXCLUDED_TABLES`.
+2. PR-3 depends on PR-1 (`checkRepoWriteAccess`) and PR-2; both are on `main` now.
+3. **Repo in org reuses `isRepoInOrganizationScope`** (`apps/www/src/server-lib/user-repos.ts:133`)
+   plus one arm: true when `{org}` already has a `repo_review_settings` row for the repo. No new
+   GitHub-backed resolver, no `getRepoInstallationId` call, no cache. This replaces §4.4 step 4's
+   resolver; the 404 parity rule stays (one byte-identical `NOT_FOUND` for every "not in this org").
+   The `github_unavailable` 503 of step 4 goes away with the GitHub call.
+4. **The view never 500s on the broker host.** `cellBrokerHost()` (`cell-gate.ts:112`) throws on a
+   single-label host; the view catches it and returns
+   `cell: {ok:false, code:"broker_host_unavailable", reason:null}` (add the code to the `cell`
+   union). Tests that assert platform hosts set `NEXT_PUBLIC_APP_URL=https://app.example.test`.
+5. (PR-3b) The session-write Origin check compares `Origin` against `new URL(publicAppUrl()).origin`
+   plus Better Auth's `trustedOrigins` (`apps/www/src/lib/auth.ts:383`), and refuses with
+   **403** `FORBIDDEN`, not 401.
+6. **`/api/cli` stays token-only** (it sends `Access-Control-Allow-Origin: *`,
+   `app/api/cli/[[...slug]]/route.ts:9`): the session path of the principal runs on the `/api/v1`
+   mount only. `Authorization: Bearer` is always read as an API key, never as a session.
+7. **A failed admin lookup on a read is not an error.** `get` with `checkRepoWriteAccess` →
+   `lookup_failed` returns 200 with `canEdit:false, readOnlyReason:"permission_unverified"`
+   (add it to the enum). Only `update` and its `dryRun` answer 503.
+8. (PR-3b) `add`/`remove` allow up to 200 entries (`.max(200)`), so the AC-6 101-host case reaches
+   the classifier's `too_many_entries` instead of a schema error.
+
+Warnings, also binding:
+
+- `owner` and `repo` match `^[A-Za-z0-9_.-]+$` in `RepoPath`.
+- The conformance test allow-lists the input-validation interceptor's mapping by name.
+- Follow-up issues to file with PR-3a: audit rows on the legacy PUT/DELETE; the PR Review settings
+  UI sending `organizationId` (OD-5).
