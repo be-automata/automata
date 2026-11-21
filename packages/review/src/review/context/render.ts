@@ -92,6 +92,15 @@ export interface RestPullRequestLike {
   body?: string | null;
 }
 
+/** REST labels (a bare name or a label object) → their non-empty names. */
+function labelNames(
+  labels: ReadonlyArray<string | { name?: string | null }>,
+): string[] {
+  return labels
+    .map((label) => (typeof label === "string" ? label : (label.name ?? "")))
+    .filter(Boolean);
+}
+
 /** REST pull request → the PR view, in gh's casing (OPEN/MERGED, MERGEABLE/CONFLICTING/UNKNOWN). */
 export function prViewFromRest(pr: RestPullRequestLike): PrViewData {
   const mergeable =
@@ -106,7 +115,7 @@ export function prViewFromRest(pr: RestPullRequestLike): PrViewData {
     state: pr.merged ? "MERGED" : pr.state.toUpperCase(),
     isDraft: pr.draft === true,
     authorLogin: pr.user?.login ?? null,
-    labels: pr.labels.map((label) => label.name ?? "").filter(Boolean),
+    labels: labelNames(pr.labels),
     url: pr.html_url,
     headRefName: pr.head.ref,
     baseRefName: pr.base.ref,
@@ -116,6 +125,41 @@ export function prViewFromRest(pr: RestPullRequestLike): PrViewData {
     mergeable,
     mergeStateStatus: (pr.mergeable_state ?? "unknown").toUpperCase(),
     body: pr.body ?? null,
+  };
+}
+
+export interface IssueViewData {
+  number: number;
+  title: string;
+  /** gh casing: OPEN | CLOSED. */
+  state: string;
+  authorLogin: string | null;
+  labels: readonly string[];
+  url: string;
+  body: string | null;
+}
+
+/** The REST issue fields the issue view reads (GitHub `GET /issues/{n}`). */
+export interface RestIssueLike {
+  number: number;
+  title: string;
+  state: string;
+  user?: { login: string } | null;
+  labels: ReadonlyArray<string | { name?: string | null }>;
+  html_url: string;
+  body?: string | null;
+}
+
+/** REST issue → the issue view, in gh's casing (OPEN/CLOSED). */
+export function issueViewFromRest(issue: RestIssueLike): IssueViewData {
+  return {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state.toUpperCase(),
+    authorLogin: issue.user?.login ?? null,
+    labels: labelNames(issue.labels),
+    url: issue.html_url,
+    body: issue.body ?? null,
   };
 }
 
@@ -136,26 +180,50 @@ export function priorReviewFromRest(review: RestReviewLike): PriorReviewData {
   };
 }
 
-/** gh's non-TTY `pr view` shape: `key:\tvalue` lines, `--`, then the body. */
-export function renderPrView(pr: PrViewData): string {
-  const fields: Array<[string, string | number | null]> = [
-    ["title", pr.title],
-    ["state", pr.state],
-    ["draft", pr.isDraft ? "true" : "false"],
-    ["author", pr.authorLogin ?? ""],
-    ["labels", pr.labels.join(", ")],
-    ["number", pr.number],
-    ["url", pr.url],
-    ["headRefName", pr.headRefName],
-    ["baseRefName", pr.baseRefName],
-    ["additions", pr.additions],
-    ["deletions", pr.deletions],
-    ["changedFiles", pr.changedFiles],
-    ["mergeable", pr.mergeable],
-    ["mergeStateStatus", pr.mergeStateStatus],
-  ];
+type GhViewFields = ReadonlyArray<readonly [string, string | number | null]>;
+
+/** gh's non-TTY `… view` shape: `key:\tvalue` lines, `--`, then the body. */
+function renderGhView(fields: GhViewFields, body: string | null): string {
   const header = fields.map(([k, v]) => `${k}:\t${v ?? ""}`).join("\n");
-  return `${header}\n--\n${(pr.body ?? "").trim()}`;
+  return `${header}\n--\n${(body ?? "").trim()}`;
+}
+
+/** gh's non-TTY `pr view` shape. */
+export function renderPrView(pr: PrViewData): string {
+  return renderGhView(
+    [
+      ["title", pr.title],
+      ["state", pr.state],
+      ["draft", pr.isDraft ? "true" : "false"],
+      ["author", pr.authorLogin ?? ""],
+      ["labels", pr.labels.join(", ")],
+      ["number", pr.number],
+      ["url", pr.url],
+      ["headRefName", pr.headRefName],
+      ["baseRefName", pr.baseRefName],
+      ["additions", pr.additions],
+      ["deletions", pr.deletions],
+      ["changedFiles", pr.changedFiles],
+      ["mergeable", pr.mergeable],
+      ["mergeStateStatus", pr.mergeStateStatus],
+    ],
+    pr.body,
+  );
+}
+
+/** gh's non-TTY `issue view` shape. */
+export function renderIssueView(issue: IssueViewData): string {
+  return renderGhView(
+    [
+      ["title", issue.title],
+      ["state", issue.state],
+      ["author", issue.authorLogin ?? ""],
+      ["labels", issue.labels.join(", ")],
+      ["number", issue.number],
+      ["url", issue.url],
+    ],
+    issue.body,
+  );
 }
 
 /**
@@ -242,29 +310,47 @@ export type ReviewContextBlock =
   | { name: string; content: string; maxChars?: number }
   | { name: string; unavailable: string };
 
+/** Why a block could not be fetched, as its `unavailable` note: at most 200 characters, never a body. */
+export function unavailableReason(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 200);
+}
+
 /**
- * Join the blocks into the text that replaces a skill's context directive:
- * each capped (head + tail) and wrapped as untrusted, separated by `---`. A
- * block that could not be fetched says so — the run is never blocked on it.
+ * One block, capped (head + tail) and wrapped as untrusted, and whether the
+ * cap cut it (the block then carries its own truncation note). A block that
+ * could not be fetched says so.
+ */
+export function renderReviewContextBlock(
+  block: ReviewContextBlock,
+  maxChars: number = REVIEW_CONTEXT_BLOCK_MAX_CHARS,
+): { text: string; truncated: boolean } {
+  if ("unavailable" in block) {
+    return {
+      text: wrapUntrusted(
+        `<${block.name} unavailable="true" reason="${block.unavailable.replace(/"/g, "'")}" />`,
+        block.name,
+      ),
+      truncated: false,
+    };
+  }
+  const cap = block.maxChars ?? maxChars;
+  const { text, truncated } = capHeadTail(block.content, cap);
+  const body = truncated
+    ? `${text}\n[block "${block.name}" truncated to ${cap} chars]`
+    : text;
+  return { text: wrapUntrusted(body, block.name), truncated };
+}
+
+/**
+ * Join the blocks into the text that replaces a skill's context directive,
+ * each rendered by {@link renderReviewContextBlock}, separated by `---`. The
+ * run is never blocked on a block that could not be fetched.
  */
 export function renderReviewContext(
   blocks: readonly ReviewContextBlock[],
   maxChars: number = REVIEW_CONTEXT_BLOCK_MAX_CHARS,
 ): string {
   return blocks
-    .map((block) => {
-      if ("unavailable" in block) {
-        return wrapUntrusted(
-          `<${block.name} unavailable="true" reason="${block.unavailable.replace(/"/g, "'")}" />`,
-          block.name,
-        );
-      }
-      const cap = block.maxChars ?? maxChars;
-      const { text, truncated } = capHeadTail(block.content, cap);
-      const body = truncated
-        ? `${text}\n[block "${block.name}" truncated to ${cap} chars]`
-        : text;
-      return wrapUntrusted(body, block.name);
-    })
+    .map((block) => renderReviewContextBlock(block, maxChars).text)
     .join(SECTION_SEPARATOR);
 }

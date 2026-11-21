@@ -124,7 +124,7 @@ describe("prefetchReviewContext", () => {
       ],
       graphql: async () => threadsPage([{ isResolved: false, id: 111 }], false),
     });
-    const out = await prefetchReviewContext({
+    const { text: out } = await prefetchReviewContext({
       octokit,
       repoFullName: "acme/widgets",
       prNumber: 7,
@@ -150,7 +150,7 @@ describe("prefetchReviewContext", () => {
 
   it("a failed block renders as unavailable; the others still render", async () => {
     const octokit = makeOctokit({ reviews: new Error("HTTP 502") });
-    const out = await prefetchReviewContext({
+    const { text: out, rendered } = await prefetchReviewContext({
       octokit,
       repoFullName: "acme/widgets",
       prNumber: 7,
@@ -160,6 +160,8 @@ describe("prefetchReviewContext", () => {
     expect(out).toContain(
       '<prior-reviews unavailable="true" reason="HTTP 502" />',
     );
+    // Only the blocks that rendered content count as rendered.
+    expect(rendered).toEqual(new Set(["pr-view"]));
   });
 
   it('paginates threads and stops at the page limit with truncated="true"', async () => {
@@ -167,7 +169,7 @@ describe("prefetchReviewContext", () => {
       threadsPage([{ isResolved: false, id: 1 }], true),
     );
     const octokit = makeOctokit({ graphql });
-    const out = await prefetchReviewContext({
+    const { text: out } = await prefetchReviewContext({
       octokit,
       repoFullName: "acme/widgets",
       prNumber: 7,
@@ -202,7 +204,7 @@ describe("prefetchReviewContext", () => {
         },
       }),
     });
-    const out = await prefetchReviewContext({
+    const { text: out } = await prefetchReviewContext({
       octokit,
       repoFullName: "acme/widgets",
       prNumber: 7,
@@ -214,7 +216,7 @@ describe("prefetchReviewContext", () => {
 
   it("renders pr-view from the caller's PR read without fetching it again", async () => {
     const octokit = makeOctokit({});
-    const out = await prefetchReviewContext({
+    const { text: out } = await prefetchReviewContext({
       octokit,
       repoFullName: "acme/widgets",
       prNumber: 7,
@@ -243,7 +245,7 @@ describe("prefetchReviewContext", () => {
 
     it("reads the PR when the caller has none and keeps the block's middle", async () => {
       const octokit = makeOctokit({});
-      const out = await prefetchReviewContext({
+      const { text: out } = await prefetchReviewContext({
         octokit,
         repoFullName: "acme/widgets",
         prNumber: 7,
@@ -268,7 +270,7 @@ describe("prefetchReviewContext", () => {
     });
 
     it("without a tracker scope the block renders unavailable", async () => {
-      const out = await prefetchReviewContext({
+      const { text: out } = await prefetchReviewContext({
         octokit: makeOctokit({}),
         repoFullName: "acme/widgets",
         prNumber: 7,

@@ -14,6 +14,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  issueViewFromRest,
+  renderIssueView,
   renderPrView,
   renderPriorReviews,
   renderReviewContext,
@@ -215,6 +217,26 @@ describe("untrusted wrapping", () => {
     });
   });
 
+  test("head + tail cap never splits a surrogate pair at either cut", () => {
+    const lone =
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    // "😀" is two UTF-16 units: odd offsets put each cut inside a pair.
+    for (const prefix of ["", "a"]) {
+      const input = prefix + "😀".repeat(20);
+      for (const cap of [9, 10, 11, 12]) {
+        const { text, truncated } = capHeadTail(input, cap);
+        assert.equal(truncated, true);
+        assert.equal(lone.test(text), false, `prefix=${prefix} cap=${cap}`);
+        const kept = text.replace(
+          /\n\n\[\.\.\. truncated \d+ chars[^\]]*\]\n\n/,
+          "",
+        );
+        const dropped = Number(/truncated (\d+) chars/.exec(text)?.[1]);
+        assert.equal(kept.length + dropped, input.length);
+      }
+    }
+  });
+
   test("renderReviewContext wraps each block, separates with ---, caps at 24k and reports unavailable blocks", () => {
     assert.equal(REVIEW_CONTEXT_BLOCK_MAX_CHARS, 24_000);
     const out = renderReviewContext([
@@ -248,5 +270,56 @@ describe("untrusted wrapping", () => {
     assert.ok(ticket?.includes("TAIL"));
     assert.ok(!ticket?.includes("truncated to"));
     assert.ok(short?.includes('[block "short" truncated to 100 chars]'));
+  });
+});
+
+describe("issueViewFromRest + renderIssueView", () => {
+  test("gh casing, string and object labels, trimmed body", () => {
+    const out = renderIssueView(
+      issueViewFromRest({
+        number: 7,
+        title: "Add widgets",
+        state: "open",
+        user: { login: "octo" },
+        labels: ["bug", { name: "infra" }, { name: null }],
+        html_url: "https://github.com/acme/widgets/issues/7",
+        body: "  Body text\n",
+      }),
+    );
+    assert.equal(
+      out,
+      [
+        "title:\tAdd widgets",
+        "state:\tOPEN",
+        "author:\tocto",
+        "labels:\tbug, infra",
+        "number:\t7",
+        "url:\thttps://github.com/acme/widgets/issues/7",
+        "--",
+        "Body text",
+      ].join("\n"),
+    );
+  });
+
+  test("a closed issue with a null or omitted user and body renders them empty", () => {
+    const base = {
+      number: 8,
+      title: "Gone",
+      state: "closed",
+      labels: [],
+      html_url: "u",
+    };
+    for (const view of [
+      issueViewFromRest({ ...base, user: null, body: null }),
+      issueViewFromRest(base),
+    ]) {
+      assert.equal(view.state, "CLOSED");
+      assert.equal(view.authorLogin, null);
+      assert.equal(view.body, null);
+      assert.equal(
+        renderIssueView(view),
+        "title:\tGone\nstate:\tCLOSED\nauthor:\t\nlabels:\t\nnumber:\t8\nurl:\tu\n--\n",
+      );
+    }
   });
 });

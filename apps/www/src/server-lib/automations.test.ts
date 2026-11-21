@@ -14,7 +14,7 @@ import { bindGithubInstallationToOrg } from "@terragon/shared/model/github-insta
 import { automations as automationsTable } from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { User } from "@terragon/shared";
+import { User, type DBUserMessage } from "@terragon/shared";
 import type {
   AutomationAction,
   IssueTriggerConfig,
@@ -28,6 +28,7 @@ import {
 import {
   runAutomation,
   validateAutomationCreationOrUpdate,
+  type TransformMessageContext,
 } from "./automations";
 import { AUDIT_FIX_SKILL_NAME } from "./review/review-skill";
 import { renderSkillPlaceholders } from "./review/resolve-review-skill";
@@ -46,7 +47,10 @@ vi.mock("./review/prefetch-review-context", async (importOriginal) => {
     await importOriginal<typeof import("./review/prefetch-review-context")>();
   return {
     ...actual,
-    prefetchReviewContextForPr: vi.fn(async () => "PREFETCHED-CONTEXT"),
+    prefetchReviewContextForPr: vi.fn(async () => ({
+      text: "PREFETCHED-CONTEXT",
+      rendered: new Set(["pr-view"]),
+    })),
   };
 });
 
@@ -1068,6 +1072,9 @@ describe("runAutomation — skill_message model + review context directive", () 
       body: BODY_WITH_CONTEXT,
       source: "seed",
     });
+    const transformMessage = vi.fn<
+      (m: DBUserMessage, c: TransformMessageContext) => DBUserMessage
+    >((message) => message);
     await runAutomation({
       userId: user.id,
       automationId: automation.id,
@@ -1076,7 +1083,12 @@ describe("runAutomation — skill_message model + review context directive", () 
         branchName: "feat/x",
         prBaseBranchName: "develop",
         prNumber: 41,
+        transformMessage,
       },
+    });
+    // The hook learns which blocks rendered from the prefetch, not the text.
+    expect(transformMessage.mock.calls[0]![1]).toEqual({
+      renderedContext: new Set(["pr-view"]),
     });
     expect(prefetchReviewContextForPr).toHaveBeenCalledWith({
       repoFullName: automation.repoFullName,
@@ -1107,13 +1119,20 @@ describe("runAutomation — skill_message model + review context directive", () 
       body: BODY_WITH_CONTEXT,
       source: "seed",
     });
+    const transformMessage = vi.fn<
+      (m: DBUserMessage, c: TransformMessageContext) => DBUserMessage
+    >((message) => message);
     await runAutomation({
       userId: user.id,
       automationId: automation.id,
       source: "manual",
+      options: { transformMessage },
     });
     expect(prefetchReviewContextForPr).not.toHaveBeenCalled();
     expect(sentMessage().text).toContain(NO_PR_REVIEW_CONTEXT);
+    expect(transformMessage.mock.calls[0]![1]).toEqual({
+      renderedContext: new Set(),
+    });
   });
 
   it("a body without the directive never fetches", async () => {

@@ -32,15 +32,31 @@ export function capHeadTail(
   if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) {
     return { text, truncated: false };
   }
-  const dropped = text.length - maxChars;
-  const headLength = Math.ceil(maxChars / 2);
-  const tailLength = maxChars - headLength;
+  let headLength = Math.ceil(maxChars / 2);
+  let tailLength = maxChars - headLength;
+  // Never cut a surrogate pair: a lone half is not valid UTF-8 or jsonb.
+  if (isHighSurrogate(text.charCodeAt(headLength - 1))) headLength -= 1;
+  if (
+    tailLength > 0 &&
+    isLowSurrogate(text.charCodeAt(text.length - tailLength))
+  ) {
+    tailLength -= 1;
+  }
   const head = text.slice(0, headLength);
   const tail = tailLength > 0 ? text.slice(text.length - tailLength) : "";
+  const dropped = text.length - head.length - tail.length;
   return {
     text: `${head}\n\n[... truncated ${dropped} chars to fit context window ...]\n\n${tail}`,
     truncated: true,
   };
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 const GUARD =

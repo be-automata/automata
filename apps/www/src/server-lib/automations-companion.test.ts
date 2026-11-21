@@ -62,7 +62,10 @@ vi.mock("./review/prefetch-review-context", async (importOriginal) => {
     await importOriginal<typeof import("./review/prefetch-review-context")>();
   return {
     ...actual,
-    prefetchReviewContextForPr: vi.fn(async () => "PREFETCHED-CONTEXT"),
+    prefetchReviewContextForPr: vi.fn(async () => ({
+      text: "PREFETCHED-CONTEXT",
+      rendered: new Set(["pr-view"]),
+    })),
   };
 });
 
