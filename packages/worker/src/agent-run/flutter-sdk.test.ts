@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { codeOf, repoRoot } from "./bash-script-hygiene";
-import type { CheckoutProbe } from "./container-entry";
+import { isSafeFlutterVersion, type CheckoutProbe } from "./container-entry";
 import {
   FLUTTER_SDKS_DIR,
   FLUTTER_SHIM_DIR,
@@ -14,7 +14,6 @@ import {
   flutterAgentNote,
   flutterJournalLine,
   flutterWrapperArgv,
-  isSafeFlutterVersion,
   selectFlutterSdk,
   type FlutterRequirement,
 } from "./flutter-sdk";

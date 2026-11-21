@@ -92,14 +92,22 @@ export const CELL_SELF_CHECK_BLOCKED_EXIT = 3;
 /** OpenSandbox's server minimum timeout is 60 s: a shorter cell TTL is refused by the server. */
 export const CELL_MIN_TTL_MS = 60_000;
 
+/** The Hatchet `executionTimeout` every lane is registered with (definition.ts pins "30m"). */
+export const REGISTERED_EXECUTION_TIMEOUT = 30 * 60 * 1000;
+/** The task lane's run budget (#742): the registered 30 min plus a 30 min `refreshTimeout`. */
+export const TASK_LANE_EXECUTION_TIMEOUT = 60 * 60 * 1000;
+/** The Hatchet `scheduleTimeout` (definition.ts pins "30m"). */
+export const SCHEDULE_TIMEOUT = 30 * 60 * 1000;
+/** The teardown margin past a run's budget (#656 R6). */
+export const CELL_TEARDOWN_MARGIN = 15 * 60 * 1000;
+
 /**
- * The task lane's run budget (60 min, `TASK_LANE_BUDGET` in
- * `packages/worker/src/agent-run/run-budget.ts`: the registered 30 min plus a
- * 30 min `refreshTimeout`, #742) plus a 15 min teardown margin (#656 R6). Cells
+ * The task lane's run budget (60 min, `TASK_LANE_EXECUTION_TIMEOUT`, #742) plus a 15 min teardown margin (#656 R6). Cells
  * run plain task runs only, so one bound serves. The cell TTL and its bearer
  * share it (ADR-014); the OpenSandbox server cap must stay at or above it.
  */
-export const CELL_RUN_TTL_MS = 75 * 60 * 1000;
+export const CELL_RUN_TTL_MS =
+  TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN;
 
 /** A cell attempt unseen this long is dead (#656 R2): ≥ 30 polls at the worker's 5-10 s cadence. */
 export const CELL_LEASE_STALE_MS = 5 * 60 * 1000;

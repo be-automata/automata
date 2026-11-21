@@ -125,11 +125,8 @@ for v in ${FLUTTER_EXTRA_VERSIONS:-}; do
     set -e
     sdk="/opt/flutter-sdks/$1"
     w="$(mktemp -d -p "$HOME")"
-    mkdir "$w/test"
-    cp /opt/automata/flutter-fixture/pubspec.yaml "$w/pubspec.yaml"
+    cp -r /opt/automata/flutter-fixture/pubspec.yaml /opt/automata/flutter-fixture/test "$w/"
     cp "/opt/automata/flutter-fixture/$1/pubspec.lock" "$w/pubspec.lock"
-    printf "%s\n" "import \"package:flutter_test/flutter_test.dart\";" \
-      "void main() { test(\"smoke\", () { expect(1 + 1, 2); }); }" >"$w/test/smoke_test.dart"
     cd "$w"
     env FLUTTER_ROOT="$sdk" "$sdk/bin/flutter" test 2>&1
   ' _ "$v"

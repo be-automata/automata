@@ -1439,6 +1439,15 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     expect(loadCellConfig).toHaveBeenCalledTimes(1);
   });
 
+  /** Install `box` as the box executor, with an inert cell executor and the cell config on. */
+  function useBox(box: ReturnType<typeof fakeExecutor>): void {
+    wf._setRunExecutorsForTests({
+      box: box.executor,
+      cell: fakeExecutor("cell", completed).executor,
+      loadCellConfig: () => ON,
+    });
+  }
+
   // card: protects=#742 the run fn refreshes a task run's timeout once and hands the effective budget to the abnormal-end state; review, pr and self-heal never refresh and stay at 30; fails_when=the refresh is skipped, repeated or leaks to another lane, or the classifier keeps reading 30 for a task run; no_claim=the engine honouring the refresh (refresh-timeout.integration.test.ts)
   it.each([
     ["task", {}, 60, true],
@@ -1459,11 +1468,7 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     "#742 %s run: effective budget %i min, refreshed=%s",
     async (_n, extra, minutes, refreshed) => {
       const box = fakeExecutor("box", completed);
-      wf._setRunExecutorsForTests({
-        box: box.executor,
-        cell: fakeExecutor("cell", completed).executor,
-        loadCellConfig: () => ON,
-      });
+      useBox(box);
       const refreshTimeout = vi.fn(async () => {});
       const c = { ...ctx(), refreshTimeout };
       await rawRunFn(await wireInput(extra), c);
@@ -1475,36 +1480,31 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
     },
   );
 
-  // card: protects=#742 the refresh settles BEFORE the executor starts, and the executor is where admission (and its #371 deferral wait) lives, so a deferred task run already holds its 60 minutes and is never refreshed again; fails_when=the refresh moves after admission or into the executor; no_claim=the deferral itself (admission-deferral.integration.test.ts)
-  it("#742 the refresh settles before the executor (admission, deferral) starts, once", async () => {
+  // card: protects=#742 the refresh is started at run start (overlapping the unseal and the stale check) and has settled BEFORE the executor starts, with its value in the abnormal-end state; the executor is where admission (and its #371 deferral wait) lives, so a deferred task run already holds its 60 minutes and is never refreshed again; fails_when=the refresh moves after admission or into the executor, or its value is not awaited; no_claim=the deferral itself (admission-deferral.integration.test.ts)
+  it("#742 the refresh starts at run start, settles before the executor (admission, deferral) starts, once", async () => {
     let refreshedAtStart = -1;
     let settled = false;
     const refreshTimeout = vi.fn(async () => {
       await new Promise((r) => setTimeout(r, 5));
       settled = true;
     });
+    let budgetAtExecutor = -1;
     const box = fakeExecutor("box", async (a) => {
       refreshedAtStart = settled ? refreshTimeout.mock.calls.length : -1;
+      budgetAtExecutor = a.abnormal.runExecutionTimeoutMs;
       return completed(a);
     });
-    wf._setRunExecutorsForTests({
-      box: box.executor,
-      cell: fakeExecutor("cell", completed).executor,
-      loadCellConfig: () => ON,
-    });
+    useBox(box);
     await rawRunFn(await wireInput(), { ...ctx(), refreshTimeout });
     expect(refreshedAtStart).toBe(1);
+    expect(budgetAtExecutor).toBe(60 * 60_000);
     expect(refreshTimeout).toHaveBeenCalledTimes(1);
   });
 
   // card: protects=#742 a refresh that rejects never fails the run: it runs at 30 minutes with one log line; fails_when=the rejection propagates or the state says 60; no_claim=the 10 s bound (run-budget.test.ts)
   it("#742 a rejected refresh leaves the task run at 30 minutes and runs on", async () => {
     const box = fakeExecutor("box", completed);
-    wf._setRunExecutorsForTests({
-      box: box.executor,
-      cell: fakeExecutor("cell", completed).executor,
-      loadCellConfig: () => ON,
-    });
+    useBox(box);
     const c = {
       ...ctx(),
       refreshTimeout: vi.fn(async () => {

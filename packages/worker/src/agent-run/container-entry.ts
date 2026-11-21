@@ -161,6 +161,11 @@ export function detectFlutterPin(repo: string): string | null {
 
 const FLUTTER_PIN = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][0-9A-Za-z.]{1,32})?$/;
 
+/** Is `v` an exact release version, safe to log and to pass as an argv? Shared with the cell path. */
+export function isSafeFlutterVersion(v: string): boolean {
+  return FLUTTER_PIN.test(v);
+}
+
 /** The pure decision over a probe: `.fvmrc` wins over the legacy config. */
 export function detectFlutterPinFrom(probe: CheckoutProbe): string | null {
   const read = (rel: string, field: string): string | null => {
@@ -178,7 +183,7 @@ export function detectFlutterPinFrom(probe: CheckoutProbe): string | null {
   const pin =
     read(".fvmrc", "flutter") ??
     read(".fvm/fvm_config.json", "flutterSdkVersion");
-  return pin !== null && FLUTTER_PIN.test(pin) ? pin : null;
+  return pin !== null && isSafeFlutterVersion(pin) ? pin : null;
 }
 
 /** The reads `detectSomnioStacksFrom` needs; a fixture checkout implements it in tests. */
@@ -191,7 +196,8 @@ export interface CheckoutProbe {
   list(rel: string): string[];
 }
 
-const MAX_MARKER_BYTES = 256 * 1024;
+/** A marker file bigger than this is treated as absent (the cell path reuses the cap). */
+export const MAX_MARKER_BYTES = 256 * 1024;
 
 function fsProbe(root: string): CheckoutProbe {
   const resolve = (rel: string): string | null => {

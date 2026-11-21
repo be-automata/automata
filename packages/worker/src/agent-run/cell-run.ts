@@ -60,16 +60,23 @@ import { admitRunSlot } from "./run-admission";
 import { formatRunStartLine, resolveRunLane } from "./run-lane";
 import { classifyNextMessageError } from "./retry-classification";
 import { getProcessWorkerId } from "./run-namespace";
-import type { CheckoutProbe } from "./container-entry";
+import {
+  CONTAINER_PINS_FILE,
+  MAX_MARKER_BYTES,
+  isSafeFlutterVersion,
+  type CheckoutProbe,
+} from "./container-entry";
 import {
   FLUTTER_MARKER_FILES,
-  FLUTTER_SDKS_DIR,
   detectFlutterRequirementFrom,
   flutterAgentNote,
   flutterJournalLine,
+  flutterInstallFailedLine,
+  flutterInstallFailedNote,
   flutterWrapperArgv,
-  isSafeFlutterVersion,
   selectFlutterSdk,
+  type FlutterRequirement,
+  type FlutterSelection,
 } from "./flutter-sdk";
 import type { RunExecutor, RunExecutorInput } from "./run-executor";
 import type { AgentRunOutput, PulledDaemonMessage } from "./types";
@@ -112,10 +119,7 @@ const SOCKET_WAIT_MS = 90_000;
 const SOCKET_POLL_MS = 1_000;
 const EXEC_STDERR_TAIL = 512;
 const PGREP_TIMEOUT_MS = 10_000;
-/** A marker file bigger than this is treated as absent (the box path's cap). */
-const FLUTTER_MARKER_MAX_BYTES = 256 * 1024;
 const FLUTTER_EXEC_TIMEOUT_MS = 20_000;
-const IMAGE_PINS_PATH = "/opt/automata/pins.env";
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const CONFIRM_RETRY = { tries: 4, backoffMs: [1_000, 2_000, 4_000] } as const;
 /** The test database's readiness budget (#707): well under one setup stamp. */
@@ -975,7 +979,7 @@ async function readFlutterMarkers(
         "-type",
         "f",
         "-size",
-        `-${FLUTTER_MARKER_MAX_BYTES + 1}c`,
+        `-${MAX_MARKER_BYTES + 1}c`,
         "-print",
       ],
       { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
@@ -987,92 +991,77 @@ async function readFlutterMarkers(
       .map((l) => l.trim())
       .filter((l) => l !== ""),
   );
+  // No inner catch: a transport error on one marker must not fall through to
+  // a lower-precedence one and pick a different SDK; the caller fails open.
   for (const rel of FLUTTER_MARKER_FILES) {
     if (!readable.has(`${CELL_WORKSPACE}/${rel}`)) continue;
-    try {
-      const raw = await raceLive(
-        r,
-        provider.copyOut(r.cellId as string, `${CELL_WORKSPACE}/${rel}`),
-      );
-      if (raw.length <= FLUTTER_MARKER_MAX_BYTES) {
-        files[rel] = new TextDecoder().decode(raw);
-      }
-    } catch (error) {
-      rethrowAbort(r, error);
+    const raw = await raceLive(
+      r,
+      provider.copyOut(r.cellId as string, `${CELL_WORKSPACE}/${rel}`),
+    );
+    if (raw.length <= MAX_MARKER_BYTES) {
+      files[rel] = new TextDecoder().decode(raw);
     }
   }
   return files;
 }
 
-/** The image's default Flutter version, from its pins file (null when unreadable or unsafe). */
-async function readImageFlutterDefault(
-  r: CellRunState,
-): Promise<string | null> {
-  try {
-    const raw = await raceLive(
-      r,
-      (r.provider as ICellProvider).copyOut(
-        r.cellId as string,
-        IMAGE_PINS_PATH,
-      ),
-    );
-    const v = /^FLUTTER_VERSION=(\S+)$/m.exec(
-      new TextDecoder().decode(raw),
-    )?.[1];
-    return v !== undefined && isSafeFlutterVersion(v) ? v : null;
-  } catch (error) {
-    rethrowAbort(r, error);
-    return null;
-  }
-}
-
-/** The SDK versions the image bakes under /opt/flutter-sdks (none on an older image). */
-async function listImageFlutterSdks(r: CellRunState): Promise<string[]> {
-  const out = await raceLive(
-    r,
-    (r.provider as ICellProvider).exec(
-      r.cellId as string,
-      ["/bin/ls", "-1", FLUTTER_SDKS_DIR],
-      { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
-    ),
-  );
-  return out.exitCode === 0
-    ? out.stdout
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l !== "")
-    : [];
+interface ImageFlutter {
+  defaultVersion: string;
+  /** The extra SDKs the image bakes (safe versions only). */
+  available: string[];
 }
 
 /**
- * Write the wrappers for `version`. Journals `selected` only once they are in
- * place; a failure keeps the default SDK and journals that instead (one line).
+ * The image's Flutter SDKs from its one pins file: the default and the extras
+ * (`FLUTTER_EXTRA_VERSIONS`, absent on an older image). Only versions that pass
+ * the safe shape survive; null when the default is missing or unsafe. A read
+ * error propagates (the caller fails open).
+ */
+async function readImageFlutter(r: CellRunState): Promise<ImageFlutter | null> {
+  const raw = await raceLive(
+    r,
+    (r.provider as ICellProvider).copyOut(
+      r.cellId as string,
+      CONTAINER_PINS_FILE,
+    ),
+  );
+  const text = new TextDecoder().decode(raw);
+  const v = /^FLUTTER_VERSION=(\S+)$/m.exec(text)?.[1];
+  if (v === undefined || !isSafeFlutterVersion(v)) return null;
+  const extras =
+    /^FLUTTER_EXTRA_VERSIONS='?([^'\n]*)'?$/m.exec(text)?.[1] ?? "";
+  return {
+    defaultVersion: v,
+    available: extras.split(/\s+/).filter(isSafeFlutterVersion),
+  };
+}
+
+/**
+ * Write the wrappers for the selected SDK. Journals the selection only once
+ * they are in place; a failure keeps the default SDK and journals that instead.
+ * Returns the agent's note.
  */
 async function installFlutterWrappers(
   r: CellRunState,
-  version: string,
+  sel: Extract<FlutterSelection, { kind: "use" }>,
+  req: FlutterRequirement,
   defaultVersion: string,
-  selected: string,
-): Promise<string> {
+): Promise<string | null> {
   const out = await raceLive(
     r,
     (r.provider as ICellProvider).exec(
       r.cellId as string,
-      flutterWrapperArgv(version),
+      flutterWrapperArgv(sel.version),
       { timeoutMs: FLUTTER_EXEC_TIMEOUT_MS },
     ),
   );
-  if (out.exitCode === 0) {
-    r.step(selected);
-    return flutterAgentNote(
-      { kind: "use", version, reason: "pinned" },
-      defaultVersion,
-    ) as string;
+  if (out.exitCode !== 0) {
+    r.step(flutterInstallFailedLine(sel.version, out.exitCode, defaultVersion));
+    return flutterInstallFailedNote(sel.version, defaultVersion);
   }
-  r.step(
-    `cell: flutter ${version} wrapper install failed (exit ${out.exitCode}); using ${defaultVersion}`,
-  );
-  return `Flutter: the project pins ${version} but selecting it failed; \`flutter\` is the default SDK ${defaultVersion}.`;
+  r.step(flutterJournalLine(sel, req, defaultVersion));
+  return flutterAgentNote(sel, defaultVersion);
 }
 
 /**
@@ -1081,7 +1070,8 @@ async function installFlutterWrappers(
  * reading; the box path is unchanged), decides in flutter-sdk.ts, and writes the
  * wrappers into the shim dir the cell image already puts first on PATH. A miss
  * keeps the default SDK and journals it. Returns the agent's CLAUDE.md note, or
- * null when there is nothing to say.
+ * null when there is nothing to say. The pins file is read only when a marker
+ * carries a requirement.
  */
 async function decideFlutterSdk(r: CellRunState): Promise<string | null> {
   const files = await readFlutterMarkers(r);
@@ -1092,21 +1082,17 @@ async function decideFlutterSdk(r: CellRunState): Promise<string | null> {
   };
   const req = detectFlutterRequirementFrom(probe);
   if (req.kind === "none") return null;
-  const defaultVersion = await readImageFlutterDefault(r);
-  if (defaultVersion === null) {
+  const image = await readImageFlutter(r);
+  if (image === null) {
     r.step("cell: flutter selection skipped (the image default is unknown)");
     return null;
   }
-  const sel = selectFlutterSdk(
-    req,
-    await listImageFlutterSdks(r),
-    defaultVersion,
-  );
-  const line = flutterJournalLine(sel, req, defaultVersion);
+  const { defaultVersion } = image;
+  const sel = selectFlutterSdk(req, image.available, defaultVersion);
   if (sel.kind === "use") {
-    return installFlutterWrappers(r, sel.version, defaultVersion, line);
+    return installFlutterWrappers(r, sel, req, defaultVersion);
   }
-  r.step(line);
+  r.step(flutterJournalLine(sel, req, defaultVersion));
   return flutterAgentNote(sel, defaultVersion);
 }
 

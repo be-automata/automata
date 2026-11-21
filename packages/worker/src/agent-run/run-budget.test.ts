@@ -6,13 +6,15 @@ import {
   newAbnormalEndState,
 } from "./abnormal-end";
 import {
+  REGISTERED_EXECUTION_TIMEOUT,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
+
+import {
   REFRESH_DEADLINE_MS,
-  REGISTERED_EXECUTION_TIMEOUT_MS,
-  TASK_LANE_EXECUTION_TIMEOUT_MS,
   TASK_LANE_REFRESH,
   applyRunBudget,
   refreshesRunBudget,
-  runExecutionBudgetMs,
 } from "./run-budget";
 import { ownsAbnormalTerminal } from "./run-lane";
 import type { AgentRunWireInput } from "./run-secrets";
@@ -60,8 +62,12 @@ describe("#742 per-lane run budget", () => {
   afterEach(() => vi.useRealTimers());
 
   // card: protects=only a task, non-self-heal run is entitled to 60 minutes; fails_when=review, pr or self-heal inherit it; no_claim=the engine (refresh-timeout.integration.test.ts)
-  it.each(LANES)("%s resolves to %i minutes", (_n, extra, minutes) => {
-    expect(runExecutionBudgetMs(wire(extra))).toBe(minutes * 60_000);
+  it.each(LANES)("%s resolves to %i minutes", async (_n, extra, minutes) => {
+    const out = await applyRunBudget(wire(extra), {
+      log: vi.fn(),
+      refreshTimeout: async () => {},
+    });
+    expect(out).toBe(minutes * 60_000);
   });
 
   it("the refresh lane is exactly the lane that owns the abnormal terminal", () => {
@@ -73,18 +79,12 @@ describe("#742 per-lane run budget", () => {
     }
   });
 
-  it("the constants mirror the registered 30m and the 60m task budget, and the refresh closes the gap (additive)", () => {
-    expect(REGISTERED_EXECUTION_TIMEOUT_MS).toBe(30 * 60_000);
-    expect(TASK_LANE_EXECUTION_TIMEOUT_MS).toBe(60 * 60_000);
-    expect(TASK_LANE_REFRESH).toBe("30m");
-  });
-
   // card: protects=refresh is called once for a task run and the effective budget is 60; fails_when=it is skipped, repeated or called for another lane; no_claim=the engine honouring it
   it("a task run refreshes once with TASK_LANE_REFRESH and gets 60 minutes", async () => {
     const refreshTimeout = vi.fn(async () => {});
     const log = vi.fn();
     expect(await applyRunBudget(wire(), { log, refreshTimeout })).toBe(
-      TASK_LANE_EXECUTION_TIMEOUT_MS,
+      TASK_LANE_EXECUTION_TIMEOUT,
     );
     expect(refreshTimeout).toHaveBeenCalledTimes(1);
     expect(refreshTimeout).toHaveBeenCalledWith(TASK_LANE_REFRESH);
@@ -98,35 +98,12 @@ describe("#742 per-lane run budget", () => {
       const refreshTimeout = vi.fn(async () => {});
       const log = vi.fn();
       expect(await applyRunBudget(wire(extra), { log, refreshTimeout })).toBe(
-        REGISTERED_EXECUTION_TIMEOUT_MS,
+        REGISTERED_EXECUTION_TIMEOUT,
       );
       expect(refreshTimeout).not.toHaveBeenCalled();
       expect(log).not.toHaveBeenCalled();
     },
   );
-
-  it("a rejected refresh fails open to 30 minutes with one log line", async () => {
-    const log = vi.fn();
-    const out = await applyRunBudget(wire(), {
-      log,
-      refreshTimeout: async () => {
-        throw new Error("engine said no");
-      },
-    });
-    expect(out).toBe(REGISTERED_EXECUTION_TIMEOUT_MS);
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(String(log.mock.calls[0]![0])).toContain(
-      "run budget: refresh failed (rejected: Error), staying at 30m",
-    );
-  });
-
-  it("a missing refreshTimeout fails open to 30 minutes with one log line", async () => {
-    const log = vi.fn();
-    expect(await applyRunBudget(wire(), { log })).toBe(
-      REGISTERED_EXECUTION_TIMEOUT_MS,
-    );
-    expect(log).toHaveBeenCalledTimes(1);
-  });
 
   // card: protects=the fail-open line says WHY the refresh failed (timeout, rejected with the error's class name, or no context) and never carries the error's message; fails_when=the cause is dropped or the message leaks into the journal; no_claim=the engine's error taxonomy
   it.each([
@@ -170,7 +147,7 @@ describe("#742 per-lane run budget", () => {
     async (_n, extra, line) => {
       const log = vi.fn();
       expect(await applyRunBudget(wire(), { log, ...extra })).toBe(
-        REGISTERED_EXECUTION_TIMEOUT_MS,
+        REGISTERED_EXECUTION_TIMEOUT,
       );
       expect(log.mock.calls.map((c) => String(c[0]))).toEqual([
         `[agent-run thr_1] ${line}`,
@@ -179,7 +156,8 @@ describe("#742 per-lane run budget", () => {
     },
   );
 
-  it("a refresh cut at 10 s says timeout", async () => {
+  // card: protects=a hung refresh call cannot hold the run past 10 s; fails_when=the race is dropped; no_claim=the engine's own timeout
+  it("a refresh that never answers is cut at 10 s, says timeout and fails open", async () => {
     vi.useFakeTimers();
     const log = vi.fn();
     const pending = applyRunBudget(wire(), {
@@ -187,23 +165,10 @@ describe("#742 per-lane run budget", () => {
       refreshTimeout: () => new Promise<void>(() => {}),
     });
     await vi.advanceTimersByTimeAsync(REFRESH_DEADLINE_MS);
-    await pending;
+    expect(await pending).toBe(REGISTERED_EXECUTION_TIMEOUT);
     expect(log.mock.calls.map((c) => String(c[0]))).toEqual([
       "[agent-run thr_1] run budget: refresh failed (timeout), staying at 30m",
     ]);
-  });
-
-  // card: protects=a hung refresh call cannot hold the run past 10 s; fails_when=the race is dropped; no_claim=the engine's own timeout
-  it("a refresh that never answers is cut at 10 s and fails open", async () => {
-    vi.useFakeTimers();
-    const log = vi.fn();
-    const pending = applyRunBudget(wire(), {
-      log,
-      refreshTimeout: () => new Promise<void>(() => {}),
-    });
-    await vi.advanceTimersByTimeAsync(REFRESH_DEADLINE_MS);
-    expect(await pending).toBe(REGISTERED_EXECUTION_TIMEOUT_MS);
-    expect(String(log.mock.calls[0]![0])).toContain("staying at 30m");
   });
 
   // card: protects=the effective budget drives the typed timeout: a cancel at 60 minutes is a timeout whose copy says 60, a cancel at 31 minutes is not; fails_when=the classifier keeps reading 30; no_claim=workflow.ts wiring (workflow.test.ts)
@@ -217,21 +182,21 @@ describe("#742 per-lane run budget", () => {
       });
     const end = { cancelled: true, starvation: null };
     const at60 = claimAbnormalEnd(
-      state(TASK_LANE_EXECUTION_TIMEOUT_MS),
+      state(TASK_LANE_EXECUTION_TIMEOUT),
       end,
-      START + TASK_LANE_EXECUTION_TIMEOUT_MS,
+      START + TASK_LANE_EXECUTION_TIMEOUT,
     );
     expect(at60?.cause).toBe("timeout");
     expect(
       abnormalEndInfo("timeout", {
-        runExecutionTimeoutMs: TASK_LANE_EXECUTION_TIMEOUT_MS,
+        runExecutionTimeoutMs: TASK_LANE_EXECUTION_TIMEOUT,
         starvation: null,
       }),
     ).toBe("The run reached its 60-minute limit.");
     // Control: at 31 minutes a 60-minute run is not at its limit.
     expect(
       claimAbnormalEnd(
-        state(TASK_LANE_EXECUTION_TIMEOUT_MS),
+        state(TASK_LANE_EXECUTION_TIMEOUT),
         end,
         START + 31 * 60_000,
       ),
@@ -239,9 +204,9 @@ describe("#742 per-lane run budget", () => {
     // Refresh failed: the 30-minute state still types a 30-minute cancel.
     expect(
       claimAbnormalEnd(
-        state(REGISTERED_EXECUTION_TIMEOUT_MS),
+        state(REGISTERED_EXECUTION_TIMEOUT),
         end,
-        START + REGISTERED_EXECUTION_TIMEOUT_MS,
+        START + REGISTERED_EXECUTION_TIMEOUT,
       )?.cause,
     ).toBe("timeout");
   });

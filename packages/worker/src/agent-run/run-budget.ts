@@ -1,4 +1,8 @@
 import type { Duration } from "@hatchet-dev/typescript-sdk";
+import {
+  REGISTERED_EXECUTION_TIMEOUT,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
 
 import { resolveRunLane } from "./run-lane";
 import type { AgentRunWireInput } from "./run-secrets";
@@ -19,10 +23,6 @@ import type { AgentRunWireInput } from "./run-secrets";
 export const TASK_LANE_BUDGET: Duration = "60m";
 export const TASK_LANE_REFRESH: Duration = "30m";
 
-/** Mirror of definition.ts `executionTimeout: "30m"` (pinned by a test). */
-export const REGISTERED_EXECUTION_TIMEOUT_MS = 30 * 60_000;
-/** Mirror of `TASK_LANE_BUDGET`; CELL_RUN_TTL_MS is this plus 15 minutes. */
-export const TASK_LANE_EXECUTION_TIMEOUT_MS = 60 * 60_000;
 /** The refresh is a control-plane call; it must never hold the run up. */
 export const REFRESH_DEADLINE_MS = 10_000;
 
@@ -37,23 +37,6 @@ export function refreshesRunBudget(wire: AgentRunWireInput): boolean {
   return resolveRunLane(wire) === "task" && wire.selfHeal === undefined;
 }
 
-/** The execution budget a run is entitled to, before any refresh failure. */
-export function runExecutionBudgetMs(wire: AgentRunWireInput): number {
-  return refreshesRunBudget(wire)
-    ? TASK_LANE_EXECUTION_TIMEOUT_MS
-    : REGISTERED_EXECUTION_TIMEOUT_MS;
-}
-
-/** Why a refresh failed: a class, never the error's text (it may carry data). */
-type RefreshFailure = "timeout" | "no context";
-
-class RefreshFailedError extends Error {
-  constructor(readonly failure: RefreshFailure) {
-    super(`refresh failed (${failure})`);
-    this.name = "RefreshFailedError";
-  }
-}
-
 /** An error's class name when it is a plain identifier, else `unknown`. */
 function errorClassOf(error: unknown): string {
   return error instanceof Error && /^[A-Za-z_$][\w$]{0,63}$/.test(error.name)
@@ -61,17 +44,20 @@ function errorClassOf(error: unknown): string {
     : "unknown";
 }
 
-async function boundedRefresh(ctx: BudgetCtx): Promise<void> {
-  if (!ctx.refreshTimeout) throw new RefreshFailedError("no context");
+/** The refresh raced against its bound: "ok" when it resolved in time, else why not. */
+async function boundedRefresh(
+  ctx: BudgetCtx,
+): Promise<"ok" | "timeout" | "no context"> {
+  if (!ctx.refreshTimeout) return "no context";
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new RefreshFailedError("timeout")),
-      REFRESH_DEADLINE_MS,
-    );
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), REFRESH_DEADLINE_MS);
   });
   try {
-    await Promise.race([ctx.refreshTimeout(TASK_LANE_REFRESH), deadline]);
+    return await Promise.race([
+      ctx.refreshTimeout(TASK_LANE_REFRESH).then(() => "ok" as const),
+      deadline,
+    ]);
   } finally {
     clearTimeout(timer);
   }
@@ -88,18 +74,19 @@ export async function applyRunBudget(
   wire: AgentRunWireInput,
   ctx: BudgetCtx,
 ): Promise<number> {
-  if (!refreshesRunBudget(wire)) return REGISTERED_EXECUTION_TIMEOUT_MS;
+  if (!refreshesRunBudget(wire)) return REGISTERED_EXECUTION_TIMEOUT;
   const tag = `[agent-run ${wire.threadId}]`;
+  let cause: string;
   try {
-    await boundedRefresh(ctx);
-    ctx.log(`${tag} run budget: ${TASK_LANE_BUDGET} (refreshed)`);
-    return TASK_LANE_EXECUTION_TIMEOUT_MS;
+    const outcome = await boundedRefresh(ctx);
+    if (outcome === "ok") {
+      ctx.log(`${tag} run budget: ${TASK_LANE_BUDGET} (refreshed)`);
+      return TASK_LANE_EXECUTION_TIMEOUT;
+    }
+    cause = outcome;
   } catch (error: unknown) {
-    const cause =
-      error instanceof RefreshFailedError
-        ? error.failure
-        : `rejected: ${errorClassOf(error)}`;
-    ctx.log(`${tag} run budget: refresh failed (${cause}), staying at 30m`);
-    return REGISTERED_EXECUTION_TIMEOUT_MS;
+    cause = `rejected: ${errorClassOf(error)}`;
   }
+  ctx.log(`${tag} run budget: refresh failed (${cause}), staying at 30m`);
+  return REGISTERED_EXECUTION_TIMEOUT;
 }

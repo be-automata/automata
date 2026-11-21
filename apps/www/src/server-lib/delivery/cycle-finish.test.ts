@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import type { ThreadSourceMetadata } from "@terragon/shared";
 import { deliveryFixCycles } from "@terragon/shared/db/schema";
+import { TASK_LANE_EXECUTION_TIMEOUT } from "@terragon/types/cell";
 import {
   bindDeliveryFixCycleThread,
   enrollDeliveryPr,
@@ -169,9 +170,7 @@ describe("#509 delivery fix-cycle finish", () => {
   });
 
   it("DELIVERY_RUN_STALE_MS exceeds the task lane's 60-minute run budget (#742)", () => {
-    // A literal, as www does not depend on the worker: 60 min is
-    // TASK_LANE_EXECUTION_TIMEOUT_MS in packages/worker/src/agent-run/run-budget.ts.
-    expect(DELIVERY_RUN_STALE_MS).toBeGreaterThan(60 * 60_000);
+    expect(DELIVERY_RUN_STALE_MS).toBeGreaterThan(TASK_LANE_EXECUTION_TIMEOUT);
   });
 
   it("the sweep settles a running cycle past the run budget whose finish was missed", async () => {

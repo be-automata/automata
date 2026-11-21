@@ -1,6 +1,10 @@
 import semver from "semver";
 
-import { detectFlutterPinFrom, type CheckoutProbe } from "./container-entry";
+import {
+  detectFlutterPinFrom,
+  isSafeFlutterVersion,
+  type CheckoutProbe,
+} from "./container-entry";
 
 /**
  * #742 OD-3: which Flutter SDK a CELL run uses. The batteries image bakes extra
@@ -24,15 +28,8 @@ export const FLUTTER_MARKER_FILES = [
   "pubspec.yaml",
 ] as const;
 
-/** An exact release version: the same shape the box path accepts (it rides an argv). */
-const SAFE_VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][0-9A-Za-z.]{1,32})?$/;
 /** Characters a Dart version constraint may use; anything else is not parsed. */
 const SAFE_RANGE = /^[0-9A-Za-z.<>=^~| *+-]{1,64}$/;
-
-/** Is `v` a version text safe to log and to pass as an argv? */
-export function isSafeFlutterVersion(v: string): boolean {
-  return SAFE_VERSION.test(v);
-}
 
 export type FlutterRequirement =
   | {
@@ -64,7 +61,7 @@ function fromPubspec(text: string | null): FlutterRequirement {
   const value = text === null ? null : pubspecFlutterValue(text);
   if (value === null || value === "" || value === "any")
     return { kind: "none" };
-  if (SAFE_VERSION.test(value)) {
+  if (isSafeFlutterVersion(value)) {
     return { kind: "pin", version: value, source: "pubspec" };
   }
   if (SAFE_RANGE.test(value) && semver.validRange(value) !== null) {
@@ -106,7 +103,7 @@ export type FlutterSelection =
 
 /** The SDK versions the image has, filtered to the ones safe to select. */
 function usable(available: readonly string[]): string[] {
-  return available.filter((v) => SAFE_VERSION.test(v) && semver.valid(v));
+  return available.filter((v) => isSafeFlutterVersion(v) && semver.valid(v));
 }
 
 function selectForConstraint(
@@ -190,6 +187,23 @@ export function flutterAgentNote(
   }
   if (sel.reason === "no-requirement") return null;
   return `Flutter: this run uses the image default SDK ${defaultVersion}, which meets the project's pin.`;
+}
+
+/** The one journal line when the wrapper install fails (the default SDK stays). */
+export function flutterInstallFailedLine(
+  version: string,
+  exitCode: number,
+  defaultVersion: string,
+): string {
+  return `cell: flutter ${version} wrapper install failed (exit ${exitCode}); using ${defaultVersion}`;
+}
+
+/** The agent's note when the wrapper install failed. */
+export function flutterInstallFailedNote(
+  version: string,
+  defaultVersion: string,
+): string {
+  return `Flutter: the project pins ${version} but selecting it failed; \`flutter\` is the default SDK ${defaultVersion}.`;
 }
 
 /**

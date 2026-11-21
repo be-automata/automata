@@ -12,6 +12,10 @@ import {
   type DeliveryFixCycleRow,
 } from "@terragon/shared/model/delivery-loop";
 import { getThread } from "@terragon/shared/model/threads";
+import {
+  CELL_TEARDOWN_MARGIN,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
 
 import { db as defaultDb } from "@/lib/db";
 import { getOctokitForApp } from "@/lib/github";
@@ -32,7 +36,8 @@ export const DELIVERY_DISPATCH_STALE_MS = 5 * 60_000;
  * Past the task lane's 60-minute run budget (#742) with slack: its finish was
  * missed. A delivery cycle dispatches a task run, which may now run 60 minutes.
  */
-export const DELIVERY_RUN_STALE_MS = 75 * 60_000;
+export const DELIVERY_RUN_STALE_MS =
+  TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN;
 
 export interface DeliveryCycleFinishDeps {
   db: DB;

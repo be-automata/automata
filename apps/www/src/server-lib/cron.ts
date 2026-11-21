@@ -1,3 +1,9 @@
+import {
+  CELL_TEARDOWN_MARGIN,
+  SCHEDULE_TIMEOUT,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
+
 import { db } from "@/lib/db";
 import {
   getStalledThreads,
@@ -42,7 +48,9 @@ const BATCH_SIZE = 5;
  * pilot volume; when it matters, derive the cutoff per row from `sandboxProvider`
  * instead of widening the constant.
  */
-export const STALLED_CUTOFF_SECS = 105 * 60;
+export const STALLED_CUTOFF_SECS =
+  (SCHEDULE_TIMEOUT + TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN) /
+  1000;
 
 /**
  * In-process cron runners (S12). The background maintenance jobs were declared ONLY

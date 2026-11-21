@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { REGISTERED_EXECUTION_TIMEOUT } from "@terragon/types/cell";
 import { FIX_BRANCH_PREFIX } from "@terragon/utils/fix-branch";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
@@ -15,7 +16,7 @@ import type { CellConfig } from "./cell-config";
 import { loadWorkerConfig } from "./config";
 import type { BoxLock } from "./box-lock";
 import { admitRunSlot, staleSkip, type RunCtx } from "./run-admission";
-import { REGISTERED_EXECUTION_TIMEOUT_MS, applyRunBudget } from "./run-budget";
+import { applyRunBudget } from "./run-budget";
 import {
   selectRunExecutor,
   type RunExecutor,
@@ -589,7 +590,9 @@ async function runAgentAttempt(
   // fix check must finish inside it (self-heal keeps the registered 30
   // minutes; a task run is extended to 60 right below, #742).
   const runStartedAt = Date.now();
-  const runBudgetMs = await applyRunBudget(wire, ctx);
+  // Started now, awaited where the abnormal-end state needs it: the bounded,
+  // fail-open refresh overlaps the unseal, the config load and the stale check.
+  const budgetP = applyRunBudget(wire, ctx);
   const config = loadWorkerConfig();
   // #380: unseal FIRST — before any www call, the staleness check or
   // provisioning. A failure here throws a PayloadSealError naming only the
@@ -617,7 +620,7 @@ async function runAgentAttempt(
       ctx,
       config,
       runStartedAt,
-      runBudgetMs,
+      budgetP,
     );
   } finally {
     await revoker.revokeOnce();
@@ -632,7 +635,7 @@ async function runAgentResolved(
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   runStartedAt: number,
-  runBudgetMs: number,
+  budgetP: Promise<number>,
 ): Promise<AgentRunOutput> {
   const wwwOpts = wwwOptsFor(input, secrets.daemonToken, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -652,7 +655,7 @@ async function runAgentResolved(
   const abnormal = newAbnormalEndState({
     owns: ownsAbnormalTerminal(input),
     runStartedAt,
-    runExecutionTimeoutMs: runBudgetMs,
+    runExecutionTimeoutMs: await budgetP,
   });
   // The cancel's own time, not the claim's: a slow teardown must not stretch
   // the timeout tolerance.
@@ -958,7 +961,7 @@ export async function runSelfHealAuditStep({
  * Self-heal runs never refresh their timeout, so this stays the REGISTERED 30
  * minutes; a task run's effective budget (run-budget.ts) is separate.
  */
-export const RUN_EXECUTION_TIMEOUT_MS = REGISTERED_EXECUTION_TIMEOUT_MS;
+export const RUN_EXECUTION_TIMEOUT_MS = REGISTERED_EXECUTION_TIMEOUT;
 const FIX_CHECK_RUN_MARGIN_MS = 60_000;
 
 /** deadlineAt = min(now + 3 min, run start + 30 min − 60 s). */
