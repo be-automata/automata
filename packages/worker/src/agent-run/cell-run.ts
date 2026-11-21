@@ -17,12 +17,15 @@ import {
 import {
   CELL_DAEMON_BUNDLE,
   CELL_DAEMON_SOCKET,
+  CELL_GH_CONFIG_DIR,
+  CELL_GH_NOTE,
   CELL_MESSAGE_DIR,
   CELL_SELF_CHECK_ARGV,
   CELL_WORKSPACE,
   CELL_WRITE_MESSAGE_SH,
   cellCloneArgv,
   cellEntrypoint,
+  cellGhSetup,
   cellGitConfigArgv,
 } from "./cell-image";
 import {
@@ -930,7 +933,41 @@ async function bootstrap(r: CellRunState): Promise<void> {
   // TEST_DATABASE_ADMIN_URL wins, as on the box (planCellTestDb starts none then).
   const testDbEnv = await startTestDb(r);
   r.testDbDelivered = Object.keys(testDbEnv).length > 0;
-  const settingsEnv = { ...testDbEnv, ...repoEnv };
+  // gh reads GitHub through the broker (#727 B): the host login holds the
+  // placeholder only; the vault's broker binding puts the bearer on the wire.
+  const gh = cellGhSetup({
+    brokerHost: r.deployment,
+    repoFullName: input.repoFullName,
+    botLogin: config.botLogin,
+  });
+  await execOk(
+    r,
+    ["/bin/mkdir", "-p", "-m", "700", CELL_GH_CONFIG_DIR],
+    "mkdir gh config",
+  );
+  await putFile(r, `${CELL_GH_CONFIG_DIR}/hosts.yml`, gh.hostsYml, 600);
+  // Appended, not replaced: the image may ship its own user memory.
+  let userMemory = "";
+  try {
+    userMemory = new TextDecoder().decode(
+      await raceLive(
+        r,
+        provider.copyOut(cellId, `${HOME_CLAUDE_DIR}/CLAUDE.md`),
+      ),
+    );
+  } catch {
+    // Absent: the note is the whole file.
+  }
+  await putFile(
+    r,
+    `${HOME_CLAUDE_DIR}/CLAUDE.md`,
+    userMemory === ""
+      ? CELL_GH_NOTE
+      : `${userMemory.trimEnd()}\n\n${CELL_GH_NOTE}`,
+    600,
+  );
+  // GH_* is reserved for repo env, so the owner's names never collide.
+  const settingsEnv = { ...testDbEnv, ...repoEnv, ...gh.env };
   await putFile(
     r,
     `${HOME_CLAUDE_DIR}/settings.json`,

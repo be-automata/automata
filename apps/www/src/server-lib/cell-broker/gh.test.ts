@@ -18,6 +18,8 @@ const SENTINEL = "ghs_SENTINEL_read_token";
 const HOST = "www.example.com";
 const REST = `https://${HOST}/api/v3`;
 const GRAPHQL = `https://${HOST}/api/graphql`;
+/** A read inside the step's repository (fixture default), allowed under #727 OD-3. */
+const IN_REPO = "/repos/acme/widgets";
 
 const fixture = (repo = "acme/widgets") =>
   createTestCellStep({ db, repoFullName: repo });
@@ -116,37 +118,81 @@ describe("gh broker REST", () => {
     const f = await fixture();
     const h = harness({ status: 200, body: '{"n":1}' });
     const res = await h.handler(
-      rest("/repos/o/r/pulls?state=open", f.token),
+      rest("/repos/acme/widgets/pulls?state=open", f.token),
       "rest",
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('{"n":1}');
     expect(h.calls[0]?.url).toBe(
-      "https://api.github.com/repos/o/r/pulls?state=open",
+      "https://api.github.com/repos/acme/widgets/pulls?state=open",
     );
     expect(h.calls[0]?.method).toBe("GET");
 
     const head = await h.handler(
-      rest("/repos/o/r", f.token, { method: "HEAD" }),
+      rest("/repos/acme/widgets", f.token, { method: "HEAD" }),
       "rest",
     );
     expect(head.status).toBe(200);
     expect(h.calls[1]?.method).toBe("HEAD");
   });
 
-  it("AC6 keeps compare ranges and an encoded slash inside one segment; an empty path is the API root", async () => {
+  it("AC6 keeps compare ranges and an encoded slash inside one segment", async () => {
     const f = await fixture();
     const h = harness();
-    await h.handler(rest("/repos/o/r/compare/main...feat", f.token), "rest");
-    await h.handler(rest("/repos/o/r/branches/feat%2Fx", f.token), "rest");
-    await h.handler(rest("", f.token), "rest");
-    await h.handler(rest("/", f.token), "rest");
+    await h.handler(
+      rest("/repos/acme/widgets/compare/main...feat", f.token),
+      "rest",
+    );
+    await h.handler(
+      rest("/repos/acme/widgets/branches/feat%2Fx", f.token),
+      "rest",
+    );
     expect(h.calls.map((c) => c.url)).toEqual([
-      "https://api.github.com/repos/o/r/compare/main...feat",
-      "https://api.github.com/repos/o/r/branches/feat%2Fx",
-      "https://api.github.com/",
-      "https://api.github.com/",
+      "https://api.github.com/repos/acme/widgets/compare/main...feat",
+      "https://api.github.com/repos/acme/widgets/branches/feat%2Fx",
     ]);
+  });
+
+  // card: protects=#727 OD-3: REST reads stay on the step's repo, plus the two repo-free paths gh calls; fails_when=another repo, the API root, /user, /search or /repositories/<id> reach GitHub, or the step repo (any case) or /rate_limit or /meta is refused; no_claim=GraphQL (mutation-free, repo-unbounded by design)
+  it("OD-3 forwards only the step's repo, /rate_limit and /meta; everything else is 403 forbidden_path", async () => {
+    const f = await fixture();
+    const h = harness();
+    for (const path of [
+      "/repos/acme/widgets",
+      "/repos/ACME/Widgets/issues/1",
+      "/rate_limit",
+      "/meta",
+    ]) {
+      expect((await h.handler(rest(path, f.token), "rest")).status, path).toBe(
+        200,
+      );
+    }
+    for (const path of [
+      "",
+      "/",
+      "/user",
+      "/repos/acme/other",
+      "/repos/other/widgets/issues",
+      "/repos/acme",
+      "/repos",
+      "/repositories/1",
+      "/search/issues?q=repo:acme/other",
+      "/orgs/acme/repos",
+      "/rate_limit/x",
+      "/meta/x",
+    ]) {
+      const res = await h.handler(rest(path, f.token), "rest");
+      expect(res.status, path).toBe(403);
+      expect(await res.json(), path).toEqual({ error: "forbidden_path" });
+    }
+    expect(h.calls.map((c) => c.url)).toEqual([
+      "https://api.github.com/repos/acme/widgets",
+      "https://api.github.com/repos/ACME/Widgets/issues/1",
+      "https://api.github.com/rate_limit",
+      "https://api.github.com/meta",
+    ]);
+    // Refused before minting: only the four allowed reads asked for a token.
+    expect(h.mintReadToken).toHaveBeenCalledTimes(4);
   });
 
   it("AC6 refuses writes on /api/v3 without calling GitHub", async () => {
@@ -154,7 +200,7 @@ describe("gh broker REST", () => {
     const h = harness();
     for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
       const res = await h.handler(
-        rest("/repos/o/r/issues", f.token, { method, body: "{}" }),
+        rest("/repos/acme/widgets/issues", f.token, { method, body: "{}" }),
         "rest",
       );
       expect(res.status, method).toBe(403);
@@ -180,20 +226,26 @@ describe("gh broker REST", () => {
     const f = await fixture();
     const h = harness();
     for (const path of [
-      "/repos/../user",
-      "/repos/%2e%2e/user",
-      "/repos/%2E./user",
+      "/repos/acme/widgets/x/../issues",
+      "/repos/acme/widgets/x/%2e%2e/issues",
+      "/repos/acme/widgets/x/%2E./issues",
     ]) {
       await h.handler(rest(path, f.token), "rest");
     }
     // `Request` resolves raw and percent-encoded dot segments before the
-    // handler runs, so these arrive as /api/v3/user, an ordinary allowed read.
+    // handler runs, so these arrive as /api/v3/repos/acme/widgets/issues.
     expect(h.calls.map((c) => c.url)).toEqual([
-      "https://api.github.com/user",
-      "https://api.github.com/user",
-      "https://api.github.com/user",
+      "https://api.github.com/repos/acme/widgets/issues",
+      "https://api.github.com/repos/acme/widgets/issues",
+      "https://api.github.com/repos/acme/widgets/issues",
     ]);
     expect(h.calls.every((c) => !/\.\.|%2e/i.test(c.url))).toBe(true);
+    // A dot segment that climbs out of the repo lands outside it: refused.
+    const out = await h.handler(
+      rest("/repos/acme/widgets/../../user", f.token),
+      "rest",
+    );
+    expect(out.status).toBe(403);
   });
 
   it("answers 400 for a malformed percent escape", async () => {
@@ -212,7 +264,10 @@ describe("gh broker REST", () => {
       },
       cookies: ["a=b"],
     });
-    const res = await h.handler(rest("/repos/o/r/pulls", f.token), "rest");
+    const res = await h.handler(
+      rest("/repos/acme/widgets/pulls", f.token),
+      "rest",
+    );
     expect(res.headers.get("link")).toBe(
       `<https://${HOST}/api/v3/repositories/1/pulls?page=2>; rel="next"`,
     );
@@ -302,13 +357,13 @@ describe("gh broker GraphQL", () => {
 describe("gh broker auth and secrets", () => {
   it("AC3 maps every refusal and rejects a missing credential, with no upstream call", async () => {
     const h = harness();
-    const none = await h.handler(rest("/user", null), "rest");
+    const none = await h.handler(rest(IN_REPO, null), "rest");
     expect(none.status).toBe(401);
     expect(await none.json()).toEqual({ error: "unauthenticated" });
     const noneGql = await h.handler(graphql(gql("query{a}"), null), "graphql");
     expect(noneGql.status).toBe(401);
 
-    const unknown = await h.handler(rest("/user", "nope"), "rest");
+    const unknown = await h.handler(rest(IN_REPO, "nope"), "rest");
     expect([unknown.status, (await unknown.json()).error]).toEqual([
       401,
       "unknown_bearer",
@@ -316,23 +371,23 @@ describe("gh broker auth and secrets", () => {
 
     const revoked = await fixture();
     await revokeAttempt({ db, stepKey: revoked.stepKey, attempt: 1 });
-    const r = await h.handler(rest("/user", revoked.token), "rest");
+    const r = await h.handler(rest(IN_REPO, revoked.token), "rest");
     expect([r.status, (await r.json()).error]).toEqual([401, "revoked"]);
 
     const expired = await fixture();
     const short = await expired.bearer(1, 1);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const e = await h.handler(rest("/user", short), "rest");
+    const e = await h.handler(rest(IN_REPO, short), "rest");
     expect([e.status, (await e.json()).error]).toEqual([401, "expired"]);
 
     const fenced = await fixture();
     await fenced.open(2);
-    const fe = await h.handler(rest("/user", fenced.token), "rest");
+    const fe = await h.handler(rest(IN_REPO, fenced.token), "rest");
     expect([fe.status, (await fe.json()).error]).toEqual([409, "fenced"]);
 
     const done = await fixture();
     await markStepDone({ db, token: done.token });
-    const d = await h.handler(rest("/user", done.token), "rest");
+    const d = await h.handler(rest(IN_REPO, done.token), "rest");
     expect([d.status, (await d.json()).error]).toEqual([409, "step_done"]);
 
     expect(h.fetchImpl).not.toHaveBeenCalled();
@@ -341,9 +396,9 @@ describe("gh broker auth and secrets", () => {
   it("AC3 accepts both `token` and `Bearer` schemes", async () => {
     const f = await fixture();
     const h = harness();
-    expect((await h.handler(rest("/user", f.token), "rest")).status).toBe(200);
+    expect((await h.handler(rest(IN_REPO, f.token), "rest")).status).toBe(200);
     expect(
-      (await h.handler(rest("/user", f.token, {}, "Bearer"), "rest")).status,
+      (await h.handler(rest(IN_REPO, f.token, {}, "Bearer"), "rest")).status,
     ).toBe(200);
   });
 
@@ -351,7 +406,7 @@ describe("gh broker auth and secrets", () => {
     const f = await fixture();
     const h = harness({ headers: { "content-type": "text/plain" } });
     const res = await h.handler(
-      rest("/user", f.token, {
+      rest(IN_REPO, f.token, {
         headers: { cookie: "s=1", "x-forwarded-for": "1.1.1.1" },
       }),
       "rest",
@@ -373,7 +428,7 @@ describe("gh broker auth and secrets", () => {
         },
       },
     );
-    const bad = await failed.handler(rest("/user", f.token), "rest");
+    const bad = await failed.handler(rest(IN_REPO, f.token), "rest");
     expect(bad.status).toBe(502);
     expect(await bad.text()).not.toContain(SENTINEL);
   });
@@ -387,7 +442,7 @@ describe("gh broker auth and secrets", () => {
       },
     });
     const h = harness({}, { enabled: () => false, db: guard });
-    expect((await h.handler(rest("/user", "x"), "rest")).status).toBe(404);
+    expect((await h.handler(rest(IN_REPO, "x"), "rest")).status).toBe(404);
     expect(
       (await h.handler(graphql(gql("query{a}"), "x"), "graphql")).status,
     ).toBe(404);
@@ -423,7 +478,7 @@ describe("gh broker auth and secrets", () => {
       status: 304,
       headers: { etag: '"abc"' },
     });
-    const res = await notModified.handler(rest("/user", f.token), "rest");
+    const res = await notModified.handler(rest(IN_REPO, f.token), "rest");
     expect(res.status).toBe(304);
     expect(res.headers.get("etag")).toBe('"abc"');
 
@@ -431,7 +486,7 @@ describe("gh broker auth and secrets", () => {
       status: 302,
       headers: { location: "https://evil.test/" },
     });
-    const moved = await redirected.handler(rest("/user", f.token), "rest");
+    const moved = await redirected.handler(rest(IN_REPO, f.token), "rest");
     expect(moved.status).toBe(502);
   });
 
@@ -471,7 +526,7 @@ describe("gh broker auth and secrets", () => {
         ok("blob-bytes"),
       ]);
       const res = await h.handler(
-        rest("/repos/o/r/releases/assets/1", f.token, {
+        rest("/repos/acme/widgets/releases/assets/1", f.token, {
           headers: { accept: "application/octet-stream", range: "bytes=0-9" },
         }),
         "rest",
@@ -497,7 +552,10 @@ describe("gh broker auth and secrets", () => {
         redirect("https://api.github.com/repositories/1/pulls", 301),
         ok("[]"),
       ]);
-      const res = await h.handler(rest("/repos/o/r/pulls", f.token), "rest");
+      const res = await h.handler(
+        rest("/repos/acme/widgets/pulls", f.token),
+        "rest",
+      );
       expect(res.status).toBe(200);
       expect(h.calls[1]!.url).toBe(
         "https://api.github.com/repositories/1/pulls",
@@ -514,7 +572,7 @@ describe("gh broker auth and secrets", () => {
         ok("asset"),
       ]);
       expect(
-        (await assets.handler(rest("/user", f.token), "rest")).status,
+        (await assets.handler(rest(IN_REPO, f.token), "rest")).status,
       ).toBe(200);
       expect(assets.calls[1]!.headers.has("authorization")).toBe(false);
 
@@ -523,7 +581,7 @@ describe("gh broker auth and secrets", () => {
         ok("log"),
       ]);
       expect(
-        (await actions.handler(rest("/user", f.token), "rest")).status,
+        (await actions.handler(rest(IN_REPO, f.token), "rest")).status,
       ).toBe(200);
       expect(actions.calls[1]!.headers.has("authorization")).toBe(false);
 
@@ -533,7 +591,7 @@ describe("gh broker auth and secrets", () => {
       ]) {
         const spoof = redirecting([redirect(`https://${host}/x`)]);
         expect(
-          (await spoof.handler(rest("/user", f.token), "rest")).status,
+          (await spoof.handler(rest(IN_REPO, f.token), "rest")).status,
           host,
         ).toBe(502);
         expect(spoof.calls).toHaveLength(1);
@@ -543,7 +601,7 @@ describe("gh broker auth and secrets", () => {
     it("refuses a redirect to any other host, a non-https Location and a second hop with a 502", async () => {
       const f = await fixture();
       const evil = redirecting([redirect("https://evil.example/x")]);
-      expect((await evil.handler(rest("/user", f.token), "rest")).status).toBe(
+      expect((await evil.handler(rest(IN_REPO, f.token), "rest")).status).toBe(
         502,
       );
       expect(evil.calls).toHaveLength(1);
@@ -551,7 +609,7 @@ describe("gh broker auth and secrets", () => {
       const plain = redirecting([
         redirect("http://objects.githubusercontent.com/x"),
       ]);
-      expect((await plain.handler(rest("/user", f.token), "rest")).status).toBe(
+      expect((await plain.handler(rest(IN_REPO, f.token), "rest")).status).toBe(
         502,
       );
       expect(plain.calls).toHaveLength(1);
@@ -560,7 +618,7 @@ describe("gh broker auth and secrets", () => {
         redirect("https://objects.githubusercontent.com/a"),
         redirect("https://objects.githubusercontent.com/b"),
       ]);
-      expect((await chain.handler(rest("/user", f.token), "rest")).status).toBe(
+      expect((await chain.handler(rest(IN_REPO, f.token), "rest")).status).toBe(
         502,
       );
       expect(chain.calls).toHaveLength(2);
@@ -570,17 +628,17 @@ describe("gh broker auth and secrets", () => {
   it("mints the read token for the step's owner and repo, and 502s on a 3xx or a thrown fetch", async () => {
     const f = await fixture("Acme/Widgets");
     const h = harness();
-    await h.handler(rest("/user", f.token), "rest");
+    await h.handler(rest(IN_REPO, f.token), "rest");
     await h.handler(graphql(gql("query{a}"), f.token), "graphql");
     expect(h.mintReadToken).toHaveBeenCalledTimes(2);
     expect(h.mintReadToken).toHaveBeenCalledWith("acme", "widgets");
 
     const redirected = harness({ status: 302 });
     expect(
-      (await redirected.handler(rest("/user", f.token), "rest")).status,
+      (await redirected.handler(rest(IN_REPO, f.token), "rest")).status,
     ).toBe(502);
     const down = harness({ throws: true });
-    expect((await down.handler(rest("/user", f.token), "rest")).status).toBe(
+    expect((await down.handler(rest(IN_REPO, f.token), "rest")).status).toBe(
       502,
     );
   });
@@ -600,7 +658,7 @@ describe("gh broker auth and secrets", () => {
         },
       },
     );
-    const res = await h.handler(rest("/user", f.token), "rest");
+    const res = await h.handler(rest(IN_REPO, f.token), "rest");
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({
       error: "missing_permission",
@@ -623,17 +681,17 @@ describe("gh broker auth and secrets", () => {
         },
       );
       expect(
-        (await failedMint.handler(rest("/user", f.token), "rest")).status,
+        (await failedMint.handler(rest(IN_REPO, f.token), "rest")).status,
       ).toBe(502);
       const down = harness({ throws: true });
-      expect((await down.handler(rest("/user", f.token), "rest")).status).toBe(
+      expect((await down.handler(rest(IN_REPO, f.token), "rest")).status).toBe(
         502,
       );
       const writes = harness();
       expect(
         (
           await writes.handler(
-            rest("/user", f.token, { method: "POST", body: "{}" }),
+            rest(IN_REPO, f.token, { method: "POST", body: "{}" }),
             "rest",
           )
         ).status,
@@ -649,7 +707,7 @@ describe("gh broker auth and secrets", () => {
         },
       );
       expect(
-        (await failingDb.handler(rest("/user", f.token), "rest")).status,
+        (await failingDb.handler(rest(IN_REPO, f.token), "rest")).status,
       ).toBe(500);
       expect(logs.text()).not.toContain(SENTINEL);
       expect(logs.text()).not.toContain(f.token);

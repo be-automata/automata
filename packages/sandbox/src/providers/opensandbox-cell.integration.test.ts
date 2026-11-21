@@ -937,6 +937,68 @@ describe(
       }
     });
 
+    it("#727 broker bearer: gh's `Authorization: token <placeholder>` is replaced, never doubled", async () => {
+      // gh sends `Authorization: token <hosts.yml oauth_token>`. Two bindings
+      // tell the two possible configs apart: the production shape (bearer, no
+      // placeholder) and a bearer with a header substitution.
+      const GH_PLACEHOLDER = "automata-cell-gh-placeholder";
+      const plain: CellVaultEntry = {
+        name: "gh-plain",
+        hosts: [ALLOWED],
+        paths: ["/anything/plain/api/v3/*"],
+        auth: "bearer",
+        credential: CANARY_A,
+      };
+      const substituted: CellVaultEntry = {
+        name: "gh-subst",
+        hosts: [ALLOWED],
+        paths: ["/anything/subst/api/v3/*"],
+        auth: "bearer",
+        credential: CANARY_C,
+        placeholder: GH_PLACEHOLDER,
+      };
+      const id = await create(plan("gh-bearer", P_CRED, [plain, substituted]));
+      try {
+        const gh = (path: string, canary: string): ProbeSpec => ({
+          kind: "https_headers",
+          url: `https://${ALLOWED}${path}`,
+          headers: { Authorization: `token ${GH_PLACEHOLDER}` },
+          // httpbin joins a repeated header, so an append would show both.
+          markers: [canary, GH_PLACEHOLDER, `token ${GH_PLACEHOLDER}`],
+        });
+        const r = await probe(id, [
+          gh("/anything/plain/api/v3/repos/acme/app", CANARY_A),
+          gh("/anything/subst/api/v3/repos/acme/app", CANARY_C),
+        ]);
+        const verdict = (x: ProbeResult | undefined) => {
+          const [canary, placeholder, tokenForm] = x?.markersFound ?? [];
+          return {
+            ...brief(x),
+            status: x?.status,
+            canary,
+            placeholder,
+            tokenForm,
+          };
+        };
+        NOTES.gh_bearer_plain = verdict(r[0]);
+        NOTES.gh_bearer_substituted = verdict(r[1]);
+        const replaced = (v: ReturnType<typeof verdict>) =>
+          v.status === 200 && v.canary === true && v.placeholder === false;
+        // The production broker binding (bearer, no placeholder) is what the
+        // cell's gh relies on: it must overwrite gh's header, not add one.
+        expect(
+          replaced(NOTES.gh_bearer_plain as ReturnType<typeof verdict>),
+          `production shape replaces gh's header ${JSON.stringify(NOTES.gh_bearer_plain)}`,
+        ).toBe(true);
+        expect(
+          replaced(NOTES.gh_bearer_substituted as ReturnType<typeof verdict>),
+          `a substitution binding also replaces it ${JSON.stringify(NOTES.gh_bearer_substituted)}`,
+        ).toBe(true);
+      } finally {
+        await destroy(id);
+      }
+    });
+
     it("daemon apiKey under path confusion (#693): no confused request carries the token", async () => {
       const id = await create(plan("daemon-confusion", P_CRED, [DAEMON_ENTRY]));
       try {

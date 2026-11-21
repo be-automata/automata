@@ -1,3 +1,5 @@
+import { CELL_GH_TOKEN_PLACEHOLDER } from "@terragon/types/cell";
+
 import { CONTAINER_HOME } from "./container-argv";
 import { botGitIdentity } from "./daemon-env";
 
@@ -197,6 +199,26 @@ const REPO_PART = /^[A-Za-z0-9._-]+$/;
 /** A git ref the worker will put in an argv slot: no leading `-`, no whitespace or control characters, no `..`. */
 const REF_NAME = /^[A-Za-z0-9._/@+-]+$/;
 
+/** `owner/name` split, or a throw for anything that is not a plain repo. */
+function plainRepo(repoFullName: string): [string, string] {
+  const parts = repoFullName.split("/");
+  const [owner, repo] = parts;
+  if (
+    parts.length !== 2 ||
+    !owner ||
+    !repo ||
+    !REPO_PART.test(owner) ||
+    !REPO_PART.test(repo) ||
+    owner === "." ||
+    owner === ".." ||
+    repo === "." ||
+    repo === ".."
+  ) {
+    throw new Error("cell repo is not a plain owner/name");
+  }
+  return [owner, repo];
+}
+
 function assertRef(label: string, value: string): void {
   if (!REF_NAME.test(value) || value.startsWith("-") || value.includes("..")) {
     throw new Error(`cell ${label} is not a safe git ref`);
@@ -222,21 +244,7 @@ export function cellCloneArgv(opts: {
       `cell broker host ${JSON.stringify(opts.brokerHost)} is not a lowercase host[:port]`,
     );
   }
-  const parts = opts.repoFullName.split("/");
-  const [owner, repo] = parts;
-  if (
-    parts.length !== 2 ||
-    !owner ||
-    !repo ||
-    !REPO_PART.test(owner) ||
-    !REPO_PART.test(repo) ||
-    owner === "." ||
-    owner === ".." ||
-    repo === "." ||
-    repo === ".."
-  ) {
-    throw new Error("cell repo is not a plain owner/name");
-  }
+  const [owner, repo] = plainRepo(opts.repoFullName);
   assertRef("branch", opts.branch);
   const argvs: string[][] = [
     [
@@ -274,6 +282,65 @@ export function cellCloneArgv(opts: {
     ]);
   }
   return argvs;
+}
+
+/** Where gh reads its host login inside the cell (HOME is /home/agent). */
+export const CELL_GH_CONFIG_DIR = "/home/agent/.config/gh";
+
+/** The agent-facing note on GitHub access in a cell, as user-level memory. */
+export const CELL_GH_NOTE = [
+  "# GitHub access in this run",
+  "",
+  "This run is in a remote cell. `gh` is already set up for this repository",
+  "through a read-only broker, so `-R` and `--hostname` are not needed:",
+  "`gh issue view <N>`, `gh pr view <N>`, `gh api repos/<owner>/<repo>/...`.",
+  "REST reads are limited to this repository: `gh search`, `gh api user` and",
+  "`gh auth status` are refused, so use `gh issue list --search` or",
+  "`gh pr list --search` instead. GitHub writes (comments,",
+  "labels, reviews, creating PRs, `gh api -X POST`, GraphQL mutations) are",
+  "refused with a 403 here; commit and push with git as usual.",
+  "",
+].join("\n");
+
+/**
+ * gh's setup for a cell (#727 B): `hosts.yml` logs the broker host in with
+ * the placeholder, and the env (the settings `env` block, which the CLI hands
+ * to the agent's tools) makes it gh's default host and the run's repo its
+ * default repo. gh cannot read the repo from `origin`, which is the broker's
+ * `/api/cell/git/<owner>/<repo>.git`. `GH_*` is a reserved repo-env prefix,
+ * so the owner's env cannot override these.
+ */
+export function cellGhSetup(opts: {
+  brokerHost: string;
+  repoFullName: string;
+  botLogin: string;
+}): { hostsYml: string; env: Record<string, string> } {
+  if (!CELL_BROKER_HOST_PATTERN.test(opts.brokerHost)) {
+    throw new Error(
+      `cell broker host ${JSON.stringify(opts.brokerHost)} is not a lowercase host[:port]`,
+    );
+  }
+  const [owner, repo] = plainRepo(opts.repoFullName);
+  if (!/^[A-Za-z0-9-]+(\[bot\])?$/.test(opts.botLogin)) {
+    throw new Error("cell bot login is not a GitHub login");
+  }
+  const hostsYml = [
+    `${opts.brokerHost}:`,
+    `    oauth_token: ${CELL_GH_TOKEN_PLACEHOLDER}`,
+    `    user: ${JSON.stringify(opts.botLogin)}`,
+    "    git_protocol: https",
+    "",
+  ].join("\n");
+  return {
+    hostsYml,
+    env: {
+      GH_HOST: opts.brokerHost,
+      GH_REPO: `${opts.brokerHost}/${owner}/${repo}`,
+      GH_CONFIG_DIR: CELL_GH_CONFIG_DIR,
+      GH_PROMPT_DISABLED: "1",
+      GH_NO_UPDATE_NOTIFIER: "1",
+    },
+  };
 }
 
 /** The repo-local identity that replaces the box's `GIT_CONFIG_*` env. */
