@@ -1,11 +1,17 @@
-import { createRouterClient, ORPCError } from "@orpc/server";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
-import { mintKey, mockSession, rejection } from "@/test-helpers/egress-api";
+import {
+  clientFor,
+  failure,
+  mintKey,
+  mockSession,
+  setupEgressWorld,
+  tokenClient,
+} from "@/test-helpers/egress-api";
 import { repoEgressAuditLog } from "@terragon/shared/db/schema";
 import { recordRepoEgressChange } from "@terragon/shared/model/repo-egress-audit-log";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
@@ -13,8 +19,6 @@ import {
   createTestOrganization,
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
-
-import { egressRouter } from "./egress-router";
 
 vi.mock("@/lib/repo-admin", () => ({ checkRepoAdmin: vi.fn() }));
 vi.mock("@/server-lib/user-repos", () => ({
@@ -24,23 +28,6 @@ vi.mock("@/server-lib/user-repos", () => ({
 const REPO = "acme/widgets";
 const PATH = { owner: "acme", repo: "widgets" };
 
-function clientFor(headers: Headers, allowSession = false) {
-  return createRouterClient(
-    { egress: egressRouter },
-    { context: { headers, allowSession } },
-  );
-}
-
-const tokenClient = (key: string) =>
-  clientFor(new Headers({ "X-Daemon-Token": key }));
-
-async function failure(promise: Promise<unknown>) {
-  const error = await rejection(promise);
-  expect(error).toBeInstanceOf(ORPCError);
-  const e = error as ORPCError<string, unknown>;
-  return { code: e.code, status: e.status, data: e.data, message: e.message };
-}
-
 describe("egress router: reads", () => {
   let userId: string;
   let orgA: { id: string; slug: string };
@@ -49,15 +36,7 @@ describe("egress router: reads", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://app.example.test");
-    vi.mocked(isRepoInOrganizationScope).mockResolvedValue(true);
-    vi.mocked(checkRepoAdmin).mockResolvedValue("not-admin");
-    userId = (await createTestUser({ db })).user.id;
-    orgA = (await createTestOrganization({ db, userId, name: "Alpha" }))
-      .organization;
-    orgB = (await createTestOrganization({ db, userId, name: "Beta" }))
-      .organization;
-    keyA = await mintKey(userId, orgA.id);
+    ({ userId, orgA, orgB, keyA } = await setupEgressWorld());
   });
 
   afterEach(() => {

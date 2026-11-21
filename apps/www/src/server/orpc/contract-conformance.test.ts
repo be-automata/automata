@@ -13,8 +13,12 @@ import type * as z from "zod/v4";
  * procedure it runs under, and no undeclared `new ORPCError` exists.
  */
 
+interface ErrorDef {
+  data?: { safeParse: (value: unknown) => { success: boolean } };
+}
+
 interface ContractLike {
-  "~orpc": { errorMap: Record<string, unknown> };
+  "~orpc": { errorMap: Record<string, ErrorDef | undefined> };
 }
 
 function isContract(value: unknown): value is ContractLike {
@@ -32,6 +36,12 @@ function declaredByAll(tree: unknown): Set<string> {
   const lists = procedures(tree).map((p) => Object.keys(p["~orpc"].errorMap));
   const [first = [], ...rest] = lists;
   return new Set(first.filter((code) => rest.every((l) => l.includes(code))));
+}
+
+/** The error map of `egress.update`, widened to the shape this test reads. */
+function updateErrorMap(): Record<string, ErrorDef | undefined> {
+  return (cliAPIContract.egress.update as unknown as ContractLike)["~orpc"]
+    .errorMap;
 }
 
 const DIR = __dirname;
@@ -65,6 +75,48 @@ describe("contract conformance (rule 6)", () => {
     });
   }
 
+  it("egress.update declares every error its handler and the middleware can throw, with the reasons they use", () => {
+    const declared = updateErrorMap();
+    for (const code of [
+      "UNAUTHORIZED",
+      "FORBIDDEN",
+      "NOT_FOUND",
+      "BAD_REQUEST",
+      "CONFLICT",
+      "RATE_LIMIT_EXCEEDED",
+      "SERVICE_UNAVAILABLE",
+    ]) {
+      expect(declared, code).toHaveProperty(code);
+    }
+    const accepts = (code: string, data: unknown) =>
+      declared[code]?.data?.safeParse(data).success;
+    expect(accepts("FORBIDDEN", { reason: "origin_mismatch" })).toBe(true);
+    expect(accepts("FORBIDDEN", { reason: "not_repo_admin" })).toBe(true);
+    expect(
+      accepts("SERVICE_UNAVAILABLE", { reason: "github_unavailable" }),
+    ).toBe(true);
+    expect(accepts("SERVICE_UNAVAILABLE", { reason: "auth_unavailable" })).toBe(
+      true,
+    );
+    expect(accepts("CONFLICT", { currentUpdatedAt: null })).toBe(true);
+    expect(accepts("CONFLICT", {})).toBe(false);
+  });
+
+  it("every reason literal the egress sources throw is declared", () => {
+    const declared = updateErrorMap();
+    const sources = read("principal.ts") + read("egress-router.ts");
+    const reasons = [...sources.matchAll(/reason: "([a-z_]+)"/g)].map(
+      (m) => m[1] as string,
+    );
+    expect(reasons.length).toBeGreaterThan(0);
+    for (const reason of reasons) {
+      const ok = ["FORBIDDEN", "SERVICE_UNAVAILABLE"].some(
+        (code) => declared[code]?.data?.safeParse({ reason }).success,
+      );
+      expect(ok, `reason ${reason}`).toBe(true);
+    }
+  });
+
   it("the input-validation interceptor is the one allow-listed raw ORPCError, and it builds a declared BAD_REQUEST", () => {
     const source = read("api-version.ts");
     expect(source.match(/new ORPCError\(/g)).toHaveLength(1);
@@ -73,6 +125,18 @@ describe("contract conformance (rule 6)", () => {
     expect(body.slice(0, end)).toContain('new ORPCError("BAD_REQUEST"');
     // Every procedure, threads and auth included: the interceptor is mounted on both.
     expect(declaredByAll(cliAPIContract)).toContain("BAD_REQUEST");
+  });
+
+  it("every egress procedure is built from the one middleware-carrying base (spec 4.4)", () => {
+    const source = read("egress-router.ts");
+    // The only direct use of `base.egress` is the middleware mount itself.
+    expect(source.match(/\bbase\.egress\b/g)).toEqual(["base.egress"]);
+    expect(source).toMatch(/const egressBase = base\.egress\.use\(/);
+    for (const name of Object.keys(cliAPIContract.egress)) {
+      expect(source, name).toMatch(
+        new RegExp(`const ${name} = egressBase\\.${name}\\.handler\\(`),
+      );
+    }
   });
 
   it("SERVICE_UNAVAILABLE is declared on every procedure, threads and auth included", () => {

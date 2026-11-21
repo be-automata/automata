@@ -3,7 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
-import { mintKey, mockSession } from "@/test-helpers/egress-api";
+import {
+  mintKey,
+  mockSession,
+  trustAppOrigin,
+} from "@/test-helpers/egress-api";
+import { eq } from "drizzle-orm";
+import {
+  repoEgressAuditLog,
+  repoReviewSettings,
+} from "@terragon/shared/db/schema";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
 import {
   createTestOrganization,
@@ -14,7 +23,7 @@ import {
   POST as cliPOST,
   OPTIONS as cliOPTIONS,
 } from "../../cli/[[...slug]]/route";
-import { GET } from "./route";
+import { GET, PATCH } from "./route";
 
 vi.mock("@/lib/repo-admin", () => ({ checkRepoAdmin: vi.fn() }));
 vi.mock("@/server-lib/user-repos", () => ({
@@ -26,6 +35,20 @@ const EGRESS = "/api/v1/orgs";
 
 function get(path: string, headers: Record<string, string> = {}) {
   return GET(new Request(`${ORIGIN}${path}`, { headers }));
+}
+
+function patch(
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+) {
+  return PATCH(
+    new Request(`${ORIGIN}${path}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 afterEach(() => {
@@ -110,6 +133,39 @@ describe("/api/v1 REST mount", () => {
     expect(getSession).not.toHaveBeenCalled();
   });
 
+  it("§4.4 order: the credential is checked before the path shape, and before the Origin", async () => {
+    const bad = `${EGRESS}/${org.id}/repos/acme/wid%20gets/egress`;
+    const credentials: Record<string, string>[] = [
+      {},
+      { "X-Daemon-Token": "bogus" },
+    ];
+    for (const headers of credentials) {
+      expect((await get(bad, headers)).status).toBe(401);
+      expect((await patch(bad, { level: "domain" }, headers)).status).toBe(401);
+      expect(
+        (
+          await patch(
+            `${EGRESS}/${org.id}/repos/acme/widgets/egress`,
+            { level: "domain" },
+            { ...headers, Origin: "https://evil.example.test" },
+          )
+        ).status,
+      ).toBe(401);
+    }
+  });
+
+  it("a session read is never origin-checked, even with a foreign Origin", async () => {
+    mockSession(userId);
+    const res = await get(`${EGRESS}/${org.id}/repos/acme/widgets/egress`, {
+      Origin: "https://evil.example.test",
+    });
+    expect(res.status).toBe(200);
+    const list = await get(`${EGRESS}/${org.id}/egress`, {
+      Origin: "https://evil.example.test",
+    });
+    expect(list.status).toBe(200);
+  });
+
   it("maps an input the schema refuses to the declared invalid_input", async () => {
     const badLimit = await get(
       `${EGRESS}/${org.id}/repos/acme/widgets/egress/history?limit=0`,
@@ -161,7 +217,7 @@ describe("/api/v1 REST mount", () => {
     expect(historyAbsent).toEqual(rowElsewhere);
   });
 
-  it("lists exactly the three egress operations in openapi.json", async () => {
+  it("lists exactly the four egress operations in openapi.json", async () => {
     const res = await get("/api/v1/openapi.json");
     expect(res.status).toBe(200);
     expect(res.headers.get("x-api-version")).toBe("1");
@@ -179,6 +235,7 @@ describe("/api/v1 REST mount", () => {
       "GET /v1/orgs/{org}/egress",
       "GET /v1/orgs/{org}/repos/{owner}/{repo}/egress",
       "GET /v1/orgs/{org}/repos/{owner}/{repo}/egress/history",
+      "PATCH /v1/orgs/{org}/repos/{owner}/{repo}/egress",
     ]);
     expect(Object.keys(doc.components.securitySchemes).sort()).toEqual([
       "apiKey",
@@ -224,5 +281,139 @@ describe("/api/cli RPC mount, egress", () => {
     expect(cookieOnly.status).toBe(401);
     expect(getSession).not.toHaveBeenCalled();
     expect((await cliOPTIONS()).headers.get("x-api-version")).toBe("1");
+  });
+});
+
+describe("/api/v1 REST mount: PATCH egress", () => {
+  let userId: string;
+  let org: { id: string; slug: string };
+  let key: string;
+  const path = (o: string) => `${EGRESS}/${o}/repos/acme/widgets/egress`;
+
+  const rows = async () =>
+    (
+      await db
+        .select()
+        .from(repoReviewSettings)
+        .where(eq(repoReviewSettings.organizationId, org.id))
+    ).length;
+  const audits = async () =>
+    (
+      await db
+        .select()
+        .from(repoEgressAuditLog)
+        .where(eq(repoEgressAuditLog.organizationId, org.id))
+    ).length;
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", ORIGIN);
+    vi.mocked(isRepoInOrganizationScope).mockResolvedValue(true);
+    vi.mocked(checkRepoAdmin).mockResolvedValue("not-admin");
+    userId = (await createTestUser({ db })).user.id;
+    org = (await createTestOrganization({ db, userId, name: "Alpha" }))
+      .organization;
+    key = await mintKey(userId, org.id);
+  });
+
+  it("applies a change with a key, and announces the version", async () => {
+    const res = await patch(
+      path(org.slug),
+      { level: "domain", add: ["a.example.org"] },
+      { "X-Daemon-Token": key },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-api-version")).toBe("1");
+    expect(await res.json()).toMatchObject({
+      applied: true,
+      after: { stored: { level: "domain", allowlist: ["a.example.org"] } },
+    });
+    expect(await audits()).toBe(1);
+  });
+
+  it("AC-6 over REST: 400 with the declared envelope and every error; nothing written", async () => {
+    const res = await patch(
+      path(org.id),
+      { level: "domain", add: ["*.example.com", "10.0.0.1"] },
+      { Authorization: `Bearer ${key}` },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      defined: true,
+      code: "BAD_REQUEST",
+      status: 400,
+    });
+    expect(body.data.errors.map((e: { code: string }) => e.code)).toEqual([
+      "wildcard_not_allowed",
+      "ip_not_allowed",
+    ]);
+    expect(await rows()).toBe(0);
+    expect(await audits()).toBe(0);
+  });
+
+  it("a body the schema refuses (201 hosts) is the declared invalid_input, not an undeclared error", async () => {
+    const add = Array.from({ length: 201 }, (_, i) => `h${i}.example.org`);
+    const res = await patch(path(org.id), { add }, { "X-Daemon-Token": key });
+    expect(res.status).toBe(400);
+    expect((await res.json()).data.errors[0]).toMatchObject({
+      code: "invalid_input",
+    });
+    expect(await rows()).toBe(0);
+  });
+
+  it("101 hosts reach the classifier: too_many_entries", async () => {
+    const add = Array.from({ length: 101 }, (_, i) => `h${i}.example.org`);
+    const res = await patch(
+      path(org.id),
+      { level: "domain", add },
+      { "X-Daemon-Token": key },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).data.errors[0]).toMatchObject({
+      code: "too_many_entries",
+    });
+  });
+
+  it("a session write without this app's Origin is 403 origin_mismatch, and with it succeeds", async () => {
+    mockSession(userId);
+    const denied = await patch(path(org.id), { level: "domain" });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({
+      code: "FORBIDDEN",
+      data: { reason: "origin_mismatch" },
+    });
+    expect(await rows()).toBe(0);
+    const ok = await patch(
+      path(org.id),
+      { level: "domain" },
+      { Origin: await trustAppOrigin() },
+    );
+    expect(ok.status).toBe(200);
+    expect(await rows()).toBe(1);
+  });
+
+  it("/api/cli stays token-only: a session never writes there", async () => {
+    mockSession(userId);
+    const res = await cliPOST(
+      new Request(`${ORIGIN}/api/cli/egress/update`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Origin: await trustAppOrigin(),
+        },
+        body: JSON.stringify({
+          json: {
+            org: org.id,
+            owner: "acme",
+            repo: "widgets",
+            level: "domain",
+          },
+        }),
+      }),
+    );
+    expect(res.status).toBe(401);
+    expect(await rows()).toBe(0);
   });
 });

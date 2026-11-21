@@ -146,6 +146,24 @@ export async function checkCliTaskCreationRateLimit(userId: string) {
   return result;
 }
 
+// Egress setting writes over the API (#728), by user ID. A dry run is not counted.
+export const cliEgressWriteRateLimit = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(
+    60, // 60 writes
+    "1h", // per hour
+  ),
+  prefix: `${PREFIX}:cli-egress-write`,
+});
+
+/** True when the user may write now; false when the hourly budget is spent. */
+export async function checkCliEgressWriteRateLimit(
+  userId: string,
+): Promise<boolean> {
+  const result = await limit(cliEgressWriteRateLimit, userId);
+  return result.success;
+}
+
 // Shadow-banned users: 3 tasks per hour (applies across sources)
 export const shadowBanTaskCreationRateLimit = new Ratelimit({
   redis,

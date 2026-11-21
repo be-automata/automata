@@ -112,3 +112,12 @@ export function cellAgentSupported(agent: string | null | undefined): boolean {
 export function cellBrokerHost(): string {
   return normalizeCellBrokerHost(new URL(nonLocalhostPublicAppUrl()).hostname);
 }
+
+/** The broker host, or undefined when the public host cannot be one (the classifier's placeholder applies). */
+export function cellBrokerHostOrUndefined(): string | undefined {
+  try {
+    return cellBrokerHost();
+  } catch {
+    return undefined;
+  }
+}

@@ -26,14 +26,26 @@ import {
 } from "@terragon/shared/model/egress-entries";
 import type { EgressLevel } from "@terragon/types/egress";
 
-import { cellBrokerHost } from "@/server-lib/compute/cell-gate";
+import { cellBrokerHostOrUndefined } from "@/server-lib/compute/cell-gate";
 
 import {
   egressPolicyFromRow,
   systemEgressHosts,
 } from "./resolve-egress-policy";
 
-type Row = RepoReviewSetting | undefined;
+/**
+ * The fields the view reads: a stored row, or a projected one for a dry run.
+ * A projection of a repo with no row has no version yet, so `updatedAt` is null.
+ */
+export type EgressRow = Pick<
+  RepoReviewSetting,
+  | "egressPolicy"
+  | "egressAllowlist"
+  | "cellEgressRegistries"
+  | "updatedByUserId"
+> & { updatedAt: Date | null };
+
+type Row = EgressRow | undefined;
 type EgressView = EgressViewData;
 type CellView = EgressCellData;
 type EgressLayer = EgressLayerData;
@@ -100,19 +112,14 @@ function cellView(
   repoFullName: string,
   row: Row,
   repoHosts: ReadonlySet<string>,
-): { cell: CellView; brokerHost: string | undefined } {
-  let brokerHost: string;
-  try {
-    brokerHost = cellBrokerHost();
-  } catch {
+  brokerHost: string | undefined,
+): CellView {
+  if (brokerHost === undefined) {
     // A single-label or missing public host: never a 500 on a read.
-    return {
-      cell: { ok: false, code: "broker_host_unavailable", reason: null },
-      brokerHost: undefined,
-    };
+    return { ok: false, code: "broker_host_unavailable", reason: null };
   }
   const plan = planCellEgressForRepo({ repoFullName, row, brokerHost });
-  return { cell: cellFromPlan(plan, brokerHost, repoHosts), brokerHost };
+  return cellFromPlan(plan, brokerHost, repoHosts);
 }
 
 /**
@@ -136,13 +143,17 @@ export function getRepoEgressView(args: {
   row: Row;
   canEdit: boolean;
   readOnlyReason: EgressReadOnlyReason | null;
+  /** Resolved once per request by the caller; omitted, it is resolved here. */
+  brokerHost?: string | undefined;
 }): EgressView {
   const { org, repoFullName, row } = args;
+  const brokerHost =
+    "brokerHost" in args ? args.brokerHost : cellBrokerHostOrUndefined();
   const level = storedEgressLevel(row?.egressPolicy ?? null);
   const allowlist = row?.egressAllowlist ?? [];
   const registries = row?.cellEgressRegistries ?? null;
   const repoHosts = new Set(canonicalizeEgressEntries(allowlist));
-  const { cell, brokerHost } = cellView(repoFullName, row, repoHosts);
+  const cell = cellView(repoFullName, row, repoHosts, brokerHost);
   const box = boxView(row);
   // A row the box builder refuses is not "no policy": the box fails those
   // runs, so the open-box warning would tell the operator the opposite.
@@ -160,7 +171,7 @@ export function getRepoEgressView(args: {
       level,
       allowlist: [...allowlist],
       registries,
-      updatedAt: row?.updatedAt.toISOString() ?? null,
+      updatedAt: row?.updatedAt?.toISOString() ?? null,
       updatedByUserId: row?.updatedByUserId ?? null,
     },
     box,
