@@ -126,6 +126,8 @@ describe("isDeliveryAsk (#729 OD-6)", () => {
     "fix the typo in the README",
     "what is this issue about?",
     "implement the new parser, then close the issue when it is done",
+    "can you implement the fix for the issue?",
+    "how would you implement it? the issue is vague",
   ])("%s does not", (text) => {
     expect(isDeliveryAsk(text)).toBe(false);
   });

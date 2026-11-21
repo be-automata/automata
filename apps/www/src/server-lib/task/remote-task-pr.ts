@@ -129,11 +129,15 @@ const ISSUE_REF =
   "https?://github\\.com/[\\w.-]+/[\\w.-]+/issues/\\d+|(?:[\\w.-]+/[\\w.-]+)?#\\d+";
 /** GitHub's closing keywords in front of an issue reference. */
 const CLOSING_REF = new RegExp(
-  `\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b:?[ \\t]+(${ISSUE_REF})`,
+  `\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b(?::[ \\t]*|[ \\t]+)(${ISSUE_REF})`,
   "gi",
 );
-/** An inline code span: a backtick run closed by a run of the same length. */
-const INLINE_CODE = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
+/**
+ * An inline code span: a backtick run closed by a run of the same length,
+ * within one paragraph (a blank line ends it, so a stray backtick never pairs
+ * with one paragraphs later and hides the prose between them).
+ */
+const INLINE_CODE = /(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 
 type Piece = [text: string, isCode: boolean];

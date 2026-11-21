@@ -490,6 +490,53 @@ describe("startGitBroker refFence (FENCE-01 — self-heal fix runs)", () => {
   });
 });
 
+describe("startGitBroker refFence on a mention run's pushRef (#729 AC-4)", () => {
+  async function bootOn(exactRef: string) {
+    const { impl, calls } = bodyReadingFetch();
+    broker = await startGitBroker({
+      installationToken: TOKEN,
+      repoFullName: REPO,
+      runBearer: BEARER,
+      fetchImpl: impl,
+      refFence: { exactRef },
+    });
+    return { b: broker, calls };
+  }
+
+  it.each([
+    ["an issue mention", "refs/heads/automata/task-abcd1234"],
+    ["a PR mention", "refs/heads/feat/pr-head"],
+  ])(
+    "%s pushes its one ref; main and any other branch → 403",
+    async (_, ref) => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { b, calls } = await bootOn(ref);
+        for (const other of [
+          "refs/heads/main",
+          "refs/heads/automata/task-ffff0000",
+          "refs/tags/v1",
+        ]) {
+          const res = await postReceivePack(
+            b,
+            pushBody([[OLD_SHA, NEW_SHA, other]]),
+          );
+          expect(res.status, other).toBe(403);
+        }
+        expect(calls).toHaveLength(0);
+        const ok = await postReceivePack(
+          b,
+          pushBody([[OLD_SHA, NEW_SHA, ref]]),
+        );
+        expect(ok.status).toBe(200);
+        expect(calls).toHaveLength(1);
+      } finally {
+        errors.mockRestore();
+      }
+    },
+  );
+});
+
 describe("startGitBroker without refFence — today's behaviour", () => {
   it("streams a receive-pack body upstream without buffering it", async () => {
     let dialled = 0;

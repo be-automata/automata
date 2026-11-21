@@ -599,6 +599,26 @@ describe("withIssueReference", () => {
     expect(out.endsWith("\n\nRefs #5")).toBe(true);
   });
 
+  it("an unpaired backtick never hides a closing keyword in a later paragraph", () => {
+    // A code span ends at its paragraph: the stray ` in the first paragraph
+    // must not pair with the one in the last and swallow "Closes #5".
+    const body = "Use the ` key.\n\nCloses #5\n\nRun `pnpm test`.";
+    const out = withIssueReference(body, 5);
+    expect(out).toContain("\n\nRefs #5\n\n");
+    expect(out).not.toMatch(/closes/i);
+    expect(out).toContain("`pnpm test`");
+  });
+
+  it("an inline code span may still wrap a single line break", () => {
+    const out = withIssueReference("See `Closes\n#5` here.", 5);
+    expect(out).toContain("`Closes\n#5`");
+  });
+
+  it("rewrites a keyword with a colon and no space before the reference", () => {
+    const out = withIssueReference("Closes:#5", 5);
+    expect(out).toBe("Refs #5");
+  });
+
   it("does not touch words that merely contain a keyword", () => {
     expect(withIssueReference("Prefixes #5 are fine.", 5)).toContain(
       "Prefixes #5 are fine.",

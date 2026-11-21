@@ -709,11 +709,12 @@ export async function handleOrgLaneMention(
 /**
  * An instruction that asks the agent to deliver the whole issue ("implement
  * this issue", "please implement the issue as written", "implement issue #12").
- * Its reply also names the `automata:deliver` label (#729 OD-6). A question
- * that merely contains "implement" does not match.
+ * Its reply also names the `automata:deliver` label (#729 OD-6). At most two
+ * words may sit between "implement" and "issue", so a question that merely
+ * contains both ("implement the fix for the issue?") does not match.
  */
 export function isDeliveryAsk(instruction: string): boolean {
-  return /\bimplement\b.{0,20}\bissue\b/i.test(instruction);
+  return /\bimplement\s+(?:[\w-]+\s+){0,2}?issue\b/i.test(instruction);
 }
 
 /**
