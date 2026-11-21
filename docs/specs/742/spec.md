@@ -437,3 +437,77 @@ phases:
 - Step 5 evidence is posted on #742.
 - Follow-ups filed if the re-run shows them: OD-2 (lane weight or memory), OD-4 (foreground
   `flutter test` killed), more SDK versions (MISS lines), the box container path using the cache.
+
+---
+
+## 9. Validator amendments (2026-11-21, verdict BLOCK → fixes applied)
+
+Binding on the implementation; they override §1–§8 where they differ.
+
+- **F1 rollout and rollback.** Rollout is cap → **www** → **worker** → image. Rollback runs in reverse:
+  worker before www, www before the cap. Rolling www back while the worker still refreshes to 60
+  minutes recreates the case where a run outlives a 45-minute cell.
+- **F2 phase order.** Phase 1 creates `run-budget.ts` with the constants only (`TASK_LANE_BUDGET`,
+  `TASK_LANE_REFRESH`), set from the semantics the IT measures. Phase 2 adds the resolver.
+- **F3 worker stop deadline (owner: raise it).** In `automata-worker.service`, the `ExecStop`
+  drain becomes `--timeout-s 4200` and `TimeoutStopSec` becomes `4500`. The
+  `automata-worker-safe-restart` default drain becomes 75 minutes. `deploy-assets.test.ts:693-698` and
+  `:729-731` move with it, and the README updates. This is its own phase (6b). Rollout step "worker"
+  re-renders the unit on the box (`daemon-reload`).
+- **F4 lane test.** Use `resolveRunLane(wire) === "task" && wire.selfHeal === undefined` on the wire
+  input, in `run-budget.ts`. `ownsAbnormalTerminal(wire)` does not type-check
+  (`SelfHealWireShape` vs `SelfHealRunShape`).
+- **F5 semver.** Add `semver` and `@types/semver` to `packages/worker`. Phase 8 splits into 8a (pure
+  pin resolution plus deps and lockfile) and 8b (cell bootstrap).
+- **F6 bounded refresh.** `ctx.refreshTimeout` races a 10 s timer. A timeout, a rejection or a
+  missing context logs one line (`run budget: refresh failed, staying at 30m`) and continues at 30
+  minutes. The run is never failed on it.
+- **F7 no unpinned precache.** Drop `flutter precache --universal --linux`. A baked SDK runs only
+  `flutter --version`, like the default SDK, and fetches the rest with sha256 pins, or not at all.
+- **F8 offline proof.** `verify.sh` warms a committed fixture (`pubspec.yaml` and `pubspec.lock`,
+  `flutter_test` only) at build time for each baked version. It then runs `flutter test` on it with
+  `--network none`. That proves the SDK needs no download, and pub resolves from the warmed
+  `PUB_CACHE`.
+- **F9 a missing SDK (owner: keep the default and log it).** When the pinned version is not baked,
+  the cell keeps `/opt/flutter` and logs `cell: flutter pin <ver> not in the image; using <default>`
+  (version text through a safe-version check, never raw). This **differs on purpose** from the box's
+  exit-69 notice shim (#565). The owner wants a cell run to keep working on the default SDK rather
+  than stop. The agent's `CLAUDE.md` note tells it which SDK it got, so its report can say so.
+- **F10 wrapper and scope.** The wrapper is inline `bash -c '<text>' -- <ver>` from worker source,
+  with no file in the image, so phase 8b does not depend on phase 9. Marker files are read with the
+  existing `provider.copyOut` (absent counts as no pin). Reading the `pubspec.yaml` constraint is
+  **cell-only**: the box path keeps `detectFlutterPinFrom` and its exit-69 shim unchanged. Moving the
+  box onto baked SDKs is a follow-up.
+
+Warnings taken:
+- `FLUTTER_ROOT=/opt/flutter` stays in the daemon env, so tools that read it bypass the shim. This
+  is a known limit, recorded here.
+- R4 folds into R1.
+- AC-8's grep also covers `stop-thread.ts:21`, `www-client.ts:827` and the `opensandbox-server.toml`
+  comment.
+- Phase 9's `FROM` bump pulls in every batteries change since the cell's current base; the PR lists
+  that diff.
+
+Final phases (each ≤ 5 files):
+1. OD-1 gate IT: `refresh-timeout.integration.test.ts`, `run-budget.ts` (constants only),
+   `docs/uat/hatchet-lite-v0.94.10-observed.md`, `CLAUDE.md`, `ci.yml`. Exit: R1 and R3 pass, else
+   re-plan fallback A.
+2. Per-lane budget: `run-budget.ts`, `run-budget.test.ts`, `run-admission.ts`, `workflow.ts`,
+   `workflow.test.ts`.
+3. Cell TTL 75 and cap 5400: `packages/types/src/cell.ts`, `cell-ttl.test.ts`,
+   `opensandbox-server.toml`, `packages/sandbox/opensandbox-it/config.toml`,
+   `container-deploy-assets.test.ts`.
+4. www: `cell-plan/route.ts`, `route.test.ts`, `cron.ts`, `cron.test.ts`, `cycle-finish.ts`.
+5. Boot inequality and comments: `config.ts`, `config.test.ts`, `admission-retry.ts`, `provision.ts`,
+   `hello/worker.ts`.
+6. Assertions and remaining comments: `opensandbox-cell.test.ts`, `headroom.test.ts`,
+   `cycle-finish.test.ts`, `stop-thread.ts`, `www-client.ts`.
+6b. Worker stop deadline: `automata-worker.service`, `automata-worker-safe-restart`,
+   `deploy-assets.test.ts`, `packages/worker/deploy/README.md`.
+7. Batteries SDK cache: `deploy/images/batteries/Dockerfile`, `verify.sh`, `README.md`, the fixture
+   (`pubspec.yaml` and `pubspec.lock`).
+8a. Pin resolution (pure): `packages/worker/package.json`, `pnpm-lock.yaml`, `flutter-sdk.ts`,
+   `flutter-sdk.test.ts`.
+8b. Cell bootstrap: `cell-run.ts`, `cell-run.test.ts`.
+9. Second PR, after the batteries digest is on main: `deploy/images/cell/Dockerfile`,
+   `cell/verify.sh`, `cell/README.md`.
