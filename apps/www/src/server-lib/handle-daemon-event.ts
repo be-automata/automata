@@ -50,6 +50,7 @@ import {
 import { trackUsageEvents } from "./usage-events";
 import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { compactThreadChat } from "./compact";
+import type { RemoteTaskPrOutcome } from "@/server-lib/task/remote-task-pr";
 
 export async function handleDaemonEvent({
   messages,
@@ -693,6 +694,18 @@ export async function handleDaemonEvent({
   return { success: true };
 }
 
+/**
+ * What a failed pull request open still tells the reply: the PR number when
+ * GitHub made the PR and only recording it failed (RemoteTaskPrRecordError).
+ * Structural, so a test double of the module needs no new export.
+ */
+function recordedOutcomeOf(error: unknown): RemoteTaskPrOutcome | null {
+  if (!(error instanceof Error) || !("recordedOutcome" in error)) return null;
+  const outcome = (error as { recordedOutcome?: RemoteTaskPrOutcome })
+    .recordedOutcome;
+  return outcome ?? null;
+}
+
 async function handleThreadFinish({
   userId,
   threadId,
@@ -770,17 +783,31 @@ async function handleThreadFinish({
   // for a sandbox thread, under the same rules: not after a user stop, not
   // for a thread that disabled git checkpointing (checked inside), and still
   // after an error. No-ops unless that branch exists and is ahead.
+  // The attempt never rejects: a failure is logged and resolves to what is
+  // known of the PR (a thrown record error still names it) or null. The mention
+  // reply (below) awaits it so an issue mention can link the PR; enrolment
+  // chains on it in its own waitUntil.
+  let remotePullRequest: Promise<RemoteTaskPrOutcome | null> | undefined;
   if (sandboxId === null && prNumber === null && repoFullName && !isStop) {
-    waitUntil(
-      import("@/server-lib/task/remote-task-pr")
-        .then(async ({ openRemoteTaskPullRequest }) => {
-          const outcome = await openRemoteTaskPullRequest({
-            db,
-            userId,
+    const attempt = import("@/server-lib/task/remote-task-pr")
+      .then(({ openRemoteTaskPullRequest }) =>
+        openRemoteTaskPullRequest({ db, userId, threadId, threadChatId }),
+      )
+      .then(
+        (outcome) => ({ outcome, recorded: true }),
+        (error: unknown) => {
+          console.error("[remote-task-pr] finish-hook failed (non-fatal)", {
             threadId,
-            threadChatId,
+            error: error instanceof Error ? error.message : String(error),
           });
-          if (outcome.status === "skipped") return;
+          return { outcome: recordedOutcomeOf(error), recorded: false };
+        },
+      );
+    remotePullRequest = attempt.then(({ outcome }) => outcome);
+    waitUntil(
+      attempt
+        .then(async ({ outcome, recorded }) => {
+          if (!recorded || !outcome || outcome.status === "skipped") return;
           console.log("[remote-task-pr]", { threadId, ...outcome });
           // #509: an issue-delivery run's PR enters the delivery loop. A
           // failure here never touches the PR that was just opened.
@@ -856,6 +883,7 @@ async function handleThreadFinish({
           userId,
           threadId,
           threadChatId,
+          remotePullRequest,
         }),
       )
       .catch((error) =>

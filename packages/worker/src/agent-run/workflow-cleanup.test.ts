@@ -922,11 +922,56 @@ describe("agent-run run task — credential brokers (#81)", () => {
     process.env.WORKER_CREDENTIAL_BROKER = "legacy-direct";
 
     await expect(runFn(FIX_INPUT, ctx())).rejects.toThrow(
-      /self-heal fix run requires the credential broker/,
+      /a fenced run requires the credential broker/,
     );
 
     expect(provisionWorkdir).not.toHaveBeenCalled();
     expect(startGitBroker).not.toHaveBeenCalled();
+  });
+
+  const MENTION_INPUT = {
+    ...INPUT,
+    pushRef: "refs/heads/automata/task-abcd1234",
+  };
+
+  it("#729: a mention run's git broker is fenced to exactly its pushRef", async () => {
+    sharedBoxNoCredential();
+
+    await expect(runFn(MENTION_INPUT, ctx())).resolves.toMatchObject({
+      outcome: "nothing-to-run",
+    });
+
+    expect(startGitBroker).toHaveBeenCalledTimes(1);
+    expect(startGitBroker).toHaveBeenCalledWith(
+      expect.objectContaining({
+        refFence: { exactRef: "refs/heads/automata/task-abcd1234" },
+      }),
+    );
+  });
+
+  it("#729: a pushRef run refuses to start without the credential broker", async () => {
+    sharedBoxNoCredential();
+    vi.stubEnv("WORKER_CREDENTIAL_BROKER", "legacy-direct");
+    try {
+      await expect(runFn(MENTION_INPUT, ctx())).rejects.toThrow(
+        /a fenced run requires the credential broker/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+
+    expect(provisionWorkdir).not.toHaveBeenCalled();
+    expect(startGitBroker).not.toHaveBeenCalled();
+  });
+
+  it("#729: a pushRef that is not a branch ref ends the run before the clone", async () => {
+    sharedBoxNoCredential();
+
+    await expect(
+      runFn({ ...INPUT, pushRef: "refs/tags/v1" }, ctx()),
+    ).rejects.toThrow(/pushRef is not a refs\/heads\/ branch ref/);
+
+    expect(provisionWorkdir).not.toHaveBeenCalled();
   });
 
   it("WORKER_CREDENTIAL_BROKER=legacy-direct: no brokers, and the container daemon gets broker=null (rollback)", async () => {

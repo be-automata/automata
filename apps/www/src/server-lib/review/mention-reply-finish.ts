@@ -54,6 +54,7 @@ import {
   reviewReplyTargetId,
 } from "./mention-target-reply";
 import { maybePromoteSkillLastKnownGood } from "./review-single-writer-finish";
+import type { RemoteTaskPrOutcome } from "@/server-lib/task/remote-task-pr";
 import type { MentionTerminalTarget } from "./mention-terminal-reply";
 
 /**
@@ -181,17 +182,95 @@ export type MentionReplyOutcome =
 
 type Logger = ReviewLogger;
 
-/** The reply as posted: the agent's text, the pushed commit, the marker. */
+/** How long a reply waits for the pull request the same finish is opening. */
+export const PR_OUTCOME_WAIT_MS = 20_000;
+
+/** The label the issue-delivery lane already listens for (delivery-effects). */
+export const DELIVERY_LABEL = "automata:deliver";
+
+const DELIVERY_HINT = `For the full delivery pipeline (spec, gated implementation and the fix loop), add the \`${DELIVERY_LABEL}\` label to this issue.`;
+
+/**
+ * The line a reply carries about the pull request the finish opened for an
+ * issue mention, or null when there is nothing to say (other skips, an error,
+ * no outcome: those are logged). The URL is built from the stamp's repo.
+ */
+export function renderPullRequestLine(
+  repoFullName: string,
+  outcome: RemoteTaskPrOutcome | null | undefined,
+): string | null {
+  if (!outcome) return null;
+  if (outcome.status === "skipped") {
+    switch (outcome.reason) {
+      case "auto_create_off":
+        return "_No pull request was opened: automatic pull requests are turned off in the task owner's settings._";
+      case "no_changes":
+      case "no_branch":
+        return "_No pull request was opened: no changes were pushed._";
+      default:
+        return null;
+    }
+  }
+  const url = `https://github.com/${repoFullName}/pull/${outcome.prNumber}`;
+  return outcome.status === "opened"
+    ? `Opened a draft pull request: ${url}`
+    : `Updated the open pull request: ${url}`;
+}
+
+/** The lines between the reply text and the marker; issue mentions only. */
+export function mentionReplyExtras(
+  stamp: MentionLaneStamp,
+  pullRequest: RemoteTaskPrOutcome | null | undefined,
+): string[] {
+  if (stamp.isPullRequest) return [];
+  return [
+    renderPullRequestLine(stamp.repoFullName, pullRequest),
+    stamp.asksForDelivery ? DELIVERY_HINT : null,
+  ].filter((line): line is string => line !== null);
+}
+
+/**
+ * The reply as posted: the agent's text, the pushed commit, then any extra
+ * lines (the pull request outcome, the delivery hint), then the marker.
+ */
 export function renderMentionReply(
   reply: MentionReply,
   commentId: number,
+  extras: readonly string[] = [],
 ): string {
   const parts = [reply.reply.trim()];
   if (reply.commit && !reply.reply.includes(reply.commit.slice(0, 7))) {
     parts.push(`_Pushed \`${reply.commit}\`._`);
   }
-  parts.push(mentionReplyMarker(commentId));
+  parts.push(...extras, mentionReplyMarker(commentId));
   return parts.join("\n\n");
+}
+
+/**
+ * Waits for the finish's pull request outcome, never longer than `waitMs`.
+ * The promise never rejects (handleThreadFinish guarantees it); a timeout
+ * resolves null (no PR line) and logs `reason=pr_outcome_timeout`.
+ */
+export async function awaitPullRequestOutcome(
+  promise: Promise<RemoteTaskPrOutcome | null>,
+  meta: Record<string, unknown>,
+  waitMs: number = PR_OUTCOME_WAIT_MS,
+): Promise<RemoteTaskPrOutcome | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      logger.warn("pull request outcome not ready; replying without it", {
+        ...meta,
+        reason: "pr_outcome_timeout",
+      });
+      resolve(null);
+    }, waitMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -205,6 +284,7 @@ export async function executeMentionReply({
   runReview,
   providerUnavailable,
   terminalCause,
+  pullRequest,
   logger,
 }: {
   github: MentionReplyGitHub;
@@ -222,6 +302,11 @@ export async function executeMentionReply({
    * not refuse the run.
    */
   terminalCause?: TerminalCause | null;
+  /**
+   * An issue mention's finish opened (or skipped) a pull request: the reply
+   * says which. Null or absent adds no line. Ignored on a PR mention.
+   */
+  pullRequest?: RemoteTaskPrOutcome | null;
   logger?: Logger;
 }): Promise<MentionReplyOutcome> {
   const marker = mentionReplyMarker(stamp.commentId);
@@ -277,13 +362,15 @@ export async function executeMentionReply({
 
   const provider = parsed.ok ? null : (providerUnavailable ?? null);
   const cause = parsed.ok || provider ? null : (terminalCause ?? null);
+  const extras = mentionReplyExtras(stamp, pullRequest);
+  const notice = (text: string) => [text, ...extras, marker].join("\n\n");
   const body = parsed.ok
-    ? renderMentionReply(parsed.value, stamp.commentId)
+    ? renderMentionReply(parsed.value, stamp.commentId, extras)
     : provider
-      ? `${renderMentionProviderNotice(provider)}\n\n${marker}`
+      ? notice(renderMentionProviderNotice(provider))
       : cause
-        ? `${renderMentionTerminalNotice(cause)}\n\n${marker}`
-        : `${MENTION_REPLY_NOTICE}\n\n${marker}`;
+        ? notice(renderMentionTerminalNotice(cause))
+        : notice(MENTION_REPLY_NOTICE);
   try {
     if (inThread) {
       await github.replyToReviewComment(
@@ -373,6 +460,7 @@ export async function handleMentionReplyAtFinish({
   userId,
   threadId,
   threadChatId,
+  remotePullRequest,
 }: {
   db: DB;
   userId: string;
@@ -382,6 +470,12 @@ export async function handleMentionReplyAtFinish({
    * which knows only the thread: the chat is resolved from the thread.
    */
   threadChatId: string | null;
+  /**
+   * The finish's pull request open, when one was attempted (never rejects).
+   * An issue mention waits for it (bounded) so its reply can link the PR; a
+   * PR mention and the typed-terminal entry pass none.
+   */
+  remotePullRequest?: Promise<RemoteTaskPrOutcome | null>;
 }): Promise<void> {
   try {
     if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
@@ -404,6 +498,10 @@ export async function handleMentionReplyAtFinish({
       logger.info("[shadow] reply suppressed", { threadId });
       return;
     }
+    const pullRequest =
+      remotePullRequest && !stamp.isPullRequest
+        ? await awaitPullRequestOutcome(remotePullRequest, { threadId })
+        : null;
     const chatId =
       threadChatId ??
       (await resolveThreadChatId({ db, threadId, version: thread.version }));
@@ -436,6 +534,7 @@ export async function handleMentionReplyAtFinish({
         : undefined,
       providerUnavailable: providerUnavailableOfChat(threadChat),
       terminalCause,
+      pullRequest,
       logger,
     });
     getPostHogServer().capture({

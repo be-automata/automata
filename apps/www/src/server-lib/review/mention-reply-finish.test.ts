@@ -9,6 +9,7 @@ import {
 } from "@terragon/shared/model/threads";
 import { getOrganizationInstallationMode } from "@terragon/shared/model/github-installation";
 import {
+  DELIVERY_LABEL,
   MENTION_REPLY_NOTICE,
   executeMentionReply,
   handleMentionRepliesAtTerminal,
@@ -16,6 +17,7 @@ import {
   mentionReplyMarker,
   parseMentionReply,
   renderMentionTerminalNotice,
+  renderPullRequestLine,
   type MentionReplyGitHub,
 } from "./mention-reply-finish";
 import { MENTION_SKILL_NAME, validateSkillBody } from "./review-skill";
@@ -74,6 +76,11 @@ const ISSUE_STAMP: MentionLaneStamp = {
   commentId: 101,
   commentKind: "issue",
   commenterLogin: "alice",
+};
+/** The ISSUE mention (ISSUE_STAMP above is, despite its name, a PR one). */
+const ISSUE_MENTION: MentionLaneStamp = {
+  ...ISSUE_STAMP,
+  isPullRequest: false,
 };
 const REVIEW_STAMP: MentionLaneStamp = {
   ...ISSUE_STAMP,
@@ -387,6 +394,119 @@ describe("executeMentionReply", () => {
   });
 });
 
+describe("the pull request outcome in an issue mention's reply (#729)", () => {
+  const URL = "https://github.com/acme/widgets/pull/55";
+  const text = block({ kind: "mention-reply", reply: "Done it." });
+  const post = async (
+    pullRequest: Parameters<typeof executeMentionReply>[0]["pullRequest"],
+    stamp: MentionLaneStamp = ISSUE_MENTION,
+    terminalText = text,
+  ) => {
+    const { github, calls } = fakeGitHub();
+    await executeMentionReply({ github, stamp, terminalText, pullRequest });
+    return calls[0] ?? "";
+  };
+
+  it("opened → links the draft PR, before the marker", async () => {
+    expect(await post({ status: "opened", prNumber: 55 })).toBe(
+      `issue:Done it.\n\nOpened a draft pull request: ${URL}\n\n${mentionReplyMarker(101)}`,
+    );
+  });
+
+  it("adopted → links the open PR", async () => {
+    expect(await post({ status: "adopted", prNumber: 55 })).toContain(
+      `Updated the open pull request: ${URL}`,
+    );
+  });
+
+  it("auto_create_off → says automatic PRs are off (OD-7)", async () => {
+    expect(
+      await post({ status: "skipped", reason: "auto_create_off" }),
+    ).toContain("automatic pull requests are turned off");
+  });
+
+  it.each(["no_changes", "no_branch"] as const)(
+    "%s → answers the question with only the no-changes line (AC-5)",
+    async (reason) => {
+      const body = await post({ status: "skipped", reason });
+      expect(body).toContain("Done it.");
+      expect(body).toContain(
+        "_No pull request was opened: no changes were pushed._",
+      );
+      expect(body).not.toContain("github.com");
+    },
+  );
+
+  it.each([
+    null,
+    undefined,
+    { status: "skipped", reason: "has_pr" },
+    { status: "skipped", reason: "checkpointing_off" },
+  ] as const)("adds no line for %j", async (outcome) => {
+    expect(await post(outcome as never)).toBe(
+      `issue:Done it.\n\n${mentionReplyMarker(101)}`,
+    );
+  });
+
+  it("sits after the pushed commit and before the delivery hint", async () => {
+    const withCommit = block({
+      kind: "mention-reply",
+      reply: "Done it.",
+      commit: "abcdef1234567",
+    });
+    const body = await post(
+      { status: "opened", prNumber: 55 },
+      { ...ISSUE_MENTION, asksForDelivery: true },
+      withCommit,
+    );
+    const at = (needle: string) => body.indexOf(needle);
+    expect(at("_Pushed")).toBeLessThan(at("Opened a draft"));
+    expect(at("Opened a draft")).toBeLessThan(at(DELIVERY_LABEL));
+    expect(at(DELIVERY_LABEL)).toBeLessThan(at("automata:mention-reply"));
+  });
+
+  it("the delivery hint names the label only when asked (OD-6)", async () => {
+    expect(await post(null)).not.toContain(DELIVERY_LABEL);
+    expect(
+      await post(null, { ...ISSUE_MENTION, asksForDelivery: true }),
+    ).toContain(`add the \`${DELIVERY_LABEL}\` label to this issue`);
+  });
+
+  it("the line rides every body: provider notice, terminal notice, generic notice", async () => {
+    const bodies = await Promise.all([
+      post({ status: "opened", prNumber: 55 }, ISSUE_MENTION, "no block"),
+    ]);
+    expect(bodies[0]).toContain(MENTION_REPLY_NOTICE);
+    expect(bodies[0]).toContain(URL);
+    const { github, calls } = fakeGitHub();
+    await executeMentionReply({
+      github,
+      stamp: ISSUE_MENTION,
+      terminalText: "no block",
+      terminalCause: "timeout" as never,
+      pullRequest: { status: "opened", prNumber: 55 },
+    });
+    expect(calls[0]).toContain(URL);
+    expect(calls[0]).toContain(mentionReplyMarker(101));
+  });
+
+  it("a PR mention never gets a PR line or the hint", async () => {
+    const body = await post(
+      { status: "opened", prNumber: 55 },
+      { ...ISSUE_STAMP, asksForDelivery: true },
+    );
+    expect(body).toBe(`issue:Done it.\n\n${mentionReplyMarker(101)}`);
+  });
+
+  it("renderPullRequestLine builds the URL from the stamp's repo", () => {
+    expect(
+      renderPullRequestLine("acme/widgets", { status: "opened", prNumber: 1 }),
+    ).toBe(
+      "Opened a draft pull request: https://github.com/acme/widgets/pull/1",
+    );
+  });
+});
+
 describe("handleMentionReplyAtFinish (routing by stamp)", () => {
   const octokit = {
     paginate: vi.fn(async () => []),
@@ -648,6 +768,91 @@ describe("handleMentionReplyAtFinish (routing by stamp)", () => {
     ).toHaveBeenCalledTimes(1);
   });
 
+  describe("the pull request outcome (#729)", () => {
+    const stampOf = (mention: MentionLaneStamp) =>
+      ({
+        organizationId: "o-1",
+        terminalCause: null,
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: MENTION_SKILL_NAME,
+          contentSha: "x",
+          source: "db-version",
+          mention,
+        },
+      }) as never;
+    const lastBody = () =>
+      (
+        octokit.rest.issues.createComment.mock.calls.at(-1) as unknown as [
+          { body: string },
+        ]
+      )[0].body;
+
+    it("an issue mention's reply is written after the PR outcome and links it", async () => {
+      vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
+      let resolvePr!: (v: { status: "opened"; prNumber: number }) => void;
+      const remotePullRequest = new Promise<{
+        status: "opened";
+        prNumber: number;
+      }>((resolve) => {
+        resolvePr = resolve;
+      });
+      const done = handleMentionReplyAtFinish({ ...args, remotePullRequest });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+      resolvePr({ status: "opened", prNumber: 55 });
+      await done;
+      expect(lastBody()).toContain(
+        "Opened a draft pull request: https://github.com/acme/widgets/pull/55",
+      );
+    });
+
+    it("a PR mention ignores the promise and never waits for it", async () => {
+      vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_STAMP));
+      await handleMentionReplyAtFinish({
+        ...args,
+        remotePullRequest: new Promise(() => {}),
+      });
+      expect(lastBody()).not.toContain("pull request");
+    });
+
+    it("gives up after 20 s: replies without a PR line and logs pr_outcome_timeout", async () => {
+      vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.useFakeTimers();
+      try {
+        const done = handleMentionReplyAtFinish({
+          ...args,
+          remotePullRequest: new Promise(() => {}),
+        });
+        await vi.advanceTimersByTimeAsync(19_999);
+        expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await done;
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(lastBody()).toBe(`Thread reply.\n\n${mentionReplyMarker(101)}`);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("pull request outcome not ready"),
+        expect.objectContaining({ reason: "pr_outcome_timeout" }),
+      );
+      warn.mockRestore();
+    });
+
+    it("a shadow org posts nothing even with an outcome", async () => {
+      vi.mocked(getOrganizationInstallationMode).mockResolvedValueOnce(
+        "shadow" as never,
+      );
+      vi.mocked(getThreadMinimal).mockResolvedValue(stampOf(ISSUE_MENTION));
+      await handleMentionReplyAtFinish({
+        ...args,
+        remotePullRequest: Promise.resolve({ status: "opened", prNumber: 55 }),
+      });
+      expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+  });
+
   it("a shadow org posts nothing", async () => {
     vi.mocked(getOrganizationInstallationMode).mockResolvedValueOnce(
       "shadow" as never,
@@ -868,6 +1073,25 @@ describe("github-mention skill validator", () => {
     expect(() =>
       validateSkillBody(MENTION_SKILL_NAME, "Reply with mention-reply.", "v2"),
     ).toThrow(/mention-reply/);
+  });
+
+  it("lets an issue mention push its work branch, never open a PR itself (#729)", () => {
+    expect(tracked).toContain("git push origin HEAD");
+    expect(tracked).toContain("gh pr create");
+    expect(tracked).toContain("Refs #<N>");
+    expect(tracked).not.toContain("On an issue, push nothing");
+    expect(tracked).not.toContain("push nothing.");
+    // Action 2 (code change) is no longer pull-request-only; action 3 still is.
+    expect(tracked).toMatch(/### 2\. Code change \([^\n]*\)\n/);
+    expect(tracked).not.toMatch(/### 2\. Code change[^\n]*pull requests only/);
+    expect(tracked).toMatch(
+      /Never open a pull request yourself, and never push any ref but the one checked out/,
+    );
+    // The platform opens the PR and links it; the agent is told so.
+    expect(tracked).toMatch(/platform opens one draft pull request/);
+    expect(() =>
+      validateSkillBody(MENTION_SKILL_NAME, tracked, "tracked"),
+    ).not.toThrow();
   });
 
   it("checks the contract on the classic render the lane receives (#492)", () => {

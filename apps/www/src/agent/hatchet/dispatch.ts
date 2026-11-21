@@ -9,6 +9,7 @@ import {
   packsRequire,
   reviewTriggerOfSourceMetadata,
 } from "@terragon/shared/model/review-agent-settings";
+import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 import { redactSecrets } from "@terragon/utils/redact";
 import {
   parsePlanePublicKey,
@@ -30,9 +31,13 @@ import {
 import { nonLocalhostPublicAppUrl } from "@/lib/server-utils";
 import { ThreadError } from "@/agent/error";
 import { recordHatchetRun } from "@terragon/shared/model/hatchet-run";
+import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 import { getPrAutomationLane } from "@/server-lib/review/review-single-writer-finish";
 import { getExecutionPlaneRunEnvironment } from "@/server-lib/env-audience";
-import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
+import {
+  isMentionPullRequestThread,
+  taskRunPushBranch,
+} from "@/server-lib/task/remote-task-pr";
 import { cellEligibilityAtDispatch } from "@/server-lib/compute/cell-eligibility";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import type {
@@ -461,6 +466,14 @@ export interface AgentRunInput {
    */
   workBranch?: string;
   /**
+   * #729: mention-lane runs only: the one fully-qualified ref the run may push
+   * (`refs/heads/<work branch>` for an issue mention, the PR head for a PR
+   * mention). The worker fences the box's git broker to it; a cell fences
+   * through the step's `allowedRef` (cell-plan). Absent for every other run
+   * (byte-identical payload).
+   */
+  pushRef?: string;
+  /**
    * #634 S4: plain org task runs only, when OpenSandbox is configured, the
    * org has cells on (#708) and the `opensandboxCells` flag is on for the
    * user. A reference, never a secret:
@@ -842,6 +855,31 @@ async function sealWireInput({
 }
 
 /**
+ * The ref a mention-lane run may push (#729), or undefined for any other
+ * thread: an issue mention pushes its work branch, a PR mention the PR head it
+ * checked out. A branch that is not a valid ref throws (the dispatch catch
+ * revokes the token and fails the thread); the raw branch name is untrusted
+ * text and stays out of the message.
+ */
+function mentionPushRef({
+  sourceMetadata,
+  push,
+  branch,
+}: {
+  sourceMetadata: ThreadSourceMetadata | null | undefined;
+  push: string | null;
+  branch: string | null | undefined;
+}): string | undefined {
+  if (!isMentionLaneStamp(sourceMetadata)) return undefined;
+  const target = sourceMetadata.mention.isPullRequest ? branch : push;
+  const ref = target ? `refs/heads/${target}` : "";
+  if (!isBranchRef(ref)) {
+    throw new Error("mention dispatch refused: no valid ref to push to");
+  }
+  return ref;
+}
+
+/**
  * Mint the short-lived tokens, assemble the reference-only input, and trigger the
  * remote agent-run. The daemon token is named by the per-run key (daemonRunKey) so
  * the terminal revoke (handleThreadFinish) covers the remote run (no sandboxId on
@@ -1188,9 +1226,18 @@ export async function dispatchAgentRun({
       prNumber,
       branch,
       baseBranch: thread?.repoBaseBranchName,
+      isMentionPullRequest: isMentionPullRequestThread(thread?.sourceMetadata),
     });
     const workBranch =
       isPlainTaskRun && push !== null && push !== branch ? push : undefined;
+    // #729: a mention run is never dispatched unfenced. The stamp decides
+    // issue vs PR (not githubPRNumber: a later run of an issue mention whose PR
+    // the finish opened keeps its work branch).
+    const pushRef = mentionPushRef({
+      sourceMetadata: thread?.sourceMetadata,
+      push,
+      branch,
+    });
     // #380: the self-heal plan's single-use token is split off here — the
     // wire shape carries the plan, the envelope carries the token.
     const selfHealSplit =
@@ -1226,6 +1273,7 @@ export async function dispatchAgentRun({
       ...taskPlan?.extension,
       ...(selfHealSplit !== undefined ? { selfHeal: selfHealSplit.wire } : {}),
       ...(workBranch !== undefined ? { workBranch } : {}),
+      ...(pushRef !== undefined ? { pushRef } : {}),
       ...cellMarker,
     };
     // #380: everything secret goes into the envelope and never into the

@@ -1206,3 +1206,101 @@ describe("runAutomation — onStartFailure (#729 B)", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("runAutomation — the mention stamp decides git checkpointing (#729)", () => {
+  const SKILL_BODY =
+    "Review {{repoFullName}} against origin/{{baseBranch}}.\n" +
+    '```json\n{ "verdict": "approve" }\n```\n';
+  const mention = (isPullRequest: boolean) => ({
+    repoFullName: "acme/widgets",
+    issueOrPrNumber: 7,
+    isPullRequest,
+    commentId: 1,
+    commentKind: "issue" as const,
+    commenterLogin: "alice",
+  });
+
+  // card: protects=an issue mention checkpoints (its finish opens one draft PR) while a PR mention never does, whatever the onboarded row says; fails_when=the row's disableGitCheckpointing wins for a mention, or a PR mention turns checkpointing on; no_claim=what the finish does with the flag (remote-task-pr suite)
+  async function disableFlagFor({
+    rowDisables,
+    stampExtra,
+  }: {
+    rowDisables: boolean;
+    stampExtra?: NonNullable<
+      Parameters<typeof runAutomation>[0]["options"]
+    >["stampExtra"];
+  }) {
+    vi.clearAllMocks();
+    vi.mocked(createNewThread).mockResolvedValue({
+      threadId: "t1",
+      threadChatId: "tc1",
+    });
+    const { user } = await createTestUser({ db });
+    const org = await createOrganization({
+      db,
+      name: "Mention",
+      slug: `mention-${nanoid(8).toLowerCase()}`,
+    });
+    const automation = await createTestAutomation({
+      db,
+      userId: user.id,
+      values: {
+        disableGitCheckpointing: rowDisables,
+        action: {
+          type: "skill_message",
+          config: { skillName: "github-ops", version: "latest" },
+        },
+      },
+    });
+    await db
+      .update(automationsTable)
+      .set({ organizationId: org.id })
+      .where(eq(automationsTable.id, automation.id));
+    await createRepoSkillVersion({
+      db,
+      organizationId: org.id,
+      repoFullName: automation.repoFullName,
+      skillName: "github-ops",
+      body: SKILL_BODY,
+      source: "seed",
+    });
+    await runAutomation({
+      userId: user.id,
+      automationId: automation.id,
+      source: "automated",
+      options: { stampExtra },
+    });
+    return vi.mocked(createNewThread).mock.calls[0]![0].disableGitCheckpointing;
+  }
+
+  it("an issue mention checkpoints even when the automation row disables it", async () => {
+    expect(
+      await disableFlagFor({
+        rowDisables: true,
+        stampExtra: { mention: mention(false) },
+      }),
+    ).toBe(false);
+  });
+
+  it("a PR mention never checkpoints, whatever the row says (AC-6)", async () => {
+    for (const rowDisables of [true, false]) {
+      expect(
+        await disableFlagFor({
+          rowDisables,
+          stampExtra: { mention: mention(true) },
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it("a thread with no mention stamp keeps the row's value; a companion is always off", async () => {
+    expect(await disableFlagFor({ rowDisables: true })).toBe(true);
+    expect(await disableFlagFor({ rowDisables: false })).toBe(false);
+    expect(
+      await disableFlagFor({
+        rowDisables: false,
+        stampExtra: { companion: { kind: "flutter" } as never },
+      }),
+    ).toBe(true);
+  });
+});

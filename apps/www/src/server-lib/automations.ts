@@ -162,9 +162,11 @@ export async function runAutomation({
      * at thread creation, so the fix attempt travels with the thread. Applies
      * to skill_message automations only; ignored for user_message, except
      * `reviewTrigger`, which both action types stamp (#560).
-     * `mention` (the org-owned mention lane) also turns git checkpointing off
-     * for the thread: the agent pushes its own fix to the PR head, and the
-     * lane never auto-commits or opens a pull request.
+     * `mention` (the org-owned mention lane) decides git checkpointing for
+     * the thread by itself, whatever the automation row says (#729): OFF on a
+     * PR (the agent pushes its own fix to the PR head and no pull request is
+     * ever opened), ON on an issue (the agent pushes the work branch and the
+     * finish opens one draft pull request that references the issue).
      */
     stampExtra?: {
       selfHealAttemptId?: string;
@@ -410,10 +412,10 @@ export async function runAutomation({
           trustContext: options?.trustContext,
           githubPRNumber: options?.prNumber,
           githubIssueNumber: options?.issueNumber,
-          disableGitCheckpointing:
-            options?.stampExtra?.mention !== undefined ||
-            options?.stampExtra?.companion !== undefined ||
-            (automation.disableGitCheckpointing ?? false),
+          disableGitCheckpointing: options?.stampExtra?.mention
+            ? options.stampExtra.mention.isPullRequest
+            : options?.stampExtra?.companion !== undefined ||
+              (automation.disableGitCheckpointing ?? false),
           deliveryId: options?.deliveryId,
           reviewedSha: options?.headSha,
         });

@@ -14,6 +14,7 @@ import {
 import { handleDaemonEvent } from "./handle-daemon-event";
 import { handleAuditFindingsAtFinish } from "@/server-lib/audit/audit-finish";
 import { openRemoteTaskPullRequest } from "@/server-lib/task/remote-task-pr";
+import { handleMentionReplyAtFinish } from "./review/mention-reply-finish";
 import { handleReviewEffectAtFinish } from "./review/review-single-writer-finish";
 import { checkpointThread } from "@/server-lib/checkpoint-thread";
 import { extendSandboxLife } from "@terragon/sandbox";
@@ -35,6 +36,9 @@ vi.mock("@/server-lib/task/remote-task-pr", () => ({
   openRemoteTaskPullRequest: vi
     .fn()
     .mockResolvedValue({ status: "skipped", reason: "no_branch" }),
+}));
+vi.mock("./review/mention-reply-finish", () => ({
+  handleMentionReplyAtFinish: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/server-lib/audit/audit-finish", () => ({
   handleAuditFindingsAtFinish: vi.fn().mockResolvedValue(undefined),
@@ -140,6 +144,96 @@ describe("handleDaemonEvent for sandbox-less remote threads", () => {
     expect(openRemoteTaskPullRequest).toHaveBeenCalledWith(
       expect.objectContaining({ userId: user.id, threadId, threadChatId }),
     );
+  });
+
+  it("hands the mention reply the PR open's outcome, awaited by the reply (#729)", async () => {
+    let resolvePr!: (outcome: { status: "opened"; prNumber: number }) => void;
+    vi.mocked(openRemoteTaskPullRequest).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolvePr = resolve;
+      }),
+    );
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+    const finish = finishThread({ threadId, threadChatId });
+    await vi.waitFor(() =>
+      expect(handleMentionReplyAtFinish).toHaveBeenCalledTimes(1),
+    );
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    let settled = false;
+    void passed.then(() => {
+      settled = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+    resolvePr({ status: "opened", prNumber: 55 });
+    await expect(passed).resolves.toEqual({ status: "opened", prNumber: 55 });
+    await finish;
+  });
+
+  it("the outcome promise never rejects: a failed open resolves null", async () => {
+    vi.mocked(openRemoteTaskPullRequest).mockRejectedValueOnce(
+      new Error("github down"),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+    await finishThread({ threadId, threadChatId });
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    await expect(passed).resolves.toBeNull();
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[remote-task-pr] finish-hook failed (non-fatal)",
+      expect.objectContaining({ threadId }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("a PR recorded wrongly still reaches the reply with its number", async () => {
+    vi.mocked(openRemoteTaskPullRequest).mockRejectedValueOnce(
+      Object.assign(new Error("not recorded"), {
+        recordedOutcome: { status: "opened", prNumber: 56 },
+      }),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { sandboxProvider: "hatchet-remote" },
+      chatOverrides: { status: "working" },
+    });
+    await finishThread({ threadId, threadChatId });
+    const passed = vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0]
+      .remotePullRequest!;
+    await expect(passed).resolves.toEqual({ status: "opened", prNumber: 56 });
+    errorSpy.mockRestore();
+  });
+
+  it("a PR thread hands the mention hook no outcome promise", async () => {
+    const { threadId, threadChatId } = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        sandboxProvider: "hatchet-remote",
+        githubRepoFullName: "acme/widgets",
+        githubPRNumber: 7,
+      },
+      chatOverrides: { status: "working" },
+    });
+    await finishThread({ threadId, threadChatId });
+    expect(openRemoteTaskPullRequest).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(handleMentionReplyAtFinish).mock.calls[0]![0].remotePullRequest,
+    ).toBeUndefined();
   });
 
   it("opens no pull request when the user stopped the run", async () => {

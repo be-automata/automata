@@ -38,7 +38,8 @@ import {
  *   - method + endpoint allowlist — GET info/refs (upload|receive), POST
  *     git-upload-pack, POST git-receive-pack. Nothing else.
  *   - ref fence (FENCE-01, phase 9; only when `refFence` is set — the self-heal
- *     fix lane): a receive-pack POST is buffered until its pkt-line command
+ *     fix lane and, from #729, mention-lane runs, whose `pushRef` is their one
+ *     pushable ref): a receive-pack POST is buffered until its pkt-line command
  *     section ends (flush-pkt, capped at 64 KiB → 413), and EVERY ref update
  *     must target exactly `refFence.exactRef` with a non-zero new sha. Any
  *     other ref, a tag, a delete, a malformed/truncated list or a compressed
@@ -81,7 +82,8 @@ export type StartGitBrokerOptions = {
   fetchImpl?: typeof fetch;
   /**
    * FENCE-01: when set, pushes may update ONLY this fully-qualified ref
-   * (`refs/heads/automata/fix-…`), and it must pass `isBranchRef`. Absent ⇒ no fence and no buffering.
+   * (`refs/heads/automata/fix-…` for a self-heal fix run, the work branch or PR
+   * head for a mention run), and it must pass `isBranchRef`. Absent ⇒ no fence and no buffering.
    */
   refFence?: { exactRef: string };
 };

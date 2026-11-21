@@ -336,7 +336,9 @@ export function mentionAutomationName(skillName: string): string {
 /**
  * The org-lane mention automation (minus owner/org/enabled) a `--mention`
  * configure run upserts: the repo's mentions run the skill as the automation
- * owner, and the thread never auto-commits or opens a pull request.
+ * owner. `disableGitCheckpointing` stays true on the row, but a mention stamp
+ * decides on its own (runAutomation, #729): off for a PR mention, on for an
+ * issue mention, whose finish opens one draft pull request.
  */
 export function buildMentionAutomation<Model extends string>({
   repoFullName,
