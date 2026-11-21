@@ -195,6 +195,14 @@ export async function runAutomation({
        */
       delivery?: DeliveryLaneStamp;
     };
+    /**
+     * Called with the error whenever this function swallows one and returns
+     * `undefined` (#729 B): usually thread creation failing, but also the
+     * bookkeeping after a created thread (run count, analytics). Lets a
+     * caller name a known failure (a missing branch) without changing what
+     * every caller gets. Must not throw; a throw is logged and ignored.
+     */
+    onStartFailure?: (error: unknown) => void;
   };
   source: "automated" | "manual";
 }): Promise<{ threadId: string; threadChatId: string } | undefined> {
@@ -439,6 +447,11 @@ export async function runAutomation({
     return { threadId, threadChatId };
   } catch (error) {
     console.error(`Error running automation ${automation.id}:`, error);
+    try {
+      options?.onStartFailure?.(error);
+    } catch (hookError) {
+      console.error("onStartFailure threw", hookError);
+    }
     // Log error metrics
     getPostHogServer().capture({
       distinctId: automation.userId,

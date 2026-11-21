@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
-import { getOctokitForApp } from "@/lib/github";
+import { BranchDoesNotExistError, getOctokitForApp } from "@/lib/github";
 import { runAutomation } from "@/server-lib/automations";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { createAutomation } from "@terragon/shared/model/automations";
@@ -27,6 +27,8 @@ import {
   CROSS_REPO_MENTION_REPLY,
   MENTION_NOT_STARTED_REPLY,
   analyseMention,
+  closedPrMentionReply,
+  missingBranchMentionReply,
   authorizeCommenter,
   emptyMentionReply,
   mentionSlug,
@@ -557,6 +559,16 @@ describe("routing: org lane vs the legacy per-user path", () => {
       shadowInstallation;
     await handleIssueCommentEvent(empty);
     expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    // #729 AC-10: a refusal in shadow mode is logged, never posted.
+    octokit.rest.pulls.get.mockResolvedValueOnce({
+      data: prData({ state: "closed", merged: true }),
+    } as never);
+    const merged = issueComment({ repoFullName });
+    (merged as unknown as { installation: { id: number } }).installation.id =
+      shadowInstallation;
+    await handleIssueCommentEvent(merged);
+    expect(octokit.rest.issues.createComment).not.toHaveBeenCalled();
+    expect(runAutomation).toHaveBeenCalledTimes(1);
   });
 
   it("a repo bound to another org inside a shared installation routes to that org", async () => {
@@ -937,6 +949,165 @@ describe("routing: org lane vs the legacy per-user path", () => {
         body: `@alice ${MENTION_NOT_STARTED_REPLY}`,
       });
     }
+  });
+
+  // card: protects=#729 B AC-7/AC-8 (OD-4): a mention on a merged (branch gone or not) or closed PR names the state and branch, starts no thread, adds no reaction and never says "Mention me again"; fails_when=runAutomation runs, a reaction is added, or the generic reply is posted; no_claim=GitHub's real PR states
+  it.each([
+    [
+      "merged, head branch deleted",
+      { state: "closed", merged: true },
+      "pr_merged",
+      404,
+    ],
+    [
+      "merged, head branch still there",
+      { state: "closed", merged: true },
+      "pr_merged",
+      200,
+    ],
+    [
+      "closed without merging",
+      { state: "closed", merged: false },
+      "pr_closed",
+      200,
+    ],
+  ])(
+    "#729 a mention on a PR that is %s gets the named reason and no thread",
+    async (_label, prState, reason, branchStatus) => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.pulls.get.mockResolvedValueOnce({
+        data: prData(prState),
+      } as never);
+      // The PR state alone decides: the branch is never looked up.
+      const getBranch = vi.fn(async () => {
+        if (branchStatus === 404)
+          throw Object.assign(new Error("Not Found"), { status: 404 });
+        return { data: { name: "feature/x" } };
+      });
+      (octokit.rest.repos as Record<string, unknown>).getBranch = getBranch;
+      const logs = vi.spyOn(console, "log");
+      await handleIssueCommentEvent(issueComment({ repoFullName }));
+      expect(runAutomation).not.toHaveBeenCalled();
+      expect(handleAppMention).not.toHaveBeenCalled();
+      expect(
+        octokit.rest.reactions.createForIssueComment,
+      ).not.toHaveBeenCalled();
+      expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      const body = (
+        (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0] as {
+          body: string;
+        }
+      ).body;
+      expect(body).toBe(
+        `@alice ${closedPrMentionReply({ merged: prState.merged, headRef: "feature/x" })}`,
+      );
+      expect(body).toContain("`feature/x`");
+      expect(body).toContain("on the issue");
+      expect(body).not.toContain("Mention me again");
+      expect(
+        logs.mock.calls.some((c) => String(c[0]).includes(`reason=${reason}`)),
+      ).toBe(true);
+      expect(getBranch).not.toHaveBeenCalled();
+    },
+  );
+
+  // card: protects=#729 B: an attacker-chosen branch name cannot close the code span or mention anyone in the refusal; fails_when=the raw ref (backtick or @) reaches the reply; no_claim=GitHub's markdown renderer
+  it("#729 a hostile head ref is not echoed into the refusal", async () => {
+    const { repoFullName } = await repoWithLane();
+    const hostile = "x`@mallory`y";
+    octokit.rest.pulls.get.mockResolvedValueOnce({
+      data: prData({
+        state: "closed",
+        merged: true,
+        head: {
+          ref: hostile,
+          sha: "h".repeat(40),
+          repo: { full_name: "acme/same" },
+        },
+      }),
+    } as never);
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    const body = (
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0] as {
+        body: string;
+      }
+    ).body;
+    expect(body).not.toContain("@mallory");
+    expect(body).not.toContain("`");
+    expect(body).toContain("its branch");
+  });
+
+  // card: protects=#729 B AC-7 for an OPEN PR whose head was deleted: thread creation's BranchDoesNotExistError reaches the lane through onStartFailure and is answered with the branch named; fails_when=the generic retry reply is posted; no_claim=ensureBranchExists itself (mocked)
+  it("#729 an open PR whose head branch is gone gets the named reply, not 'mention me again'", async () => {
+    const { repoFullName } = await repoWithLane();
+    vi.mocked(runAutomation).mockImplementationOnce(async ({ options }) => {
+      options?.onStartFailure?.(
+        new BranchDoesNotExistError({
+          repoFullName,
+          branchName: "feature/x",
+        }),
+      );
+      return undefined;
+    });
+    const logs = vi.spyOn(console, "log");
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+    expect(
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0],
+    ).toMatchObject({
+      body: `@alice ${missingBranchMentionReply({ branch: "feature/x", isPullRequest: true })}`,
+    });
+    expect(
+      logs.mock.calls.some((c) =>
+        String(c[0]).includes("reason=head_branch_missing"),
+      ),
+    ).toBe(true);
+  });
+
+  // card: protects=#729 B: an issue mention whose default branch is missing names it (branch_missing), the issue wording; fails_when=the PR wording or the generic reply; no_claim=none
+  it("#729 an issue mention whose default branch is missing names the branch", async () => {
+    const { repoFullName } = await repoWithLane();
+    vi.mocked(runAutomation).mockImplementationOnce(async ({ options }) => {
+      options?.onStartFailure?.(
+        new BranchDoesNotExistError({ repoFullName, branchName: "main" }),
+      );
+      return undefined;
+    });
+    await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+    expect(
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0],
+    ).toMatchObject({
+      body: `@alice ${missingBranchMentionReply({ branch: "main", isPullRequest: false })}`,
+    });
+  });
+
+  // card: protects=#729 B AC-9: an unknown failure keeps the generic reply, logged as reason=start_failed; fails_when=a named reply is invented for it; no_claim=none
+  it("#729 an unknown start failure keeps the generic reply, with reason=start_failed", async () => {
+    const { repoFullName } = await repoWithLane();
+    vi.mocked(runAutomation).mockImplementationOnce(async ({ options }) => {
+      options?.onStartFailure?.(new Error("no credits"));
+      return undefined;
+    });
+    const logs = vi.spyOn(console, "log");
+    await handleIssueCommentEvent(issueComment({ repoFullName }));
+    expect(
+      (octokit.rest.issues.createComment.mock.calls[0] as unknown[])[0],
+    ).toMatchObject({ body: `@alice ${MENTION_NOT_STARTED_REPLY}` });
+    expect(
+      logs.mock.calls.some((c) => String(c[0]).includes("reason=start_failed")),
+    ).toBe(true);
+  });
+
+  // card: protects=#729 B AC-9: a redelivered merged-PR mention is answered once (the intake claim holds the refusal); fails_when=a second reply; no_claim=Redis TTL
+  it("#729 a redelivered merged-PR mention is answered once", async () => {
+    const { repoFullName } = await repoWithLane();
+    octokit.rest.pulls.get.mockResolvedValue({
+      data: prData({ state: "closed", merged: true }),
+    } as never);
+    const event = issueComment({ repoFullName });
+    await handleIssueCommentEvent(event);
+    await handleIssueCommentEvent(event);
+    expect(octokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
   });
 
   it("a failed PR read releases the claim: the delivery fails, a redelivery retries", async () => {
