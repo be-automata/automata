@@ -172,6 +172,43 @@ describe("#742 per-lane run budget", () => {
   });
 
   // card: protects=the effective budget drives the typed timeout: a cancel at 60 minutes is a timeout whose copy says 60, a cancel at 31 minutes is not; fails_when=the classifier keeps reading 30; no_claim=workflow.ts wiring (workflow.test.ts)
+  // card: protects=roborev 1373: a refresh that lands AFTER its 10 s bound was still applied by the engine, so the recorded budget follows it to 60 min; a late rejection keeps 30; fails_when=a real 60-minute timeout is labelled 30, or a late rejection raises it; no_claim=the engine's late-apply behaviour (IT)
+  it.each([
+    ["resolves", true],
+    ["rejects", false],
+  ])(
+    "a refresh that %s after the bound: onLateRefresh %s",
+    async (_how, resolves) => {
+      vi.useFakeTimers();
+      const log = vi.fn();
+      let settle!: () => void;
+      const call = new Promise<void>((resolve, reject) => {
+        settle = resolves ? () => resolve() : () => reject(new Error("late"));
+      });
+      const onLate = vi.fn();
+      const p = applyRunBudget(
+        wire(),
+        { log, refreshTimeout: () => call },
+        onLate,
+      );
+      await vi.advanceTimersByTimeAsync(REFRESH_DEADLINE_MS);
+      expect(await p).toBe(REGISTERED_EXECUTION_TIMEOUT);
+      settle();
+      await vi.runAllTimersAsync();
+      await Promise.resolve();
+      if (resolves) {
+        expect(onLate).toHaveBeenCalledExactlyOnceWith(
+          TASK_LANE_EXECUTION_TIMEOUT,
+        );
+        expect(log).toHaveBeenCalledWith(
+          expect.stringContaining("(refreshed late)"),
+        );
+      } else {
+        expect(onLate).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("the abnormal end at the 60-minute budget classifies as timeout and says 60", () => {
     const START = 1_000_000;
     const state = (budget: number) =>

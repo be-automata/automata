@@ -592,7 +592,15 @@ async function runAgentAttempt(
   const runStartedAt = Date.now();
   // Started now, awaited where the abnormal-end state needs it: the bounded,
   // fail-open refresh overlaps the unseal, the config load and the stale check.
-  const budgetP = applyRunBudget(wire, ctx);
+  // A refresh that lands after its bound still raised the engine's deadline:
+  // the abnormal-end state (built later) follows it.
+  const budget: RunBudgetHandle = {
+    promise: Promise.resolve(0),
+  };
+  budget.promise = applyRunBudget(wire, ctx, (ms) => {
+    budget.lateMs = ms;
+    budget.onLate?.(ms);
+  });
   const config = loadWorkerConfig();
   // #380: unseal FIRST — before any www call, the staleness check or
   // provisioning. A failure here throws a PayloadSealError naming only the
@@ -620,11 +628,21 @@ async function runAgentAttempt(
       ctx,
       config,
       runStartedAt,
-      budgetP,
+      budget,
     );
   } finally {
     await revoker.revokeOnce();
   }
+}
+
+/**
+ * The run's budget as the engine enforces it: the bounded refresh's answer,
+ * raised later if a refresh that missed its bound still lands (#742).
+ */
+interface RunBudgetHandle {
+  promise: Promise<number>;
+  lateMs?: number;
+  onLate?: (ms: number) => void;
 }
 
 /** `runAgentAttempt` after the secrets are resolved: the staleness self-check + cancel hook. */
@@ -635,7 +653,7 @@ async function runAgentResolved(
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   runStartedAt: number,
-  budgetP: Promise<number>,
+  budget: RunBudgetHandle,
 ): Promise<AgentRunOutput> {
   const wwwOpts = wwwOptsFor(input, secrets.daemonToken, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -655,8 +673,11 @@ async function runAgentResolved(
   const abnormal = newAbnormalEndState({
     owns: ownsAbnormalTerminal(input),
     runStartedAt,
-    runExecutionTimeoutMs: await budgetP,
+    runExecutionTimeoutMs: budget.lateMs ?? (await budget.promise),
   });
+  budget.onLate = (ms) => {
+    abnormal.runExecutionTimeoutMs = ms;
+  };
   // The cancel's own time, not the claim's: a slow teardown must not stretch
   // the timeout tolerance.
   ctx.abortController?.signal.addEventListener(
