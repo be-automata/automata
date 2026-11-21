@@ -178,7 +178,7 @@ async function main() {
   }
 
   // Remove run dirs older than 24h that earlier teardowns could not (every run
-  // is hard-capped at 30 min, so a dir that old cannot belong to a live run on
+  // is capped at 60 min at most (a task run; every other run 30), so a dir that old cannot belong to a live run on
   // any slot). AFTER the orphan containers are removed, so nothing is still
   // writing into them. Never throws, and the catch is belt and braces: residue
   // must never stop a boot.

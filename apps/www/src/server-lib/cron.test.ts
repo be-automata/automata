@@ -105,15 +105,15 @@ vi.mock("@/server-lib/compute/cell-evidence-status", async (importActual) => ({
 
 /**
  * Enterprise-hardening #2 watchdog delta (amendment 5): the hourly stalled-task cron
- * reaps with a cutoff ABOVE a remote agent-run's 60m worst case (30m Hatchet schedule
- * + 30m execution), else a late-starting remote run is reaped at the boundary.
- * runStalledTasksCron passes this constant to getStalledThreads (see cron.ts); this
- * locks the raised value so a future edit can't silently drop it back to ≤60m.
+ * reaps with a cutoff ABOVE a remote task run's 90m worst case (30m Hatchet schedule
+ * + 60m task-lane execution budget, #742), else a late-starting remote run is reaped
+ * at the boundary. runStalledTasksCron passes this constant to getStalledThreads (see
+ * cron.ts); this locks the raised value so a future edit can't silently drop it.
  */
 describe("stalled-task watchdog cutoff", () => {
-  it("is 75 minutes — above the 60m remote worst case, with margin", () => {
-    expect(STALLED_CUTOFF_SECS).toBe(75 * 60);
-    expect(STALLED_CUTOFF_SECS).toBeGreaterThan(60 * 60);
+  it("is 105 minutes — above the 30 + 60 minute remote worst case, with margin", () => {
+    expect(STALLED_CUTOFF_SECS).toBe(105 * 60);
+    expect(STALLED_CUTOFF_SECS).toBeGreaterThan((30 + 60) * 60);
   });
 });
 

@@ -1,3 +1,5 @@
+import type { Duration } from "@hatchet-dev/typescript-sdk";
+
 import {
   ADMISSION_DEFERRAL_BUDGET_S,
   backoffSeconds,
@@ -39,6 +41,8 @@ export type RunCtx = {
   cancelled: boolean;
   log: (message: string) => void;
   workflowRunId?: () => string;
+  /** #742: Hatchet's `ctx.refreshTimeout` (additive); optional so stubs omit it. */
+  refreshTimeout?: (incrementBy: Duration) => Promise<void>;
 };
 
 /**

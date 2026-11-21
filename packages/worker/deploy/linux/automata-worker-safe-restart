@@ -6,6 +6,9 @@
 #
 #   automata-worker-safe-restart [--timeout-s N] [--allow-no-worker]
 #
+# --timeout-s: the drain budget, default 4500 s (75 min: a task run's 60-minute
+# budget plus its 15-minute teardown margin, #742).
+#
 # --allow-no-worker: proceed when the engine shows no active worker under this
 # box's name. Refused by default — a name mismatch or a worker still
 # registering reads the same, and restarting then could SIGTERM a busy worker.

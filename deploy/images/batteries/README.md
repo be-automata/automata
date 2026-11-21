@@ -20,6 +20,7 @@ tag.
 | Claude Code CLI           | 2.1.284                             | exact npm version                                              |
 | gh                        | 2.102.0                             | tarball sha256                                                 |
 | Flutter SDK (+ its Dart)  | 3.47.7 (bundles Dart 3.13.5)        | tarball sha256                                                 |
+| Extra Flutter SDKs        | 3.41.2 (`/opt/flutter-sdks/3.41.2`) | tarball sha256 (`FLUTTER_EXTRA_SDKS`)                          |
 | Somnio CLI + all skills   | v3.1.1 @ `aa53f071…`                | commit sha + `pubspec.lock` overlay sha256                     |
 | gstack (full suite)       | `df89475b…`                         | commit sha; its own setup, telemetry off                       |
 | bun                       | 1.4.2                               | zip sha256                                                     |
@@ -70,7 +71,7 @@ deploy/images/batteries/verify.sh automata-batteries:dev
 ```
 
 One throwaway container with the run hardening baseline (`--network none`, `--cap-drop ALL`,
-`no-new-privileges`, `--init`, `--read-only` with only HOME, `/opt/flutter` and `/tmp` writable).
+`no-new-privileges`, `--init`, `--read-only` with only HOME, `/opt/flutter`, `/opt/flutter-sdks` and `/tmp` writable).
 It checks that the runtime user is not root, has no capabilities and cannot write the rootfs, that no
 per-run policy is baked in, runs each tool's version command against its pin, counts the installed
 Claude skills, and runs the per-run Somnio rules install against a scratch checkout that tracks its
@@ -116,12 +117,24 @@ deploy/images/batteries/verify.sh ghcr.io/be-automata/automata-batteries@sha256:
 - **Read-only rootfs.** Flutter writes stamps and a lock under `/opt/flutter/bin/cache` on every
   invocation, so `/opt/flutter` belongs to `agent` and a run mounts it, like HOME, as a per-run
   anonymous volume (populated from the image, removed with the container).
-- **One Flutter, and a repo's FVM pin.** The image has one SDK (`FLUTTER_VERSION`). When a
-  checkout pins another release in `.fvmrc` (or `.fvm/fvm_config.json`), the run entry replaces
-  `flutter` and `dart` with shims that name both versions and exit 69, so format, codegen and
-  analyze never run on the wrong SDK. Matching the pin needs that release in the image, which
-  costs a second SDK of disk on the box (the prod disk fits one image) and a second per-run
-  volume.
+- **A Flutter SDK cache, and a repo's pin (#742).** `/opt/flutter` stays the default SDK
+  (`FLUTTER_VERSION`). Beside it, `/opt/flutter-sdks/<version>` holds every SDK in
+  `FLUTTER_EXTRA_SDKS` (a link to `/opt/flutter` for the default). A cell run reads the project's
+  pin (`.fvmrc`, `.fvm/fvm_config.json`, or the `environment.flutter` constraint in
+  `pubspec.yaml`) and, when an SDK here satisfies it, writes `flutter`/`dart`/`fvm` wrappers that
+  select it, so the run downloads nothing. A pin that is NOT here keeps the default SDK and says so
+  in the run journal and the agent's `CLAUDE.md` note. The box container path (read-only rootfs)
+  does not use the cache: it keeps its exit-69 notice shims when a checkout pins another release.
+- **Adding a Flutter version** is a reviewed change to this image, not to a run: add
+  `VERSION=sha256` to `FLUTTER_EXTRA_SDKS` (the sha256 is in the `releases_linux.json` feed of
+  `storage.googleapis.com/flutter_infra_release/releases`), and commit
+  `flutter-fixture/<version>/pubspec.lock`. The lock is per SDK because `flutter_test` pins exact
+  transitive versions that differ between releases. Generate it with that SDK's
+  `flutter pub get` on `flutter-fixture/pubspec.yaml`. The build warms the SDK's tool snapshot and
+  the locked packages (`pub get --enforce-lockfile`; NO `flutter precache`, which fetches
+  artifacts nothing pins), and `verify.sh` then runs `flutter test` on the fixture with no
+  network: that is the proof a run on it downloads nothing. Each SDK is about 2.5 GB unpacked, in
+  this image and again in the cell image built on it, so the list starts at one.
 - **Bumping a pin** is a reviewed change to the `ARG` lines only: the image records them in
   `/opt/automata/pins.env` and `verify.sh` checks the installed tools against that file. Update the
   table above in the same change.

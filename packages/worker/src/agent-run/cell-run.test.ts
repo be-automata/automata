@@ -17,6 +17,7 @@ import {
   type CellExecutorDeps,
 } from "./cell-run";
 import { cellEntrypoint, cellGhSetup } from "./cell-image";
+import { flutterWrapperArgv } from "./flutter-sdk";
 import {
   CELL_PG_BIN,
   CELL_TEST_DB_DIR,
@@ -113,6 +114,8 @@ function setup(
     pollUntilTerminal?: (ctx: PollContext) => Promise<unknown>;
     execExit?: (argv: string[]) => number;
     execStderr?: (argv: string[]) => string;
+    execStdout?: (argv: string[]) => string;
+    execThrow?: (argv: string[]) => boolean;
     execHang?: (argv: string[]) => boolean;
     /** Holds the clone exec until released (setup stays busy, the cell exists). */
     execGate?: Promise<void>;
@@ -145,10 +148,11 @@ function setup(
       calls.push("provider.exec");
       execs.push(argv);
       if (over.execHang?.(argv)) return new Promise<never>(() => {});
+      if (over.execThrow?.(argv)) throw new Error("exec transport down");
       if (over.execGate && argv[1] === "clone") await over.execGate;
       return {
         exitCode: over.execExit?.(argv) ?? 0,
-        stdout: "",
+        stdout: over.execStdout?.(argv) ?? "",
         stderr: over.execStderr?.(argv) ?? "",
       };
     }),
@@ -1707,5 +1711,222 @@ describe("the cell run: a test database for TEST_SERVICES_REPOS repos (#707)", (
     expect(s.logs).toContain(
       "[agent-run thr_1] cell: test database env not delivered (agent=codex)",
     );
+  });
+});
+
+describe("the cell run: the project's Flutter SDK (#742)", () => {
+  const DEFAULT_SDK = "3.47.7";
+  const isWrapper = (a: string[]) => a[0] === "bash" && a[1] === "-c";
+  const PINS_PATH = "/opt/automata/pins.env";
+  const flutterLogs = (s: ReturnType<typeof setup>) =>
+    s.logs.filter((l) => l.includes("cell: flutter"));
+  /** The image's pins file; an older image has no FLUTTER_EXTRA_VERSIONS. */
+  const pinsEnv = (extras: string | null = "3.41.2") =>
+    `NODE_VERSION=24.21.0\nFLUTTER_VERSION=${DEFAULT_SDK}\n${
+      extras === null ? "" : `FLUTTER_EXTRA_VERSIONS='${extras}'\n`
+    }`;
+  /** ~/.claude/CLAUDE.md is absent in the image: the note is written whole. */
+  const absentMemory = (a: string[]) => (isMemoryProbe(a) ? 1 : 0);
+  const note = (s: ReturnType<typeof setup>) =>
+    s.files.find((f) => f.path === "/home/agent/.claude/CLAUDE.md")?.text ?? "";
+
+  /** Marker files in the clone and the image's pins file. */
+  function withProject(
+    s: ReturnType<typeof setup>,
+    markers: Record<string, string>,
+    // Markers present in the clone but not regular files under the cap
+    // (a symlink, a device, oversized): the find probe does not list them.
+    unreadable: readonly string[] = [],
+    pins: string = pinsEnv(),
+  ) {
+    const exec = s.provider.exec.getMockImplementation();
+    if (exec === undefined) throw new Error("exec has no implementation");
+    s.provider.exec.mockImplementation(async (id: string, argv: string[]) =>
+      argv[0] === "/usr/bin/find"
+        ? {
+            exitCode: 0,
+            stdout: Object.keys(markers)
+              .filter((rel) => !unreadable.includes(rel))
+              .map((rel) => `/workspace/${rel}\n`)
+              .join(""),
+            stderr: "",
+          }
+        : exec(id, argv),
+    );
+    s.provider.copyOut.mockImplementation(async (_id: string, path: string) => {
+      if (path === PINS_PATH) return new TextEncoder().encode(pins);
+      const text = markers[path.replace(/^\/workspace\//, "")];
+      if (path.startsWith("/workspace/") && text !== undefined) {
+        return new TextEncoder().encode(text);
+      }
+      throw new Error("absent");
+    });
+  }
+
+  /** One run over a project: the setup, the markers and the image, then the run. */
+  async function flutterRun(
+    markers: Record<string, string>,
+    over: {
+      setup?: Parameters<typeof setup>[0];
+      unreadable?: readonly string[];
+      pins?: string;
+    } = {},
+  ) {
+    const s = setup({ execExit: absentMemory, ...over.setup });
+    withProject(s, markers, over.unreadable, over.pins);
+    const out = await s.executor.run(s.args);
+    return { s, out };
+  }
+  const fvmrc = (flutter: string) => ({
+    ".fvmrc": JSON.stringify({ flutter }),
+  });
+
+  // card: protects=#742 refinement: a marker the find probe does not list (a symlink to /dev/zero, a FIFO, an oversized file) is never copied out, so a hostile repo cannot stall the bootstrap; fails_when=copyOut is called for it; no_claim=find's own -P/-type f semantics (coreutils)
+  it("a marker that is not a regular file under the cap is never read", async () => {
+    const { s, out } = await flutterRun(fvmrc("3.41.2"), {
+      unreadable: [".fvmrc"],
+    });
+    expect(out.outcome).toBe("completed");
+    expect(
+      s.provider.copyOut.mock.calls.some(([, path]) =>
+        String(path).endsWith("/.fvmrc"),
+      ),
+    ).toBe(false);
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+  });
+
+  // card: protects=a pin is decided from the one pins file: an SDK the image bakes gets wrappers (and the journal and note say so), one it lacks, or any pin on an image that predates the cache, keeps /opt/flutter, installs nothing and says so (F9); fails_when=a shim blocks the run, a line differs, the note is missing, or a missing list fails the run; no_claim=the box path's exit-69 shims (unchanged)
+  it.each([
+    [
+      "an SDK the image has",
+      "3.41.2",
+      pinsEnv(),
+      [flutterWrapperArgv("3.41.2")],
+      "cell: flutter 3.41.2 (pinned by .fvmrc)",
+      "this run uses SDK 3.41.2",
+    ],
+    [
+      "an SDK the image lacks",
+      "3.35.0",
+      pinsEnv(),
+      [],
+      "cell: flutter pin 3.35.0 not in the image; using 3.47.7",
+      "NOT in this image",
+    ],
+    [
+      "an older image without extras",
+      "3.41.2",
+      pinsEnv(null),
+      [],
+      "cell: flutter pin 3.41.2 not in the image; using 3.47.7",
+      "NOT in this image",
+    ],
+  ])("a pin on %s", async (_n, version, pins, wrappers, line, noteText) => {
+    const { s, out } = await flutterRun(fvmrc(version), { pins });
+    expect(out.outcome).toBe("completed");
+    expect(s.execs.filter(isWrapper)).toEqual(wrappers);
+    expect(flutterLogs(s)).toEqual([`[agent-run thr_1] ${line}`]);
+    expect(note(s)).toContain(noteText);
+    expect(note(s).startsWith("# GitHub access in this run")).toBe(true);
+  });
+
+  // card: protects=the wrapper script is exec'd once, after the clone and before the first message, and names FLUTTER_ROOT; fails_when=the exec is repeated, mis-ordered or missing; no_claim=the wrapper's behaviour (flutter-sdk.test.ts) and the image (batteries verify.sh)
+  it("the wrappers are installed once, after the clone and before the first message", async () => {
+    const { s } = await flutterRun(fvmrc("3.41.2"));
+    const wrappers = s.execs.filter(isWrapper);
+    expect(wrappers).toHaveLength(1);
+    expect(wrappers[0]![2]).toContain("FLUTTER_ROOT");
+    const cloneAt = s.execs.findIndex((a) => a[1] === "clone");
+    expect(s.execs.findIndex(isWrapper)).toBeGreaterThan(cloneAt);
+    expect(s.calls.indexOf("www.nextMessage")).toBeGreaterThan(
+      s.calls.indexOf("provider.exec"),
+    );
+  });
+
+  // card: protects=CELL-ONLY pubspec reading: a constraint the default satisfies installs nothing; fails_when=a constraint is ignored or always installs a wrapper; no_claim=the box path (it never reads pubspec.yaml)
+  it("reads the pubspec constraint: the default satisfying it keeps the default", async () => {
+    const { s } = await flutterRun({
+      "pubspec.yaml": "name: a\nenvironment:\n  flutter: ^3.40.0\n",
+    });
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+    expect(flutterLogs(s)).toEqual([
+      "[agent-run thr_1] cell: flutter 3.47.7 (default satisfies pubspec)",
+    ]);
+    expect(note(s)).toContain("the image default SDK 3.47.7");
+  });
+
+  // card: protects=a pubspec constraint only a baked SDK satisfies selects that SDK; fails_when=the baked SDK is not selected; no_claim=the default-satisfies path
+  it("reads the pubspec constraint: a constraint only a baked SDK satisfies selects it", async () => {
+    const { s } = await flutterRun({
+      "pubspec.yaml": 'name: a\nenvironment:\n  flutter: ">=3.41.0 <3.42.0"\n',
+    });
+    expect(s.execs.filter(isWrapper)).toEqual([flutterWrapperArgv("3.41.2")]);
+    expect(flutterLogs(s)).toEqual([
+      "[agent-run thr_1] cell: flutter 3.41.2 (satisfies pubspec)",
+    ]);
+  });
+
+  // card: protects=a project with no Flutter requirement costs nothing: no pins read, no wrapper, no journal line, the note is the gh note alone; fails_when=any extra read, exec or line appears; no_claim=Flutter projects
+  it("no requirement: nothing is read, installed, logged or noted", async () => {
+    const { s } = await flutterRun({ "README.md": "x" });
+    expect(s.provider.copyOut.mock.calls.map(([, p]) => p)).not.toContain(
+      PINS_PATH,
+    );
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+    expect(flutterLogs(s)).toEqual([]);
+    expect(note(s)).not.toContain("Flutter");
+  });
+
+  // card: protects=an unsafe version in a marker never reaches a log line, an argv or the note; fails_when=the raw text is used; no_claim=every other parser input (flutter-sdk.test.ts)
+  it("an unsafe version in a marker is ignored entirely", async () => {
+    const { s } = await flutterRun(fvmrc("3.41.2\nforged: line"));
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+    expect(s.logs.join("\n")).not.toContain("forged");
+  });
+
+  // card: protects=a wrapper install that fails never fails the run: the default stays, the failure is journaled and the note says selection failed; fails_when=the run fails or the note claims the pinned SDK; no_claim=why the install failed
+  it("a failing wrapper install fails open to the default SDK", async () => {
+    const { s, out } = await flutterRun(fvmrc("3.41.2"), {
+      setup: { execExit: (a) => (isWrapper(a) ? 65 : absentMemory(a)) },
+    });
+    expect(out.outcome).toBe("completed");
+    // One line, the failure: never a "flutter 3.41.2" claim it then retracts.
+    expect(flutterLogs(s)).toEqual([
+      "[agent-run thr_1] cell: flutter 3.41.2 wrapper install failed (exit 65); using 3.47.7",
+    ]);
+    expect(note(s)).toContain("selecting it failed");
+    expect(note(s)).not.toContain("this run uses SDK");
+  });
+
+  // card: protects=an exec transport error during selection fails open: the run goes on and the line says so; fails_when=the error fails the run; no_claim=aborts (they still stop the setup)
+  it("an exec error during selection never fails the run", async () => {
+    const { s, out } = await flutterRun(fvmrc("3.41.2"), {
+      setup: { execThrow: isWrapper },
+    });
+    expect(out.outcome).toBe("completed");
+    expect(s.logs.join("\n")).toContain(
+      "cell: flutter selection failed; using the image default SDK",
+    );
+  });
+
+  // card: protects=a transport error reading a marker fails the WHOLE selection open: it never falls through to a lower-precedence marker and picks a different SDK; fails_when=pubspec.yaml selects an SDK after .fvmrc failed to read; no_claim=aborts
+  it("a transport error on .fvmrc never falls through to pubspec.yaml", async () => {
+    const s = setup({ execExit: absentMemory });
+    withProject(s, {
+      ...fvmrc("3.41.2"),
+      "pubspec.yaml": 'name: a\nenvironment:\n  flutter: ">=3.41.0 <3.42.0"\n',
+    });
+    const read = s.provider.copyOut.getMockImplementation();
+    if (read === undefined) throw new Error("copyOut has no implementation");
+    s.provider.copyOut.mockImplementation(async (id: string, path: string) => {
+      if (path.endsWith("/.fvmrc")) throw new Error("copyOut transport down");
+      return read(id, path);
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(s.execs.filter(isWrapper)).toEqual([]);
+    expect(flutterLogs(s)).toEqual([
+      "[agent-run thr_1] cell: flutter selection failed; using the image default SDK",
+    ]);
   });
 });

@@ -18,13 +18,14 @@ export const ADMISSION_BACKOFF = { factor: 2, maxSeconds: 120 } as const;
 
 /**
  * The most a run may spend deferred, in seconds, over all its deferrals. The
- * wait counts against the run's 30-minute executionTimeout, so the budget is
- * the time a deferred run gives up: 12 minutes leaves 18 for the agent (a
- * review takes 2–15; a task run that needs more will time out and fail final,
- * with the deferral count in its journal). It also keeps the whole run inside
- * the control plane's 75-minute stalled-thread cutoff
+ * wait counts against the run's execution timeout (30 minutes; a task run is
+ * extended to 60, #742), so the budget is the time a deferred run gives up: 12
+ * minutes leaves 18 for a review-lane run (a review takes 2–15) and 48 for a
+ * task run; one that needs more will time out and fail final, with the
+ * deferral count in its journal. It also keeps the whole run inside the control
+ * plane's 105-minute stalled-thread cutoff
  * (apps/www/src/server-lib/cron.ts STALLED_CUTOFF_SECS):
- *   ≤ 30 m scheduleTimeout + ≤ 30 m execution (wait included) + margin ≤ 75 m.
+ *   ≤ 30 m scheduleTimeout + ≤ 60 m task execution (wait included) + margin ≤ 105 m.
  */
 export const ADMISSION_DEFERRAL_BUDGET_S = 12 * 60;
 

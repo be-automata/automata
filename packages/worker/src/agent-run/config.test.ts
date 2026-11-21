@@ -578,7 +578,7 @@ describe("#205: WORKER_BOX_SLOTS — the counting box budget is validated at boo
     expect(() =>
       loadWorkerConfig({ ...REQ, WORKER_ADMISSION_MAX_DEFERRALS: "11" }),
     ).toThrow(
-      /WORKER_ADMISSION_MAX_DEFERRALS=11 waits up to 726s.*720s budget.*75-minute/,
+      /WORKER_ADMISSION_MAX_DEFERRALS=11 waits up to 726s.*720s budget.*105-minute/,
     );
     expect(
       loadWorkerConfig({ ...REQ, WORKER_ADMISSION_MAX_DEFERRALS: "10" })

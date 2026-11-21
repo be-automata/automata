@@ -18,7 +18,8 @@ import {
  * lives on a worker box that only polls thread-status. Cancel the engine run
  * itself so the worker tears down NOW (its poll loop also returns on
  * `stopping` — belt and braces) instead of parking the box/engine slot until
- * the task's 30-minute step timeout (observed in prod 2026-08-25: one stopped
+ * the task's step timeout (30 minutes when observed in prod 2026-08-25, up
+ * to 60 for a task run since #742: one stopped
  * review starved every queued review behind it). Best-effort: the #125 C4
  * sweep and the worker's own `stopping` handling are the backstops.
  */

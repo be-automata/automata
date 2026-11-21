@@ -824,7 +824,7 @@ export interface PollResult {
    * does not observe that status and www cannot reach a remote-plane daemon,
    * so the WORKER must act: tear the daemon down and post the typed
    * `user-cancelled` terminal. Without this the task waited for terminal=true
-   * until its step timeout — holding the box/engine slot for 30 minutes
+   * until its step timeout — holding the box/engine slot for the step timeout (30 minutes then, up to 60 now)
    * (observed in prod 2026-08-25, PR #139 run starving #137/#138).
    */
   outcome: "completed" | "cancelled" | "stopped";

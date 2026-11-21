@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { REGISTERED_EXECUTION_TIMEOUT } from "@terragon/types/cell";
 import { FIX_BRANCH_PREFIX } from "@terragon/utils/fix-branch";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
@@ -15,6 +16,7 @@ import type { CellConfig } from "./cell-config";
 import { loadWorkerConfig } from "./config";
 import type { BoxLock } from "./box-lock";
 import { admitRunSlot, staleSkip, type RunCtx } from "./run-admission";
+import { applyRunBudget } from "./run-budget";
 import {
   selectRunExecutor,
   type RunExecutor,
@@ -584,9 +586,21 @@ async function runAgentAttempt(
   wire: AgentRunWireInput,
   ctx: RunCtx,
 ): Promise<AgentRunOutput> {
-  // TMO-01: the 30-minute execution timeout counts from here; the post-agent
-  // fix check must finish inside it.
+  // TMO-01: the engine's execution timeout counts from here; the post-agent
+  // fix check must finish inside it (self-heal keeps the registered 30
+  // minutes; a task run is extended to 60 right below, #742).
   const runStartedAt = Date.now();
+  // Started now, awaited where the abnormal-end state needs it: the bounded,
+  // fail-open refresh overlaps the unseal, the config load and the stale check.
+  // A refresh that lands after its bound still raised the engine's deadline:
+  // the abnormal-end state (built later) follows it.
+  const budget: RunBudgetHandle = {
+    promise: Promise.resolve(0),
+  };
+  budget.promise = applyRunBudget(wire, ctx, (ms) => {
+    budget.lateMs = ms;
+    budget.onLate?.(ms);
+  });
   const config = loadWorkerConfig();
   // #380: unseal FIRST — before any www call, the staleness check or
   // provisioning. A failure here throws a PayloadSealError naming only the
@@ -614,10 +628,21 @@ async function runAgentAttempt(
       ctx,
       config,
       runStartedAt,
+      budget,
     );
   } finally {
     await revoker.revokeOnce();
   }
+}
+
+/**
+ * The run's budget as the engine enforces it: the bounded refresh's answer,
+ * raised later if a refresh that missed its bound still lands (#742).
+ */
+interface RunBudgetHandle {
+  promise: Promise<number>;
+  lateMs?: number;
+  onLate?: (ms: number) => void;
 }
 
 /** `runAgentAttempt` after the secrets are resolved: the staleness self-check + cancel hook. */
@@ -628,6 +653,7 @@ async function runAgentResolved(
   ctx: RunCtx,
   config: ReturnType<typeof loadWorkerConfig>,
   runStartedAt: number,
+  budget: RunBudgetHandle,
 ): Promise<AgentRunOutput> {
   const wwwOpts = wwwOptsFor(input, secrets.daemonToken, ctx);
   const runExternalId = wwwOpts.runExternalId ?? "";
@@ -647,8 +673,11 @@ async function runAgentResolved(
   const abnormal = newAbnormalEndState({
     owns: ownsAbnormalTerminal(input),
     runStartedAt,
-    runExecutionTimeoutMs: RUN_EXECUTION_TIMEOUT_MS,
+    runExecutionTimeoutMs: budget.lateMs ?? (await budget.promise),
   });
+  budget.onLate = (ms) => {
+    abnormal.runExecutionTimeoutMs = ms;
+  };
   // The cancel's own time, not the claim's: a slow teardown must not stretch
   // the timeout tolerance.
   ctx.abortController?.signal.addEventListener(
@@ -950,8 +979,10 @@ export async function runSelfHealAuditStep({
 /**
  * Mirror of definition.ts `executionTimeout: "30m"` (pinned by a test): the
  * post-agent fix check stops a minute before the engine would cancel the run.
+ * Self-heal runs never refresh their timeout, so this stays the REGISTERED 30
+ * minutes; a task run's effective budget (run-budget.ts) is separate.
  */
-export const RUN_EXECUTION_TIMEOUT_MS = 30 * 60_000;
+export const RUN_EXECUTION_TIMEOUT_MS = REGISTERED_EXECUTION_TIMEOUT;
 const FIX_CHECK_RUN_MARGIN_MS = 60_000;
 
 /** deadlineAt = min(now + 3 min, run start + 30 min − 60 s). */

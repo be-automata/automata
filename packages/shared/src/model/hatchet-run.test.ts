@@ -303,6 +303,17 @@ describe("#125 C4 sweep model: lease, candidates, orphans, terminal writer", () 
     expect(ids).not.toContain("ext-leased");
   });
 
+  // card: protects=roborev 1374 (#742): a task run can live schedule 30 + refreshed 60 min from dispatch, so an in_flight row 95 min old is still a sweep candidate (it was outside the old 75-min window), while one past 105 min is not; fails_when=the window stays 75 min or stops bounding at all; no_claim=the sweep's own reconcile decision
+  it("findSweepCandidates covers a task run's 90-minute worst case, and stops at 105 minutes", async () => {
+    await remoteRun(7, 95 * 60 * 1000, "ext-task-95m");
+    await remoteRun(8, 110 * 60 * 1000, "ext-task-110m");
+    const ids = (
+      await findSweepCandidates({ db, olderThanMs: 10 * 60 * 1000 })
+    ).map((c) => c.externalId);
+    expect(ids).toContain("ext-task-95m");
+    expect(ids).not.toContain("ext-task-110m");
+  });
+
   it("hasNewerRun sees only later siblings of the same (org, repo, PR)", async () => {
     const first = await remoteRun(6, 5 * 60 * 1000, "ext-first");
     const [firstRow] = await db

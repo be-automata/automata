@@ -94,3 +94,24 @@ hatchet-dev/hatchet#4494 (a dropped task left QUEUED with a leaked slot) and
 - `agent-run-discard` (`CANCEL_NEWEST`): the newcomer is CANCELLED without ever
   executing; the incumbent completes.
 - `agent-run-strict` (`GROUP_ROUND_ROBIN`): strict FIFO per `prKey`, no overlap.
+
+## 7. `ctx.refreshTimeout` is additive (#742, 2026-11-21)
+
+Measured by `refresh-timeout.integration.test.ts` (HATCHET_IT, `retries: 0`, the
+shipped `agent-run-discard` shape with `executionTimeout` scaled to 10 s):
+
+| Case       | Refresh            | Run time | Result                                                                                            |
+| ---------- | ------------------ | -------- | ------------------------------------------------------------------------------------------------- |
+| R0 control | none               | 15 s     | FAILED, one attempt (the registered timeout bites)                                                |
+| R1         | `"20s"` at t = 1 s | 15 s     | COMPLETED, one attempt (`ctx.refreshTimeout` is a function on the SDK context)                    |
+| R2         | `"10s"` at t = 4 s | 17 s     | COMPLETED: **additive** (deadline 10 + 10 = 20 s; reset-from-now would have cancelled it at 14 s) |
+| R3         | `"10s"` at t = 1 s | 60 s     | FAILED, and still exactly one attempt after a 6 s settle                                          |
+
+Consequences for the worker:
+
+- A refresh ADDS its interval to the run's current deadline. A task registered with
+  `"30m"` reaches the 60-minute task-lane budget with `refreshTimeout("30m")`
+  (`TASK_LANE_REFRESH` in `run-budget.ts`); `"60m"` would give 90.
+- `retries: 0` still means a timed-out refreshed run is never re-executed (the #371 fact,
+  extended to the refreshed case).
+- The IT fails if `TASK_LANE_REFRESH` and the engine disagree.

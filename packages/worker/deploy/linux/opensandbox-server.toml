@@ -12,8 +12,9 @@
 host = "127.0.0.1"
 port = 8090
 api_key = "__API_KEY__"
-# Must stay >= CELL_RUN_TTL_MS (45 min = 2700 s): the 30-minute run plus margin.
-max_sandbox_timeout_seconds = 3600
+# Must stay >= CELL_RUN_TTL_MS (75 min = 4500 s): the task lane's 60-minute run plus
+# margin. 5400 leaves 15 minutes of headroom.
+max_sandbox_timeout_seconds = 5400
 
 [proxy]
 resolve_internal = false

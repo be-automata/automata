@@ -4,7 +4,7 @@
 # Runs every battery's version command inside ONE throwaway container started
 # with the run hardening baseline (ADR-013 "Hardening baseline"): no network,
 # no capabilities, no-new-privileges, read-only rootfs, --init, and writable
-# HOME, /opt/flutter and /tmp only. Checks the pinned versions and that the
+# HOME, /opt/flutter, /opt/flutter-sdks and /tmp only. Checks the pinned versions and that the
 # image carries no per-run policy.
 # Exit 0 = every check passed; 1 = at least one failed; 2 = usage/docker error.
 #
@@ -29,7 +29,7 @@ fi
 # with the container (--rm): the same writable set a run gets.
 docker run --rm -i --platform linux/amd64 --network none \
   --cap-drop ALL --security-opt no-new-privileges --init \
-  --read-only --tmpfs /tmp -v /home/agent -v /opt/flutter \
+  --read-only --tmpfs /tmp -v /home/agent -v /opt/flutter -v /opt/flutter-sdks \
   -v /opt/somnio-ai-tools/agent-rules/adapters \
   --entrypoint /bin/bash "$image" -s <<'IN_CONTAINER'
 set -uo pipefail
@@ -111,6 +111,26 @@ check flutter          "${FLUTTER_VERSION}" flutter --version
 check dart             "Dart SDK version" dart --version
 assert one-dart "dart is /opt/flutter/bin/dart" test "$(command -v dart)" = /opt/flutter/bin/dart
 assert no-dart-sdk "no standalone /opt/dart-sdk" test ! -e /opt/dart-sdk
+# The Flutter SDK cache (#742): /opt/flutter-sdks/<version> for the default (a
+# link to /opt/flutter) and every extra. Each extra must report its own version
+# AND pass `flutter test` on the committed fixture with NO network (this
+# container has none): its tool snapshot and the fixture's locked packages were
+# warmed at build time, so a run on it downloads nothing.
+assert flutter-sdk-default "/opt/flutter-sdks/${FLUTTER_VERSION} is /opt/flutter" \
+  test "$(readlink "/opt/flutter-sdks/${FLUTTER_VERSION}")" = /opt/flutter
+# shellcheck disable=SC2154 # sourced from pins.env above
+for v in ${FLUTTER_EXTRA_VERSIONS:-}; do
+  check "flutter-sdk-$v" "$v" env FLUTTER_ROOT="/opt/flutter-sdks/$v" "/opt/flutter-sdks/$v/bin/flutter" --version
+  check "flutter-test-$v" "All tests passed" bash -c '
+    set -e
+    sdk="/opt/flutter-sdks/$1"
+    w="$(mktemp -d -p "$HOME")"
+    cp -r /opt/automata/flutter-fixture/pubspec.yaml /opt/automata/flutter-fixture/test "$w/"
+    cp "/opt/automata/flutter-fixture/$1/pubspec.lock" "$w/pubspec.lock"
+    cd "$w"
+    env FLUTTER_ROOT="$sdk" "$sdk/bin/flutter" test 2>&1
+  ' _ "$v"
+done
 check somnio           "${SOMNIO_VERSION_LINE}" somnio --version
 check actionlint       "${ACTIONLINT_VERSION}" actionlint -version
 check gitleaks         "${GITLEAKS_VERSION}" gitleaks version

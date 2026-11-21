@@ -45,6 +45,8 @@ ARG GH_SHA256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 # standalone SDK). The Somnio CLI needs Dart >= 3.10.
 ARG FLUTTER_VERSION=3.47.7
 ARG FLUTTER_SHA256=af7455f540df951184c7953fbe3cf884766e7541dacf8571f9f582db03dd6230
+# The extra Flutter SDKs (#742) are pinned by FLUTTER_EXTRA_SDKS, declared late
+# in this file so a bump rebuilds only their layers.
 
 # somnio-ai-tools: CLI v3.1.1. The
 # operator's reference ref aa91cefe... is 5 commits BEHIND this one.
@@ -379,15 +381,66 @@ RUN c="${VENDOR_SKILLS_ROOT}/catalog.json"; \
       ! grep -q '^hooks:' "$HOME/.claude/agents/${f#*/}.md"; \
     done
 
+USER root
+# Extra Flutter SDKs baked beside the default (#742), as space-separated
+# VERSION=SHA256 pairs: a project that pins one of these (.fvmrc, fvm_config.json
+# or a pubspec constraint) runs on it with NO download, selected per run by the
+# cell bootstrap. Each one costs about 2.5 GB, so the list starts with one. A new
+# entry needs its sha256 (releases_linux.json of the Flutter release feed) AND a
+# flutter-fixture/<version>/pubspec.lock, because flutter_test pins exact
+# transitive versions that differ per SDK.
+ARG FLUTTER_EXTRA_SDKS="3.41.2=4a04f8a6152986d14fc137ffaf98106ca743c0f9ab66f1bc2f20ee84eb573e5c"
+
+# ── Extra Flutter SDKs (#742) ───────────────────────────────────────────────
+# /opt/flutter-sdks/<version> for every SDK, the default included (a symlink to
+# /opt/flutter), so a run selects one by path. Same pinning rule and ownership
+# as the default: fetched by version AND sha256, owned by the runtime user in
+# the layer that extracts it.
+RUN mkdir -p /opt/flutter-sdks; \
+    ln -s /opt/flutter "/opt/flutter-sdks/${FLUTTER_VERSION}"; \
+    for pin in ${FLUTTER_EXTRA_SDKS}; do \
+      v="${pin%%=*}"; sha="${pin#*=}"; \
+      [ "${v}" != "${FLUTTER_VERSION}" ] || { echo "FLUTTER_EXTRA_SDKS repeats the default ${v}" >&2; exit 1; }; \
+      fetch-verified "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${v}-stable.tar.xz" \
+        "${sha}" /tmp/flutter.tar.xz; \
+      mkdir "/opt/flutter-sdks/${v}"; \
+      tar -xJf /tmp/flutter.tar.xz -C "/opt/flutter-sdks/${v}" --strip-components=1 --no-same-owner; \
+      rm /tmp/flutter.tar.xz; \
+      git config --system --add safe.directory "/opt/flutter-sdks/${v}"; \
+      chown -R "${AGENT_USER}:${AGENT_USER}" "/opt/flutter-sdks/${v}"; \
+    done
+
+# The offline-proof fixture: flutter_test only, one pubspec.lock per SDK.
+COPY flutter-fixture /opt/automata/flutter-fixture
+
+USER ${AGENT_USER}
+# The extra SDKs: unpack each tool snapshot (`flutter --version`, as the default)
+# and warm PUB_CACHE with the fixture's locked packages. NO `flutter precache`:
+# it downloads artifacts nothing pins. `--enforce-lockfile` fails the build when
+# the lock and the SDK disagree, and the content hashes in the lock are checked
+# by pub, so the warm-up is pinned too. verify.sh then runs `flutter test` on the
+# fixture with no network: that is the proof a run needs no download.
+RUN for pin in ${FLUTTER_EXTRA_SDKS}; do \
+      v="${pin%%=*}"; sdk="/opt/flutter-sdks/${v}"; \
+      env FLUTTER_ROOT="${sdk}" "${sdk}/bin/flutter" --version; \
+      w="$(mktemp -d)"; \
+      cp /opt/automata/flutter-fixture/pubspec.yaml "${w}/pubspec.yaml"; \
+      cp "/opt/automata/flutter-fixture/${v}/pubspec.lock" "${w}/pubspec.lock"; \
+      (cd "${w}" && env FLUTTER_ROOT="${sdk}" "${sdk}/bin/flutter" pub get --enforce-lockfile); \
+      rm -rf "${w}"; \
+    done
+
 # The pins verify.sh checks the installed tools against, so a bump is one edit
 # to the ARG lines above, not a second one to verify.sh.
 USER root
-RUN printf '%s\n' \
+RUN extra_versions="$(printf '%s\n' ${FLUTTER_EXTRA_SDKS} | cut -d= -f1 | paste -sd' ')"; \
+    printf '%s\n' \
       "NODE_VERSION=${NODE_VERSION}" "PNPM_VERSION=${PNPM_VERSION}" \
       "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}" "GH_VERSION=${GH_VERSION}" \
       "RUFLO_VERSION=${RUFLO_VERSION}" "CHROMIUM_REVISION=${CHROMIUM_REVISION}" \
       "CHROMIUM_VERSION=${CHROMIUM_VERSION}" "BUN_VERSION=${BUN_VERSION}" \
       "FLUTTER_VERSION=${FLUTTER_VERSION}" "SOMNIO_VERSION_LINE='${SOMNIO_VERSION_LINE}'" \
+      "FLUTTER_EXTRA_VERSIONS='${extra_versions}'" \
       "ACTIONLINT_VERSION=${ACTIONLINT_VERSION}" "GITLEAKS_VERSION=${GITLEAKS_VERSION}" \
       "SHELLCHECK_VERSION=${SHELLCHECK_VERSION}" "ROBOREV_VERSION=${ROBOREV_VERSION}" >/opt/automata/pins.env; \
     chmod 0444 /opt/automata/pins.env
