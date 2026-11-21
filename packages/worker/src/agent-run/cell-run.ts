@@ -1,6 +1,7 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { OpenSandboxCellConfig } from "@terragon/sandbox/opensandbox-cell";
 import {
+  CELL_MEMORY_BYTES,
   CELL_DAEMON_TOKEN_PLACEHOLDER,
   CELL_LEASE_STALE_MS,
   type CellCreatePlan,
@@ -344,6 +345,8 @@ async function runCell(
     signal: runSignal,
     step,
     admissionLog: step,
+    // #749: the cell's memory is outside this run's cgroup; reserve all of it.
+    commitBytes: CELL_MEMORY_BYTES,
   });
   if (admitted.kind === "skipped") return admitted.output;
   const releaseAdmission = async () => {

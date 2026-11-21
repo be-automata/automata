@@ -188,6 +188,8 @@ export async function admitRunSlot(args: {
   signal: AbortSignal | undefined;
   step: (msg: string) => void;
   admissionLog: (m: string) => void;
+  /** #749: the headroom reservation when it is not the policy's (a cell's full size). */
+  commitBytes?: number;
 }): Promise<AdmitRunSlotResult> {
   const { input, ctx, wwwOpts, runKey, signal, step, admissionLog } = args;
   let config = args.config;
@@ -256,6 +258,7 @@ export async function admitRunSlot(args: {
             runId: runKey,
             threadId: input.threadId,
             attempt: deferrals,
+            commitBytes: args.commitBytes,
             log: admissionLog,
           }) ?? null;
         break;

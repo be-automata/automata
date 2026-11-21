@@ -15,6 +15,7 @@ import {
   type HeadroomPolicy,
   type MeminfoReading,
 } from "./headroom";
+import { CELL_MEMORY_BYTES } from "@terragon/types/cell";
 
 const GIB = 1024 ** 3;
 
@@ -170,6 +171,55 @@ describe("AdmissionController (mutex + reservations)", () => {
     expect((err as Error).message).toMatch(
       /MemAvailable=\d+M Committed_AS=\d+M\/CommitLimit=\d+M/,
     );
+  });
+
+  // card: protects=#749 a cell reserves its full 8 GiB (its memory is outside the run's cgroup), so on the production box one cell runs at a time while a box run can still start beside it; fails_when=a cell reserves only runCommitBytes (two 8 GiB cells admitted on a 15 GiB box) or the box run is pushed out; no_claim=the kernel's real accounting under load
+  it("#749 on the production box, one 8 GiB cell is admitted, a second cell is deferred, and a box run still fits", () => {
+    // automata-exec-1 on 2026-11-21, idle: 15.2 GiB RAM, CommitLimit 20.2 GiB.
+    const BOX = `MemTotal:       15987540 kB
+MemAvailable:   13419504 kB
+CommitLimit:    21178636 kB
+Committed_AS:    6270296 kB
+`;
+    const live: HeadroomPolicy = {
+      floorBytes: 1 * GIB,
+      commitFraction: 0.9,
+      runCommitBytes: 4000 * 1024 ** 2,
+    };
+    const c = new AdmissionController(live, () => BOX);
+    c.admit({
+      runId: "cell-1",
+      threadId: "t1",
+      attempt: 0,
+      commitBytes: CELL_MEMORY_BYTES,
+    });
+    expect(c.reservedBytes()).toBe(CELL_MEMORY_BYTES);
+    expect(() =>
+      c.admit({
+        runId: "cell-2",
+        threadId: "t2",
+        attempt: 0,
+        commitBytes: CELL_MEMORY_BYTES,
+      }),
+    ).toThrow(AdmissionDeferredError);
+    // A box run (the policy's 4000 MiB) is admitted next to the one cell.
+    c.admit({ runId: "box-1", threadId: "t3", attempt: 0 });
+    expect(c.reservedBytes()).toBe(CELL_MEMORY_BYTES + live.runCommitBytes);
+  });
+
+  it("#749 a run without commitBytes reserves the policy's runCommitBytes, and the observed fields name the run's own commit", () => {
+    const lines: string[] = [];
+    const c = new AdmissionController(POLICY, () => MEMINFO);
+    c.admit({
+      runId: "a",
+      threadId: "a",
+      attempt: 0,
+      log: (l) => lines.push(l),
+    });
+    expect(c.reservedBytes()).toBe(POLICY.runCommitBytes);
+    expect(lines[0]).toContain(`"runCommit":${POLICY.runCommitBytes}`);
+    const v = evaluateHeadroom(parseMeminfo(MEMINFO), POLICY, 0, 1 * GIB);
+    expect(v.observed.runCommit).toBe(1 * GIB);
   });
 
   it("releasing the reservation lets the next admission through; release is idempotent", () => {
