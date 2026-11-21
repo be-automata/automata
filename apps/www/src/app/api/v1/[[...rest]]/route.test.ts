@@ -166,6 +166,8 @@ describe("/api/v1 REST mount", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("x-api-version")).toBe("1");
     const doc = await res.json();
+    // The contract's paths start at /v1; the mount serves them under /api.
+    expect(doc.servers).toEqual([{ url: "/api" }]);
     const operations = Object.entries(
       doc.paths as Record<string, Record<string, unknown>>,
     )

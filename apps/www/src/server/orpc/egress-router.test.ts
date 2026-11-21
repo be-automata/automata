@@ -247,6 +247,29 @@ describe("egress router: reads", () => {
     expect(await db.$count(repoEgressAuditLog)).toBeGreaterThanOrEqual(3);
   });
 
+  it("history: an audit row with a level outside the list reads as null, not a 500", async () => {
+    const row = await recordRepoEgressChange({
+      db,
+      organizationId: orgA.id,
+      repoFullName: REPO,
+      actorUserId: userId,
+      authKind: "api_key",
+      credentialId: "key_1",
+      before: { level: null, allowlist: null, registries: null },
+      after: { level: "domain", allowlist: [], registries: null },
+    });
+    // Only a raw write can do this: the column is text with no CHECK.
+    await db
+      .update(repoEgressAuditLog)
+      .set({ levelAfter: "everything" as never })
+      .where(eq(repoEgressAuditLog.id, row.id));
+    const page = await tokenClient(keyA).egress.history({
+      org: orgA.id,
+      ...PATH,
+    });
+    expect(page.entries.find((e) => e.id === row.id)?.levelAfter).toBeNull();
+  });
+
   it("history: a forged cursor is a declared BAD_REQUEST invalid_input", async () => {
     const error = await failure(
       tokenClient(keyA).egress.history({

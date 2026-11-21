@@ -130,6 +130,8 @@ describe("getRepoEgressView", () => {
     const v = view(row({ egressPolicy: "everything", egressAllowlist: [] }));
     expect(v.stored.level).toBeNull();
     expect(v.box.error).toBe("invalid_policy");
+    // The box refuses these runs: no "box open" warning may say otherwise.
+    expect(v.warnings.map((w) => w.code)).not.toContain("no_policy_box_open");
   });
 
   it("a stored value the box builder throws on is invalid_policy, not a 500", () => {

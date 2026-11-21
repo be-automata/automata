@@ -35,6 +35,8 @@ function getOpenApiDocument(): Promise<object> {
     { egress: cliAPIContract.egress },
     {
       info: { title: "Automata API", version: "1" },
+      // The handler serves the contract's `/v1/...` paths under `/api`.
+      servers: [{ url: "/api" }],
       components: {
         securitySchemes: {
           apiKey: { type: "apiKey", in: "header", name: "X-Daemon-Token" },

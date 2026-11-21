@@ -143,6 +143,16 @@ export function getRepoEgressView(args: {
   const registries = row?.cellEgressRegistries ?? null;
   const repoHosts = new Set(canonicalizeEgressEntries(allowlist));
   const { cell, brokerHost } = cellView(repoFullName, row, repoHosts);
+  const box = boxView(row);
+  // A row the box builder refuses is not "no policy": the box fails those
+  // runs, so the open-box warning would tell the operator the opposite.
+  const warnings = egressWarnings({
+    level,
+    entries: allowlist,
+    registries,
+  }).filter(
+    (warning) => box.error === null || warning.code !== "no_policy_box_open",
+  );
   return {
     org,
     repo: repoFullName,
@@ -153,9 +163,9 @@ export function getRepoEgressView(args: {
       updatedAt: row?.updatedAt.toISOString() ?? null,
       updatedByUserId: row?.updatedByUserId ?? null,
     },
-    box: boxView(row),
+    box,
     cell,
-    warnings: egressWarnings({ level, entries: allowlist, registries }),
+    warnings,
     canEdit: args.canEdit,
     readOnlyReason: args.readOnlyReason,
     budget: classifyEgressEntries({
