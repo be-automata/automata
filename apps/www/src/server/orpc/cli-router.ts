@@ -1,4 +1,4 @@
-import { implement, ORPCError } from "@orpc/server";
+import { implement } from "@orpc/server";
 import { cliAPIContract } from "@terragon/cli-api-contract";
 import { db } from "@/lib/db";
 import {
@@ -18,48 +18,48 @@ import { ensureAgent } from "@terragon/agent/utils";
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 import { combineThreadStatuses } from "@/agent/thread-status";
+import { egressRouter } from "@/server/orpc/egress-router";
+import type { EgressRequestContext } from "@/server/orpc/principal";
 
-const os = implement(cliAPIContract)
-  .$context<{
-    headers: Headers;
-    userId: string;
-    // Tenant from the daemon token (WI-5). Nullable during the backfill phase;
-    // threaded into the thread fence on the CLI read path.
-    organizationId: string | null;
-  }>()
-  .use(async ({ context, next, errors }) => {
-    const headers = (context?.headers || new Headers()) as Headers;
-    let tenant: Awaited<ReturnType<typeof getDaemonTokenContext>>;
-    try {
-      tenant = await getDaemonTokenContext({ headers });
-    } catch (error) {
-      // The auth store failed: retryable, never UNAUTHORIZED.
-      if (error instanceof DaemonAuthUnavailableError) {
-        throw new ORPCError("SERVICE_UNAVAILABLE", {
-          status: 503,
-          message: "Authentication temporarily unavailable",
-        });
-      }
-      throw error;
+const base = implement(cliAPIContract).$context<EgressRequestContext>();
+
+// `threads.*` and `auth.whoami` keep the token-only middleware: no cookie ever
+// authenticates them (this mount sends a wildcard CORS header). It is applied
+// to those procedures only, never to the router: `egress.*` resolves its own
+// principal (egress-router.ts) and may be authenticated by a session.
+const os = base.use(async ({ context, next, errors }) => {
+  const headers = (context?.headers || new Headers()) as Headers;
+  let tenant: Awaited<ReturnType<typeof getDaemonTokenContext>>;
+  try {
+    tenant = await getDaemonTokenContext({ headers });
+  } catch (error) {
+    // The auth store failed: retryable, never UNAUTHORIZED.
+    if (error instanceof DaemonAuthUnavailableError) {
+      throw errors.SERVICE_UNAVAILABLE({
+        message: "Authentication temporarily unavailable",
+        data: { reason: "auth_unavailable" },
+      });
     }
-    if (!tenant) {
-      throw errors.UNAUTHORIZED();
-    }
-    // ADR-003 F1: a daemon-scoped token (minted for a sandbox/worker agent run)
-    // must NOT grant CLI access — threads.list/detail/CREATE + agent-spawn. A
-    // compromised execution box holds a daemon token; reject it here so its blast
-    // radius stays "one thread's events", not "the whole account's CLI".
-    if (tenant.tokenType === "daemon") {
-      throw errors.UNAUTHORIZED();
-    }
-    return next({
-      context: {
-        headers,
-        userId: tenant.userId,
-        organizationId: tenant.organizationId,
-      },
-    });
+    throw error;
+  }
+  if (!tenant) {
+    throw errors.UNAUTHORIZED();
+  }
+  // ADR-003 F1: a daemon-scoped token (minted for a sandbox/worker agent run)
+  // must NOT grant CLI access — threads.list/detail/CREATE + agent-spawn. A
+  // compromised execution box holds a daemon token; reject it here so its blast
+  // radius stays "one thread's events", not "the whole account's CLI".
+  if (tenant.tokenType === "daemon") {
+    throw errors.UNAUTHORIZED();
+  }
+  return next({
+    context: {
+      headers,
+      userId: tenant.userId,
+      organizationId: tenant.organizationId,
+    },
   });
+});
 
 // Create procedures
 const listThreads = os.threads.list.handler(async ({ input, context }) => {
@@ -269,7 +269,7 @@ const whoAmI = os.auth.whoami.handler(async ({ context }) => {
 });
 
 // Create the router
-export const cliRouter = os.router({
+export const cliRouter = base.router({
   threads: {
     list: listThreads,
     detail: threadDetail,
@@ -278,4 +278,5 @@ export const cliRouter = os.router({
   auth: {
     whoami: whoAmI,
   },
+  egress: egressRouter,
 });

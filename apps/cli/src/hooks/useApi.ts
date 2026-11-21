@@ -22,6 +22,8 @@ async function fetchThreads(
         throw new Error("Internal server error");
       case "RATE_LIMIT_EXCEEDED":
         throw new Error("Rate limit exceeded. Please try again later.");
+      case "SERVICE_UNAVAILABLE":
+        throw new Error("Service temporarily unavailable. Try again shortly.");
       default:
         const _exhaustiveCheck: never = error;
         throw new Error(`Unknown error: ${_exhaustiveCheck}`);
@@ -52,6 +54,8 @@ async function fetchThreadDetail(
         throw new Error("Internal server error");
       case "RATE_LIMIT_EXCEEDED":
         throw new Error("Rate limit exceeded. Please try again later.");
+      case "SERVICE_UNAVAILABLE":
+        throw new Error("Service temporarily unavailable. Try again shortly.");
       default:
         const _exhaustiveCheck: never = error;
         throw new Error(`Unknown error: ${_exhaustiveCheck}`);

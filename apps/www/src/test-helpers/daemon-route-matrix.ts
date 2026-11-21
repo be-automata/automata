@@ -198,8 +198,6 @@ export function daemonRouteMatrix(
       const client = createRouterClient(cliRouter, {
         context: {
           headers: new Headers({ "X-Daemon-Token": token }),
-          userId: null as unknown as string,
-          organizationId: null,
         },
       });
       const error = await client.auth.whoami().catch((e: unknown) => e);

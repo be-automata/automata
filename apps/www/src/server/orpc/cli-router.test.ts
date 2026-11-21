@@ -7,11 +7,7 @@ import { DaemonAuthUnavailableError } from "@/lib/daemon-auth-unavailable";
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
 
 const client = createRouterClient(cliRouter, {
-  context: {
-    headers: new Headers(),
-    userId: null as unknown as string,
-    organizationId: null,
-  },
+  context: { headers: new Headers() },
 });
 
 describe("cli-router middleware — F1 daemon-token purpose scope", () => {
@@ -56,5 +52,9 @@ describe("cli-router middleware — F1 daemon-token purpose scope", () => {
       "SERVICE_UNAVAILABLE",
     );
     expect((error as ORPCError<string, unknown>).status).toBe(503);
+    // Declared in the contract (CLI practices rule 6): the typed reason travels.
+    expect((error as ORPCError<string, unknown>).data).toEqual({
+      reason: "auth_unavailable",
+    });
   });
 });
