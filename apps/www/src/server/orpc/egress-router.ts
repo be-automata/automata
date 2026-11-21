@@ -3,7 +3,10 @@ import type {
   RepoReviewSetting,
 } from "@terragon/shared/db/types";
 import type { DB } from "@terragon/shared/db";
-import { canonicalizeEgressEntries } from "@terragon/shared/model/egress-policy";
+import {
+  canonicalizeEgressEntries,
+  isEgressPolicyLevel,
+} from "@terragon/shared/model/egress-policy";
 import type { EgressEntryError } from "@terragon/shared/model/egress-entries";
 import {
   listRepoEgressChanges,
@@ -17,13 +20,15 @@ import {
 } from "@terragon/shared/model/repo-review-settings";
 import { sql } from "drizzle-orm";
 
-import * as z from "zod/v4";
+import { RepoPath } from "@terragon/cli-api-contract";
 
 import { db } from "@/lib/db";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { checkCliEgressWriteRateLimit } from "@/lib/rate-limit";
+import { cellBrokerHostOrUndefined } from "@/server-lib/compute/cell-gate";
 import {
   computeEgressChange,
+  patchShapeErrors,
   type EgressFields,
   type EgressPatch,
 } from "@/server-lib/egress/egress-update";
@@ -56,20 +61,18 @@ export interface EgressTarget {
   row?: RepoReviewSetting;
 }
 
-const PathTarget = z.object({
-  org: z.string(),
-  owner: z.string().optional(),
-  repo: z.string().optional(),
-});
+/** `list` names no repo; the others name both segments. */
+const PathTarget = RepoPath.partial({ owner: true, repo: true });
 
 /**
  * The ONE authorization sequence of the egress API (spec 4.4): credential,
  * `{org}`, then repo in org when the path names one. It is mounted on the
  * `egress` namespace, and this file builds every procedure from `egressBase`,
- * so a new egress procedure cannot forget it. The input is parsed again here
- * because the order of oRPC's own validation and middlewares is not part of
- * its contract; the credential is checked first, so a bad shape never
- * answers before an unauthenticated 401.
+ * so a new egress procedure cannot forget it. oRPC runs its input validation
+ * after the namespace middlewares by its index; this parse exists to put the
+ * credential first, so a bad shape never answers before an unauthenticated
+ * 401. It uses the contract's own `RepoPath`, so a malformed segment is a 400
+ * and never a repo-in-org lookup.
  */
 const egressBase = base.egress.use(
   async ({ context, next, errors, procedure }, rawInput) => {
@@ -77,18 +80,25 @@ const egressBase = base.egress.use(
     // Step 2: every procedure the contract routes as a write.
     const method = procedure["~orpc"].route.method ?? "POST";
     if (method !== "GET" && method !== "HEAD") {
-      assertSessionWriteOrigin(principal, context.headers, errors);
+      await assertSessionWriteOrigin(principal, context.headers, errors);
     }
     const path = PathTarget.safeParse(rawInput);
     if (!path.success) {
       throw errors.BAD_REQUEST({
-        data: invalidInputError(["org, owner and repo must be strings"]),
+        data: invalidInputError(
+          path.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+        ),
       });
     }
     const org = await resolveEgressOrg(principal, path.data.org, errors);
     const { owner, repo } = path.data;
-    if (owner === undefined || repo === undefined) {
+    if (owner === undefined && repo === undefined) {
       return next({ context: { principal, org } satisfies EgressTarget });
+    }
+    if (owner === undefined || repo === undefined) {
+      throw errors.BAD_REQUEST({
+        data: invalidInputError(["owner and repo go together"]),
+      });
     }
     const found = await assertRepoInOrg({ org, owner, repo, errors });
     return next({
@@ -112,7 +122,8 @@ const get = egressBase.get.handler(async ({ context }) => {
     organizationId: org.id,
     repoFullName,
   });
-  return getRepoEgressView({ org, repoFullName, row, ...access });
+  const brokerHost = cellBrokerHostOrUndefined();
+  return getRepoEgressView({ org, repoFullName, row, brokerHost, ...access });
 });
 
 interface HistoryCursor {
@@ -220,33 +231,29 @@ function fieldsOfRow(row: EgressRow | undefined): EgressFields {
   };
 }
 
+/** The three stored columns of a set of fields. */
+function columnsOf(fields: EgressFields) {
+  return {
+    egressPolicy: fields.level,
+    egressAllowlist: fields.allowlist,
+    cellEgressRegistries: fields.registries,
+  };
+}
+
 /** The row a dry run would produce: the stored provenance with the result's three fields. */
 function projectedRow(row: EgressRow | undefined, after: EgressFields) {
   return {
-    egressPolicy: after.level,
-    egressAllowlist: after.allowlist,
-    cellEgressRegistries: after.registries,
+    ...columnsOf(after),
     updatedAt: row?.updatedAt ?? null,
     updatedByUserId: row?.updatedByUserId ?? null,
   } satisfies EgressRow;
 }
 
+/** `audit` is set only for an applied change: the applied flag, the audit id and the analytics event all derive from it. */
 interface UpdateOutcome {
   before: EgressRow | undefined;
   after: EgressRow | undefined;
-  applied: boolean;
-  auditId: string | null;
-  /** Set for an applied change: what the analytics event reports. */
-  summary?: ChangeSummary;
-}
-
-interface ChangeSummary {
-  levelBefore: EgressFields["level"];
-  levelAfter: EgressFields["level"];
-  registriesBefore: boolean | null;
-  registriesAfter: boolean | null;
-  addedCount: number;
-  removedCount: number;
+  audit: RepoEgressAuditLog | null;
 }
 
 type UpdateInput = EgressPatch & {
@@ -267,6 +274,8 @@ interface UpdateScope {
   principal: EgressPrincipal;
   input: UpdateInput;
   errors: UpdateErrors;
+  /** Resolved once per request. */
+  brokerHost: string | undefined;
 }
 
 /** Step 3, the compare-and-set: a sent token must still name the stored version. */
@@ -290,6 +299,35 @@ function assertExpectedVersion(
   });
 }
 
+/**
+ * A stored level this build does not know (only a raw SQL write puts one
+ * there) must never be read as "no policy": writing the three fields back
+ * would store NULL and open the box. The patch must send a `level` to replace it.
+ */
+function assertStoredLevelReplaceable(
+  stored: RepoReviewSetting | undefined,
+  input: UpdateInput,
+  errors: UpdateErrors,
+): void {
+  const raw = stored?.egressPolicy ?? null;
+  if (raw === null || isEgressPolicyLevel(raw) || input.level !== undefined) {
+    return;
+  }
+  throw errors.BAD_REQUEST({
+    data: {
+      errors: [
+        {
+          code: "invalid_input",
+          message:
+            "the stored egress level is not valid; send a level to replace it",
+          entry: null,
+          index: null,
+        },
+      ],
+    },
+  });
+}
+
 /** Write the change and its audit row; both land in the caller's transaction. */
 async function writeChange(
   scope: UpdateScope,
@@ -302,11 +340,7 @@ async function writeChange(
     db: txDb,
     organizationId: org.id,
     repoFullName,
-    patch: {
-      egressPolicy: fields.after.level,
-      egressAllowlist: fields.after.allowlist,
-      cellEgressRegistries: fields.after.registries,
-    },
+    patch: columnsOf(fields.after),
     updatedByUserId: principal.userId,
     expectedUpdatedAt: stored?.updatedAt,
     expectRowAbsent: stored ? undefined : true,
@@ -321,21 +355,7 @@ async function writeChange(
     before: fields.before,
     after: fields.after,
   });
-  const summary: ChangeSummary = {
-    levelBefore: fields.before.level,
-    levelAfter: fields.after.level,
-    registriesBefore: fields.before.registries,
-    registriesAfter: fields.after.registries,
-    addedCount: audit.hostsAdded.length,
-    removedCount: audit.hostsRemoved.length,
-  };
-  return {
-    before: stored,
-    after: written,
-    applied: true,
-    auditId: audit.id,
-    summary,
-  };
+  return { before: stored, after: written, audit };
 }
 
 /** Steps 1 to 7 of the handler (spec 4.6), inside one transaction. */
@@ -355,17 +375,18 @@ async function updateInTransaction(
     repoFullName,
   });
   assertExpectedVersion(input.expectedUpdatedAt, stored, errors);
+  assertStoredLevelReplaceable(stored, input, errors);
   const before = fieldsOfRow(stored);
-  const change = computeEgressChange(before, input);
+  const change = computeEgressChange(before, input, scope.brokerHost);
   if (!change.ok) {
     throw errors.BAD_REQUEST({ data: { errors: change.errors } });
   }
   if (input.dryRun) {
     const after = projectedRow(stored, change.after);
-    return { before: stored, after, applied: false, auditId: null };
+    return { before: stored, after, audit: null };
   }
   if (!change.changed) {
-    return { before: stored, after: stored, applied: false, auditId: null };
+    return { before: stored, after: stored, audit: null };
   }
   return writeChange(scope, txDb, stored, { before, after: change.after });
 }
@@ -377,7 +398,7 @@ async function updateInTransaction(
  */
 function captureEgressChanged(
   scope: Pick<UpdateScope, "org" | "repoFullName" | "principal">,
-  summary: ChangeSummary,
+  audit: RepoEgressAuditLog,
 ): void {
   const { org, repoFullName, principal } = scope;
   try {
@@ -388,7 +409,12 @@ function captureEgressChanged(
         organizationId: org.id,
         repoFullName,
         authKind: principal.authKind,
-        ...summary,
+        levelBefore: storedEgressLevel(audit.levelBefore),
+        levelAfter: storedEgressLevel(audit.levelAfter),
+        registriesBefore: audit.registriesBefore,
+        registriesAfter: audit.registriesAfter,
+        addedCount: audit.hostsAdded.length,
+        removedCount: audit.hostsRemoved.length,
       },
     });
   } catch (error) {
@@ -406,6 +432,11 @@ const update = egressBase.update.handler(async ({ input, context, errors }) => {
     repoFullName,
     errors,
   });
+  // A malformed patch spends no budget and opens no transaction.
+  const shape = patchShapeErrors(input);
+  if (shape.length > 0) {
+    throw errors.BAD_REQUEST({ data: { errors: shape } });
+  }
   const limited =
     !input.dryRun && !(await checkCliEgressWriteRateLimit(principal.userId));
   if (limited) {
@@ -413,7 +444,8 @@ const update = egressBase.update.handler(async ({ input, context, errors }) => {
       message: "Too many egress changes. Try again later.",
     });
   }
-  const scope = { org, repoFullName, principal, input, errors };
+  const brokerHost = cellBrokerHostOrUndefined();
+  const scope = { org, repoFullName, principal, input, errors, brokerHost };
   let outcome: UpdateOutcome;
   try {
     outcome = await db.transaction((tx) => updateInTransaction(scope, tx));
@@ -429,15 +461,16 @@ const update = egressBase.update.handler(async ({ input, context, errors }) => {
       data: { currentUpdatedAt: current?.updatedAt.toISOString() ?? null },
     });
   }
-  if (outcome.summary) captureEgressChanged(scope, outcome.summary);
+  if (outcome.audit) captureEgressChanged(scope, outcome.audit);
   const access = { canEdit: true, readOnlyReason: null } as const;
   const view = (row: EgressRow | undefined) =>
-    getRepoEgressView({ org, repoFullName, row, ...access });
+    getRepoEgressView({ org, repoFullName, row, brokerHost, ...access });
+  const before = view(outcome.before);
   return {
-    applied: outcome.applied,
-    before: view(outcome.before),
-    after: view(outcome.after),
-    auditId: outcome.auditId,
+    applied: outcome.audit !== null,
+    before,
+    after: outcome.after === outcome.before ? before : view(outcome.after),
+    auditId: outcome.audit?.id ?? null,
   };
 });
 

@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { checkRepoAdmin } from "@/lib/repo-admin";
 import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
-import { mintKey, mockSession } from "@/test-helpers/egress-api";
+import {
+  mintKey,
+  mockSession,
+  trustAppOrigin,
+} from "@/test-helpers/egress-api";
 import { eq } from "drizzle-orm";
 import {
   repoEgressAuditLog,
@@ -384,7 +388,7 @@ describe("/api/v1 REST mount: PATCH egress", () => {
     const ok = await patch(
       path(org.id),
       { level: "domain" },
-      { Origin: ORIGIN },
+      { Origin: await trustAppOrigin() },
     );
     expect(ok.status).toBe(200);
     expect(await rows()).toBe(1);
@@ -395,7 +399,10 @@ describe("/api/v1 REST mount: PATCH egress", () => {
     const res = await cliPOST(
       new Request(`${ORIGIN}/api/cli/egress/update`, {
         method: "POST",
-        headers: { "content-type": "application/json", Origin: ORIGIN },
+        headers: {
+          "content-type": "application/json",
+          Origin: await trustAppOrigin(),
+        },
         body: JSON.stringify({
           json: {
             org: org.id,

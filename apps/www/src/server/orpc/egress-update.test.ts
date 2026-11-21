@@ -1,4 +1,3 @@
-import { createRouterClient, ORPCError } from "@orpc/server";
 import { eq, inArray, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,8 +5,16 @@ import { db } from "@/lib/db";
 import { getPostHogServer } from "@/lib/posthog-server";
 import { checkCliEgressWriteRateLimit } from "@/lib/rate-limit";
 import { checkRepoAdmin } from "@/lib/repo-admin";
-import { isRepoInOrganizationScope } from "@/server-lib/user-repos";
-import { mintKey, mockSession, rejection } from "@/test-helpers/egress-api";
+import {
+  clientFor,
+  failure,
+  mintKey,
+  mockSession,
+  rejection,
+  setupEgressWorld,
+  tokenClient,
+  trustAppOrigin,
+} from "@/test-helpers/egress-api";
 import {
   repoEgressAuditLog,
   repoReviewSettings,
@@ -21,8 +28,6 @@ import {
   createTestOrganization,
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
-
-import { egressRouter } from "./egress-router";
 
 vi.mock("@/lib/repo-admin", () => ({ checkRepoAdmin: vi.fn() }));
 vi.mock("@/server-lib/user-repos", () => ({
@@ -52,24 +57,6 @@ vi.mock("@terragon/shared/model/repo-review-settings", async (original) => {
 
 const REPO = "acme/widgets";
 const PATH = { owner: "acme", repo: "widgets" };
-const APP = "https://app.example.test";
-
-function clientFor(headers: Headers, allowSession = false) {
-  return createRouterClient(
-    { egress: egressRouter },
-    { context: { headers, allowSession } },
-  );
-}
-
-const tokenClient = (key: string) =>
-  clientFor(new Headers({ "X-Daemon-Token": key }));
-
-async function failure(promise: Promise<unknown>) {
-  const error = await rejection(promise);
-  expect(error).toBeInstanceOf(ORPCError);
-  const e = error as ORPCError<string, unknown>;
-  return { code: e.code, status: e.status, data: e.data };
-}
 
 const rowJson = async (organizationId: string) =>
   JSON.stringify(
@@ -107,9 +94,6 @@ describe("egress.update", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    vi.stubEnv("NEXT_PUBLIC_APP_URL", APP);
-    vi.mocked(isRepoInOrganizationScope).mockResolvedValue(true);
-    vi.mocked(checkRepoAdmin).mockResolvedValue("not-admin");
     vi.mocked(checkCliEgressWriteRateLimit).mockResolvedValue(true);
     capture = vi.fn();
     vi.mocked(getPostHogServer).mockReturnValue({ capture } as never);
@@ -124,12 +108,7 @@ describe("egress.update", () => {
     >("@terragon/shared/model/repo-review-settings");
     actualUpsert = settings.upsertRepoReviewSetting;
     vi.mocked(upsertRepoReviewSetting).mockImplementation(actualUpsert);
-    userId = (await createTestUser({ db })).user.id;
-    orgA = (await createTestOrganization({ db, userId, name: "Alpha" }))
-      .organization;
-    orgB = (await createTestOrganization({ db, userId, name: "Beta" }))
-      .organization;
-    keyA = await mintKey(userId, orgA.id);
+    ({ userId, orgA, orgB, keyA } = await setupEgressWorld());
   });
 
   afterEach(() => {
@@ -220,7 +199,10 @@ describe("egress.update", () => {
     });
     const bBefore = await rowJson(orgB.id);
     mockSession(userId, { activeOrganizationId: orgB.id });
-    const client = clientFor(new Headers({ Origin: APP }), true);
+    const client = clientFor(
+      new Headers({ Origin: await trustAppOrigin() }),
+      true,
+    );
     await client.egress.update({
       org: orgA.slug,
       ...PATH,
@@ -244,7 +226,10 @@ describe("egress.update", () => {
   it("AC-4: a session that is not a member of A is org_forbidden and writes nothing", async () => {
     const stranger = (await createTestUser({ db })).user.id;
     mockSession(stranger, { activeOrganizationId: orgA.id });
-    const client = clientFor(new Headers({ Origin: APP }), true);
+    const client = clientFor(
+      new Headers({ Origin: await trustAppOrigin() }),
+      true,
+    );
     expect(
       await failure(
         client.egress.update({ org: orgA.id, ...PATH, level: "domain" }),
@@ -284,6 +269,26 @@ describe("egress.update", () => {
         level: "domain",
       }),
     ).resolves.toMatchObject({ applied: true });
+  });
+
+  // card: protects=spec §8 fix 5: the app's own public origin is trusted even when Better Auth's configured list does not name it (the dashboard's own writes); fails_when=a same-origin dashboard write is 403; no_claim=Better Auth's pattern matching
+  it("a session write from the public app origin is allowed without being in Better Auth's list", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://dash.example.test");
+    mockSession(userId);
+    await expect(
+      clientFor(
+        new Headers({ Origin: "https://dash.example.test" }),
+        true,
+      ).egress.update({ org: orgA.id, ...PATH, level: "domain" }),
+    ).resolves.toMatchObject({ applied: true });
+    expect(
+      await failure(
+        clientFor(
+          new Headers({ Origin: "http://dash.example.test" }),
+          true,
+        ).egress.update({ org: orgA.id, ...PATH, registries: true }),
+      ),
+    ).toMatchObject({ data: { reason: "origin_mismatch" } });
   });
 
   it("AC-5: a non-admin is not_repo_admin, a failed lookup is 503 github_unavailable, dryRun included; no write", async () => {
@@ -417,6 +422,52 @@ describe("egress.update", () => {
       });
     }
     expect(await rowCount()).toBe(0);
+  });
+
+  it("a malformed patch is not charged to the rate limit and opens no transaction", async () => {
+    const client = tokenClient(keyA);
+    await failure(client.egress.update({ org: orgA.id, ...PATH }));
+    expect(checkCliEgressWriteRateLimit).not.toHaveBeenCalled();
+    expect(await rowCount()).toBe(0);
+    expect(await auditCount()).toBe(0);
+  });
+
+  it("a stored level this build does not know is never cleared by a patch without a level", async () => {
+    await seed(orgA.id, {
+      egressPolicy: "domain",
+      egressAllowlist: ["a.example.org"],
+    });
+    await db.execute(
+      sql`UPDATE repo_review_settings SET egress_policy = 'bogus_level' WHERE organization_id = ${orgA.id}`,
+    );
+    const before = await rowJson(orgA.id);
+    const client = tokenClient(keyA);
+    for (const patch of [
+      { registries: true },
+      { add: ["b.example.org"] },
+      { remove: ["a.example.org"] },
+    ]) {
+      expect(
+        await failure(
+          client.egress.update({ org: orgA.id, ...PATH, ...patch }),
+        ),
+      ).toMatchObject({
+        code: "BAD_REQUEST",
+        status: 400,
+        data: {
+          errors: [{ code: "invalid_input", entry: null, index: null }],
+        },
+      });
+    }
+    expect(await rowJson(orgA.id)).toBe(before);
+    expect(await auditCount()).toBe(0);
+    const fixed = await client.egress.update({
+      org: orgA.id,
+      ...PATH,
+      level: "domain",
+    });
+    expect(fixed.applied).toBe(true);
+    expect(fixed.after.stored.level).toBe("domain");
   });
 
   it("AC-7: two concurrent adds of different hosts both land, with one audit row each", async () => {
@@ -848,9 +899,10 @@ describe("egress.update", () => {
     expect(result.applied).toBe(true);
   });
 
-  it("a session Origin of null is refused; a scheme-less trusted origin is accepted over https only", async () => {
+  it("a session Origin of null is refused; a trusted origin is accepted over its own scheme only", async () => {
     mockSession(userId);
-    for (const origin of ["null", "http://terragonlabs.com"]) {
+    const trusted = await trustAppOrigin();
+    for (const origin of ["null", trusted.replace("https:", "http:")]) {
       expect(
         await failure(
           clientFor(new Headers({ Origin: origin }), true).egress.update({
@@ -866,7 +918,7 @@ describe("egress.update", () => {
     }
     expect(await rowCount()).toBe(0);
     const ok = await clientFor(
-      new Headers({ Origin: "https://terragonlabs.com" }),
+      new Headers({ Origin: trusted }),
       true,
     ).egress.update({ org: orgA.id, ...PATH, level: "domain" });
     expect(ok.applied).toBe(true);
@@ -879,7 +931,10 @@ describe("egress.update", () => {
       level: "domain",
     });
     mockSession(userId);
-    await clientFor(new Headers({ Origin: APP }), true).egress.update({
+    await clientFor(
+      new Headers({ Origin: await trustAppOrigin() }),
+      true,
+    ).egress.update({
       org: orgA.id,
       ...PATH,
       add: ["a.example.org"],

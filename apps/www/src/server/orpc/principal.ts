@@ -317,46 +317,37 @@ export async function readEditAccess({
   return { canEdit: false, readOnlyReason };
 }
 
-/** `Origin` form of a Better Auth `trustedOrigins` entry (host or URL), or null for a pattern. */
-function originOfTrusted(entry: string): string | null {
-  if (entry.includes("*")) return null;
-  try {
-    return new URL(entry.includes("://") ? entry : `https://${entry}`).origin;
-  } catch {
-    return null;
-  }
-}
-
-/** The origins a browser may send for a session write: the public app origin plus Better Auth's trusted ones. */
-function allowedSessionOrigins(): Set<string> {
-  const origins = new Set<string>();
-  try {
-    origins.add(new URL(publicAppUrl()).origin);
-  } catch {
-    // No usable public URL: only the trusted origins can match.
-  }
-  const trusted = auth.options.trustedOrigins;
-  for (const entry of Array.isArray(trusted) ? trusted : []) {
-    const origin = typeof entry === "string" ? originOfTrusted(entry) : null;
-    if (origin) origins.add(origin);
-  }
-  return origins;
-}
-
 /**
  * Step 2: a session-authenticated write must come from this app's own origin
  * (a cookie is sent by any site, so this is the CSRF guard). An API key is
  * exempt: it is never sent by a browser on its own. Refused with 403
  * `origin_mismatch` (spec section 8 fix 5).
  */
-export function assertSessionWriteOrigin(
+/** The public app origin, or null when the URL cannot be parsed. */
+function appOrigin(): string | null {
+  try {
+    return new URL(publicAppUrl()).origin;
+  } catch {
+    return null;
+  }
+}
+
+export async function assertSessionWriteOrigin(
   principal: EgressPrincipal,
   headers: Headers,
   errors: Pick<PrincipalErrors, "FORBIDDEN">,
-): void {
+): Promise<void> {
   if (principal.authKind !== "session") return;
   const origin = headers.get("Origin");
-  if (origin === null || !allowedSessionOrigins().has(origin)) {
+  // Spec §8 fix 5: the app's own public origin, plus Better Auth's own
+  // trusted-origin rule (one source of truth for the configured list).
+  const trusted =
+    origin !== null &&
+    (origin === appOrigin() ||
+      (await auth.$context).isTrustedOrigin(origin, {
+        allowRelativePaths: false,
+      }));
+  if (!trusted) {
     throw errors.FORBIDDEN({ data: { reason: "origin_mismatch" } });
   }
 }

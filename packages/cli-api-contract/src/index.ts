@@ -148,7 +148,7 @@ const egressOc = oc.errors({
 
 const REPO_SEGMENT = /^[A-Za-z0-9_.-]+$/;
 
-const RepoPath = z.object({
+export const RepoPath = z.object({
   // org id or slug (OD-8)
   org: z.string().min(1).max(128),
   owner: z.string().min(1).max(100).regex(REPO_SEGMENT),
@@ -227,7 +227,7 @@ const egressGet = egressOc
   .input(RepoPath)
   .output(EgressView);
 
-const EntryList = z.string().max(253);
+const Entry = z.string().max(253);
 
 const egressUpdate = egressOc
   .route({
@@ -241,11 +241,11 @@ const egressUpdate = egressOc
       // handler with `level_unsupported_in_cell` (OD-1, OD-2).
       level: Level.nullable().optional(),
       // full replace; exclusive with add/remove
-      allowlist: z.array(EntryList).max(200).optional(),
+      allowlist: z.array(Entry).max(200).optional(),
       // up to 200 so the 101-host case reaches the classifier's
       // `too_many_entries` instead of a schema error (spec section 8 fix 8)
-      add: z.array(EntryList).max(200).optional(),
-      remove: z.array(EntryList).max(200).optional(),
+      add: z.array(Entry).max(200).optional(),
+      remove: z.array(Entry).max(200).optional(),
       registries: z.boolean().optional(),
       // the compare-and-set token; null = "I read no row"
       expectedUpdatedAt: z.string().max(64).nullable().optional(),

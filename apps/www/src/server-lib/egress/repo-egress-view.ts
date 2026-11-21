@@ -26,7 +26,7 @@ import {
 } from "@terragon/shared/model/egress-entries";
 import type { EgressLevel } from "@terragon/types/egress";
 
-import { cellBrokerHost } from "@/server-lib/compute/cell-gate";
+import { cellBrokerHostOrUndefined } from "@/server-lib/compute/cell-gate";
 
 import {
   egressPolicyFromRow,
@@ -112,19 +112,14 @@ function cellView(
   repoFullName: string,
   row: Row,
   repoHosts: ReadonlySet<string>,
-): { cell: CellView; brokerHost: string | undefined } {
-  let brokerHost: string;
-  try {
-    brokerHost = cellBrokerHost();
-  } catch {
+  brokerHost: string | undefined,
+): CellView {
+  if (brokerHost === undefined) {
     // A single-label or missing public host: never a 500 on a read.
-    return {
-      cell: { ok: false, code: "broker_host_unavailable", reason: null },
-      brokerHost: undefined,
-    };
+    return { ok: false, code: "broker_host_unavailable", reason: null };
   }
   const plan = planCellEgressForRepo({ repoFullName, row, brokerHost });
-  return { cell: cellFromPlan(plan, brokerHost, repoHosts), brokerHost };
+  return cellFromPlan(plan, brokerHost, repoHosts);
 }
 
 /**
@@ -148,13 +143,17 @@ export function getRepoEgressView(args: {
   row: Row;
   canEdit: boolean;
   readOnlyReason: EgressReadOnlyReason | null;
+  /** Resolved once per request by the caller; omitted, it is resolved here. */
+  brokerHost?: string | undefined;
 }): EgressView {
   const { org, repoFullName, row } = args;
+  const brokerHost =
+    "brokerHost" in args ? args.brokerHost : cellBrokerHostOrUndefined();
   const level = storedEgressLevel(row?.egressPolicy ?? null);
   const allowlist = row?.egressAllowlist ?? [];
   const registries = row?.cellEgressRegistries ?? null;
   const repoHosts = new Set(canonicalizeEgressEntries(allowlist));
-  const { cell, brokerHost } = cellView(repoFullName, row, repoHosts);
+  const cell = cellView(repoFullName, row, repoHosts, brokerHost);
   const box = boxView(row);
   // A row the box builder refuses is not "no policy": the box fails those
   // runs, so the open-box warning would tell the operator the opposite.
