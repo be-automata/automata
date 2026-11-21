@@ -31,10 +31,11 @@ no fallback to the base branch.
 3. **Branch names are untrusted.** Every reply renders the ref through `safeGitRef`
    (`server-lib/review/pr-diff-context.ts`); an unsafe name becomes "its branch", so a backtick or `@`
    in a ref cannot close the code span or mention anyone.
-4. **One reason per no-thread answer** (B.3, AC-9). `reply(body, what, reason)` logs
-   `<what> reason=<reason> — replying` (or `[shadow] … reply suppressed`). The reasons are a closed union,
-   `MentionNoThreadReason`: `empty_instruction`, `cross_repo`, `pr_merged`, `pr_closed`,
-   `head_branch_missing`, `branch_missing`, `start_failed`.
+4. **One reason per no-thread answer** (B.3, AC-9). `reply(body, reason)` logs
+   `no thread reason=<reason> — replying` (or `[shadow] no thread reason=<reason> — reply suppressed`)
+   with `reason` also as a log field. The reasons are a closed union, `MentionNoThreadReason`:
+   `empty_instruction`, `cross_repo`, `pr_merged`, `pr_closed`, `head_branch_missing`,
+   `branch_missing`, `start_failed`.
 
 **Deviation from the ticket's sketch.** The ticket suggests `repos.getBranch` for the open-PR, missing-head
 case. This spec uses the `BranchDoesNotExistError` that thread creation already raises, so the outcome is
@@ -42,9 +43,10 @@ the same, there is no extra GitHub call per PR mention, and the race above is co
 
 ## 3. Acceptance criteria covered
 
-- **AC-7, AC-8:** `org-mention-lane.test.ts` "#729 a mention on a PR that is …" (merged with the branch deleted,
-  merged with the branch kept, closed and unmerged): the named reply, no `runAutomation`, no reaction, never
-  "Mention me again", `reason=` logged.
+- **AC-7, AC-8:** `org-mention-lane.test.ts` "#729 a mention on a PR that is …" (merged; closed and unmerged),
+  plus odd payloads (`merged` missing with `merged_at` set or null) and a review-comment mention: the named
+  reply, no `runAutomation`, no reaction, never "Mention me again", `reason` logged, and the branch never
+  read (so a deleted and a kept branch get the same reply).
 - **AC-9:** the named reply for an open PR whose head is gone, the issue default branch missing,
   `start_failed` keeping the generic text, and a redelivered merged-PR mention answered once.
 - **AC-10:** the shadow test extended: a merged-PR refusal in shadow posts nothing.

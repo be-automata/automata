@@ -512,7 +512,6 @@ export async function handleOrgLaneMention(
     log("skip: this comment was already handled (redelivery)", meta);
     return true;
   }
-  // Every no-thread answer names its reason in one greppable log line.
   // One greppable line per no-thread answer, with the reason as a field too.
   const reply = async (body: string, reason: MentionNoThreadReason) => {
     if (shadow) {
