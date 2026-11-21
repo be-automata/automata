@@ -27,11 +27,16 @@ const wire = (extra: Record<string, unknown> = {}): AgentRunWireInput =>
     branch: "main",
     daemonCallbackUrl: "https://www.example.com",
     orgId: "org-1",
+    // Marked for a cell by default: only a cell run gets the 60-minute budget.
+    cell: "opensandbox",
     ...extra,
   }) as unknown as AgentRunWireInput;
 
 const LANES: Array<[string, Record<string, unknown>, number]> = [
-  ["task", {}, 60],
+  ["task in a cell", {}, 60],
+  // Box task runs keep 30: their brokers push with the dispatch-minted
+  // installation token, which GitHub expires after about an hour.
+  ["task on the box", { cell: undefined }, 30],
   [
     "task + self-heal",
     { selfHeal: { kind: "audit", attemptId: "a1", checkToken: "t" } },
@@ -70,9 +75,13 @@ describe("#742 per-lane run budget", () => {
     expect(out).toBe(minutes * 60_000);
   });
 
-  it("the refresh lane is exactly the lane that owns the abnormal terminal", () => {
+  it("for a cell run, the refresh lane is exactly the lane that owns the abnormal terminal", () => {
     for (const [, extra] of LANES) {
       const w = wire(extra);
+      if (w.cell === undefined) {
+        expect(refreshesRunBudget(w)).toBe(false);
+        continue;
+      }
       expect(refreshesRunBudget(w)).toBe(
         ownsAbnormalTerminal(w as Parameters<typeof ownsAbnormalTerminal>[0]),
       );

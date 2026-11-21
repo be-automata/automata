@@ -6,7 +6,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import type { ThreadSourceMetadata } from "@terragon/shared";
 import { deliveryFixCycles } from "@terragon/shared/db/schema";
-import { TASK_LANE_EXECUTION_TIMEOUT } from "@terragon/types/cell";
+import {
+  CELL_TEARDOWN_MARGIN,
+  SCHEDULE_TIMEOUT,
+  TASK_LANE_EXECUTION_TIMEOUT,
+} from "@terragon/types/cell";
 import {
   bindDeliveryFixCycleThread,
   enrollDeliveryPr,
@@ -171,6 +175,11 @@ describe("#509 delivery fix-cycle finish", () => {
 
   it("DELIVERY_RUN_STALE_MS exceeds the task lane's 60-minute run budget (#742)", () => {
     expect(DELIVERY_RUN_STALE_MS).toBeGreaterThan(TASK_LANE_EXECUTION_TIMEOUT);
+    // Measured from cycle creation, so it also covers the schedule wait.
+    expect(DELIVERY_RUN_STALE_MS).toBe(
+      SCHEDULE_TIMEOUT + TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN,
+    );
+    expect(DELIVERY_RUN_STALE_MS).toBeGreaterThan(95 * 60_000);
   });
 
   it("the sweep settles a running cycle past the run budget whose finish was missed", async () => {

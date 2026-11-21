@@ -14,6 +14,7 @@ import {
 import { getThread } from "@terragon/shared/model/threads";
 import {
   CELL_TEARDOWN_MARGIN,
+  SCHEDULE_TIMEOUT,
   TASK_LANE_EXECUTION_TIMEOUT,
 } from "@terragon/types/cell";
 
@@ -33,11 +34,13 @@ import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
 /** A cycle with no thread this long after its start never began. */
 export const DELIVERY_DISPATCH_STALE_MS = 5 * 60_000;
 /**
- * Past the task lane's 60-minute run budget (#742) with slack: its finish was
- * missed. A delivery cycle dispatches a task run, which may now run 60 minutes.
+ * Measured from the cycle's CREATION, so it covers a task run's worst case
+ * from dispatch: the schedule wait, the 60-minute cell budget (#742) and the
+ * teardown margin — the same bound as the stalled cutoff and the sweep window.
+ * Past it, the cycle's finish was missed.
  */
 export const DELIVERY_RUN_STALE_MS =
-  TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN;
+  SCHEDULE_TIMEOUT + TASK_LANE_EXECUTION_TIMEOUT + CELL_TEARDOWN_MARGIN;
 
 export interface DeliveryCycleFinishDeps {
   db: DB;

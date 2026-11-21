@@ -32,9 +32,21 @@ export interface BudgetCtx {
   refreshTimeout?: (incrementBy: Duration) => Promise<void>;
 }
 
-/** Task lane, not self-heal: the one run shape that gets the 60-minute budget. */
+/**
+ * A task-lane, non-self-heal run marked for a CELL: the one run shape that gets
+ * the 60-minute budget. Box runs keep 30 minutes for now: their git/gh brokers
+ * push with the installation token minted at dispatch, which GitHub expires
+ * after about an hour, so a 60-minute box run (and its timeout salvage push)
+ * would outlive its credential. A cell's broker mints a token per request.
+ * The `cell` marker is the worker's only cell switch (run-executor.ts): a
+ * marked run runs in a cell or is refused, never on the box.
+ */
 export function refreshesRunBudget(wire: AgentRunWireInput): boolean {
-  return resolveRunLane(wire) === "task" && wire.selfHeal === undefined;
+  return (
+    resolveRunLane(wire) === "task" &&
+    wire.selfHeal === undefined &&
+    wire.cell !== undefined
+  );
 }
 
 /** An error's class name when it is a plain identifier, else `unknown`. */

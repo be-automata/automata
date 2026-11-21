@@ -1440,41 +1440,53 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
   });
 
   /** Install `box` as the box executor, with an inert cell executor and the cell config on. */
-  function useBox(box: ReturnType<typeof fakeExecutor>): void {
+  /** Both executors as fakes; returns the one a run lands on, by `where`. */
+  function useBoth(
+    box: ReturnType<typeof fakeExecutor>,
+    cell: ReturnType<typeof fakeExecutor>,
+  ): void {
     wf._setRunExecutorsForTests({
       box: box.executor,
-      cell: fakeExecutor("cell", completed).executor,
+      cell: cell.executor,
       loadCellConfig: () => ON,
     });
   }
+  const IN_CELL = { cell: "opensandbox" };
 
   // card: protects=#742 the run fn refreshes a task run's timeout once and hands the effective budget to the abnormal-end state; review, pr and self-heal never refresh and stay at 30; fails_when=the refresh is skipped, repeated or leaks to another lane, or the classifier keeps reading 30 for a task run; no_claim=the engine honouring the refresh (refresh-timeout.integration.test.ts)
+  // Box task runs keep 30: their brokers push with the dispatch-minted
+  // installation token, which GitHub expires after about an hour (#742 review).
   it.each([
-    ["task", {}, 60, true],
-    ["pr", { prNumber: 7 }, 30, false],
+    ["task in a cell", IN_CELL, 60, true, "cell"],
+    ["task on the box", {}, 30, false, "box"],
+    ["pr", { prNumber: 7 }, 30, false, "box"],
     [
       "review",
       { prKey: "org-1/o/r/7", supersedePolicy: "newest-wins" },
       30,
       false,
+      "box",
     ],
     [
       "self-heal",
       { selfHeal: { kind: "audit", attemptId: "a1", checkToken: "chk-tok" } },
       30,
       false,
+      "box",
     ],
   ])(
     "#742 %s run: effective budget %i min, refreshed=%s",
-    async (_n, extra, minutes, refreshed) => {
+    async (_n, extra, minutes, refreshed, where) => {
       const box = fakeExecutor("box", completed);
-      useBox(box);
+      const cell = fakeExecutor("cell", completed);
+      useBoth(box, cell);
       const refreshTimeout = vi.fn(async () => {});
       const c = { ...ctx(), refreshTimeout };
       await rawRunFn(await wireInput(extra), c);
       expect(refreshTimeout).toHaveBeenCalledTimes(refreshed ? 1 : 0);
       if (refreshed) expect(refreshTimeout).toHaveBeenCalledWith("30m");
-      expect(box.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
+      const ran = where === "cell" ? cell : box;
+      expect(ran.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
         minutes * 60_000,
       );
     },
@@ -1489,13 +1501,13 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
       settled = true;
     });
     let budgetAtExecutor = -1;
-    const box = fakeExecutor("box", async (a) => {
+    const cell = fakeExecutor("cell", async (a) => {
       refreshedAtStart = settled ? refreshTimeout.mock.calls.length : -1;
       budgetAtExecutor = a.abnormal.runExecutionTimeoutMs;
       return completed(a);
     });
-    useBox(box);
-    await rawRunFn(await wireInput(), { ...ctx(), refreshTimeout });
+    useBoth(fakeExecutor("box", completed), cell);
+    await rawRunFn(await wireInput(IN_CELL), { ...ctx(), refreshTimeout });
     expect(refreshedAtStart).toBe(1);
     expect(budgetAtExecutor).toBe(60 * 60_000);
     expect(refreshTimeout).toHaveBeenCalledTimes(1);
@@ -1503,17 +1515,17 @@ describe("#656 PR-E: the run executor seam (the run fn with a fake injected exec
 
   // card: protects=#742 a refresh that rejects never fails the run: it runs at 30 minutes with one log line; fails_when=the rejection propagates or the state says 60; no_claim=the 10 s bound (run-budget.test.ts)
   it("#742 a rejected refresh leaves the task run at 30 minutes and runs on", async () => {
-    const box = fakeExecutor("box", completed);
-    useBox(box);
+    const cell = fakeExecutor("cell", completed);
+    useBoth(fakeExecutor("box", completed), cell);
     const c = {
       ...ctx(),
       refreshTimeout: vi.fn(async () => {
         throw new Error("engine said no");
       }),
     };
-    const out = await rawRunFn(await wireInput(), c);
+    const out = await rawRunFn(await wireInput(IN_CELL), c);
     expect(out.outcome).toBe("completed");
-    expect(box.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
+    expect(cell.fn.mock.calls[0]![0].abnormal.runExecutionTimeoutMs).toBe(
       30 * 60_000,
     );
     expect(
