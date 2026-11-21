@@ -154,6 +154,17 @@ assert ca-store-rest-root "/etc/ssl, /etc/ssl/private, /usr/share/ca-certificate
 assert ca-store-no-hooks "no update.d hook and no subdirectory under /etc/ssl/certs" \
   bash -c 'test -z "$(ls -A /etc/ca-certificates/update.d 2>/dev/null)" && test -z "$(find /etc/ssl/certs -mindepth 1 -type d)"'
 
+# The pinned Flutter SDKs (#742): a cell run's pin shims exec
+# /opt/flutter-sdks/<version>/bin/flutter as uid 10001, so every extra SDK the
+# batteries image lists in pins.env must run here as this user, offline, and
+# report its own version.
+FLUTTER_EXTRA_VERSIONS="$(sed -n "s/^FLUTTER_EXTRA_VERSIONS=//p" /opt/automata/pins.env | tr -d "'\"")"
+assert flutter-extras-listed "pins.env lists the extra Flutter SDKs" test -n "$FLUTTER_EXTRA_VERSIONS"
+for v in $FLUTTER_EXTRA_VERSIONS; do
+  assert "flutter-sdk-$v" "uid 10001 runs /opt/flutter-sdks/$v offline and it reports $v" \
+    bash -c 'env FLUTTER_ROOT="/opt/flutter-sdks/$1" "/opt/flutter-sdks/$1/bin/flutter" --version --machine 2>/dev/null | grep -q "\"frameworkVersion\": *\"$1\""' _ "$v"
+done
+
 DART=/opt/flutter/bin/dart
 cad="$(mktemp -d)"
 # mkca GEN: a CA and a localhost leaf it signs (EC P-256). Both generations

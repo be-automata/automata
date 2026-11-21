@@ -15,7 +15,7 @@
 # No secrets: no build arg is a credential, and the daemon token is never in
 # the image, its layers or its env. The daemon takes the token from each
 # message; the sidecar vault swaps the placeholder on the wire.
-FROM --platform=linux/amd64 ghcr.io/be-automata/automata-batteries@sha256:da029c443bfba5d61f67fdee4f5596ba1bfc6aff7653a46fa858a6b3cdfffffc
+FROM --platform=linux/amd64 ghcr.io/be-automata/automata-batteries@sha256:cfd893435d46d2165e090286c02af3b33d61afb6265e4b340c636a473cf89640
 
 ARG REVISION=unknown
 # apt: the batteries image's Ubuntu snapshot, so every .deb version is frozen.
@@ -73,4 +73,4 @@ LABEL org.opencontainers.image.title="automata-cell" \
       org.opencontainers.image.source="https://github.com/be-automata/automata" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.revision="${REVISION}" \
-      org.opencontainers.image.base.name="ghcr.io/be-automata/automata-batteries@sha256:da029c443bfba5d61f67fdee4f5596ba1bfc6aff7653a46fa858a6b3cdfffffc"
+      org.opencontainers.image.base.name="ghcr.io/be-automata/automata-batteries@sha256:cfd893435d46d2165e090286c02af3b33d61afb6265e4b340c636a473cf89640"

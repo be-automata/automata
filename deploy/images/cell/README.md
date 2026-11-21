@@ -59,6 +59,9 @@ the request `entrypoint` as the command. It runs as `agent` (uid 10001), never r
   can write Flutter pin shims after the clone without restarting the daemon. That dir is
   agent-writable and first on `PATH`, so both scripts reset `PATH` to `/usr/bin:/bin` before any
   other command and call node by `/usr/local/bin/node`, never through the inherited `PATH`.
+- **Pinned Flutter SDKs (#742).** The batteries base carries `/opt/flutter-sdks/<version>` for the
+  default SDK and every extra one in `pins.env` (`FLUTTER_EXTRA_VERSIONS`), owned by uid 10001.
+  `verify.sh` runs each extra SDK here as that user, offline, and checks the version it reports.
 - **Not here.** Somnio rules, Flutter pin shims and git setup need the checkout, which is cloned
   after the cell is up. PR-E runs them by exec.
 
