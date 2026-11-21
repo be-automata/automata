@@ -181,47 +181,47 @@ Order to merge and deploy: PR-1 (any time) → PR-2 → **`migrate.yml` applies
 
 ### 3.1 File ownership map
 
-| File                                                                                                                                                                             | PR  | Change                                                                                                                                                               |
-| :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/www/src/lib/repo-write-access.ts` (new)                                                                                                                                    | 1   | `checkRepoWriteAccess({db, userId, organizationId, repoFullName})` → `"allowed" \| "not_repo_admin" \| "lookup_failed"`; the logic moved from `route.ts:60-88`       |
-| `apps/www/src/lib/repo-write-access.test.ts` (new)                                                                                                                               | 1   | org admin, repo admin, not admin, lookup failed                                                                                                                      |
-| `apps/www/src/app/api/review-settings/[owner]/[repo]/route.ts`                                                                                                                   | 1   | body `organizationId` on PUT, `?organizationId=` on DELETE; mismatch → 409; uses `checkRepoWriteAccess`; same copy as today                                          |
-| `apps/www/src/app/api/review-settings/[owner]/[repo]/route.test.ts`, `route.permissions.test.ts`                                                                                 | 1   | AC-13 cases; permission suite moved onto the lib                                                                                                                     |
-| `packages/types/src/egress.ts` (new)                                                                                                                                             | 2   | `EGRESS_ENTRY_CODES`, `EGRESS_ACCESS_REFUSALS`, `EGRESS_WARNING_CODES` as `as const` arrays (precedent: `CELL_EGRESS_GUARD_REASONS` in `packages/types/src/cell.ts`) |
-| `packages/shared/src/model/egress-policy.ts`                                                                                                                                     | 2   | export `assertValidEntry` (renamed `assertValidEgressEntry`) and `canonicalizeEntries` (renamed `canonicalizeEgressEntries`); no logic change                        |
-| `packages/shared/src/model/cell-egress.ts`                                                                                                                                       | 2   | export `normalizeEntry` as `normalizeCellEgressEntry`; no logic change                                                                                               |
-| `packages/shared/src/model/egress-entries.ts` (new)                                                                                                                              | 2   | `classifyEgressEntries`, `detectMultiTenantUploadHost`, `egressWarnings`                                                                                             |
-| `packages/shared/src/model/egress-entries.test.ts` (new)                                                                                                                         | 2   | code table, parity, warnings                                                                                                                                         |
-| `packages/shared/src/db/schema.ts`                                                                                                                                               | 2   | `repoEgressAuditLog` table                                                                                                                                           |
-| `packages/shared/src/db/types.ts`                                                                                                                                                | 2   | `RepoEgressAuditLog` row type (follow the file's existing `InferSelectModel` pattern)                                                                                |
-| `packages/shared/src/model/repo-egress-audit-log.ts` (new) + `.test.ts`                                                                                                          | 2   | `recordRepoEgressChange`, `listRepoEgressChanges`                                                                                                                    |
-| `deploy/migrations/2026-11-24-repo-egress-audit-log.sql` (new)                                                                                                                   | 2   | expand migration                                                                                                                                                     |
-| `packages/migrate/src/expected-migrations.ts`                                                                                                                                    | 2   | append the id                                                                                                                                                        |
-| `packages/cli-api-contract/src/index.ts`                                                                                                                                         | 3   | base SERVICE_UNAVAILABLE; `egress.*` procedures with `.route()`                                                                                                      |
-| `packages/cli-api-contract/package.json`                                                                                                                                         | 3   | add `"@terragon/types": "workspace:*"`                                                                                                                               |
-| `apps/www/package.json`, `pnpm-lock.yaml`                                                                                                                                        | 3   | `@orpc/openapi@1.14.13`, `@orpc/zod@1.14.13` (exact)                                                                                                                 |
-| `apps/www/src/server/orpc/principal.ts` (new) + `.test.ts`                                                                                                                       | 3   | token-or-session principal, Bearer adapter, `{org}` resolution                                                                                                       |
-| `apps/www/src/server/orpc/egress-router.ts` (new) + `.test.ts`                                                                                                                   | 3   | the four handlers                                                                                                                                                    |
-| `apps/www/src/server/orpc/cli-router.ts`                                                                                                                                         | 3   | split the middleware (token-only for `threads`/`auth`, principal for `egress`); declared SERVICE_UNAVAILABLE                                                         |
-| `apps/www/src/server/orpc/cli-router.test.ts`                                                                                                                                    | 3   | the 503 case asserts a declared error                                                                                                                                |
-| `apps/www/src/server/orpc/contract-conformance.test.ts` (new)                                                                                                                    | 3   | every thrown code is declared                                                                                                                                        |
-| `apps/www/src/server/orpc/api-version.ts` (new)                                                                                                                                  | 3   | `API_VERSION = "1"` and the header helper used by both mounts                                                                                                        |
-| `apps/www/src/app/api/cli/[[...slug]]/route.ts`                                                                                                                                  | 3   | add `x-api-version: 1`                                                                                                                                               |
-| `apps/www/src/app/api/v1/[[...rest]]/route.ts` (new)                                                                                                                             | 3   | `OpenAPIHandler` over `{ egress }` only, `GET /api/v1/openapi.json`, `x-api-version`, no wildcard CORS                                                               |
-| `apps/www/src/app/api/v1/[[...rest]]/route.test.ts` (new)                                                                                                                        | 3   | REST end-to-end on throwaway Postgres                                                                                                                                |
-| `apps/www/src/server-lib/egress/repo-egress-view.ts` (new) + `.test.ts`                                                                                                          | 3   | `getRepoEgressView` (box via `egressPolicyFromRow`, cell via `planCellEgressForRepo`)                                                                                |
-| `apps/www/src/server-lib/egress/repo-org.ts` (new) + `.test.ts`                                                                                                                  | 3   | `isRepoInOrganization` (§4.4)                                                                                                                                        |
-| `apps/www/src/lib/rate-limit.ts`                                                                                                                                                 | 3   | `cliEgressWriteRateLimit` + `checkCliEgressWriteRateLimit`                                                                                                           |
-| `apps/www/src/app/(sidebar)/(site-header)/settings/egress/page.tsx` (new)                                                                                                        | 4   | page                                                                                                                                                                 |
-| `apps/www/src/components/settings/settings-layout.tsx`                                                                                                                           | 4   | nav item "Egress", scope `organization`                                                                                                                              |
-| `apps/www/src/components/settings/tab/egress.tsx` (new)                                                                                                                          | 4   | repo register                                                                                                                                                        |
-| `apps/www/src/components/settings/egress/*.tsx` (new: `egress-panel`, `effective-egress-register`, `host-list-editor`, `confirm-domain-dialog`, `egress-history`) + `*.test.tsx` | 4   | panel                                                                                                                                                                |
-| `apps/www/src/queries/egress-queries.ts` (new)                                                                                                                                   | 4   | hooks; query key includes the page's org id                                                                                                                          |
-| `apps/www/e2e/specs/egress-second-org.e2e.ts` (new); `apps/www/e2e/support/*` GitHub fixture for `/repos/{o}/{r}/installation`                                                   | 4   | e2e                                                                                                                                                                  |
-| `apps/docs/content/docs/api/egress.mdx` (new)                                                                                                                                    | 5   | page                                                                                                                                                                 |
-| `apps/docs/content/docs/meta.json`                                                                                                                                               | 5   | add `"api/egress"` under Configuration or Help & Resources                                                                                                           |
-| `apps/docs/content/docs/security-permissions.mdx`, `integrations/cli.mdx`                                                                                                        | 5   | links                                                                                                                                                                |
-| `apps/docs/content/docs/resources/release-notes.mdx`, `apps/www/src/lib/constants.ts`                                                                                            | 5   | entry per `apps/docs/RELEASE_NOTES_TEMPLATE.md`; 18 → 19                                                                                                             |
+| File                                                                                                                                                                             | PR  | Change                                                                                                                                                                                                  |
+| :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/www/src/lib/repo-write-access.ts` (new)                                                                                                                                    | 1   | `checkRepoWriteAccess({db, userId, organizationId, repoFullName})` → `"allowed" \| "not_repo_admin" \| "lookup_failed"`; the logic moved from `route.ts:60-88`                                          |
+| `apps/www/src/lib/repo-write-access.test.ts` (new)                                                                                                                               | 1   | org admin, repo admin, not admin, lookup failed                                                                                                                                                         |
+| `apps/www/src/app/api/review-settings/[owner]/[repo]/route.ts`                                                                                                                   | 1   | body `organizationId` on PUT, `?organizationId=` on DELETE; mismatch → 409; uses `checkRepoWriteAccess`; same copy as today                                                                             |
+| `apps/www/src/app/api/review-settings/[owner]/[repo]/route.test.ts`, `route.permissions.test.ts`                                                                                 | 1   | AC-13 cases; permission suite moved onto the lib                                                                                                                                                        |
+| `packages/types/src/egress.ts` (new)                                                                                                                                             | 2   | `EGRESS_ENTRY_CODES`, `EGRESS_ACCESS_REFUSALS`, `EGRESS_WARNING_CODES` as `as const` arrays (precedent: `CELL_EGRESS_GUARD_REASONS` in `packages/types/src/cell.ts`)                                    |
+| `packages/shared/src/model/egress-policy.ts`                                                                                                                                     | 2   | export `canonicalizeEntries` (renamed `canonicalizeEgressEntries`); no logic change. `assertValidEntry` stays private: the classifier calls the public `findEgressPolicyError` per entry (validate fix) |
+| `packages/shared/src/model/cell-egress.ts`                                                                                                                                       | 2   | export `normalizeEntry` as `normalizeCellEgressEntry`; no logic change                                                                                                                                  |
+| `packages/shared/src/model/egress-entries.ts` (new)                                                                                                                              | 2   | `classifyEgressEntries`, `detectMultiTenantUploadHost`, `egressWarnings`                                                                                                                                |
+| `packages/shared/src/model/egress-entries.test.ts` (new)                                                                                                                         | 2   | code table, parity, warnings                                                                                                                                                                            |
+| `packages/shared/src/db/schema.ts`                                                                                                                                               | 2   | `repoEgressAuditLog` table                                                                                                                                                                              |
+| `packages/shared/src/db/types.ts`                                                                                                                                                | 2   | `RepoEgressAuditLog` row type (follow the file's existing `InferSelectModel` pattern)                                                                                                                   |
+| `packages/shared/src/model/repo-egress-audit-log.ts` (new) + `.test.ts`                                                                                                          | 2   | `recordRepoEgressChange`, `listRepoEgressChanges` (insert and list only; no update/delete export)                                                                                                       |
+| `deploy/migrations/2026-11-24-repo-egress-audit-log.sql` (new)                                                                                                                   | 2   | expand migration                                                                                                                                                                                        |
+| `packages/migrate/src/expected-migrations.ts`                                                                                                                                    | 2   | append the id                                                                                                                                                                                           |
+| `packages/cli-api-contract/src/index.ts`                                                                                                                                         | 3   | base SERVICE_UNAVAILABLE; `egress.*` procedures with `.route()`                                                                                                                                         |
+| `packages/cli-api-contract/package.json`                                                                                                                                         | 3   | add `"@terragon/types": "workspace:*"`                                                                                                                                                                  |
+| `apps/www/package.json`, `pnpm-lock.yaml`                                                                                                                                        | 3   | `@orpc/openapi@1.14.13`, `@orpc/zod@1.14.13` (exact)                                                                                                                                                    |
+| `apps/www/src/server/orpc/principal.ts` (new) + `.test.ts`                                                                                                                       | 3   | token-or-session principal, Bearer adapter, `{org}` resolution                                                                                                                                          |
+| `apps/www/src/server/orpc/egress-router.ts` (new) + `.test.ts`                                                                                                                   | 3   | the four handlers                                                                                                                                                                                       |
+| `apps/www/src/server/orpc/cli-router.ts`                                                                                                                                         | 3   | split the middleware (token-only for `threads`/`auth`, principal for `egress`); declared SERVICE_UNAVAILABLE                                                                                            |
+| `apps/www/src/server/orpc/cli-router.test.ts`                                                                                                                                    | 3   | the 503 case asserts a declared error                                                                                                                                                                   |
+| `apps/www/src/server/orpc/contract-conformance.test.ts` (new)                                                                                                                    | 3   | every thrown code is declared                                                                                                                                                                           |
+| `apps/www/src/server/orpc/api-version.ts` (new)                                                                                                                                  | 3   | `API_VERSION = "1"` and the header helper used by both mounts                                                                                                                                           |
+| `apps/www/src/app/api/cli/[[...slug]]/route.ts`                                                                                                                                  | 3   | add `x-api-version: 1`                                                                                                                                                                                  |
+| `apps/www/src/app/api/v1/[[...rest]]/route.ts` (new)                                                                                                                             | 3   | `OpenAPIHandler` over `{ egress }` only, `GET /api/v1/openapi.json`, `x-api-version`, no wildcard CORS                                                                                                  |
+| `apps/www/src/app/api/v1/[[...rest]]/route.test.ts` (new)                                                                                                                        | 3   | REST end-to-end on throwaway Postgres                                                                                                                                                                   |
+| `apps/www/src/server-lib/egress/repo-egress-view.ts` (new) + `.test.ts`                                                                                                          | 3   | `getRepoEgressView` (box via `egressPolicyFromRow`, cell via `planCellEgressForRepo`)                                                                                                                   |
+| `apps/www/src/server-lib/egress/repo-org.ts` (new) + `.test.ts`                                                                                                                  | 3   | `isRepoInOrganization` (§4.4)                                                                                                                                                                           |
+| `apps/www/src/lib/rate-limit.ts`                                                                                                                                                 | 3   | `cliEgressWriteRateLimit` + `checkCliEgressWriteRateLimit`                                                                                                                                              |
+| `apps/www/src/app/(sidebar)/(site-header)/settings/egress/page.tsx` (new)                                                                                                        | 4   | page                                                                                                                                                                                                    |
+| `apps/www/src/components/settings/settings-layout.tsx`                                                                                                                           | 4   | nav item "Egress", scope `organization`                                                                                                                                                                 |
+| `apps/www/src/components/settings/tab/egress.tsx` (new)                                                                                                                          | 4   | repo register                                                                                                                                                                                           |
+| `apps/www/src/components/settings/egress/*.tsx` (new: `egress-panel`, `effective-egress-register`, `host-list-editor`, `confirm-domain-dialog`, `egress-history`) + `*.test.tsx` | 4   | panel                                                                                                                                                                                                   |
+| `apps/www/src/queries/egress-queries.ts` (new)                                                                                                                                   | 4   | hooks; query key includes the page's org id                                                                                                                                                             |
+| `apps/www/e2e/specs/egress-second-org.e2e.ts` (new); `apps/www/e2e/support/*` GitHub fixture for `/repos/{o}/{r}/installation`                                                   | 4   | e2e                                                                                                                                                                                                     |
+| `apps/docs/content/docs/api/egress.mdx` (new)                                                                                                                                    | 5   | page                                                                                                                                                                                                    |
+| `apps/docs/content/docs/meta.json`                                                                                                                                               | 5   | add `"api/egress"` under Configuration or Help & Resources                                                                                                                                              |
+| `apps/docs/content/docs/security-permissions.mdx`, `integrations/cli.mdx`                                                                                                        | 5   | links                                                                                                                                                                                                   |
+| `apps/docs/content/docs/resources/release-notes.mdx`, `apps/www/src/lib/constants.ts`                                                                                            | 5   | entry per `apps/docs/RELEASE_NOTES_TEMPLATE.md`; 18 → 19                                                                                                                                                |
 
 No file is owned by two PRs.
 
@@ -311,7 +311,7 @@ const EgressView = z.object({
   warnings: z.array(z.object({ code: z.enum(EGRESS_WARNING_CODES), entry: z.string().nullable() })),
   canEdit: z.boolean(),                       // drives the UI read-only state
   readOnlyReason: z.enum(["not_repo_admin"]).nullable(),
-  budget: z.object({ used: z.number().int(), max: z.number().int() }), // G19c: max = 100 - platform - registries
+  budget: z.object({ used: z.number().int(), max: z.number().int() }), // G19c: used = rendered count (platform + registries + repo, deduped), max = CELL_EGRESS_MAX_ENTRIES
 });
 
 const egressGet = egressOc
@@ -404,8 +404,19 @@ export function classifyEgressEntries(input: {
   level: EgressPolicyLevel | null;
   entries: readonly string[]; // the resulting list, before canonicalization
   registries: boolean | null;
-}): { entries: string[] /* canonical */; errors: EgressEntryError[] };
+  brokerHost?: string; // the www public host; CLASSIFY_BROKER_PLACEHOLDER when absent (CLI)
+}): {
+  entries: string[]; // canonical
+  errors: EgressEntryError[];
+  budget: { used: number; max: number };
+};
 ```
+
+`index` refers to the **canonical** resulting list (trimmed, lowercased, empties dropped, deduped,
+order-stable), which the result returns as `entries`; it is not the index in the request body.
+`budget.used` is the rendered count of the compiled plan (`toAgent37Network(plan.set).allow.length`:
+platform + registries + repo hosts, deduped), and `max` is `CELL_EGRESS_MAX_ENTRIES` (100). When the
+plan does not compile, `used` is the same deduped count over the entries that passed.
 
 Algorithm (maps the existing validators, re-parses nothing):
 
@@ -420,7 +431,8 @@ Algorithm (maps the existing validators, re-parses nothing):
      `error.entry ?? null` (keeps the no-echo rule, G19b), `message` = `error.message`, `index` = `i`.
    - On success with `wildcard: true` → `wildcard_not_allowed` (the rule at
      `cell-egress-catalog.ts:189-195`).
-   - Then `assertValidEgressEntry("domain", entry)` in a try: a throw → `invalid_host`, message
+   - Then `findEgressPolicyError({ egressPolicy: "domain", egressAllowlist: [entry] })` (the
+     public box check, so `assertValidEntry` stays private): a message → `invalid_host`, message
      from the box. (Catches what the cell normalizer accepts and the box does not, e.g. a
      trailing dot.)
    - Any other `CellEgressError` code is unreachable for a single host; it rethrows (500). The
@@ -433,9 +445,12 @@ brokerHost: "broker.invalid" })`. `reason: "too_many_entries"` → one `too_many
 
 Message words are the validators' own (G19, G13) so the API, UI and CLI say the same thing.
 
-`detectMultiTenantUploadHost(host)`: exact `storage.googleapis.com`; any host equal to
-`s3.amazonaws.com`, matching `s3.<region>.amazonaws.com`, `s3-<region>.amazonaws.com`, or ending in
-`.s3.amazonaws.com` / `.s3.<region>.amazonaws.com`; `*.amazonaws.com`. The list is a frozen
+`detectMultiTenantUploadHost(host)`: `storage.googleapis.com` and buckets under it; an S3 name,
+i.e. an `s3` or `s3-…` label followed only by region or `dualstack` labels before
+`amazonaws.com` (`s3.amazonaws.com`, `s3.<region>`, `s3-<region>`, `<bucket>.s3.<region>`,
+`s3.dualstack.<region>`, `s3-accelerate`), so a load balancer named `s3-proxy` under
+`elb.amazonaws.com` is not one; and any wildcard that covers one of these (`*.amazonaws.com`,
+`*.<region>.amazonaws.com`, `*.googleapis.com`, `*.s3.amazonaws.com`). The list is a frozen
 constant with a comment linking #719; widening it is a code change with review.
 
 `egressWarnings({ level, entries, registries })` returns, in this order:
@@ -504,8 +519,8 @@ export function getRepoEgressView(args: {
   Layers: the platform bundle's hosts → `platform`, `CELL_EGRESS_CATALOG["automata/registries@1"].allow`
   → `registries`, else `repo`.
 - `warnings`: `egressWarnings` from PR-2 on the stored fields.
-- `budget.max` = `CELL_EGRESS_MAX_ENTRIES` − 2 − (registries ? 17 : 0), from the bundle constants,
-  not literals.
+- `budget` = the classifier's (§4.3): `used` = the compiled plan's rendered count (deduped, platform
+  and registries included), `max` = `CELL_EGRESS_MAX_ENTRIES`. The view passes `cellBrokerHost()`.
 
 No second copy of the box or cell rules: the view only calls the two existing functions.
 
@@ -531,7 +546,7 @@ expectRowAbsent: stored ? undefined : true })`. The DB fence still protects agai
    **No hosts** (test asserts no captured property contains any request host).
 
 `get`: principal → repo-in-org → row → view. `history`: same gates, `listRepoEgressChanges`
-(newest first, `before` cursor = `createdAt` ISO of the last entry). `list`: membership only.
+(newest first, keyset cursor `(createdAt, id)` of the last entry, encoded opaquely on the wire). `list`: membership only.
 
 Router wiring: `const base = implement(cliAPIContract).$context<{ headers: Headers }>()`;
 `threads.*` and `auth.whoami` keep today's token-only middleware (unchanged behavior); `egress.*`
@@ -575,13 +590,16 @@ export const repoEgressAuditLog = pgTable(
     hostsRemoved: text("hosts_removed").array().notNull(),
     registriesBefore: boolean("registries_before"),
     registriesAfter: boolean("registries_after"),
-    createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
   },
   (table) => [
     index("repo_egress_audit_log_org_repo_created_index").on(
       table.organizationId,
       table.repoFullName,
       table.createdAt,
+      table.id,
     ),
   ],
 );
@@ -616,7 +634,7 @@ CREATE TABLE IF NOT EXISTS "repo_egress_audit_log" (
   "hosts_removed" text[] NOT NULL,
   "registries_before" boolean,
   "registries_after" boolean,
-  "created_at" timestamp DEFAULT now() NOT NULL
+  "created_at" timestamp(3) DEFAULT now() NOT NULL
 );
 
 DO $$ BEGIN
@@ -628,7 +646,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- The table is created in this file, so a plain CREATE INDEX blocks no traffic (lint L3).
 CREATE INDEX IF NOT EXISTS "repo_egress_audit_log_org_repo_created_index"
-  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at");
+  ON "repo_egress_audit_log" USING btree ("organization_id", "repo_full_name", "created_at", "id");
 
 -- Post-migration verification:
 --   \d repo_egress_audit_log
@@ -641,8 +659,17 @@ last entry. Rollback: stop writing; the table is never dropped while code reads 
 Model `packages/shared/src/model/repo-egress-audit-log.ts`:
 `recordRepoEgressChange({ db, organizationId, repoFullName, actorUserId, authKind, credentialId,
 before: {level, allowlist, registries}, after: {…} })` computes added/removed itself (canonical
-sets, order-stable) and inserts one row; `listRepoEgressChanges({ db, organizationId,
-repoFullName, limit, before })`.
+sets, order-stable) and inserts one row, returning it (its id is `auditId`);
+`listRepoEgressChanges({ db, organizationId, repoFullName, limit, before })` returns
+`{ entries, nextBefore }`, newest first by `(createdAt desc, id desc)`, with the keyset cursor
+`before = { createdAt, id }` (row comparison, so rows sharing a millisecond are neither skipped nor
+repeated). `created_at` is `timestamp(3)` so a JS `Date` cursor round-trips exactly. The module
+exports insert and list only: no update or delete.
+
+**Re-home.** `repo_egress_audit_log` is in `REHOME_EXCLUDED_TABLES`
+(`packages/shared/src/model/rehome-repos-to-org.ts`), like `knowledge_admin_log` and
+`self_heal_admin_log`: the rows stay with the source org, so **a repo's egress audit history
+restarts after a re-home** to another org. The rehome coverage guard test requires the entry.
 
 Legacy PUT/DELETE do **not** write audit rows in this ticket (OD-2 keeps the legacy path
 unchanged). This is a known gap to name in PR-3's description; a follow-up can add rows with
@@ -716,8 +743,10 @@ build-time fetch for one page).
   one of them refuses too. Run over `__fixtures__/cell-egress.ts` plus the table above. Proves
   step 3's "unreachable" claim.
 - Warnings: each of the six codes; S3 variants; `storage.googleapis.com`.
-- Audit model (DB): insert computes added/removed; list order and cursor; org fence (org B's
-  rows never returned for org A).
+- Audit model (DB): insert computes added/removed; list order and `(createdAt, id)` cursor
+  (ties on one millisecond); org fence (org B's rows never returned for org A); rollback with the
+  caller's tx; the module exports insert and list only.
+- `rehome-repos-to-org.test.ts`: the coverage guard passes with `repo_egress_audit_log` excluded.
 - `pnpm --filter @terragon/migrate exec vitest run --no-file-parallelism` (counts derived from
   `EXPECTED_MIGRATION_IDS`); `node deploy/lint-migrations.ts deploy/migrations`.
 
@@ -811,9 +840,9 @@ after PR-2 merges; the www deploy for PR-3 waits for it.
 1. **`effectiveEgress` in `packages/shared` cannot call `egressPolicyFromRow`**: it lives in
    apps/www with a `plane` argument (G15), and the name clashes with `effectiveEgressFields`
    (G16). The view is `getRepoEgressView` in apps/www, box = worker plane.
-2. **The validators are first-throw and private** (G17, G19a): `assertValidEntry`,
-   `canonicalizeEntries` and `normalizeEntry` must be exported (moved, not copied) to map per
-   entry. Wildcards are refused after compile, not by the normalizer.
+2. **The validators are first-throw and private** (G17, G19a): `canonicalizeEntries` and
+   `normalizeEntry` are exported (moved, not copied) to map per entry; `assertValidEntry` stays
+   private and the classifier calls the public `findEgressPolicyError` per entry instead. Wildcards are refused after compile, not by the normalizer.
 3. **`entry` is null for non-echoable entries** (`exa mple` among them, G19b); `index` is always set.
 4. **The 100-entry cap counts platform (2) and registries (17) hosts** (G19c): the repo budget is
    98, or 81 with registries.

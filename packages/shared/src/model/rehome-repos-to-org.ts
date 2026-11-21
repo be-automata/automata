@@ -135,6 +135,10 @@ export const REHOME_EXCLUDED_TABLES: readonly string[] = [
   "self_heal_admin_log",
   "knowledge_usage_window",
   "knowledge_admin_log",
+  // An org-scoped audit trail, like self_heal_admin_log and knowledge_admin_log:
+  // a re-home leaves it with the source org, so a moved repo's egress history
+  // restarts in the target org.
+  "repo_egress_audit_log",
   // The exactly-once effect ledger (#652) records effects the org already
   // performed. Its rows carry no repo or thread, a re-home refuses while a run
   // is in flight (the guard below), and a moved repo's next run gets new keys.

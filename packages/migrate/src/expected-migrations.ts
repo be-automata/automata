@@ -35,4 +35,5 @@ export const EXPECTED_MIGRATION_IDS = [
   "2026-11-21-agent-messages",
   "2026-11-22-organization-cells-enabled",
   "2026-11-23-repo-cell-egress-registries",
+  "2026-11-24-repo-egress-audit-log",
 ] as const;
