@@ -80,6 +80,7 @@ const RULES_DIGEST = sha256Hex(
     ...PATTERN_RULES.map(([name, re]) => `${name}:${re.source}`),
     `system-prompt-keys:${[...SYSTEM_PROMPT_KEYS].join(",")}`,
     `account-keys:${[...ACCOUNT_KEYS].join(",")}`,
+    "object-keys:redacted-like-values;collision-suffix:#n",
   ].join("\n"),
 );
 
@@ -136,16 +137,24 @@ export function createSessionRedactor(
       let hits = 0;
       const out: Record<string, unknown> = {};
       for (const [key, item] of Object.entries(value)) {
+        // Keys are transcript text too: redact them like values. Two keys
+        // that redact to the same string both survive (second gets "#n").
+        const rk = redactString(key);
+        hits += rk.hits;
+        let outKey = rk.text;
+        for (let n = 2; Object.hasOwn(out, outKey); n += 1) {
+          outKey = `${rk.text}#${n}`;
+        }
         if (SYSTEM_PROMPT_KEYS.has(key)) {
-          out[key] = SYSTEM_PROMPT_MARK;
+          out[outKey] = SYSTEM_PROMPT_MARK;
           hits += 1;
         } else if (ACCOUNT_KEYS.has(key) && typeof item === "string") {
-          out[key] = ACCOUNT_MARK;
+          out[outKey] = ACCOUNT_MARK;
           hits += 1;
         } else {
           const r = walk(item, depth + 1);
           hits += r.hits;
-          out[key] = r.value;
+          out[outKey] = r.value;
         }
       }
       return { value: out, hits };

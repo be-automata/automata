@@ -128,6 +128,20 @@ describe("session redactor", () => {
     expect(JSON.parse(out.text)).toEqual({ accountUuid: { n: 1 } });
   });
 
+  it("redacts object keys and keeps colliding keys distinct", () => {
+    const line = JSON.stringify({
+      "CANARY-EMAIL@example.invalid": 1,
+      "sk-ant-api03-CANARYCANARYCANARYCANARY00": { x: 2 },
+      "CANARY-DB-PASSWORD-456": 3,
+    });
+    const out = redactor().redactLine(line);
+    for (const c of CANARIES) expect(out.text).not.toContain(c);
+    const parsed = JSON.parse(out.text) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toHaveLength(3);
+    expect(Object.values(parsed)).toEqual([1, { x: 2 }, 3]);
+    expect(out.hits).toBeGreaterThanOrEqual(3);
+  });
+
   it("throws on a line that is not JSON", () => {
     expect(() => redactor().redactLine("{not json")).toThrow(
       SessionRedactionError,
@@ -141,7 +155,7 @@ describe("session redactor", () => {
 
   it("pins the rules digest: rules may be added, never removed", () => {
     expect(redactor().digest).toBe(
-      "a98fb1b8c529f5c2c521c8f79ff3e81982176fe0adc1ff2efa937232d5468267",
+      "272dfe87e3b193aa61216068cf52687801dece3a8a380ab0cfd76fe61b9629e1",
     );
   });
 });
