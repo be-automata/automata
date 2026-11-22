@@ -633,3 +633,61 @@ describe("fetchSessionCheckpoint (#743 phase 8)", () => {
     });
   });
 });
+
+describe("prepareCheckpoint with a short repo env value (#743 roborev)", () => {
+  it("keeps the transcript structure: the turn counts and the user line stays a user line", () => {
+    const shortRedactor = createSessionRedactor({ values: ["user"] });
+    const sid = CONTEXT.sessionId;
+    const lines = [
+      {
+        type: "user",
+        uuid: "u-1",
+        parentUuid: null,
+        sessionId: sid,
+        userType: "external",
+        message: { role: "user", content: "run the tests" },
+      },
+      {
+        type: "assistant",
+        uuid: "a-1",
+        parentUuid: "u-1",
+        sessionId: sid,
+        message: {
+          id: "msg_s1",
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_s1", name: "Bash", input: {} },
+          ],
+        },
+      },
+      {
+        type: "user",
+        uuid: "u-2",
+        parentUuid: "a-1",
+        sessionId: sid,
+        userType: "external",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_s1", content: "ok" },
+          ],
+        },
+      },
+    ]
+      .map((l) => `${JSON.stringify(l)}\n`)
+      .join("");
+
+    const w = written(run({ newBytes: bytes(lines), redactor: shortRedactor }));
+
+    expect(w.manifest.turn).toBe(1);
+    expect(w.turnAdvanced).toBe(true);
+    const stored = text(w.native)
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(stored).toHaveLength(3);
+    expect(stored[0]?.type).toBe("user");
+    expect(stored[2]?.type).toBe("user");
+    expect(stored[2]?.userType).toBe("external");
+  });
+});

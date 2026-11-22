@@ -28,6 +28,15 @@ export const CANARIES = [
   "CANARY-DB-PASSWORD-456",
 ];
 
+// A user line is a counted turn only while it still has type "user" and text.
+function normalizeTurnsOf(line: string): number {
+  const p = JSON.parse(line) as {
+    type?: string;
+    message?: { content?: unknown };
+  };
+  return p.type === "user" && typeof p.message?.content === "string" ? 1 : 0;
+}
+
 function redactor() {
   return createSessionRedactor({
     values: ["CANARY-REPO-ENV-VALUE-123", "CANARY-DB-PASSWORD-456"],
@@ -153,9 +162,51 @@ describe("session redactor", () => {
     expect(() => redactor().redactLine(deep)).toThrow(/nests too deeply/);
   });
 
+  // card: protects=#743 finding 2: a short repo env value (`user`, `test`) never rewrites schema keys or structural values, so normalize still counts the turn; fails_when=exact-value blanking reaches keys or structural fields again; no_claim=a short secret inside a longer token is blanked
+  it("short env values leave the transcript schema alone", () => {
+    const r = createSessionRedactor({ values: ["user", "test"] });
+    const line = JSON.stringify({
+      type: "user",
+      uuid: "00000000-0000-4000-8000-000000000002",
+      userType: "external",
+      role: "user",
+      message: { role: "user", content: "run pnpm test as user, userType ok" },
+    });
+    const out = r.redactLine(line);
+    const parsed = JSON.parse(out.text) as Record<string, unknown>;
+    expect(parsed.type).toBe("user");
+    expect(Object.keys(parsed)).toEqual([
+      "type",
+      "uuid",
+      "userType",
+      "role",
+      "message",
+    ]);
+    expect(parsed.role).toBe("user");
+    expect(parsed.message).toEqual({
+      role: "user",
+      content: "run pnpm <redacted> as <redacted>, userType ok",
+    });
+    expect(normalizeTurnsOf(out.text)).toBe(1);
+  });
+
+  it("blanks a 12-character env value inside content", () => {
+    const r = createSessionRedactor({ values: ["abcdefghijkl"] });
+    const out = r.redactLine(JSON.stringify({ a: "x abcdefghijkl-y" })).text;
+    expect(JSON.parse(out)).toEqual({ a: "x <redacted>-y" });
+  });
+
+  it("round-trips a parsed __proto__ key", () => {
+    const out = createSessionRedactor({ values: [] }).redactLine(
+      '{"a":{"__proto__":{"x":1}}}',
+    ).text;
+    expect(out).toBe('{"a":{"__proto__":{"x":1}}}');
+  });
+
+  // Re-pinned deliberately for #743 round 2: rules ADDED (structural keys, exact-value threshold), none removed.
   it("pins the rules digest: rules may be added, never removed", () => {
     expect(redactor().digest).toBe(
-      "272dfe87e3b193aa61216068cf52687801dece3a8a380ab0cfd76fe61b9629e1",
+      "ba61d03b4e7b16c0771440204c3f853556f1d8979b1f01400e54d4f1892cc447",
     );
   });
 });

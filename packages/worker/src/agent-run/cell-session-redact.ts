@@ -1,4 +1,4 @@
-import { createValueRedactor } from "@terragon/utils/redact";
+import { createValueRedactor, redactSecrets } from "@terragon/utils/redact";
 import { sha256Hex } from "@terragon/types/cell-session-checkpoint";
 
 /**
@@ -52,6 +52,44 @@ const SYSTEM_PROMPT_KEYS = new Set([
 const ACCOUNT_KEYS = new Set(["accountUuid", "organizationUuid"]);
 const MAX_DEPTH = 64;
 
+/**
+ * Exact-value blanking bar: a value of this length or more is blanked as a
+ * substring (the bar cell-run.ts applies to log lines, as a literal there).
+ * A shorter value (down to SHORT_VALUE_MIN) is blanked only as a whole token,
+ * with a non-`[A-Za-z0-9_]` neighbour on both sides, so `POSTGRES_USER=user`
+ * does not rewrite `userType`. Trade-off, on purpose: a short secret inside a
+ * longer token is not blanked. A value under 8 characters is a weak secret,
+ * and the pattern rules (keys, tokens, emails) still apply to it.
+ */
+const EXACT_VALUE_MIN_LENGTH = 8;
+const SHORT_VALUE_MIN = 4;
+
+/**
+ * Transcript schema fields whose string values are never exact-value blanked,
+ * at any depth: `normalize` and `--resume` read them. The pattern rules still
+ * run on them. Object KEYS are never exact-blanked for these names either.
+ */
+const STRUCTURAL_KEYS = new Set([
+  "type",
+  "subtype",
+  "role",
+  "uuid",
+  "parentUuid",
+  "leafUuid",
+  "sessionId",
+  "id",
+  "tool_use_id",
+  "timestamp",
+  "version",
+  "cwd",
+  "gitBranch",
+  "isSidechain",
+  "userType",
+  "requestId",
+  "model",
+  "stop_reason",
+]);
+
 const SYSTEM_PROMPT_MARK = "[REDACTED:system-prompt]";
 const ACCOUNT_MARK = "[REDACTED:account-id]";
 
@@ -81,6 +119,8 @@ const RULES_DIGEST = sha256Hex(
     `system-prompt-keys:${[...SYSTEM_PROMPT_KEYS].join(",")}`,
     `account-keys:${[...ACCOUNT_KEYS].join(",")}`,
     "object-keys:redacted-like-values;collision-suffix:#n",
+    `structural-keys:${[...STRUCTURAL_KEYS].join(",")}`,
+    `exact-values:min=${EXACT_VALUE_MIN_LENGTH};whole-token-from=${SHORT_VALUE_MIN}`,
   ].join("\n"),
 );
 
@@ -98,12 +138,44 @@ export function createSessionRedactor(
     ...(input.identityIds ?? []),
     ...(input.systemPrompts ?? []),
   ];
-  const scrub = createValueRedactor(exact);
+  const scrubLong = createValueRedactor(exact, EXACT_VALUE_MIN_LENGTH);
+  const shortValues = [
+    ...new Set(
+      exact.filter(
+        (v) => v.length >= SHORT_VALUE_MIN && v.length < EXACT_VALUE_MIN_LENGTH,
+      ),
+    ),
+  ];
+  const shortBlanks = [
+    ...new Set(shortValues.flatMap((v) => [v, JSON.stringify(v).slice(1, -1)])),
+  ].sort((a, b) => b.length - a.length);
+  const shortRe =
+    shortBlanks.length > 0
+      ? new RegExp(
+          `(?<![A-Za-z0-9_])(?:${shortBlanks
+            .map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|")})(?![A-Za-z0-9_])`,
+          "g",
+        )
+      : null;
 
-  function redactString(text: string): RedactedLine {
+  function redactString(
+    text: string,
+    exactValues: "all" | "long" | "none" = "all",
+  ): RedactedLine {
     let hits = 0;
-    let out = scrub(text);
-    hits += countMarks(out) - countMarks(text);
+    let out = text;
+    if (exactValues !== "none") {
+      out = scrubLong(out);
+      if (exactValues === "all" && shortRe) {
+        out = out.replace(shortRe, "<redacted>");
+      }
+      hits += countMarks(out) - countMarks(text);
+    } else {
+      // Pattern rules only: still run through the shared secret patterns.
+      out = redactSecrets(out);
+      hits += countMarks(out) - countMarks(text);
+    }
     for (const [name, re] of PATTERN_RULES) {
       out = out.replace(re, () => {
         hits += 1;
@@ -116,12 +188,13 @@ export function createSessionRedactor(
   function walk(
     value: unknown,
     depth: number,
+    structural = false,
   ): { value: unknown; hits: number } {
     if (depth > MAX_DEPTH) {
       throw new SessionRedactionError("line nests too deeply");
     }
     if (typeof value === "string") {
-      const r = redactString(value);
+      const r = redactString(value, structural ? "none" : "all");
       return { value: r.text, hits: r.hits };
     }
     if (Array.isArray(value)) {
@@ -135,11 +208,18 @@ export function createSessionRedactor(
     }
     if (value !== null && typeof value === "object") {
       let hits = 0;
-      const out: Record<string, unknown> = {};
+      // No prototype: a parsed "__proto__" key is an own property, not a
+      // prototype assignment that JSON.stringify then drops.
+      const out: Record<string, unknown> = Object.create(null);
       for (const [key, item] of Object.entries(value)) {
-        // Keys are transcript text too: redact them like values. Two keys
-        // that redact to the same string both survive (second gets "#n").
-        const rk = redactString(key);
+        // Keys are transcript text too: pattern-redacted, and exact-blanked
+        // only for long values and never for schema names, so a short env value
+        // never renames a schema key. Two keys that redact to the same
+        // string both survive (second gets "#n").
+        const rk = redactString(
+          key,
+          STRUCTURAL_KEYS.has(key) ? "none" : "long",
+        );
         hits += rk.hits;
         let outKey = rk.text;
         for (let n = 2; Object.hasOwn(out, outKey); n += 1) {
@@ -152,7 +232,7 @@ export function createSessionRedactor(
           out[outKey] = ACCOUNT_MARK;
           hits += 1;
         } else {
-          const r = walk(item, depth + 1);
+          const r = walk(item, depth + 1, STRUCTURAL_KEYS.has(key));
           hits += r.hits;
           out[outKey] = r.value;
         }
