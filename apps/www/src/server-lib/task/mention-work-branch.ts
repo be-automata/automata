@@ -3,6 +3,14 @@ import type { Octokit } from "octokit";
 import type { MentionLaneStamp } from "@terragon/shared/db/types";
 import { isBranchRef } from "@terragon/utils/receive-pack-refs";
 
+import { isNotFound } from "@/server-lib/task/github-errors";
+
+/** The stamp fields the branch choice writes; `{}` when the issue names no ticket. */
+export type MentionWorkBranchStamp = Pick<
+  MentionLaneStamp,
+  "workBranch" | "workBranchTaken"
+>;
+
 /**
  * The convention branch an issue mention's run pushes (#752):
  * `<type>/<KEY>[-<slug>]`, e.g. `feat/ACME-123-add-request-logging`. Pure
@@ -49,9 +57,13 @@ const TYPE_PREFIX = new RegExp(
   `^\\s*(${COMMIT_TYPES.join("|")})(?:\\([^)]*\\))?!?:\\s*`,
   "i",
 );
-const TICKET_KEY =
-  /(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,31})-(\d{1,12})(?![A-Za-z0-9])/g;
-const KEY_SOURCE = "([A-Za-z][A-Za-z0-9]{1,31})-(\\d{1,12})";
+/** The one key pattern: `PROJECT-123`, project 2-32 chars starting with a letter. */
+const KEY_SOURCE = "([A-Z][A-Z0-9]{1,31})-(\\d{1,12})";
+/** A bare key in an issue title (case-sensitive: the project is uppercase). */
+const TICKET_KEY = new RegExp(
+  `(?<![A-Za-z0-9])${KEY_SOURCE}(?![A-Za-z0-9])`,
+  "g",
+);
 /** The only forms a key may take in an issue body: a bare key never counts. */
 const BODY_KEY_MARKERS: readonly RegExp[] = [
   new RegExp(`\\[${KEY_SOURCE}\\]`, "gi"),
@@ -62,7 +74,7 @@ const BODY_KEY_MARKERS: readonly RegExp[] = [
   new RegExp(`/browse/${KEY_SOURCE}(?![A-Za-z0-9])`, "gi"),
 ];
 const BRANCH_SHAPE = new RegExp(
-  `^(?:${COMMIT_TYPES.join("|")})/[A-Z][A-Z0-9]{1,31}-\\d{1,12}(?:-[a-z0-9]+)*$`,
+  `^(?:${COMMIT_TYPES.join("|")})/${KEY_SOURCE}(?:-[a-z0-9]+)*$`,
 );
 
 interface KeyMatch {
@@ -71,25 +83,15 @@ interface KeyMatch {
   end: number;
 }
 
-function findKey(text: string): KeyMatch | null {
-  for (const match of text.matchAll(TICKET_KEY)) {
-    const [whole, project] = match;
-    if (project === undefined || MENTION_KEY_DENYLIST.includes(project)) {
-      continue;
-    }
-    return {
-      key: whole,
-      start: match.index,
-      end: match.index + whole.length,
-    };
-  }
-  return null;
-}
-
-function findBodyKey(body: string): KeyMatch | null {
+/**
+ * The earliest key any of `patterns` finds in `text` (each pattern
+ * contributes its first match whose project is not on the denylist). The
+ * denylist lives only here.
+ */
+function findKey(text: string, patterns: readonly RegExp[]): KeyMatch | null {
   let best: KeyMatch | null = null;
-  for (const marker of BODY_KEY_MARKERS) {
-    for (const match of body.matchAll(marker)) {
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
       const [whole, project, digits] = match;
       if (project === undefined || digits === undefined) continue;
       const upper = project.toUpperCase();
@@ -125,6 +127,8 @@ function slugify(text: string): string {
  * never be a base branch such as `main` or `develop`.
  */
 export function isMentionWorkBranch(name: string): boolean {
+  // BRANCH_SHAPE already implies the ASCII and `isBranchRef` checks; they stay
+  // as a second guard on a ref the platform pushes.
   return (
     name.length <= BRANCH_MAX &&
     /^[\x21-\x7e]+$/.test(name) &&
@@ -154,7 +158,7 @@ export function mentionWorkBranchName({
 
   let key: string;
   let slug: string;
-  const inTitle = findKey(title);
+  const inTitle = findKey(title, [TICKET_KEY]);
   if (inTitle) {
     key = inTitle.key;
     const afterStart = Math.max(inTitle.end, prefixLength);
@@ -163,7 +167,7 @@ export function mentionWorkBranchName({
       slug = slugify(title.slice(prefixLength, inTitle.start));
     }
   } else {
-    const inBody = findBodyKey(body ?? "");
+    const inBody = findKey(body ?? "", BODY_KEY_MARKERS);
     if (!inBody) return null;
     key = inBody.key;
     slug = slugify(titleWithoutPrefix);
@@ -171,14 +175,6 @@ export function mentionWorkBranchName({
 
   const name = `${type}/${key}${slug === "" ? "" : `-${slug}`}`;
   return isMentionWorkBranch(name) ? name : null;
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { status?: unknown }).status === 404
-  );
 }
 
 /**
@@ -202,7 +198,7 @@ export async function chooseMentionWorkBranch({
   title: string;
   body: string | null | undefined;
   isClaimed: (name: string) => Promise<boolean>;
-}): Promise<Pick<MentionLaneStamp, "workBranch" | "workBranchTaken">> {
+}): Promise<MentionWorkBranchStamp> {
   const workBranch = mentionWorkBranchName({ title, body });
   if (workBranch === null) return {};
 

@@ -3,6 +3,7 @@ import { findOpenDeliveryPrs } from "@terragon/shared/model/delivery-loop";
 
 import { db as defaultDb } from "@/lib/db";
 
+import { REMOTE_TASK_BRANCH_PREFIX } from "@/server-lib/task/remote-task-pr";
 import { loadDeliveryLoopMode } from "./delivery-mode";
 
 /**
@@ -17,8 +18,6 @@ import { loadDeliveryLoopMode } from "./delivery-mode";
  * other PR: a head ref outside automata/task-* returns false with no query.
  * Fails closed to false (today's behaviour) on any error.
  */
-
-const DELIVERY_BRANCH_PREFIX = "automata/task-";
 
 export async function isDeliveryLoopOwned(
   {
@@ -37,7 +36,7 @@ export async function isDeliveryLoopOwned(
 ): Promise<boolean> {
   if (
     typeof headRef !== "string" ||
-    !headRef.startsWith(DELIVERY_BRANCH_PREFIX)
+    !headRef.startsWith(REMOTE_TASK_BRANCH_PREFIX)
   ) {
     return false;
   }

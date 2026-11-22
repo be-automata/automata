@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { BranchDoesNotExistError, getOctokitForApp } from "@/lib/github";
 import { runAutomation } from "@/server-lib/automations";
+import { chooseMentionWorkBranch } from "@/server-lib/task/mention-work-branch";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { createAutomation } from "@terragon/shared/model/automations";
 import { createOrganization } from "@terragon/shared/model/organizations";
@@ -54,6 +55,16 @@ import {
 vi.mock("./handle-app-mention", () => ({
   handleAppMention: vi.fn(() => Promise.resolve()),
 }));
+vi.mock("@/server-lib/task/mention-work-branch", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/task/mention-work-branch")
+    >();
+  return {
+    ...actual,
+    chooseMentionWorkBranch: vi.fn(actual.chooseMentionWorkBranch),
+  };
+});
 vi.mock("@/server-lib/automations", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/server-lib/automations")>()),
   runAutomation: vi.fn(() =>
@@ -533,6 +544,31 @@ describe("routing: org lane vs the legacy per-user path", () => {
       await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
       expect(stampOf()?.workBranch).toBe(BRANCH);
       expect(stampOf()?.workBranchTaken).toBe(true);
+    });
+
+    it("a failed issue-context render keeps the branch choice", async () => {
+      const { repoFullName } = await repoWithLane();
+      // `state` undefined makes the issue rendering throw; the choice never reads it.
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE, state: undefined }),
+      });
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()?.workBranch).toBe(BRANCH);
+      expect(sentTexts()[1]).toContain('<github_issue unavailable="true"');
+    });
+
+    it("a failed branch choice keeps the issue context", async () => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      vi.mocked(chooseMentionWorkBranch).mockRejectedValueOnce(
+        new Error("boom"),
+      );
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()).not.toHaveProperty("workBranch");
+      expect(sentTexts()[1]).toContain('<user_content source="github_issue">');
+      expect(sentTexts()[1]).not.toContain("unavailable");
     });
 
     it("an issue naming no ticket stores nothing", async () => {

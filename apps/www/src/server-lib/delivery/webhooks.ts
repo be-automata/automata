@@ -7,6 +7,7 @@ import {
 import { db as defaultDb } from "@/lib/db";
 import { waitUntil } from "@/lib/wait-until";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { REMOTE_TASK_BRANCH_PREFIX } from "@/server-lib/task/remote-task-pr";
 
 import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
 
@@ -17,9 +18,6 @@ import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
  * find the row (the evaluator re-reads GitHub). An event whose head branch is
  * not a task work branch costs nothing. Never throws.
  */
-
-/** Every delivery PR's head: remote-task-pr's work branch. */
-const DELIVERY_BRANCH_PREFIX = "automata/task-";
 
 export interface DeliveryWebhookDeps {
   db: DB;
@@ -58,7 +56,7 @@ function repoOf(payload: RepoPayload): string | null {
 }
 
 function isDeliveryBranch(ref: unknown): ref is string {
-  return typeof ref === "string" && ref.startsWith(DELIVERY_BRANCH_PREFIX);
+  return typeof ref === "string" && ref.startsWith(REMOTE_TASK_BRANCH_PREFIX);
 }
 
 async function scheduleMatches(

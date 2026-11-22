@@ -30,7 +30,10 @@ import {
   safeGitRef,
 } from "@/server-lib/review/pr-diff-context";
 import { replyToMention } from "@/server-lib/review/mention-target-reply";
-import { chooseMentionWorkBranch } from "@/server-lib/task/mention-work-branch";
+import {
+  chooseMentionWorkBranch,
+  type MentionWorkBranchStamp,
+} from "@/server-lib/task/mention-work-branch";
 import { addEyesReactionToComment } from "./utils";
 import { requireAppAccess } from "./webhook-skip";
 
@@ -563,10 +566,7 @@ export async function handleOrgLaneMention(
   let pullRequest: RestPullRequestLike | undefined;
   // Issue mentions only: the convention branch the run pushes (#752), absent
   // when the issue names no ticket or could not be read.
-  let workBranchStamp: Pick<
-    MentionLaneStamp,
-    "workBranch" | "workBranchTaken"
-  > = {};
+  let workBranchStamp: MentionWorkBranchStamp = {};
   try {
     if (input.isPullRequest) {
       const { data: pr } = await octokit.rest.pulls.get({
@@ -612,29 +612,41 @@ export async function handleOrgLaneMention(
         () => renderPrView(prViewFromRest(pr)),
       );
     } else {
+      // One read feeds both steps; each fails on its own.
+      const issueRead = octokit.rest.issues.get({
+        owner,
+        repo,
+        issue_number: input.issueOrPrNumber,
+      });
       const [{ data }, issueBlock] = await Promise.all([
         octokit.rest.repos.get({ owner, repo }),
-        safeSection("issue", input.issueOrPrNumber, meta, async () => {
-          const { data: issue } = await octokit.rest.issues.get({
-            owner,
-            repo,
-            issue_number: input.issueOrPrNumber,
-          });
-          workBranchStamp = await chooseMentionWorkBranch({
-            octokit,
-            owner,
-            repo,
-            // GitHub can hand back a null title: the context must still render.
-            title: issue.title ?? "",
-            body: issue.body,
-            isClaimed: (workBranch) =>
-              isMentionWorkBranchClaimed(db, {
-                repoFullName: input.repoFullName,
-                workBranch,
-              }),
-          });
-          return renderIssueView(issueViewFromRest(issue));
-        }),
+        safeSection("issue", input.issueOrPrNumber, meta, async () =>
+          renderIssueView(issueViewFromRest((await issueRead).data)),
+        ),
+        (async () => {
+          try {
+            const { data: issue } = await issueRead;
+            workBranchStamp = await chooseMentionWorkBranch({
+              octokit,
+              owner,
+              repo,
+              // GitHub can hand back a null title.
+              title: issue.title ?? "",
+              body: issue.body,
+              isClaimed: (workBranch) =>
+                isMentionWorkBranchClaimed(db, {
+                  repoFullName: input.repoFullName,
+                  workBranch,
+                }),
+            });
+          } catch (error) {
+            // No branch choice: the run starts on the task branch.
+            console.warn("[org-mention] work branch choice failed", {
+              ...meta,
+              reason: unavailableReason(error),
+            });
+          }
+        })(),
       ]);
       branchName = data.default_branch;
       contextBlock = issueBlock;
@@ -684,10 +696,11 @@ export async function handleOrgLaneMention(
           return appendMentionBlock(withContext, mentionBlock);
         },
         stampExtra: {
-          mention:
-            prIsDraft === undefined
-              ? { ...stamp, ...workBranchStamp }
-              : { ...stamp, isDraft: prIsDraft },
+          mention: {
+            ...stamp,
+            ...workBranchStamp,
+            ...(prIsDraft !== undefined && { isDraft: prIsDraft }),
+          },
         },
         onStartFailure: (error) => {
           startFailure = error;

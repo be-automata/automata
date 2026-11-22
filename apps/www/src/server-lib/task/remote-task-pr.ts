@@ -21,6 +21,7 @@ import { generatePRContent } from "@/server-lib/generate-pr-content";
 import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 
 import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
+import { errorStatus, isNotFound } from "./github-errors";
 import { isMentionWorkBranch } from "./mention-work-branch";
 
 /**
@@ -62,8 +63,16 @@ const DIFF_CHAR_LIMIT = 60_000;
 const GITHUB_PR_BODY_MAX = 65_536;
 const GENERIC_PR_BODY = "Changes made by an automated task run.";
 
+/** Every branch a plain task run pushes starts with this. */
+export const REMOTE_TASK_BRANCH_PREFIX = "automata/task-";
+
+/** The 8-character lowercase thread id the branch names embed. */
+function threadShortId(threadId: string): string {
+  return threadId.slice(0, 8).toLowerCase();
+}
+
 export function remoteTaskBranchName(threadId: string): string {
-  return `automata/task-${threadId.slice(0, 8).toLowerCase()}`;
+  return `${REMOTE_TASK_BRANCH_PREFIX}${threadShortId(threadId)}`;
 }
 
 /**
@@ -108,7 +117,7 @@ export function remoteTaskBranchFor({
     const { workBranch, workBranchTaken } = sourceMetadata.mention;
     const name =
       workBranchTaken === true
-        ? `${workBranch}-${threadId.slice(0, 8).toLowerCase()}`
+        ? `${workBranch}-${threadShortId(threadId)}`
         : workBranch;
     if (isMentionWorkBranch(name) && name !== baseBranch) return name;
   }
@@ -289,16 +298,6 @@ function diffFromCompare(files: readonly CompareFile[]): string {
   return text.length > DIFF_CHAR_LIMIT
     ? `${text.slice(0, DIFF_CHAR_LIMIT)}\n… (diff cut)`
     : text;
-}
-
-function errorStatus(error: unknown): unknown {
-  return typeof error === "object" && error !== null
-    ? (error as { status?: unknown }).status
-    : undefined;
-}
-
-function isNotFound(error: unknown): boolean {
-  return errorStatus(error) === 404;
 }
 
 /**
