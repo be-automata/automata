@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
+import { CELL_MEMORY_BYTES } from "@terragon/types/cell";
 import { ADMISSION_EXHAUSTED_PREFIX } from "@terragon/utils/box-capacity";
 
 import { sumBackoffSeconds } from "./admission-retry";
@@ -123,6 +124,8 @@ export function evaluateHeadroom(
   reading: MeminfoReading,
   policy: HeadroomPolicy,
   reservedBytes = 0,
+  /** This run's expected commit (#749: a cell reserves its full size); defaults to the policy's. */
+  runCommitBytes = policy.runCommitBytes,
 ): HeadroomVerdict {
   const observed: HeadroomObserved = {
     memAvailable: reading.memAvailable,
@@ -130,7 +133,7 @@ export function evaluateHeadroom(
     commitLimit: reading.commitLimit,
     floor: policy.floorBytes,
     fraction: policy.commitFraction,
-    runCommit: policy.runCommitBytes,
+    runCommit: runCommitBytes,
     reserved: reservedBytes,
   };
   if (
@@ -141,7 +144,7 @@ export function evaluateHeadroom(
   }
   if (
     policy.commitFraction < 1 &&
-    reading.committedAs + reservedBytes + policy.runCommitBytes >
+    reading.committedAs + reservedBytes + runCommitBytes >
       policy.commitFraction * reading.commitLimit
   ) {
     return { ok: false, reason: "commit-over-fraction", observed };
@@ -252,8 +255,9 @@ export class AdmissionController {
   /**
    * Admit one run or throw `AdmissionDeferredError`. One synchronous decision
    * (see the module comment: no await, so no interleaving); a successful
-   * admission reserves `policy.runCommitBytes` under the run's id (the workflow run, never the thread) until the
-   * returned reservation is released.
+   * admission reserves `opts.commitBytes` (#749: a cell's full size), else
+   * `policy.runCommitBytes`, under the run's id (the workflow run, never the
+   * thread) until the returned reservation is released.
    */
   admit(opts: {
     /**
@@ -265,9 +269,16 @@ export class AdmissionController {
     runId: string;
     threadId: string;
     attempt: number;
+    /**
+     * #749: the commit this run will use, when it differs from the policy's
+     * `runCommitBytes`. A cell's memory lives in OpenSandbox's cgroup, which the
+     * run's anon probe never sees, so a cell reserves its whole size.
+     */
+    commitBytes?: number;
     log?: (line: string) => void;
   }): Reservation {
     const runId = opts.runId;
+    const commitBytes = opts.commitBytes ?? this.policy.runCommitBytes;
     // FAIL-OPEN on an unreadable kernel: a check that cannot read
     // /proc/meminfo at this instant admits with one loud line rather than
     // failing the run (the task registers retries: 0, so a throw here would end
@@ -287,7 +298,7 @@ export class AdmissionController {
       );
       // Fail-open on the DECISION only: the admitted run still reserves its
       // expected commit, or the next admission would see it as free headroom.
-      return this.reserve(runId);
+      return this.reserve(runId, commitBytes);
     }
     // A retried attempt of the same RUN must not count its own earlier
     // reservation; a sibling run of the same thread (a supersede whose old
@@ -297,6 +308,7 @@ export class AdmissionController {
       reading,
       this.policy,
       this.reservedBytesExcept(runId),
+      commitBytes,
     );
     // runId is the reservation key: two runs of one thread (a supersede
     // sibling) are told apart in the journal by it, never by threadId.
@@ -316,13 +328,13 @@ export class AdmissionController {
       );
     }
     opts.log?.(`box.headroom_ok ${fields}`);
-    return this.reserve(runId);
+    return this.reserve(runId, commitBytes);
   }
 
-  /** Reserve `runCommitBytes` under `runId` and hand back its handle (token-scoped release/observe). */
-  private reserve(runId: string): Reservation {
+  /** Reserve `bytes` under `runId` and hand back its handle (token-scoped release/observe). */
+  private reserve(runId: string, bytes: number): Reservation {
     const token = Symbol(runId);
-    const entry = { bytes: this.policy.runCommitBytes, token };
+    const entry = { bytes, token };
     this.reserved.set(runId, entry);
     const mine = () => this.reserved.get(runId)?.token === token;
     return {
@@ -405,6 +417,14 @@ export function assessHeadroomSupport(opts: {
     reading.committedAs + opts.policy.runCommitBytes > commitCeiling
   ) {
     warning = `with the load observed at boot the memory headroom check would defer every run: Committed_AS ${mib(reading.committedAs)} (as sampled now, not a guaranteed idle baseline) + run commit ${mib(opts.policy.runCommitBytes)} exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)}; if this is the box's resting load, lower the run commit or raise WORKER_HEADROOM_COMMIT_FRACTION — if it is transient, runs will be admitted once it drops`;
+  }
+  // #749: a cell reserves its full size (CELL_MEMORY_BYTES), not the run
+  // commit. A box whose ceiling is below it can run box runs but never a cell:
+  // every cell run would wait out its deferral budget and fail final. Warn
+  // (not refuse): a box with cells off is still a working box.
+  if (opts.policy.commitFraction < 1 && CELL_MEMORY_BYTES > commitCeiling) {
+    const cell = `a cell (${mib(CELL_MEMORY_BYTES)}, CELL_RESOURCES) can never be admitted on this box: it exceeds ${opts.policy.commitFraction} × CommitLimit ${mib(reading.commitLimit)} = ${mib(commitCeiling)}; turn cells off for this worker or raise the ceiling`;
+    warning = warning ? `${warning}; ${cell}` : cell;
   }
   // Same for the floor arm: a floor at or above the box's memory means
   // `MemAvailable − reserved ≥ floor` can never hold (a typo such as 10G on a

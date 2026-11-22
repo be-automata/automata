@@ -20,6 +20,7 @@ import {
 import { isAgentWorking } from "@/agent/thread-status";
 import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import {
+  CELL_RESOURCES,
   CELL_RUN_TTL_MS,
   cellStepKey,
   isCellLabelValue,
@@ -75,13 +76,6 @@ const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 /** Pushes spend it (one per generation, never refunded); shared by every attempt of the step. */
 const CELL_TASK_EFFECT_BUDGET = 50;
-
-/**
- * #742: 4 CPU, memory kept at 4096 MiB (OD-2: 3 box slots x 4 GiB of the box's
- * 15 GiB). A CFS quota, not a reservation. Not exported: a Next.js route module
- * may only export its handlers and route config.
- */
-const CELL_RESOURCES = { cpu: 4, memoryMiB: 4096 } as const;
 
 const bodySchema = z
   .object({
@@ -252,7 +246,7 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         egress: { brokerHost, catalog: egress.catalog },
         profile,
         tags: { worker, epoch, deployment: brokerHost },
-        resources: CELL_RESOURCES,
+        resources: { ...CELL_RESOURCES },
         modelToken,
         daemonToken: cellToken.token,
         runtime: "runc",

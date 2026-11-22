@@ -83,6 +83,21 @@ export interface CellResources {
 }
 
 /**
+ * Every cell's size (#749): 8 CPU and 8192 MiB, sized so a client repository's
+ * full Jest suite with 8 workers fits (#742 had 4 CPU / 4096 MiB, and the suite
+ * timed out and was OOM-killed). www sends it in the cell plan; the worker's
+ * headroom admission reserves the same memory, so on the 15 GiB box a second
+ * cell waits while one runs, and a box run can still start next to it.
+ */
+export const CELL_RESOURCES: Readonly<CellResources> = {
+  cpu: 8,
+  memoryMiB: 8192,
+};
+
+/** A cell's memory in bytes, for the worker's headroom reservation. */
+export const CELL_MEMORY_BYTES = CELL_RESOURCES.memoryMiB * 1024 * 1024;
+
+/**
  * Self-check probe contract: the probe opens TLS and HTTP to a host the policy
  * denies. Exit 3 means it was blocked (egress enforced); exit 0 means it
  * reached the host; any other exit is inconclusive and counts as not enforced.

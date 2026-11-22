@@ -67,6 +67,11 @@ export function readMemoryAnon(
   } catch {
     return null;
   }
+  return parseMemoryAnon(raw);
+}
+
+/** `anon` + `shmem` of a `memory.stat` body; null with no usable `anon` line. */
+export function parseMemoryAnon(raw: string): number | null {
   let anon: number | null = null;
   let shmem = 0;
   for (const line of raw.split("\n")) {
