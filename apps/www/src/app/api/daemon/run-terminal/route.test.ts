@@ -23,11 +23,36 @@ import { User } from "@terragon/shared";
 import { DaemonTokenContext } from "@/lib/daemon-token-context";
 import { getOctokitForApp } from "@/lib/github";
 import { mentionReplyMarker } from "@/server-lib/review/mention-reply-finish";
-import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
+import {
+  continueOrReplyAtTerminal,
+  reconcileAddonCalls,
+  replyToMentionsAtTerminal,
+} from "@/server-lib/review/mention-terminal-reply";
+import { maybeContinueAfterTimeout } from "@/server-lib/cell-session/continuation";
+import { advanceCellSessionHead } from "@terragon/shared/model/cell-session-checkpoint";
+import {
+  claimContinuation,
+  countContinuations,
+} from "@terragon/shared/model/cell-session-continuation";
+import { getThreadChat } from "@terragon/shared/model/threads";
 import { markThreadTerminal } from "@terragon/shared/model/threads";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
+vi.mock("@/server-lib/process-follow-up-queue", () => ({
+  maybeProcessFollowUpQueue: vi.fn(),
+}));
+// The real decision by default; a test makes it throw once to prove fail-open.
+vi.mock("@/server-lib/cell-session/continuation", async (importOriginal) => {
+  const actual = await importOriginal<object>();
+  return {
+    ...actual,
+    maybeContinueAfterTimeout: vi.fn(
+      (actual as { maybeContinueAfterTimeout: never })
+        .maybeContinueAfterTimeout,
+    ),
+  };
+});
 
 function req(body: unknown) {
   return new NextRequest("http://localhost/api/daemon/run-terminal", {
@@ -590,5 +615,219 @@ describe("POST /api/daemon/run-terminal — mention reply (#668)", () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(posted).toHaveLength(0);
     expect(getOctokitForApp).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/daemon/run-terminal — timeout continuation (#743 phase 10)", () => {
+  // Unique per test: the ledger's source-run key is global.
+  let RUN = "";
+  const STAMP = {
+    repoFullName: "acme/widgets",
+    issueOrPrNumber: 743,
+    isPullRequest: false,
+    commentId: 7430001,
+    commentKind: "issue" as const,
+    commenterLogin: "alice",
+  };
+  const posted: string[] = [];
+  const octokit = {
+    paginate: vi.fn(async () => []),
+    rest: {
+      issues: {
+        listComments: vi.fn(),
+        createComment: vi.fn(async (args: { body: string }) => {
+          posted.push(args.body);
+          return { data: {} };
+        }),
+      },
+    },
+  };
+  let user: User;
+  let threadId: string;
+  let threadChatId: string;
+
+  async function seed({ checkpoint }: { checkpoint: boolean }) {
+    RUN = `run-cont-${nanoid(8)}`;
+    user = (await createTestUser({ db })).user;
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: { branchName: "work/branch" },
+    });
+    threadId = t.threadId;
+    threadChatId = t.threadChatId;
+    await db
+      .update(threadTable)
+      .set({
+        status: "working",
+        sourceMetadata: {
+          type: "automation-skill",
+          skillName: "github-mention",
+          contentSha: "x",
+          source: "db-version",
+          mention: STAMP,
+        } as never,
+      })
+      .where(eq(threadTable.id, threadId));
+    await setThreadActiveRun({ db, threadId, externalId: RUN });
+    if (checkpoint) {
+      await advanceCellSessionHead({
+        db,
+        threadId,
+        threadChatId,
+        expectedVersion: 0,
+        move: {
+          sessionId: "s",
+          headManifestId: "manifest-1",
+          headTurn: 3,
+          nativeBytes: 10,
+          callIndexSha256: null,
+          lastRunExternalId: RUN,
+        },
+      });
+    }
+    vi.mocked(getDaemonTokenContext).mockResolvedValue({
+      userId: user.id,
+      apiKeyId: "apikey_test",
+      organizationId: null,
+      threadChatId,
+      threadId,
+      tokenType: "daemon",
+    } as DaemonTokenContext);
+  }
+  const timeout = () =>
+    POST(req({ threadId, threadChatId, runExternalId: RUN, cause: "timeout" }));
+  const queuedCount = async () =>
+    (await getThreadChat({ db, threadId, threadChatId, userId: user.id }))
+      ?.queuedMessages?.length ?? 0;
+  const settle = () => new Promise((r) => setTimeout(r, 100));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    posted.length = 0;
+    vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+  });
+
+  it("a first timeout with a checkpoint re-dispatches once and defers the reply", async () => {
+    await seed({ checkpoint: true });
+    expect(await (await timeout()).json()).toEqual({ applied: true });
+    await vi.waitFor(async () =>
+      expect(await countContinuations({ db, threadId })).toBe(1),
+    );
+    expect(await queuedCount()).toBe(1);
+    await settle();
+    expect(posted).toHaveLength(0);
+    expect(getOctokitForApp).not.toHaveBeenCalled();
+  });
+
+  it("F1: a redelivered terminal takes the early branch, claims at most once and posts no reply", async () => {
+    await seed({ checkpoint: true });
+    // The first attempt's decision is lost after the terminal write.
+    vi.mocked(maybeContinueAfterTimeout).mockRejectedValueOnce(
+      new Error("lost"),
+    );
+    expect(await (await timeout()).json()).toEqual({ applied: true });
+    // Not continued, so today's reply went out once.
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(await countContinuations({ db, threadId })).toBe(0);
+
+    // The redelivery: applied:false from the superseded branch.
+    expect(await (await timeout()).json()).toEqual({ applied: false });
+    await vi.waitFor(async () =>
+      expect(await countContinuations({ db, threadId })).toBe(1),
+    );
+    expect(await queuedCount()).toBe(1);
+
+    // A further redelivery claims nothing more.
+    expect(await (await timeout()).json()).toEqual({ applied: false });
+    await settle();
+    expect(await countContinuations({ db, threadId })).toBe(1);
+    expect(await queuedCount()).toBe(1);
+    // No reply from the early branch.
+    expect(posted).toHaveLength(1);
+    expect(getOctokitForApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("a spent budget puts the limit in the reply (AC-3)", async () => {
+    await seed({ checkpoint: true });
+    // A run id of its own: the ledger's source-run key is unique across the
+    // whole test database, so a shared literal would make another suite's
+    // claim lose silently.
+    const earlier = await claimContinuation({
+      db,
+      threadId,
+      threadChatId,
+      sourceRunExternalId: `run-earlier-${nanoid()}`,
+      checkpointManifestId: "manifest-0",
+      checkpointTurn: 2,
+    });
+    expect(earlier).toMatchObject({ claimed: true });
+    await timeout();
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toContain(
+      "the limit of one automatic continuation per thread was already used",
+    );
+    expect(await queuedCount()).toBe(0);
+  });
+
+  it("no checkpoint keeps today's reply and queues nothing (OQ-1)", async () => {
+    await seed({ checkpoint: false });
+    await timeout();
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0]).toBe(
+      `I couldn't finish this: the run hit its time limit before it could answer. Mention me again to retry.\n\n${mentionReplyMarker(STAMP.commentId)}`,
+    );
+    expect(await countContinuations({ db, threadId })).toBe(0);
+    expect(await queuedCount()).toBe(0);
+  });
+
+  it("a hook throw is fail-open: the terminal still lands and the mention is answered", async () => {
+    await seed({ checkpoint: true });
+    vi.mocked(maybeContinueAfterTimeout).mockRejectedValueOnce(
+      new TypeError("boom"),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await timeout();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ applied: true });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(errors).toHaveBeenCalledWith(
+      `continuation: hook failed (TypeError) thread=${threadId}`,
+    );
+    errors.mockRestore();
+  });
+
+  it("the add-on reconcile stub runs before the decision and does nothing", async () => {
+    await seed({ checkpoint: false });
+    expect(await reconcileAddonCalls({ threadId })).toEqual({
+      reason: "receiver-off",
+    });
+    const reconcile = vi.fn(reconcileAddonCalls);
+    await continueOrReplyAtTerminal(
+      {
+        threadId,
+        threadChatId,
+        runExternalId: RUN,
+        cause: "timeout",
+        reply: false,
+      },
+      reconcile,
+    );
+    expect(reconcile).toHaveBeenCalledWith({ threadId });
+    expect(reconcile.mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(maybeContinueAfterTimeout).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a non-timeout cause never consults the decision", async () => {
+    await seed({ checkpoint: true });
+    await continueOrReplyAtTerminal({
+      threadId,
+      threadChatId,
+      runExternalId: RUN,
+      cause: "daemon-failed",
+      reply: false,
+    });
+    expect(maybeContinueAfterTimeout).not.toHaveBeenCalled();
   });
 });

@@ -13,7 +13,7 @@ import {
 import { TERMINAL_CAUSES } from "@terragon/shared/model/terminal-cause";
 import { waitUntil } from "@/lib/wait-until";
 import { maybeRecheckOnComplete } from "@/server-lib/supersede-recheck";
-import { replyToMentionsAtTerminal } from "@/server-lib/review/mention-terminal-reply";
+import { continueOrReplyAtTerminal } from "@/server-lib/review/mention-terminal-reply";
 
 /**
  * POST /api/daemon/run-terminal
@@ -43,6 +43,9 @@ const bodySchema = z.object({
       policy: z.string().max(64).optional(),
       // #437: worker-authored only (never agent output), shown under the error.
       info: z.string().max(300).optional(),
+      // #743: class-only, set by the worker when the run started fresh after
+      // a failed session restore. Logged; never shown.
+      startedFresh: z.string().max(64).optional(),
     })
     .optional(),
 });
@@ -74,6 +77,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // and its ledger claim — so the reconciliation fires here too (the
       // UNIQUE ledger keeps it at-most-once).
       waitUntil(maybeRecheckOnComplete({ threadId }));
+      // #743 F1: a redelivered `timeout` lands HERE, and a continuation lost
+      // after the first write is repaired here (the ledger keeps it at most
+      // once). No mention reply: the first write's path owns it.
+      waitUntil(
+        continueOrReplyAtTerminal({
+          threadId,
+          threadChatId,
+          runExternalId,
+          cause,
+          reply: false,
+          startedFresh: detail?.startedFresh,
+        }),
+      );
       return NextResponse.json({ applied: false });
     }
     console.log("[run-terminal] rejected", {
@@ -142,8 +158,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // #668: a mention run ended here never reaches the daemon finish, its only
   // other reply writer. Only on the write that moved the thread: a retried
   // terminal (`applied: false`) must not answer twice.
-  if (applied) {
-    waitUntil(replyToMentionsAtTerminal([{ threadId, threadChatId }]));
-  }
+  // #743: a timed-out run may continue in a new cell; then the reply waits
+  // for the final run. The decision runs whatever `applied` is.
+  waitUntil(
+    continueOrReplyAtTerminal({
+      threadId,
+      threadChatId,
+      runExternalId,
+      cause,
+      reply: applied,
+      startedFresh: detail?.startedFresh,
+    }),
+  );
   return NextResponse.json({ applied });
 }

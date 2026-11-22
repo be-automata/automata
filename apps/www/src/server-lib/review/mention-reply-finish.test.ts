@@ -309,7 +309,7 @@ describe("executeMentionReply", () => {
       "run-failed-unreported",
       "out-of-memory",
     ] as const;
-    const texts = failures.map(renderMentionTerminalNotice);
+    const texts = failures.map((cause) => renderMentionTerminalNotice(cause));
     expect(new Set(texts).size).toBe(failures.length);
     for (const text of texts) {
       expect(text).toMatch(
@@ -317,6 +317,21 @@ describe("executeMentionReply", () => {
       );
       expect(text).not.toMatch(/nothing was (changed|pushed)/i);
     }
+  });
+
+  it("a spent continuation budget names the limit, on a timeout only (#743)", () => {
+    expect(
+      renderMentionTerminalNotice("timeout", {
+        continuationLimitReached: true,
+      }),
+    ).toBe(
+      "I couldn't finish this: the run hit its time limit before it could answer, and the limit of one automatic continuation per thread was already used. Mention me again to retry.",
+    );
+    expect(
+      renderMentionTerminalNotice("daemon-failed", {
+        continuationLimitReached: true,
+      }),
+    ).toBe(renderMentionTerminalNotice("daemon-failed"));
   });
 
   it("a marker lookup failure still posts (a lost reply is worse than a duplicate)", async () => {

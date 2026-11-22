@@ -102,8 +102,17 @@ export function renderMentionProviderNotice(
  * finish. Says what happened in the commenter's terms; it never claims that
  * nothing was pushed, because a run that timed out may already have pushed.
  */
-export function renderMentionTerminalNotice(cause: TerminalCause): string {
-  return `I couldn't finish this: ${describeMentionTerminal(cause)}. Mention me again to retry.`;
+export function renderMentionTerminalNotice(
+  cause: TerminalCause,
+  options: { continuationLimitReached?: boolean } = {},
+): string {
+  // #743: the one automatic continuation per thread is spent, so say so
+  // instead of letting the commenter wait for a run that will not come.
+  const limit =
+    cause === "timeout" && options.continuationLimitReached
+      ? ", and the limit of one automatic continuation per thread was already used"
+      : "";
+  return `I couldn't finish this: ${describeMentionTerminal(cause)}${limit}. Mention me again to retry.`;
 }
 
 function describeMentionTerminal(cause: TerminalCause): string {
@@ -290,6 +299,7 @@ export async function executeMentionReply({
   runReview,
   providerUnavailable,
   terminalCause,
+  continuationLimitReached,
   pullRequest,
   logger,
 }: {
@@ -308,6 +318,8 @@ export async function executeMentionReply({
    * not refuse the run.
    */
   terminalCause?: TerminalCause | null;
+  /** #743: the timed-out run's one automatic continuation was already spent. */
+  continuationLimitReached?: boolean;
   /**
    * An issue mention's finish opened (or skipped) a pull request: the reply
    * says which. Null or absent adds no line. Ignored on a PR mention.
@@ -372,7 +384,7 @@ export async function executeMentionReply({
   const noticeText = provider
     ? renderMentionProviderNotice(provider)
     : cause
-      ? renderMentionTerminalNotice(cause)
+      ? renderMentionTerminalNotice(cause, { continuationLimitReached })
       : MENTION_REPLY_NOTICE;
   const body = parsed.ok
     ? renderMentionReply(parsed.value, stamp.commentId, extras)
@@ -467,6 +479,7 @@ export async function handleMentionReplyAtFinish({
   threadId,
   threadChatId,
   remotePullRequest,
+  continuationLimitReached,
 }: {
   db: DB;
   userId: string;
@@ -482,6 +495,8 @@ export async function handleMentionReplyAtFinish({
    * PR mention and the typed-terminal entry pass none.
    */
   remotePullRequest?: Promise<RemoteTaskPrOutcome | null>;
+  /** #743: the typed terminal found the continuation budget spent. */
+  continuationLimitReached?: boolean;
 }): Promise<void> {
   try {
     if (!env.GITHUB_SIDE_EFFECTS_ENABLED) return;
@@ -545,6 +560,7 @@ export async function handleMentionReplyAtFinish({
         : undefined,
       providerUnavailable: providerUnavailableOfChat(threadChat),
       terminalCause,
+      continuationLimitReached,
       pullRequest,
       logger,
     });
@@ -659,12 +675,13 @@ export async function handleMentionRepliesAtTerminal({
   }
   for (const row of rows) {
     if (!isMentionLaneStamp(row.sourceMetadata)) continue;
+    const target = targets.find((t) => t.threadId === row.id);
     await handleMentionReplyAtFinish({
       db,
       userId: row.userId,
       threadId: row.id,
-      threadChatId:
-        targets.find((t) => t.threadId === row.id)?.threadChatId ?? null,
+      threadChatId: target?.threadChatId ?? null,
+      continuationLimitReached: target?.continuationLimitReached,
     });
   }
 }
