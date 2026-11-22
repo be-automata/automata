@@ -131,8 +131,10 @@ The server hashes every byte. The worker's hash is only a check.
   transcript at every turn: O(n²) bytes sent and stored.
 - Here each pull uploads **only the new bytes** as one create-only, content-addressed chunk. The
   manifest lists the chunks in order, and a restore concatenates them.
-- When the list would pass `CELL_SESSION_MAX_CHUNKS` (32), the writer rewrites the whole transcript
-  as fresh chunks.
+- The chain is **append-only**: no rewrite, so a racing or compromised writer can't replace history
+  (amendment A-12). A pull with no new bytes writes nothing, so a session grows by about one chunk
+  per turn, under `CELL_SESSION_MAX_CHUNKS` (1024). Restore fetches chunks with bounded concurrency
+  (8 at a time).
 - Every object is still immutable, and only the head moves.
 
 ### 2.2 The www checkpoint route (the worker's write path)
@@ -214,7 +216,7 @@ spawns Claude only when a message arrives, so the file is in place before `isVal
 
 1. **Read the head.** Gated (2.9): read `read-head` with `{ sessionId: pulled.sessionId }` once per
    run. Capture needs the head version even when nothing is restored.
-2. **Fetch and verify.** When the row's session matches, fetch each chunk (`read-blob`, at most 32)
+2. **Fetch and verify.** When the row's session matches, fetch each chunk (`read-blob`, up to 1024, 8 at a time)
    and verify each sha256 against its address. Then verify the whole transcript against
    `native.sha256` and `native.bytes`.
 3. **Copy in** to `/home/agent/.claude/projects/<projectDir>/<sessionId>.jsonl` (mode 600, uid
@@ -498,7 +500,7 @@ export interface CellSessionManifest {
 }
 export const CELL_SESSION_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
 export const CELL_SESSION_NATIVE_MAX_BYTES = 12 * 1024 * 1024;
-export const CELL_SESSION_MAX_CHUNKS = 32;
+export const CELL_SESSION_MAX_CHUNKS = 1024;
 export const CELL_SESSION_CONTINUATION_BUDGET = 1;
 export function canonicalJson(value: unknown): string;   // sorted keys, no whitespace
 export function cellSessionKeys(threadId: string): { blob(sha: string): string; manifest(id: string): string };
@@ -750,7 +752,7 @@ Gates after the last phase:
   - turns count only completed responses;
   - no write when the turn count did not rise;
   - an append-only file sends only the delta; a changed prefix triggers a full rewrite;
-  - more than 32 chunks → a full rewrite;
+  - a pull with no new bytes → no write;
   - over 12 MiB → skipped;
   - `head_moved` stops the writer.
 - **Per-turn** (P6):
@@ -1028,3 +1030,8 @@ above is updated to match them.
 | 9 | Ledger + decision + F4/F7 (4) |
 | 10 | run-terminal + F1 + mention (5) |
 | 11 | Flag wiring (5) |
+
+- **A-12 (2026-11-22, phase 3): the chunk chain is append-only, with no rewrite.** §2.1's "rewrite as fresh
+  chunks past 32" conflicted with the store's append-only check. Append-only keeps tampering and races
+  detectable. The cap rises to 1024, an empty pull writes nothing, and restore fetches 8 chunks at a
+  time.
