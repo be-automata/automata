@@ -17,6 +17,8 @@ import { updateUserSettings } from "@terragon/shared/model/user";
 import * as schema from "@terragon/shared/db/schema";
 import { eq } from "drizzle-orm";
 
+import { publicAppUrl } from "@terragon/env/next-public";
+
 import { db } from "@/lib/db";
 import {
   mentionSourceMetadata,
@@ -25,6 +27,7 @@ import {
 
 import {
   openRemoteTaskPullRequest,
+  remoteTaskBranchFor,
   remoteTaskBranchName,
   isMentionPullRequestThread,
   mentionPullRequestPolicy,
@@ -335,6 +338,199 @@ describe("openRemoteTaskPullRequest", () => {
     });
   });
 
+  describe("a mention thread on a ticket-keyed branch (#752)", () => {
+    const WORK_BRANCH = "feat/ACME-123-add-request-logging";
+    const stampWith = (extra: {
+      workBranch?: string;
+      workBranchTaken?: true;
+      isPullRequest?: boolean;
+    }) =>
+      mentionSourceMetadata(
+        mentionStamp({
+          isPullRequest: false,
+          repoFullName: REPO,
+          issueOrPrNumber: 42,
+          ...extra,
+        }),
+      );
+    const stampThread = (sourceMetadata: ThreadSourceMetadata) =>
+      updateThread({ db, userId, threadId, updates: { sourceMetadata } });
+    const mentionReply = '```json mention-reply\n{"reply":"Done."}\n```';
+
+    it("compares, lists, opens and records the convention branch (AC-1)", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await expect(run(gh)).resolves.toMatchObject({ status: "opened" });
+      expect(
+        vi.mocked(gh.octokit.rest.repos.compareCommitsWithBasehead),
+      ).toHaveBeenCalledWith({
+        owner: "acme",
+        repo: "widgets",
+        basehead: "main...feat/ACME-123-add-request-logging",
+      });
+      expect(vi.mocked(gh.octokit.rest.pulls.list)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          head: "acme:feat/ACME-123-add-request-logging",
+        }),
+      );
+      expect(gh.created[0]).toMatchObject({
+        head: "feat/ACME-123-add-request-logging",
+        base: "main",
+        draft: true,
+      });
+      const thread = await getThread({ db, threadId, userId });
+      expect(thread?.branchName).toBe("feat/ACME-123-add-request-logging");
+      expect(thread?.githubPRNumber).toBe(77);
+    });
+
+    it("appends the thread suffix when intake found the name taken", async () => {
+      await stampThread(
+        stampWith({ workBranch: WORK_BRANCH, workBranchTaken: true }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      const suffix = threadId.slice(0, 8).toLowerCase();
+      expect(gh.created[0]).toMatchObject({
+        head: `feat/ACME-123-add-request-logging-${suffix}`,
+      });
+      const thread = await getThread({ db, threadId, userId });
+      expect(thread?.branchName).toBe(
+        `feat/ACME-123-add-request-logging-${suffix}`,
+      );
+    });
+
+    it("falls back to the task branch when the stored name is invalid", async () => {
+      await stampThread(stampWith({ workBranch: "feat/../x" }));
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(gh.created[0]).toMatchObject({
+        head: `automata/task-${threadId.slice(0, 8).toLowerCase()}`,
+      });
+    });
+
+    it("takes the title and body from a pull-request block ahead of the mention-reply block (AC-3)", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      await finishWith(
+        [
+          "Delivered.",
+          "",
+          "```json pull-request",
+          JSON.stringify({
+            title: "feat(logging): add request logging",
+            body: "## Ticket\nACME-123\n\n## Checks\n- [x] pnpm test",
+          }),
+          "```",
+          "",
+          mentionReply,
+        ].join("\n"),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(generateContent).not.toHaveBeenCalled();
+      expect(gh.created[0]).toMatchObject({
+        title: "feat(logging): add request logging",
+      });
+      expect(String(gh.created[0]?.body)).toBe(
+        `## Ticket\nACME-123\n\n## Checks\n- [x] pnpm test\n\nRefs #42\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`,
+      );
+    });
+
+    it("keeps today's body when the final message has only the mention-reply block", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      await finishWith(`Delivered.\n\n${mentionReply}`);
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(String(gh.created[0]?.body)).toContain(
+        "Generated body.\n\nRefs #42",
+      );
+    });
+
+    it("ignores a pull-request body over the agent cap", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      await finishWith(
+        pullRequestBlock({ title: "feat: a", body: "x".repeat(60_001) }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(gh.created[0]).toMatchObject({ title: "feat: generated title" });
+    });
+
+    it("rebuilds a body that closing-keyword rewrites pushed past GitHub's cap (D4)", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      const body = "fix #1 ".repeat(8_571);
+      expect(body.length).toBeLessThanOrEqual(60_000);
+      await finishWith(pullRequestBlock({ title: "feat: big", body }));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(gh.created[0]).toMatchObject({ title: "feat: big" });
+      expect(String(gh.created[0]?.body)).toBe(
+        `Changes made by an automated task run.\n\nRefs #42\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`,
+      );
+      expect(warn).toHaveBeenCalledWith(
+        "[remote-task-pr] agent body over GitHub's cap",
+        expect.objectContaining({ threadId }),
+      );
+      warn.mockRestore();
+    });
+
+    it("leaves a body under the cap alone", async () => {
+      await stampThread(stampWith({ workBranch: WORK_BRANCH }));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await finishWith(
+        pullRequestBlock({ title: "feat: ok", body: "y".repeat(59_000) }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(String(gh.created[0]?.body)).toMatch(/^y{59000}\n\nRefs #42/);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("a PR mention carrying a forged workBranch keeps the task branch", async () => {
+      await stampThread(
+        stampWith({ workBranch: WORK_BRANCH, isPullRequest: true }),
+      );
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      expect(gh.created[0]).toMatchObject({
+        head: `automata/task-${threadId.slice(0, 8).toLowerCase()}`,
+      });
+    });
+
+    it("an issue-delivery thread keeps the task branch and the mention policy stays off", async () => {
+      await updateThread({
+        db,
+        userId,
+        threadId,
+        updates: {
+          githubIssueNumber: 42,
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName: "issue-delivery",
+            contentSha: "sha",
+            source: "org",
+          },
+        },
+      });
+      const gh = fakeGitHub({ compare: { ahead_by: 1 } });
+      await run(gh);
+      const head = `automata/task-${threadId.slice(0, 8).toLowerCase()}`;
+      expect(
+        vi.mocked(gh.octokit.rest.repos.compareCommitsWithBasehead),
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ basehead: `main...${head}` }),
+      );
+      expect(vi.mocked(gh.octokit.rest.pulls.list)).toHaveBeenCalledWith(
+        expect.objectContaining({ head: `acme:${head}` }),
+      );
+      expect(gh.created[0]).toMatchObject({ head });
+      expect(String(gh.created[0]?.body)).not.toContain("Refs #");
+    });
+  });
+
   it("a failure recording the PR still names it, flagged unrecorded and logged", async () => {
     const gh = fakeGitHub({ compare: { ahead_by: 1 } });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -441,6 +637,110 @@ const issueMention = mentionSourceMetadata(
   mentionStamp({ isPullRequest: false }),
 );
 
+const issueWorkBranch = (
+  extra: { taken?: true; workBranch?: string } = {},
+): ThreadSourceMetadata =>
+  mentionSourceMetadata(
+    mentionStamp({
+      isPullRequest: false,
+      workBranch: extra.workBranch ?? "feat/ACME-123-add-request-logging",
+      ...(extra.taken ? { workBranchTaken: true as const } : {}),
+    }),
+  );
+const prWorkBranch = mentionSourceMetadata(
+  mentionStamp({
+    isPullRequest: true,
+    workBranch: "feat/ACME-123-add-request-logging",
+  }),
+);
+
+describe("remoteTaskBranchFor", () => {
+  const threadId = "ABCDEF12-0000-0000-0000-000000000000";
+  const TASK_BRANCH = "automata/task-abcdef12";
+  const branchFor = (
+    sourceMetadata: ThreadSourceMetadata | null | undefined,
+    baseBranch: string | null | undefined = "main",
+  ) => remoteTaskBranchFor({ threadId, sourceMetadata, baseBranch });
+
+  it("returns the literal convention name for an issue mention (AC-1)", () => {
+    expect(branchFor(issueWorkBranch())).toBe(
+      "feat/ACME-123-add-request-logging",
+    );
+  });
+  it("appends the lowercase thread suffix when the name was taken", () => {
+    expect(branchFor(issueWorkBranch({ taken: true }))).toBe(
+      "feat/ACME-123-add-request-logging-abcdef12",
+    );
+  });
+  it.each([
+    [
+      "a stamp with no work branch",
+      mentionSourceMetadata(mentionStamp({ isPullRequest: false })),
+    ],
+    ["a PR mention with a forged work branch", prWorkBranch],
+    ["no metadata", null],
+    ["undefined metadata", undefined],
+    ["a non-automation stamp", { type: "manual" } as never],
+    [
+      "an issue-delivery stamp",
+      {
+        type: "automation-skill",
+        skillName: "issue-delivery",
+        contentSha: "sha",
+        source: "org",
+      } as ThreadSourceMetadata,
+    ],
+    [
+      "a self-heal stamp",
+      {
+        type: "automation-skill",
+        skillName: "self-heal-fix",
+        contentSha: "sha",
+        source: "org",
+        selfHealAttemptId: "attempt-1",
+      } as ThreadSourceMetadata,
+    ],
+  ])("keeps the task branch for %s", (_, sourceMetadata) => {
+    expect(branchFor(sourceMetadata)).toBe(TASK_BRANCH);
+  });
+  it.each([
+    "main",
+    "feat/../x",
+    "feat/ACME-1.lock",
+    "feat/ACME-1-café",
+    "-feat/ACME-1",
+    "automata/task-abcdef12",
+    "",
+  ])("falls back to the task branch for the invalid name %j", (workBranch) => {
+    expect(branchFor(issueWorkBranch({ workBranch }))).toBe(TASK_BRANCH);
+    expect(branchFor(issueWorkBranch({ workBranch, taken: true }))).toBe(
+      TASK_BRANCH,
+    );
+  });
+  it("falls back to the task branch when the name equals the base branch (RF-2)", () => {
+    expect(
+      branchFor(issueWorkBranch(), "feat/ACME-123-add-request-logging"),
+    ).toBe(TASK_BRANCH);
+  });
+  it("is not fooled by a null or missing base branch", () => {
+    expect(branchFor(issueWorkBranch(), null)).toBe(
+      "feat/ACME-123-add-request-logging",
+    );
+    expect(branchFor(issueWorkBranch(), undefined)).toBe(
+      "feat/ACME-123-add-request-logging",
+    );
+  });
+  it("never returns main or the base for any stamp", () => {
+    for (const workBranch of ["main", "develop", "master"]) {
+      for (const base of ["main", "develop", "master"]) {
+        expect(branchFor(issueWorkBranch({ workBranch }), base)).toBe(
+          TASK_BRANCH,
+        );
+      }
+    }
+  });
+});
+
 describe("taskRunPushBranch", () => {
   const threadId = "abcdef12-0000-0000-0000-000000000000";
   const push = (patch: {
@@ -494,6 +794,43 @@ describe("taskRunPushBranch", () => {
     expect(
       push({ prNumber: 7, branch: null, sourceMetadata: prMention }),
     ).toBeNull();
+  });
+  it("an issue mention with a work branch pushes the convention name (AC-1)", () => {
+    expect(push({ sourceMetadata: issueWorkBranch() })).toBe(
+      "feat/ACME-123-add-request-logging",
+    );
+  });
+  it("a taken name pushes the name plus the thread suffix", () => {
+    expect(push({ sourceMetadata: issueWorkBranch({ taken: true }) })).toBe(
+      "feat/ACME-123-add-request-logging-abcdef12",
+    );
+  });
+  it("a follow-up run after the PR opened keeps the stored branch", () => {
+    expect(
+      push({
+        prNumber: 5,
+        branch: "feat/ACME-123-add-request-logging",
+        sourceMetadata: issueWorkBranch(),
+      }),
+    ).toBe("feat/ACME-123-add-request-logging");
+  });
+  it("a work branch never overrides a non-base branch", () => {
+    expect(
+      push({ branch: "feat/other", sourceMetadata: issueWorkBranch() }),
+    ).toBe("feat/other");
+  });
+  it("the base branch with a PR stays null for an issue mention", () => {
+    expect(push({ prNumber: 5, sourceMetadata: issueWorkBranch() })).toBeNull();
+  });
+  it("a PR mention carrying a forged workBranch still pushes the PR head", () => {
+    expect(
+      push({
+        prNumber: 7,
+        branch: "feat/pr-head",
+        baseBranch: "feat/pr-head",
+        sourceMetadata: prWorkBranch,
+      }),
+    ).toBe("feat/pr-head");
   });
   it("the base branch with a PR, or a blank branch, is null", () => {
     expect(push({ prNumber: 7 })).toBeNull();

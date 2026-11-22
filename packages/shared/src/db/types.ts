@@ -237,6 +237,17 @@ export type MentionLaneStamp = {
    * label (#729 OD-6).
    */
   asksForDelivery?: true;
+  /**
+   * Issue mentions only, written only when the issue names a ticket key (#752):
+   * the convention branch `<type>/<KEY>[-<slug>]`, chosen once at intake.
+   */
+  workBranch?: string;
+  /**
+   * With `workBranch`, written only when true: the name was already taken on
+   * the remote at intake, so the run pushes `<workBranch>-<threadId[0:8]>`
+   * (the thread id did not exist yet when the stamp was written).
+   */
+  workBranchTaken?: true;
   /** Review comments only: the anchor and the (clipped) diff hunk. */
   path?: string;
   line?: number | null;
