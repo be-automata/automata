@@ -33,6 +33,7 @@ import {
   BOX_AT_CAPACITY_SENTENCE,
   boxAtCapacityOfChat,
 } from "@/agent/msg/classify-box-capacity";
+import { isNotFound } from "@/server-lib/task/github-errors";
 
 /**
  * The PR companion lane's terminal writer (emit-only, like the review and
@@ -476,15 +477,6 @@ async function convergeOnOneComment({
 }
 
 type Octokit = Awaited<ReturnType<typeof getOctokitForApp>>;
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "status" in error &&
-    error.status === 404
-  );
-}
 
 export function createOctokitCompanionReportClient(
   octokit: Octokit,

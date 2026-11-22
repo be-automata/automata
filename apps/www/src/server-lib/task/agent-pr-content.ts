@@ -15,8 +15,11 @@ import { buildTaggedFence } from "@/server-lib/review/tagged-fence";
  *
  * and the platform opens the PR with exactly that content (it holds the only
  * GitHub write credential). The same tagged-fence rules as the review intent
- * apply: a whole fence line opens it, the LAST opener in the last lead agent
- * message that has one decides, sub-agent messages never count.
+ * apply: a whole fence line opens it, the LAST opener in the message decides,
+ * sub-agent messages never count. Only the FINAL lead agent message of the run
+ * being finished is read (a message has no run id, so the run is the tail
+ * after the last user message): a block from an earlier run or an earlier
+ * message is stale and must never title this run's PR.
  *
  * Anything malformed returns null and the caller falls back to generated
  * content, so a bad block can never stop the PR from opening.
@@ -37,8 +40,15 @@ export interface AgentPrContent {
 export function parseAgentPrContent(
   messages: DBMessage[] | null,
 ): AgentPrContent | null {
-  const text = findLastLeadAgentText(messages, PULL_REQUEST_FENCE.hasOpener);
-  if (text === null) {
+  if (!messages) {
+    return null;
+  }
+  const lastUser = messages.findLastIndex((m) => m.type === "user");
+  const text = findLastLeadAgentText(
+    messages.slice(lastUser + 1),
+    (candidate) => candidate.trim() !== "",
+  );
+  if (text === null || !PULL_REQUEST_FENCE.hasOpener(text)) {
     return null;
   }
   const extracted = PULL_REQUEST_FENCE.extractLast(text);

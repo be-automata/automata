@@ -33,7 +33,7 @@ export function buildSeedSkillBodies(
     // full skill is deploy/skills/github-mention/SKILL.md (push it with
     // skill-push.ts for a repo onboarded onto the org mention lane).
     "github-mention":
-      "Respond to the GitHub mention. Your final message ends with exactly one block:\n" +
+      "Respond to the GitHub mention. Your final message ends with a `json mention-reply` block (on an issue where you pushed, a `json pull-request` block may precede it):\n" +
       '```json mention-reply\n{ "kind": "mention-reply", "reply": "<your reply>" }\n```',
   };
 }

@@ -28,6 +28,7 @@ import {
   updateThreadChat,
   getThreadChat,
   getThreadMinimal,
+  isMentionWorkBranchClaimed,
 } from "./threads";
 import { LEGACY_THREAD_CHAT_ID } from "../utils/thread-utils";
 import { upsertGithubPR } from "./github";
@@ -5524,6 +5525,60 @@ describe("thread", () => {
         userId: user.id,
       });
       expect(updatedThreadChat!.errorMessageInfo).toMatch(/^Info\d+text$/);
+    });
+  });
+
+  describe("isMentionWorkBranchClaimed", () => {
+    // The test database is shared across tests: a fresh repo per test.
+    let repoFullName: string;
+    const workBranch = "feat/ACME-123-add-request-logging";
+
+    beforeEach(() => {
+      repoFullName = `acme/widgets-${Math.random().toString(36).slice(2, 10)}`;
+    });
+
+    async function threadWithStamp(repo: string, stampBranch?: string) {
+      await createThread({
+        db,
+        userId: user.id,
+        threadValues: {
+          githubRepoFullName: repo,
+          repoBaseBranchName: "main",
+          sandboxProvider: "e2b",
+          sourceType: "automation",
+          sourceMetadata: {
+            type: "automation",
+            automationId: "automation-1",
+            mention: {
+              repoFullName: repo,
+              ...(stampBranch ? { workBranch: stampBranch } : {}),
+            },
+          } as never,
+        },
+        initialChatValues: { agent: "claudeCode" },
+      });
+    }
+
+    it("is false when no thread carries the name", async () => {
+      expect(
+        await isMentionWorkBranchClaimed(db, { repoFullName, workBranch }),
+      ).toBe(false);
+    });
+
+    it("is true when a thread of the repo carries the same stamp", async () => {
+      await threadWithStamp(repoFullName, workBranch);
+      expect(
+        await isMentionWorkBranchClaimed(db, { repoFullName, workBranch }),
+      ).toBe(true);
+    });
+
+    it("is false for another repo, another name, or a stamp without a name", async () => {
+      await threadWithStamp("acme/other", workBranch);
+      await threadWithStamp(repoFullName, "feat/ACME-999-other");
+      await threadWithStamp(repoFullName);
+      expect(
+        await isMentionWorkBranchClaimed(db, { repoFullName, workBranch }),
+      ).toBe(false);
     });
   });
 });

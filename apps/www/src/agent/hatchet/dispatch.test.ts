@@ -1684,6 +1684,105 @@ describe("dispatchAgentRun — phase 7 taskAgent payload", () => {
       else expect("workBranch" in input).toBe(false);
     });
 
+    describe("ticket-keyed work branch (#752), literal refs", () => {
+      const WORK = "feat/ACME-123-add-request-logging";
+      const keyedThread = (
+        stamp: Record<string, unknown>,
+        overrides: Record<string, unknown> = {},
+      ) =>
+        createTestThread({
+          db,
+          userId: user.id,
+          overrides: {
+            organizationId: orgId,
+            sourceMetadata: mentionSourceMetadata(
+              mentionStamp({
+                isPullRequest: false,
+                repoFullName: REPO,
+                ...stamp,
+              }),
+            ),
+            ...overrides,
+          } as never,
+        });
+
+      it("the first run pushes the plain ticket-keyed name", async () => {
+        const t = await keyedThread({ workBranch: WORK });
+        const input = await dispatchAndRead(t, "main");
+        expect(input.workBranch).toBe("feat/ACME-123-add-request-logging");
+        expect(input.pushRef).toBe(
+          "refs/heads/feat/ACME-123-add-request-logging",
+        );
+      });
+
+      it("a name taken at intake gets the thread's first 8 characters", async () => {
+        const t = await keyedThread({
+          workBranch: WORK,
+          workBranchTaken: true,
+        });
+        const thread8 = t.threadId.slice(0, 8).toLowerCase();
+        const input = await dispatchAndRead(t, "main");
+        expect(input.workBranch).toBe(
+          `feat/ACME-123-add-request-logging-${thread8}`,
+        );
+        expect(input.pushRef).toBe(
+          `refs/heads/feat/ACME-123-add-request-logging-${thread8}`,
+        );
+      });
+
+      it("a follow-up after the PR opened keeps the same branch, with no work branch", async () => {
+        const t = await keyedThread(
+          { workBranch: WORK },
+          {
+            githubPRNumber: 5,
+            branchName: "feat/ACME-123-add-request-logging",
+          },
+        );
+        const input = await dispatchAndRead(
+          t,
+          "feat/ACME-123-add-request-logging",
+        );
+        expect(input.pushRef).toBe(
+          "refs/heads/feat/ACME-123-add-request-logging",
+        );
+        expect("workBranch" in input).toBe(false);
+      });
+
+      it("a PR mention ignores a forged workBranch and keeps the PR head", async () => {
+        const t = await keyedThread(
+          { isPullRequest: true, workBranch: WORK },
+          {
+            githubPRNumber: 7,
+            branchName: null,
+            repoBaseBranchName: "feat/pr-head",
+          },
+        );
+        const input = await dispatchAndRead(t, "feat/pr-head");
+        expect(input.pushRef).toBe("refs/heads/feat/pr-head");
+        expect("workBranch" in input).toBe(false);
+      });
+
+      it("an issue-delivery thread keeps its automata/task branch", async () => {
+        const t = await createTestThread({
+          db,
+          userId: user.id,
+          overrides: {
+            organizationId: orgId,
+            sourceMetadata: {
+              type: "automation-skill",
+              skillName: "issue-delivery",
+              contentSha: "sha",
+              source: "db-version",
+            },
+          } as never,
+        });
+        const input = await dispatchAndRead(t, "main");
+        expect(input.workBranch).toBe(
+          `automata/task-${t.threadId.slice(0, 8).toLowerCase()}`,
+        );
+      });
+    });
+
     it("a PR head that is not a valid ref is refused, never dispatched unfenced", async () => {
       const t = await mentionThread(true, {
         githubPRNumber: 7,

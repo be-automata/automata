@@ -3,7 +3,7 @@ import { enrollDeliveryPr } from "@terragon/shared/model/delivery-loop";
 import { getThread } from "@terragon/shared/model/threads";
 
 import { db as defaultDb } from "@/lib/db";
-import { remoteTaskBranchName } from "@/server-lib/task/remote-task-pr";
+import { remoteTaskBranchFor } from "@/server-lib/task/remote-task-pr";
 
 import { loadDeliveryLoopMode } from "./delivery-mode";
 import { evaluateDeliveryPr } from "./evaluate-delivery-pr";
@@ -77,7 +77,11 @@ export async function enrollDeliveryAtPrOpen({
     repoFullName: thread.githubRepoFullName,
     prNumber,
     issueNumber: thread.githubIssueNumber,
-    headRef: remoteTaskBranchName(threadId),
+    headRef: remoteTaskBranchFor({
+      threadId,
+      sourceMetadata: stamp,
+      baseBranch: thread.repoBaseBranchName,
+    }),
     baseRef: thread.repoBaseBranchName,
     // The first evaluation reads the real head from GitHub.
     headSha: null,

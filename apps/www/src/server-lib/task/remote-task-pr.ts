@@ -21,6 +21,8 @@ import { generatePRContent } from "@/server-lib/generate-pr-content";
 import { isMentionLaneStamp } from "@/server-lib/review/review-skill";
 
 import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
+import { errorStatus, isNotFound } from "./github-errors";
+import { isMentionWorkBranch } from "./mention-work-branch";
 
 /**
  * Remote-plane task runs (manual, scheduled, mention) have no control-plane
@@ -31,7 +33,7 @@ import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
  * anything after it. So the AGENT publishes its own commits during the run,
  * and the platform does the rest:
  *
- *   dispatch → names the run's work branch (remoteTaskBranchName); the worker
+ *   dispatch → names the run's work branch (remoteTaskBranchFor); the worker
  *              checks it out right after the clone, so `git push origin HEAD`
  *              publishes exactly this branch.
  *   finish   → if that branch is on GitHub and ahead of the base, open a
@@ -57,9 +59,20 @@ import { type AgentPrContent, parseAgentPrContent } from "./agent-pr-content";
  */
 
 const DIFF_CHAR_LIMIT = 60_000;
+/** GitHub rejects a PR body longer than this (HTTP 422). */
+const GITHUB_PR_BODY_MAX = 65_536;
+const GENERIC_PR_BODY = "Changes made by an automated task run.";
+
+/** Every branch a plain task run pushes starts with this. */
+export const REMOTE_TASK_BRANCH_PREFIX = "automata/task-";
+
+/** The 8-character lowercase thread id the branch names embed. */
+function threadShortId(threadId: string): string {
+  return threadId.slice(0, 8).toLowerCase();
+}
 
 export function remoteTaskBranchName(threadId: string): string {
-  return `automata/task-${threadId.slice(0, 8).toLowerCase()}`;
+  return `${REMOTE_TASK_BRANCH_PREFIX}${threadShortId(threadId)}`;
 }
 
 /**
@@ -79,9 +92,43 @@ export function isMentionPullRequestThread(
 }
 
 /**
+ * The one branch name a thread's run pushes when it starts from the base (#752):
+ * - an ISSUE mention whose stamp carries a valid `workBranch` → that
+ *   convention name, with `-<thread8>` when intake found it taken;
+ * - everything else (PR mentions, delivery and self-heal threads, plain
+ *   tasks, a stamp that fails validation, a name equal to the base branch)
+ *   → `automata/task-<id8>`.
+ * Deterministic from the row, so dispatch, `cell-plan` and the PR open agree.
+ */
+export function remoteTaskBranchFor({
+  threadId,
+  sourceMetadata,
+  baseBranch,
+}: {
+  threadId: string;
+  sourceMetadata: ThreadSourceMetadata | null | undefined;
+  baseBranch: string | null | undefined;
+}): string {
+  if (
+    isMentionLaneStamp(sourceMetadata) &&
+    !sourceMetadata.mention.isPullRequest &&
+    typeof sourceMetadata.mention.workBranch === "string"
+  ) {
+    const { workBranch, workBranchTaken } = sourceMetadata.mention;
+    const name =
+      workBranchTaken === true
+        ? `${workBranch}-${threadShortId(threadId)}`
+        : workBranch;
+    if (isMentionWorkBranch(name) && name !== baseBranch) return name;
+  }
+  return remoteTaskBranchName(threadId);
+}
+
+/**
  * The one branch a task run may push, shared by dispatch (the worker's work
  * branch) and `cell-plan` (the step's `allowedRef`):
- * - no PR and `branch` is the base → the thread's own task branch;
+ * - no PR and `branch` is the base → the thread's own work branch
+ *   (`remoteTaskBranchFor`);
  * - otherwise (an existing PR or a non-base branch) → `branch`;
  * - the base branch with a PR, or a blank branch → null: a run never gets its
  *   base branch as a push target;
@@ -105,7 +152,9 @@ export function taskRunPushBranch({
   if (!branch || branch.trim() === "") return null;
   const isBase = branch === baseBranch;
   if (isBase) {
-    if (prNumber === undefined) return remoteTaskBranchName(threadId);
+    if (prNumber === undefined) {
+      return remoteTaskBranchFor({ threadId, sourceMetadata, baseBranch });
+    }
     return isMentionPullRequestThread(sourceMetadata) ? branch : null;
   }
   return branch;
@@ -199,9 +248,10 @@ export function withIssueReference(body: string, issueNumber: number): string {
     .filter(([, isCode]) => !isCode)
     .map(([text]) => text)
     .join("");
-  const hasRef = new RegExp(`(?<![\\w/])Refs #${issueNumber}(?!\\d)`).test(
-    prose,
-  );
+  const hasRef = new RegExp(
+    `(?<![\\w/])(?:refs|closes|fixes|resolves):?[ \\t]+#${issueNumber}(?!\\d)`,
+    "i",
+  ).test(prose);
   return hasRef ? rewritten : `${rewritten}\n\nRefs #${issueNumber}`;
 }
 
@@ -248,16 +298,6 @@ function diffFromCompare(files: readonly CompareFile[]): string {
   return text.length > DIFF_CHAR_LIMIT
     ? `${text.slice(0, DIFF_CHAR_LIMIT)}\n… (diff cut)`
     : text;
-}
-
-function errorStatus(error: unknown): unknown {
-  return typeof error === "object" && error !== null
-    ? (error as { status?: unknown }).status
-    : undefined;
-}
-
-function isNotFound(error: unknown): boolean {
-  return errorStatus(error) === 404;
 }
 
 /**
@@ -308,7 +348,7 @@ async function createPullRequest({
   generateContent: typeof generatePRContent;
 }) {
   let title = latestCommitSubject(commits) ?? taskTitle;
-  let body = "Changes made by an automated task run.";
+  let body = GENERIC_PR_BODY;
   if (agentContent) {
     ({ title, body } = agentContent);
   } else {
@@ -331,8 +371,20 @@ async function createPullRequest({
       );
     }
   }
-  if (issueNumber !== undefined) body = withIssueReference(body, issueNumber);
-  body += `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
+  const footer = `\n\n---\n\n📎 **Task**: ${publicAppUrl()}/task/${threadId}`;
+  const compose = (text: string) =>
+    (issueNumber !== undefined ? withIssueReference(text, issueNumber) : text) +
+    footer;
+  body = compose(body);
+  if (body.length > GITHUB_PR_BODY_MAX) {
+    // Rewriting closing keywords and the footer can push a body under the
+    // agent cap past GitHub's, which answers 422 and opens no PR (#752 D4).
+    console.warn("[remote-task-pr] agent body over GitHub's cap", {
+      threadId,
+      length: body.length,
+    });
+    body = compose(GENERIC_PR_BODY);
+  }
   const params = { owner, repo, title, body, head: branch, base, draft };
   try {
     return await octokit.rest.pulls.create(params);
@@ -386,8 +438,12 @@ export async function openRemoteTaskPullRequest({
     return { status: "skipped", reason: "auto_create_off" };
   }
   const mentionPolicy = mentionPullRequestPolicy(thread.sourceMetadata);
-  const branch = remoteTaskBranchName(threadId);
   const base = thread.repoBaseBranchName;
+  const branch = remoteTaskBranchFor({
+    threadId,
+    sourceMetadata: thread.sourceMetadata,
+    baseBranch: base,
+  });
   const [owner, repo] = parseRepoFullName(thread.githubRepoFullName);
   const octokit = await octokitFor({ owner, repo });
 

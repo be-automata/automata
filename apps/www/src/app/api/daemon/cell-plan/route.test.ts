@@ -484,6 +484,93 @@ describe("POST /api/daemon/cell-plan", () => {
       );
     });
 
+    describe("ticket-keyed work branch (#752), literal allowedRef", () => {
+      const stamp = (extra: Record<string, unknown> = {}) =>
+        mentionSourceMetadata(
+          mentionStamp({
+            isPullRequest: false,
+            issueOrPrNumber: 5,
+            workBranch: "feat/ACME-123-add-request-logging",
+            ...extra,
+          }),
+        );
+      const allowedRef = async (overrides: Record<string, unknown>) => {
+        const t = await newThread({ organizationId: orgId, ...overrides });
+        threadId = t.threadId;
+        threadChatId = t.threadChatId;
+        vi.mocked(getDaemonTokenContext).mockResolvedValue(ctx());
+        expect((await POST(req(body()))).status).toBe(200);
+        return (await steps())[0]?.allowedRef;
+      };
+
+      it("the first run gets the plain ticket-keyed ref", async () => {
+        expect(
+          await allowedRef({ branchName: null, sourceMetadata: stamp() }),
+        ).toBe("refs/heads/feat/ACME-123-add-request-logging");
+      });
+
+      it("a name taken at intake gets the thread's first 8 characters", async () => {
+        const ref = await allowedRef({
+          branchName: null,
+          sourceMetadata: stamp({ workBranchTaken: true }),
+        });
+        expect(ref).toBe(
+          `refs/heads/feat/ACME-123-add-request-logging-${threadId.slice(0, 8).toLowerCase()}`,
+        );
+      });
+
+      it("a follow-up after the PR opened keeps the same ref", async () => {
+        expect(
+          await allowedRef({
+            githubPRNumber: 5,
+            branchName: "feat/ACME-123-add-request-logging",
+            sourceMetadata: stamp(),
+          }),
+        ).toBe("refs/heads/feat/ACME-123-add-request-logging");
+      });
+
+      it("a PR mention ignores a forged workBranch and keeps the PR head", async () => {
+        expect(
+          await allowedRef({
+            githubPRNumber: 5,
+            branchName: null,
+            repoBaseBranchName: "feat/pr-head",
+            sourceMetadata: stamp({ isPullRequest: true }),
+          }),
+        ).toBe("refs/heads/feat/pr-head");
+      });
+
+      it("an issue-delivery thread keeps its automata/task ref", async () => {
+        const ref = await allowedRef({
+          branchName: null,
+          sourceMetadata: {
+            type: "automation-skill",
+            skillName: "issue-delivery",
+            contentSha: "sha",
+            source: "db-version",
+          },
+        });
+        expect(ref).toBe(
+          `refs/heads/automata/task-${threadId.slice(0, 8).toLowerCase()}`,
+        );
+      });
+
+      it("a self-heal thread on its fix branch keeps that ref", async () => {
+        expect(
+          await allowedRef({
+            githubPRNumber: 8,
+            branchName: "automata/fix-12-abcdef-1",
+            sourceMetadata: {
+              type: "automation-skill",
+              skillName: "audit-fix",
+              contentSha: "sha",
+              source: "db",
+            },
+          }),
+        ).toBe("refs/heads/automata/fix-12-abcdef-1");
+      });
+    });
+
     it("an existing PR on a work branch pushes that branch", async () => {
       const t = await newThread({
         organizationId: orgId,
