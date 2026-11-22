@@ -145,7 +145,10 @@ function setup(
     /** #743 phase 6: turns the per-turn session capture on (default off, like production). */
     capture?: boolean;
     /** What the checkpoint route's commit answers; default ok with the next version. */
-    commit?: (expectedVersion: number) => Promise<unknown>;
+    commit?: (
+      expectedVersion: number,
+      manifest?: { id: string; parent: string | null; turn: number },
+    ) => Promise<unknown>;
     putBlob?: () => Promise<unknown>;
     /** #743 phase 8: the restore's reads; default a head error (no restore). */
     readHead?: () => Promise<unknown>;
@@ -294,7 +297,16 @@ function setup(
         return { ok: true, created: true };
       },
       commit: async (_o, manifest, expected) => {
-        if (over.commit) return (await over.commit(expected)) as never;
+        if (over.commit) {
+          return (await over.commit(
+            expected,
+            manifest as unknown as {
+              id: string;
+              parent: string | null;
+              turn: number;
+            },
+          )) as never;
+        }
         checkpoint.commits.push({
           manifest: manifest as unknown as { turn: number },
           expected,
@@ -2420,6 +2432,107 @@ describe("the per-turn session capture (#743 phase 6)", () => {
       },
     );
     await s.executor.run(s.args);
+    expect(checkLogs(s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
+    );
+  });
+
+  // card: protects=#743 R2 a commit applied by the store whose answer was lost leaves the worker at a stale version; the next commit meets head_moved on its own manifest, adopts the head's version, retries once and keeps capturing; fails_when=capture stops at head_moved, the retry repeats, or the later parent/version is wrong; no_claim=the www route
+  it("recovers when a commit's acknowledgement was lost", async () => {
+    let head: { id: string; version: number } | null = null;
+    const commits: { expected: number; id: string; parent: string | null }[] =
+      [];
+    let n = 0;
+    const { s } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+        cell.text = turn(1) + turn(2);
+        await s.captureTick();
+        cell.text = turn(1) + turn(2) + turn(3);
+        await s.captureTick();
+        cell.text = turn(1) + turn(2) + turn(3) + turn(4);
+        await s.captureTick();
+      },
+      {
+        readHead: async () =>
+          head === null
+            ? { ok: true, head: { found: false, reason: "none" } }
+            : {
+                ok: true,
+                head: {
+                  found: true,
+                  version: head.version,
+                  manifest: { id: head.id },
+                },
+              },
+        commit: async (expected, manifest) => {
+          n += 1;
+          const m = manifest as { id: string; parent: string | null };
+          commits.push({ expected, id: m.id, parent: m.parent });
+          if (head !== null && head.version !== expected) {
+            return {
+              ok: false,
+              code: "head_moved",
+              status: 409,
+              version: head.version,
+            };
+          }
+          head = { id: m.id, version: expected + 1 };
+          // The second call is applied, but its answer is lost.
+          return n === 2
+            ? { ok: false, code: "timeout", status: 0 }
+            : { ok: true, version: expected + 1 };
+        },
+      },
+    );
+    await s.executor.run(s.args);
+    expect(commits.map((c) => c.expected)).toEqual([0, 1, 1, 2, 3]);
+    expect(checkLogs(s)).not.toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
+    );
+    const last = commits[commits.length - 1];
+    const prev = commits[commits.length - 2];
+    expect(last?.parent).toBe(prev?.id);
+  });
+
+  // card: protects=#743 R2 a head_moved whose head is not the manifest this writer sent is a real foreign move and still stops the capture; fails_when=the capture adopts a foreign head or loops; no_claim=the www route
+  it("stops when the head moved to a manifest this writer never sent", async () => {
+    const expected: number[] = [];
+    let reads = 0;
+    const { s } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+        cell.text = turn(1) + turn(2);
+        await s.captureTick();
+        const before = probes(s);
+        cell.text = turn(1) + turn(2) + turn(3);
+        await s.captureTick();
+        expect(probes(s)).toBe(before);
+      },
+      {
+        readHead: async () => {
+          reads += 1;
+          return reads === 1
+            ? { ok: true, head: { found: false, reason: "none" } }
+            : {
+                ok: true,
+                head: { found: true, version: 7, manifest: { id: "foreign" } },
+              };
+        },
+        commit: async (e) => {
+          expected.push(e);
+          return e === 0
+            ? { ok: true, version: 1 }
+            : { ok: false, code: "head_moved", status: 409, version: 7 };
+        },
+      },
+    );
+    await s.executor.run(s.args);
+    expect(expected).toEqual([0, 1]);
+    // The head was read once to judge the move, and no retry followed.
+    expect(reads).toBe(2);
     expect(checkLogs(s)).toContain(
       "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
     );

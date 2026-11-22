@@ -1242,6 +1242,10 @@ function openSessionCapture(
   let version = restored?.version ?? start.version;
   const resumed = restored !== null;
   let versionKnown = resumed || start.known;
+  // The id of the manifest this writer last SENT (not the last acknowledged):
+  // a commit whose answer was lost may still have been applied, and the next
+  // commit then meets `head_moved` on a head that is this writer's own.
+  let lastSentId: string | null = null;
   // A chain with no previous manifest is parented to the head it began after.
   let chainParent: string | null = start.parent;
   let turnState: TurnState | undefined;
@@ -1382,6 +1386,9 @@ function openSessionCapture(
       ),
     );
     if (upload.failure !== null) return failed(upload.failure);
+    const priorSentId = lastSentId;
+    lastSentId = result.manifest.id;
+    const knewVersion = versionKnown;
     let commit = await checkpoint.commit(
       r.cellOpts,
       result.manifest,
@@ -1389,6 +1396,30 @@ function openSessionCapture(
       budget,
     );
     if (
+      !commit.ok &&
+      commit.code === "head_moved" &&
+      knewVersion &&
+      priorSentId !== null
+    ) {
+      // The earlier commit's answer may have been lost after the store applied
+      // it. If the head is that very manifest, it is ours: take its version as
+      // if it had been acknowledged and commit once more (no loop). Any other
+      // head is a real foreign move and stops the capture below.
+      const read = await checkpoint.readHead(
+        r.cellOpts,
+        result.manifest.sessionId,
+        budget,
+      );
+      if (read.ok && read.head.found && read.head.manifest.id === priorSentId) {
+        version = read.head.version;
+        commit = await checkpoint.commit(
+          r.cellOpts,
+          result.manifest,
+          version,
+          budget,
+        );
+      }
+    } else if (
       !commit.ok &&
       commit.code === "head_moved" &&
       !versionKnown &&
