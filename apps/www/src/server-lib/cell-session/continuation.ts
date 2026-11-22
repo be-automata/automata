@@ -6,6 +6,7 @@ import { taskRunPushBranch } from "@/server-lib/task/remote-task-pr";
 import type { DB } from "@terragon/shared/db";
 import { thread as threadTable } from "@terragon/shared/db/schema";
 import type { DBUserMessage } from "@terragon/shared";
+import { getFeatureFlagForUser } from "@terragon/shared/model/feature-flags";
 import { getCellSessionHead } from "@terragon/shared/model/cell-session-checkpoint";
 import {
   CELL_SESSION_CONTINUATION_BUDGET,
@@ -24,6 +25,7 @@ import type { RunDisplayLane } from "@terragon/utils/run-lane";
 
 /** Why a timed-out run is not continued. `error` = the decision itself failed (fail closed). */
 export type ContinuationNoneReason =
+  | "flag-off"
   | "not-timeout"
   | "lane"
   | "budget-spent"
@@ -63,6 +65,8 @@ export interface ContinuationThread {
 
 export interface ContinuationDeps {
   db: DB;
+  /** The `cellSessionContinuation` flag for the thread's owner (default off). */
+  isEnabled(args: { userId: string }): Promise<boolean>;
   readThread(args: { threadId: string }): Promise<ContinuationThread | null>;
   /**
    * The queue write. A throw here means nothing was queued. Resolves true when
@@ -165,6 +169,12 @@ function defaultDeps(): ContinuationDeps {
     async drain({ userId, threadId, threadChatId }) {
       await maybeProcessFollowUpQueue({ userId, threadId, threadChatId });
     },
+    isEnabled: ({ userId }) =>
+      getFeatureFlagForUser({
+        db,
+        userId,
+        flagName: "cellSessionContinuation",
+      }),
     log: (message) => console.log(message),
   };
 }
@@ -196,6 +206,12 @@ export async function maybeContinueAfterTimeout(
     const { db } = deps;
     if (input.cause !== "timeout") return none("not-timeout");
     if (input.lane !== "task") return none("lane");
+    // The flag is per owner, so it needs the thread; a missing thread falls
+    // through to `superseded` below.
+    const owner = await deps.readThread({ threadId: input.threadId });
+    if (owner && !(await deps.isEnabled({ userId: owner.userId }))) {
+      return none("flag-off");
+    }
     if (
       await getContinuationBySourceRun({
         db,

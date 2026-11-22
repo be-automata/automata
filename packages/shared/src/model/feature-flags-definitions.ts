@@ -144,6 +144,11 @@ export const featureFlagsDefinitions = {
     description:
       "Runs eligible tasks in an OpenSandbox cell (ADR-014 #634); needs OPENSANDBOX_URL/API_KEY.",
   },
+  cellSessionContinuation: {
+    defaultValue: false,
+    description:
+      "Captures a cell task run's session after each turn, restores it into the next cell, and continues a run that timed out once (#743). Off: no capture, no restore, no continuation.",
+  },
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
 export type FeatureFlagName = keyof typeof featureFlagsDefinitions;

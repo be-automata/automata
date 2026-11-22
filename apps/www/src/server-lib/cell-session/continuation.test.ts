@@ -5,6 +5,10 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { thread as threadTable } from "@terragon/shared/db/schema";
+import {
+  seedFeatureFlags,
+  setUserFeatureFlagOverride,
+} from "@terragon/shared/model/feature-flags";
 import { advanceCellSessionHead } from "@terragon/shared/model/cell-session-checkpoint";
 import {
   claimContinuation,
@@ -25,6 +29,15 @@ import {
 vi.mock("@/server-lib/process-follow-up-queue", () => ({
   maybeProcessFollowUpQueue: vi.fn(),
 }));
+
+async function ownerOf(threadId: string): Promise<string> {
+  const [row] = await db
+    .select({ userId: threadTable.userId })
+    .from(threadTable)
+    .where(eq(threadTable.id, threadId));
+  if (!row) throw new Error("thread not found");
+  return row.userId;
+}
 
 interface Fixture {
   input: ContinuationInput;
@@ -74,6 +87,7 @@ async function setup({
   const logs: string[] = [];
   const deps: ContinuationDeps = {
     db,
+    isEnabled: async () => true,
     readThread: async () => ({
       userId: user.id,
       shadow: false,
@@ -124,6 +138,24 @@ describe("maybeContinueAfterTimeout (#743 phase 9)", () => {
     expect(f.logs.join("\n")).toContain("continuation: dispatched (ordinal 1)");
   });
 
+  it("the flag off for the owner is flag-off: nothing is claimed or queued", async () => {
+    const calls: string[] = [];
+    const res = await maybeContinueAfterTimeout(f.input, {
+      ...f.deps,
+      isEnabled: async ({ userId }) => {
+        calls.push(userId);
+        return false;
+      },
+    });
+    expect(res).toEqual({ action: "none", reason: "flag-off" });
+    expect(calls).toHaveLength(1);
+    expect(f.queued).toHaveLength(0);
+    expect(await countContinuations({ db, threadId: f.input.threadId })).toBe(
+      0,
+    );
+    expect(f.logs.join("\n")).toContain("continuation: none (flag-off)");
+  });
+
   it("a cause other than timeout is not-timeout", async () => {
     expect(
       await maybeContinueAfterTimeout(
@@ -172,14 +204,15 @@ describe("maybeContinueAfterTimeout (#743 phase 9)", () => {
 
   it("budget-spent beats no-checkpoint (F4): a second timeout with no checkpoint names the limit", async () => {
     const g = await setup({ head: null });
-    await claimContinuation({
+    const earlier = await claimContinuation({
       db,
       threadId: g.input.threadId,
       threadChatId: g.input.threadChatId,
-      sourceRunExternalId: "run-earlier",
+      sourceRunExternalId: `run-earlier-${nanoid(8)}`,
       checkpointManifestId: "m",
       checkpointTurn: 2,
     });
+    expect(earlier.claimed).toBe(true);
     expect(await maybeContinueAfterTimeout(g.input, g.deps)).toEqual({
       action: "none",
       reason: "budget-spent",
@@ -311,7 +344,30 @@ describe("maybeContinueAfterTimeout (#743 phase 9)", () => {
     expect(drain).not.toHaveBeenCalled();
   });
 
+  it("the default dependencies resolve the flag per user: off by default, on with an override", async () => {
+    const userId = await ownerOf(f.input.threadId);
+    expect(await maybeContinueAfterTimeout(f.input)).toEqual({
+      action: "none",
+      reason: "flag-off",
+    });
+    await seedFeatureFlags({ db });
+    await setUserFeatureFlagOverride({
+      db,
+      userId,
+      name: "cellSessionContinuation",
+      value: true,
+    });
+    expect((await maybeContinueAfterTimeout(f.input)).action).toBe("continue");
+  });
+
   it("the default dependencies read the thread, queue the message on the chat and drain", async () => {
+    await seedFeatureFlags({ db });
+    await setUserFeatureFlagOverride({
+      db,
+      userId: await ownerOf(f.input.threadId),
+      name: "cellSessionContinuation",
+      value: true,
+    });
     await db
       .update(threadTable)
       .set({ status: "complete" })

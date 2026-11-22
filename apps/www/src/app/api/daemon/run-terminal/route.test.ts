@@ -36,6 +36,7 @@ import {
 } from "@terragon/shared/model/cell-session-continuation";
 import { getThreadChat } from "@terragon/shared/model/threads";
 import { markThreadTerminal } from "@terragon/shared/model/threads";
+import { setUserFeatureFlagOverride } from "@terragon/shared/model/feature-flags";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
 
 vi.mock("@/lib/auth-server", () => ({ getDaemonTokenContext: vi.fn() }));
@@ -649,6 +650,13 @@ describe("POST /api/daemon/run-terminal — timeout continuation (#743 phase 10)
   async function seed({ checkpoint }: { checkpoint: boolean }) {
     RUN = `run-cont-${nanoid(8)}`;
     user = (await createTestUser({ db })).user;
+    // #743 phase 11: the continuation is behind cellSessionContinuation.
+    await setUserFeatureFlagOverride({
+      db,
+      userId: user.id,
+      name: "cellSessionContinuation",
+      value: true,
+    });
     const t = await createTestThread({
       db,
       userId: user.id,
