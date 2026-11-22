@@ -10,6 +10,7 @@ import {
 } from "@terragon/types/cell-session-checkpoint";
 
 import type { SessionRedactor } from "./cell-session-redact";
+import type { CheckpointResult, CheckpointHead } from "./cell-www-client";
 
 /**
  * The checkpoint writer core (#743 phase 5). Pure: it turns the previous
@@ -341,4 +342,136 @@ export function prepareCheckpoint(
 
 function concatAll(chunks: Uint8Array[]): Uint8Array {
   return chunks.reduce((acc, c) => concat(acc, c), new Uint8Array(0));
+}
+
+// ---- restore into a new cell (#743 phase 8) -----------------------------------
+
+/** A restore fetches this many chunks at a time (A-12). */
+export const CELL_RESTORE_FETCH_CONCURRENCY = 8;
+
+/** Why a restore started fresh. Enum only: never a value from the transcript. */
+export type RestoreFailure =
+  | "no-head"
+  | "other-session"
+  | "head-error"
+  | "bad-manifest"
+  | "over-cap"
+  | "fetch-error"
+  | "hash-mismatch";
+
+export type RestoreResult =
+  | {
+      kind: "restored";
+      manifest: CellSessionManifest;
+      version: number;
+      /** The whole redacted transcript, hash-verified. */
+      native: Uint8Array;
+    }
+  | { kind: "fresh"; reason: RestoreFailure };
+
+export interface RestoreInput {
+  sessionId: string;
+  readHead: (
+    sessionId: string,
+    signal: AbortSignal,
+  ) => Promise<CheckpointResult<{ head: CheckpointHead }>>;
+  readBlob: (
+    sha256: string,
+    signal: AbortSignal,
+  ) => Promise<CheckpointResult<{ bytes: Uint8Array }>>;
+  signal: AbortSignal;
+  concurrency?: number;
+}
+
+/**
+ * Reads the head, fetches every native chunk (8 at a time) and verifies each
+ * against its address, then the whole transcript against the manifest. A
+ * missing or bad chunk fails the hash check (A-13) and the run starts fresh.
+ * Never throws and never returns a byte that failed a check.
+ */
+export async function fetchSessionCheckpoint(
+  input: RestoreInput,
+): Promise<RestoreResult> {
+  const fresh = (reason: RestoreFailure): RestoreResult => ({
+    kind: "fresh",
+    reason,
+  });
+  let head: CheckpointHead;
+  try {
+    const out = await input.readHead(input.sessionId, input.signal);
+    if (!out.ok) return fresh("head-error");
+    head = out.head;
+  } catch {
+    return fresh("head-error");
+  }
+  if (!head.found) {
+    return fresh(head.reason === "other_session" ? "other-session" : "no-head");
+  }
+  const { manifest, version } = head;
+  const { id, ...rest } = manifest;
+  if (
+    manifest.schema !== CELL_SESSION_SCHEMA ||
+    id !== computeManifestId(rest) ||
+    manifest.sessionId !== input.sessionId
+  ) {
+    return fresh("bad-manifest");
+  }
+  const chunks = manifest.native.chunks;
+  const total = chunks.reduce((n, c) => n + c.bytes, 0);
+  if (
+    chunks.length > CELL_SESSION_MAX_CHUNKS ||
+    manifest.native.bytes > CELL_SESSION_NATIVE_MAX_BYTES ||
+    total !== manifest.native.bytes
+  ) {
+    return fresh(
+      total > CELL_SESSION_NATIVE_MAX_BYTES ? "over-cap" : "bad-manifest",
+    );
+  }
+
+  const bodies: Uint8Array[] = new Array<Uint8Array>(chunks.length);
+  const state: { failure: RestoreFailure | null } = { failure: null };
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (state.failure === null) {
+      const index = next++;
+      const chunk = chunks[index];
+      if (chunk === undefined) return;
+      let out: CheckpointResult<{ bytes: Uint8Array }>;
+      try {
+        out = await input.readBlob(chunk.sha256, input.signal);
+      } catch {
+        state.failure ??= "fetch-error";
+        return;
+      }
+      if (!out.ok) {
+        state.failure ??= "fetch-error";
+        return;
+      }
+      if (
+        out.bytes.length !== chunk.bytes ||
+        sha256Hex(out.bytes) !== chunk.sha256
+      ) {
+        state.failure ??= "hash-mismatch";
+        return;
+      }
+      bodies[index] = out.bytes;
+    }
+  };
+  const width = Math.max(
+    1,
+    input.concurrency ?? CELL_RESTORE_FETCH_CONCURRENCY,
+  );
+  await Promise.all(
+    Array.from({ length: Math.min(width, chunks.length) }, worker),
+  );
+  if (state.failure !== null) return fresh(state.failure);
+
+  const native = concatAll(bodies);
+  if (
+    native.length !== manifest.native.bytes ||
+    sha256Hex(native) !== manifest.native.sha256
+  ) {
+    return fresh("hash-mismatch");
+  }
+  return { kind: "restored", manifest, version, native };
 }

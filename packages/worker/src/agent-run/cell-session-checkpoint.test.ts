@@ -8,11 +8,18 @@ import { computeManifestId } from "@terragon/types/cell-session-checkpoint";
 import {
   CELL_SESSION_CHUNK_MAX_BYTES,
   CELL_SESSION_NATIVE_MAX_BYTES,
+  CELL_SESSION_SCHEMA,
+  sha256Hex,
+  type CellSessionManifest,
 } from "@terragon/types/cell-session-checkpoint";
 
+import type { CheckpointHead } from "./cell-www-client";
 import {
+  CELL_RESTORE_FETCH_CONCURRENCY,
+  fetchSessionCheckpoint,
   prepareCheckpoint,
   type CheckpointContext,
+  type RestoreInput,
   type PrepareCheckpointInput,
   type PrepareCheckpointResult,
 } from "./cell-session-checkpoint";
@@ -379,5 +386,183 @@ describe("prepareCheckpoint", () => {
     expect(events[1]?.toolName).toBe("");
     expect(events[2]?.text).toBe("[1]");
     expect(w.manifest.turn).toBe(0);
+  });
+});
+
+describe("fetchSessionCheckpoint (#743 phase 8)", () => {
+  const SID = CONTEXT.sessionId;
+  const parts = Array.from({ length: 20 }, (_, i) => bytes(`line ${i}\n`));
+  const whole = parts.reduce((a, b) => {
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a);
+    out.set(b, a.length);
+    return out;
+  }, new Uint8Array(0));
+
+  function manifestFor(over: Partial<CellSessionManifest> = {}) {
+    const body: Omit<CellSessionManifest, "id"> = {
+      schema: CELL_SESSION_SCHEMA,
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+      sessionId: SID,
+      parent: null,
+      turn: 3,
+      runExternalId: "run-1",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      harness: { name: "claude-code", nativeFormat: "claude-jsonl" },
+      projectDir: "-workspace",
+      git: null,
+      native: {
+        sha256: sha256Hex(whole),
+        bytes: whole.length,
+        chunks: parts.map((p) => ({ sha256: sha256Hex(p), bytes: p.length })),
+      },
+      events: { count: 0, chunks: [] },
+      redaction: { rulesDigest: "d", hits: 0 },
+      ...over,
+    };
+    return { ...body, id: computeManifestId(body) } as CellSessionManifest;
+  }
+
+  function harness(
+    opts: {
+      head?: CheckpointHead;
+      blob?: (sha: string) => Uint8Array | "fail";
+    } = {},
+  ) {
+    const manifest = manifestFor();
+    const store = new Map(parts.map((p) => [sha256Hex(p), p]));
+    let inFlight = 0;
+    let peak = 0;
+    const input: RestoreInput = {
+      sessionId: SID,
+      signal: new AbortController().signal,
+      readHead: async () => ({
+        ok: true as const,
+        head: opts.head ?? { found: true as const, manifest, version: 5 },
+      }),
+      readBlob: async (sha: string) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setImmediate(r));
+        inFlight -= 1;
+        const got = opts.blob ? opts.blob(sha) : store.get(sha);
+        if (got === "fail" || got === undefined) {
+          return { ok: false as const, code: "not_found", status: 404 };
+        }
+        return { ok: true as const, bytes: got };
+      },
+    };
+    return { input, manifest, peak: () => peak };
+  }
+
+  it("returns the exact bytes and the head version, fetching at most 8 chunks at once", async () => {
+    const h = harness();
+    const out = await fetchSessionCheckpoint(h.input);
+    expect(out.kind).toBe("restored");
+    if (out.kind !== "restored") return;
+    expect(text(out.native)).toBe(text(whole));
+    expect(out.version).toBe(5);
+    expect(out.manifest.id).toBe(h.manifest.id);
+    expect(h.peak()).toBe(CELL_RESTORE_FETCH_CONCURRENCY);
+  });
+
+  it("fails on a chunk that does not match its address", async () => {
+    const h = harness({ blob: () => bytes("tampered\n") });
+    expect(await fetchSessionCheckpoint(h.input)).toEqual({
+      kind: "fresh",
+      reason: "hash-mismatch",
+    });
+  });
+
+  it("fails on a missing chunk (A-13) and on a thrown fetch", async () => {
+    const h = harness({ blob: () => "fail" });
+    expect(await fetchSessionCheckpoint(h.input)).toEqual({
+      kind: "fresh",
+      reason: "fetch-error",
+    });
+    const t = harness();
+    t.input.readBlob = async () => {
+      throw new Error("boom");
+    };
+    expect(await fetchSessionCheckpoint(t.input)).toEqual({
+      kind: "fresh",
+      reason: "fetch-error",
+    });
+  });
+
+  it("starts fresh with no head, another session, or a head error", async () => {
+    for (const [head, reason] of [
+      [{ found: false, reason: "none" }, "no-head"],
+      [{ found: false, reason: "other_session" }, "other-session"],
+    ] as const) {
+      const h = harness({ head });
+      expect(await fetchSessionCheckpoint(h.input)).toEqual({
+        kind: "fresh",
+        reason,
+      });
+    }
+    const h = harness();
+    h.input.readHead = async () => ({
+      ok: false as const,
+      code: "transport",
+      status: 0,
+    });
+    expect(await fetchSessionCheckpoint(h.input)).toEqual({
+      kind: "fresh",
+      reason: "head-error",
+    });
+    h.input.readHead = async () => {
+      throw new Error("x");
+    };
+    expect(await fetchSessionCheckpoint(h.input)).toEqual({
+      kind: "fresh",
+      reason: "head-error",
+    });
+  });
+
+  it("refuses a manifest with a bad id, another session, wrong sizes or over the cap", async () => {
+    const good = manifestFor();
+    const cases: CellSessionManifest[] = [
+      { ...good, id: "0".repeat(64) },
+      manifestFor({ sessionId: "22222222-2222-4222-8222-222222222222" }),
+      manifestFor({ native: { ...good.native, bytes: good.native.bytes + 1 } }),
+      manifestFor({
+        native: {
+          sha256: good.native.sha256,
+          bytes: CELL_SESSION_NATIVE_MAX_BYTES + 1,
+          chunks: [
+            {
+              sha256: "a".repeat(64),
+              bytes: CELL_SESSION_NATIVE_MAX_BYTES + 1,
+            },
+          ],
+        },
+      }),
+    ];
+    const reasons = [];
+    for (const manifest of cases) {
+      const h = harness({ head: { found: true, manifest, version: 1 } });
+      const out = await fetchSessionCheckpoint(h.input);
+      reasons.push(out.kind === "fresh" ? out.reason : "restored");
+    }
+    expect(reasons).toEqual([
+      "bad-manifest",
+      "bad-manifest",
+      "bad-manifest",
+      "over-cap",
+    ]);
+  });
+
+  it("fails when the whole transcript hash disagrees with the manifest", async () => {
+    const good = manifestFor();
+    const manifest = manifestFor({
+      native: { ...good.native, sha256: "f".repeat(64) },
+    });
+    const h = harness({ head: { found: true, manifest, version: 1 } });
+    expect(await fetchSessionCheckpoint(h.input)).toEqual({
+      kind: "fresh",
+      reason: "hash-mismatch",
+    });
   });
 });

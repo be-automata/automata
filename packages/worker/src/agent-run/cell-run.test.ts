@@ -9,6 +9,13 @@ import {
   newAbnormalEndState,
   type AbnormalEnd,
 } from "./abnormal-end";
+import {
+  CELL_SESSION_SCHEMA,
+  computeManifestId,
+  sha256Hex,
+  type CellSessionManifest,
+} from "@terragon/types/cell-session-checkpoint";
+
 import { BoundedRunMap } from "./run-end-marks";
 import {
   buildCellMessage,
@@ -136,6 +143,9 @@ function setup(
     /** What the checkpoint route's commit answers; default ok with the next version. */
     commit?: (expectedVersion: number) => Promise<unknown>;
     putBlob?: () => Promise<unknown>;
+    /** #743 phase 8: the restore's reads; both unset = no restore reads wired. */
+    readHead?: () => Promise<unknown>;
+    readBlob?: (sha256: string) => Promise<unknown>;
   } = {},
 ) {
   released.length = 0;
@@ -287,6 +297,13 @@ function setup(
         });
         return { ok: true, version: expected + 1 };
       },
+      ...(over.readHead && over.readBlob
+        ? {
+            readHead: async () => (await over.readHead?.()) as never,
+            readBlob: async (_o: unknown, sha256: string) =>
+              (await over.readBlob?.(sha256)) as never,
+          }
+        : {}),
     },
     sleep: async (ms, signal) => {
       // #743: the capture loop has its own interval and waits like the sampler.
@@ -2606,5 +2623,263 @@ describe("the timeout capture order (#743 phase 7b)", () => {
     expect(CELL_CAPTURE_POLL_MS).not.toBe(CELL_MEMORY_SAMPLE_MS);
     expect(CELL_CAPTURE_POLL_MS).not.toBe(CELL_SETUP_STAMP_MS);
     expect(CELL_CAPTURE_POLL_MS).not.toBe(5_000); // CELL_TERMINAL_RETRY.delayMs
+  });
+});
+
+describe("the session restore (#743 phase 8)", () => {
+  const SID = "11111111-1111-4111-8111-111111111111";
+  const PATH = `/home/agent/.claude/projects/-workspace/${SID}.jsonl`;
+  const enc = (t: string) => new TextEncoder().encode(t);
+  const dec = (b: Uint8Array) => new TextDecoder().decode(b);
+  const turn = (n: number) =>
+    `${JSON.stringify({
+      type: "assistant",
+      uuid: `u${n}`,
+      message: {
+        id: `msg_${n}`,
+        content: [{ type: "text", text: `answer ${n}` }],
+      },
+    })}\n`;
+  const withSession = (id: string | null = SID) =>
+    (async () => ({ ...pulled, sessionId: id })) as never;
+
+  /** A hand-built head: `chunks` pieces of a transcript, addressed by their hash. */
+  function head(chunks: string[], over: Partial<CellSessionManifest> = {}) {
+    const parts = chunks.map(enc);
+    const whole = enc(chunks.join(""));
+    const body: Omit<CellSessionManifest, "id"> = {
+      schema: CELL_SESSION_SCHEMA,
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      sessionId: SID,
+      parent: null,
+      turn: chunks.length,
+      runExternalId: "run-0",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      harness: { name: "claude-code", nativeFormat: "claude-jsonl" },
+      projectDir: "-workspace",
+      git: null,
+      native: {
+        sha256: sha256Hex(whole),
+        bytes: whole.length,
+        chunks: parts.map((p) => ({ sha256: sha256Hex(p), bytes: p.length })),
+      },
+      events: { count: 0, chunks: [] },
+      redaction: { rulesDigest: "d", hits: 0 },
+      ...over,
+    };
+    const manifest = { ...body, id: computeManifestId(body) };
+    const blobs = new Map(parts.map((p) => [sha256Hex(p), p]));
+    return { manifest, blobs, whole };
+  }
+
+  function restoring(
+    h: ReturnType<typeof head> | null,
+    over: Parameters<typeof setup>[0] = {},
+  ) {
+    return setup({
+      capture: true,
+      nextMessage: withSession(),
+      readHead: async () =>
+        h === null
+          ? { ok: true, head: { found: false, reason: "none" } }
+          : {
+              ok: true,
+              head: { found: true, manifest: h.manifest, version: 5 },
+            },
+      readBlob: async (sha) => {
+        const bytes = h?.blobs.get(sha);
+        return bytes
+          ? { ok: true, bytes }
+          : { ok: false, code: "not_found", status: 404 };
+      },
+      ...over,
+    });
+  }
+
+  /** The message file the daemon was handed. */
+  const sentMessage = (s: ReturnType<typeof setup>) => {
+    const f = s.files.find((x) => x.path.includes("/msg-"));
+    return JSON.parse(f?.text ?? "{}") as {
+      sessionId: string | null;
+      prompt: string;
+    };
+  };
+  const restoreLogs = (s: { logs: string[] }) =>
+    s.logs.filter((l) => l.includes("restore"));
+
+  // card: protects=#743 a restore writes the exact checkpointed bytes at the recorded project dir (mode 600, owner agent) BEFORE the message, and the message keeps the session id so the daemon resumes; fails_when=the bytes differ, the path or mode is wrong, the file lands after the message, or the id is dropped; no_claim=a real claude --resume (the OPENSANDBOX_IT and AC-8)
+  it("copies the transcript in before the message and keeps the session id", async () => {
+    const h = head([turn(1), turn(2), turn(3)]);
+    const s = restoring(h);
+    await s.executor.run(s.args);
+    const written = s.files.find((f) => f.path === PATH);
+    expect(written?.text).toBe(h.whole && dec(h.whole));
+    expect(written?.opts).toEqual({
+      mode: 600,
+      owner: "agent",
+      group: "agent",
+    });
+    expect(s.files.findIndex((f) => f.path === PATH)).toBeLessThan(
+      s.files.findIndex((f) => f.path.includes("/msg-")),
+    );
+    expect(sentMessage(s).sessionId).toBe(SID);
+    expect(
+      s.execs.some((a) => a.join(" ") === `/usr/bin/test -s ${PATH}`),
+    ).toBe(true);
+    expect(restoreLogs(s).join("\n")).toMatch(
+      /cell: session restore: restored turn=3 native=\d+ dir=-workspace in \d+ms/,
+    );
+  });
+
+  // card: protects=#743 F6: the file goes into the project dir the manifest recorded, and an unsafe recorded dir falls back to -workspace; fails_when=a hard-coded dir or a path-traversing dir is used; no_claim=which dir a real run records
+  it("writes into the recorded project dir, and refuses an unsafe one", async () => {
+    const good = head([turn(1)], { projectDir: "-home-agent-app" });
+    const a = restoring(good);
+    await a.executor.run(a.args);
+    expect(
+      a.files.some((f) => f.path.includes("/projects/-home-agent-app/")),
+    ).toBe(true);
+    const bad = head([turn(1)], { projectDir: "../../etc" });
+    const b = restoring(bad);
+    await b.executor.run(b.args);
+    expect(b.files.some((f) => f.path === PATH)).toBe(true);
+    expect(b.files.some((f) => f.path.includes(".."))).toBe(false);
+  });
+
+  // card: protects=#743 AC-2 (OQ-1): a chunk that fails its hash starts fresh, said in the journal and the prompt, and the message never carries the id; fails_when=the id is sent, nothing is logged, or the bad bytes are written; no_claim=the daemon's own fallback
+  it("a hash mismatch starts fresh and says so", async () => {
+    const h = head([turn(1), turn(2)]);
+    const first = [...h.blobs.keys()][0] as string;
+    h.blobs.set(first, enc("tampered\n"));
+    const s = restoring(h);
+    await s.executor.run(s.args);
+    expect(sentMessage(s).sessionId).toBeNull();
+    expect(sentMessage(s).prompt).toContain("could not be restored");
+    expect(s.files.some((f) => f.path === PATH)).toBe(false);
+    expect(restoreLogs(s)).toContain(
+      "[agent-run thr_1] continuation: restore failed (hash-mismatch), starting fresh",
+    );
+  });
+
+  // card: protects=#743 AC-2: no head, an unreadable blob, a head error and a copy-in failure each start fresh; fails_when=any of them keeps the session id; no_claim=the route
+  it.each([
+    ["no head", null, {}, "no-head"],
+    ["a missing blob", "blobless", {}, "fetch-error"],
+    [
+      "a head read error",
+      "ok",
+      { readHead: async () => ({ ok: false, code: "transport", status: 0 }) },
+      "head-error",
+    ],
+    [
+      "a copy-in failure",
+      "ok",
+      {
+        execExit: (argv: string[]) =>
+          argv[0] === "/usr/bin/test" && argv[2]?.endsWith(".jsonl") ? 1 : 0,
+      },
+      "copy-in-failed",
+    ],
+  ] as const)("%s starts fresh", async (_name, kind, over, cls) => {
+    const h = kind === null ? null : head([turn(1)]);
+    if (kind === "blobless" && h) h.blobs.clear();
+    const s = restoring(h, over as never);
+    await s.executor.run(s.args);
+    expect(sentMessage(s).sessionId).toBeNull();
+    expect(restoreLogs(s)).toContain(
+      `[agent-run thr_1] continuation: restore failed (${cls}), starting fresh`,
+    );
+  });
+
+  it("a session id that is not a UUID is never turned into a path", async () => {
+    const s = restoring(head([turn(1)]), { nextMessage: withSession("../x") });
+    await s.executor.run(s.args);
+    expect(sentMessage(s).sessionId).toBeNull();
+    expect(s.files.some((f) => f.path.includes(".."))).toBe(false);
+  });
+
+  // card: protects=#743 A-12: a restore fetches at most 8 chunks at once; fails_when=more than 8 reads overlap or the reads are serial; no_claim=real network timing
+  it("fetches at most 8 chunks at a time", async () => {
+    const h = head(Array.from({ length: 20 }, (_, i) => turn(i)));
+    let inFlight = 0;
+    let peak = 0;
+    const s = restoring(h, {
+      readBlob: async (sha) => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await flush();
+        inFlight -= 1;
+        return { ok: true, bytes: h.blobs.get(sha) };
+      },
+    });
+    await s.executor.run(s.args);
+    expect(peak).toBe(8);
+    expect(sentMessage(s).sessionId).toBe(SID);
+  });
+
+  // card: protects=#743 phase 6 limitation resolved: after a restore the capture continues the restored chain (parent = restored head, expected version = its version, only the new turn uploaded), not from version 0; fails_when=the next commit expects 0, has no parent, or re-uploads the restored turns; no_claim=a real second cell
+  it("the capture continues the restored chain", async () => {
+    const h = head([turn(1)]);
+    const s = restoring(h, {
+      execStdout: (argv) =>
+        isCaptureProbe(argv)
+          ? `${enc(turn(1) + turn(2)).length} 1700000000.5 -workspace/${SID}.jsonl\n`
+          : isRegularFileCheck(argv)
+            ? `${PATH}\n`
+            : "",
+      pollUntilTerminal: async () => {
+        await s.captureTick();
+        return { outcome: "completed", finalStatus: "complete" };
+      },
+    });
+    s.provider.copyOut.mockImplementation(async () => enc(turn(1) + turn(2)));
+    await s.executor.run(s.args);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    const commit = s.checkpoint.commits[0] as unknown as {
+      manifest: { turn: number; parent: string };
+      expected: number;
+    };
+    expect(commit.expected).toBe(5);
+    expect(commit.manifest.parent).toBe(h.manifest.id);
+    expect(commit.manifest.turn).toBe(2);
+    expect(s.checkpoint.puts.some((p) => p.text.includes("answer 2"))).toBe(
+      true,
+    );
+    expect(s.checkpoint.puts.some((p) => p.text.includes("answer 1"))).toBe(
+      false,
+    );
+  });
+
+  // card: protects=#743 the restore is off by default and when its reads are unwired: the message passes through untouched, no read, no copy-in; fails_when=a session id is dropped or a file is written with the gate off; no_claim=the flag itself (phase 11)
+  it("is off by default", async () => {
+    let reads = 0;
+    const h = head([turn(1)]);
+    const s = setup({
+      nextMessage: withSession(),
+      readHead: async () => {
+        reads += 1;
+        return {
+          ok: true,
+          head: { found: true, manifest: h.manifest, version: 1 },
+        };
+      },
+      readBlob: async () => ({ ok: false, code: "x", status: 500 }),
+    });
+    await s.executor.run(s.args);
+    expect(reads).toBe(0);
+    expect(sentMessage(s).sessionId).toBe(SID);
+    expect(s.files.some((f) => f.path === PATH)).toBe(false);
+    expect(restoreLogs(s)).toEqual([]);
+
+    const unwired = setup({ capture: true, nextMessage: withSession() });
+    await unwired.executor.run(unwired.args);
+    expect(sentMessage(unwired).sessionId).toBe(SID);
+    expect(unwired.files.some((f) => f.path === PATH)).toBe(false);
+
+    const noId = restoring(h, { nextMessage: withSession(null) });
+    await noId.executor.run(noId.args);
+    expect(noId.files.some((f) => f.path === PATH)).toBe(false);
+    expect(sentMessage(noId).sessionId).toBeNull();
   });
 });

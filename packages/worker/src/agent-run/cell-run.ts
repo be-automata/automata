@@ -41,7 +41,12 @@ import {
   freezeCellAgent,
   salvageCellWorkBranch,
 } from "./cell-salvage";
-import { prepareCheckpoint, type TurnState } from "./cell-session-checkpoint";
+import {
+  fetchSessionCheckpoint,
+  prepareCheckpoint,
+  type RestoreResult,
+  type TurnState,
+} from "./cell-session-checkpoint";
 import { createSessionRedactor } from "./cell-session-redact";
 import { teardownCellRun } from "./cell-teardown";
 import {
@@ -61,6 +66,7 @@ import {
   CELL_PLAN_UNAVAILABLE_CODES,
   withTimeout,
   type CellPlanResult,
+  type CheckpointHead,
   type CheckpointResult,
   type FailedStep,
   type TeardownCallResult,
@@ -213,6 +219,17 @@ export interface CellExecutorDeps {
       expectedVersion: number,
       signal: AbortSignal,
     ) => Promise<CheckpointResult<{ version: number }>>;
+    /** #743 phase 8: the restore's reads. Both set (and the gate on) = restore runs. */
+    readHead?: (
+      opts: WwwClientOpts,
+      sessionId: string,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ head: CheckpointHead }>>;
+    readBlob?: (
+      opts: WwwClientOpts,
+      sha256: string,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ bytes: Uint8Array }>>;
   };
   /** A fresh 24-char base64url id (18 random bytes) for one plan fetch. */
   randomId: () => string;
@@ -308,6 +325,8 @@ interface CellRunState {
   captureAbort: AbortController;
   /** #743: the running capture, when the gate is on. */
   capture: CaptureHandle | null;
+  /** #743 phase 8: why a restore failed and the run started without its history; null otherwise. */
+  startedFresh: string | null;
   cellOpts: WwwClientOpts;
   attempt: number;
   stepKey: string;
@@ -460,6 +479,7 @@ async function runCell(
     captureStop: new AbortController(),
     captureAbort: new AbortController(),
     capture: null,
+    startedFresh: null,
     cellOpts: { ...wwwOpts, cellAttempt: attempt },
     attempt,
     stepKey: plan.tags.stepKey,
@@ -600,12 +620,15 @@ async function runCell(
       if (pulled.agent !== "claudeCode" && r.testDbDelivered) {
         step(`cell: test database env not delivered (agent=${pulled.agent})`);
       }
+      // #743 phase 8: restore the session before the daemon gets its message.
+      const restore = await restoreSession(r, pulled);
+      const outgoing = restore.message;
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
       await putFile(
         r,
         messagePath,
-        JSON.stringify(buildCellMessage(pulled, ids)),
+        JSON.stringify(buildCellMessage(outgoing, ids)),
         600,
       );
       await execOk(
@@ -619,7 +642,7 @@ async function runCell(
 
       // 10. The poll loop takes over from the heartbeat.
       r.heartbeatStop.abort();
-      startSessionCapture(r, pulled);
+      startSessionCapture(r, outgoing, restore.restored);
       const poll = await deps.www.pollUntilTerminal(
         pollContext(r, provider, r.cellId),
         r.cellOpts,
@@ -942,13 +965,129 @@ function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 function startSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
+  restored: RestoredSession | null,
 ): void {
-  r.capture = openSessionCapture(r, pulled);
+  r.capture = openSessionCapture(r, pulled, restored);
+}
+
+/** A restore that landed: the chain the capture continues. */
+interface RestoredSession {
+  manifest: CellSessionManifest;
+  version: number;
+  native: Uint8Array;
+  projectDir: string;
+}
+
+/** The whole restore (reads, verification, copy-in) is abandoned after this long. */
+export const CELL_RESTORE_BUDGET_MS = 90_000;
+const RESTORE_FALLBACK_PROJECT_DIR = "-workspace";
+const SAFE_PROJECT_DIR = /^-[A-Za-z0-9-]{1,200}$/;
+const SAFE_SESSION_ID =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const RESTORE_NOTE =
+  "[automata] The earlier conversation could not be restored; you are starting without its history. Check the work branch for earlier commits.";
+
+/**
+ * #743 phase 8: puts the checkpointed transcript into the new cell, where the
+ * daemon's `--resume <sessionId>` finds it. Gated like the capture and off by
+ * default (unchanged message). On ANY failure the message carries
+ * `sessionId: null`, so the daemon starts fresh and never reaches its silent
+ * `--continue` fallback; the run says so in the journal and in the prompt.
+ */
+async function restoreSession(
+  r: CellRunState,
+  pulled: PulledDaemonMessage,
+): Promise<{ message: PulledDaemonMessage; restored: RestoredSession | null }> {
+  const { checkpoint, sessionContinuation } = r.deps;
+  const sessionId = pulled.sessionId;
+  if (
+    !checkpoint?.readHead ||
+    !checkpoint.readBlob ||
+    !sessionContinuation?.() ||
+    pulled.agent !== "claudeCode" ||
+    !sessionId
+  ) {
+    return { message: pulled, restored: null };
+  }
+  const { readHead, readBlob } = checkpoint;
+  const startedAt = r.deps.now();
+  const failFresh = (cls: string) => {
+    r.startedFresh = cls;
+    r.step(`continuation: restore failed (${cls}), starting fresh`);
+    return {
+      message: {
+        ...pulled,
+        sessionId: null,
+        prompt: `${RESTORE_NOTE}\n\n${pulled.prompt}`,
+      },
+      restored: null,
+    };
+  };
+  if (!SAFE_SESSION_ID.test(sessionId)) return failFresh("bad-session-id");
+
+  const budget = withTimeout(CELL_RESTORE_BUDGET_MS, r.live);
+  let result: RestoreResult;
+  try {
+    result = await fetchSessionCheckpoint({
+      sessionId,
+      readHead: (id, signal) => readHead(r.cellOpts, id, signal),
+      readBlob: (sha, signal) => readBlob(r.cellOpts, sha, signal),
+      signal: budget,
+    });
+  } catch (error) {
+    return failFresh(`error-${causeClass(error)}`);
+  }
+  if (result.kind === "fresh") return failFresh(result.reason);
+
+  const projectDir = SAFE_PROJECT_DIR.test(result.manifest.projectDir)
+    ? result.manifest.projectDir
+    : RESTORE_FALLBACK_PROJECT_DIR;
+  const dir = `${CELL_PROJECTS_DIR}/${projectDir}`;
+  const path = `${dir}/${sessionId}.jsonl`;
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  try {
+    ensureLive(r);
+    const mk = await raceLive(
+      r,
+      provider.exec(cellId, ["/bin/mkdir", "-p", "-m", "700", dir], {
+        timeoutMs: 5_000,
+      }),
+    );
+    if (mk.exitCode !== 0) return failFresh("copy-in-failed");
+    await raceLive(
+      r,
+      provider.copyIn(cellId, path, result.native, { mode: 600, ...CELL_USER }),
+    );
+    const check = await raceLive(
+      r,
+      provider.exec(cellId, ["/usr/bin/test", "-s", path], {
+        timeoutMs: 5_000,
+      }),
+    );
+    if (check.exitCode !== 0) return failFresh("copy-in-failed");
+  } catch (error) {
+    if (r.live.aborted) throw error;
+    return failFresh("copy-in-failed");
+  }
+  r.step(
+    `cell: session restore: restored turn=${result.manifest.turn} native=${result.native.length} dir=${projectDir} in ${r.deps.now() - startedAt}ms`,
+  );
+  return {
+    message: pulled,
+    restored: {
+      manifest: result.manifest,
+      version: result.version,
+      native: result.native,
+      projectDir,
+    },
+  };
 }
 
 function openSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
+  restored: RestoredSession | null,
 ): CaptureHandle | null {
   const { checkpoint, sessionContinuation } = r.deps;
   if (!checkpoint || !sessionContinuation?.()) return null;
@@ -971,13 +1110,14 @@ function openSessionCapture(
   }
 
   let sessionId: string | null = pulled.sessionId;
-  let projectDir: string | null = null;
-  let lastSize = 0;
-  let consumed = 0;
+  // A restore continues its chain: the file in the cell starts with the restored bytes.
+  let projectDir: string | null = restored?.projectDir ?? null;
+  let lastSize = restored?.native.length ?? 0;
+  let consumed = restored?.native.length ?? 0;
   let lastPullAt = r.deps.now();
-  let manifest: CellSessionManifest | null = null;
-  let native: Uint8Array = new Uint8Array(0);
-  let version = 0;
+  let manifest: CellSessionManifest | null = restored?.manifest ?? null;
+  let native: Uint8Array = restored?.native ?? new Uint8Array(0);
+  let version = restored?.version ?? 0;
   let turnState: TurnState | undefined;
   let stopped = false;
 
