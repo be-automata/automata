@@ -30,8 +30,12 @@ export interface R2BucketLike {
   put(
     key: string,
     value: ArrayBuffer | ArrayBufferView | string | ReadableStream | Blob,
-    options?: { httpMetadata?: { contentType?: string } },
-  ): Promise<unknown>;
+    options?: {
+      httpMetadata?: { contentType?: string };
+      /** A failed precondition makes `put` resolve `null` instead of writing. */
+      onlyIf?: Headers;
+    },
+  ): Promise<unknown | null>;
   get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
   head(
     key: string,
@@ -52,6 +56,12 @@ export interface R2BucketLike {
     cursor?: string;
   }>;
 }
+
+/**
+ * Outcome of a create-only write: 201 the object was created, 412 the key
+ * already existed (the precondition failed and nothing was written).
+ */
+export type R2ConditionalPut = { status: 201 } | { status: 412 };
 
 export interface R2ListResult {
   objects: Array<{
@@ -82,6 +92,16 @@ interface R2Config {
    * upload proxy). Required for `generatePresignedUploadUrl` in native mode.
    */
   uploadProxyPath?: string;
+}
+
+/** The HTTP status an S3 SDK error carries, or undefined. */
+function httpStatusOf(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+  const metadata = (error as { $metadata?: { httpStatusCode?: number } })
+    .$metadata;
+  return metadata?.httpStatusCode;
 }
 
 class R2Client {
@@ -202,6 +222,79 @@ class R2Client {
         ...(contentType ? { ContentType: contentType } : {}),
       }),
     );
+  }
+
+  /**
+   * Create-only write (`If-None-Match: *`). Returns 412 when the key already
+   * exists; never overwrites. Any error other than a failed precondition throws.
+   */
+  public async putObjectIfAbsent(
+    key: string,
+    body: Buffer | Uint8Array | string,
+    contentType?: string,
+  ): Promise<R2ConditionalPut> {
+    const bucket = this.binding();
+    if (bucket) {
+      // A binding `put` resolves null when `onlyIf` fails.
+      const written = await bucket.put(key, body, {
+        onlyIf: new Headers({ "If-None-Match": "*" }),
+        ...(contentType ? { httpMetadata: { contentType } } : {}),
+      });
+      return written === null ? { status: 412 } : { status: 201 };
+    }
+    // S3 answers 409 to a concurrent conditional write: retry once, then 412.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.s3Client.send(
+          new PutObjectCommand({
+            Bucket: this.bucketName,
+            Key: key,
+            Body: body,
+            IfNoneMatch: "*",
+            ...(contentType ? { ContentType: contentType } : {}),
+          }),
+        );
+        return { status: 201 };
+      } catch (error) {
+        const status = httpStatusOf(error);
+        if (status === 412) {
+          return { status: 412 };
+        }
+        if (status !== 409) {
+          throw error;
+        }
+      }
+    }
+    return { status: 412 };
+  }
+
+  /**
+   * Reads an object as a Buffer. `null` only when the key is missing; every
+   * other error throws (unlike `downloadData`, which throws on a missing key).
+   */
+  public async getObjectOrNull(key: string): Promise<Buffer | null> {
+    const bucket = this.binding();
+    if (bucket) {
+      const object = await bucket.get(key);
+      return object ? Buffer.from(await object.arrayBuffer()) : null;
+    }
+    try {
+      const response = await this.s3Client.send(
+        new GetObjectCommand({ Bucket: this.bucketName, Key: key }),
+      );
+      if (!response.Body) {
+        throw new Error("No data returned from R2");
+      }
+      return Buffer.from(await response.Body.transformToByteArray());
+    } catch (error) {
+      if (
+        httpStatusOf(error) === 404 ||
+        (error instanceof Error && error.name === "NoSuchKey")
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
