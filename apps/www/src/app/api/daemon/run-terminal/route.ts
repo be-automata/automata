@@ -45,7 +45,10 @@ const bodySchema = z.object({
       info: z.string().max(300).optional(),
       // #743: class-only, set by the worker when the run started fresh after
       // a failed session restore. Logged; never shown.
-      startedFresh: z.string().max(64).optional(),
+      startedFresh: z
+        .string()
+        .regex(/^[a-z0-9-]{1,64}$/)
+        .optional(),
     })
     .optional(),
 });

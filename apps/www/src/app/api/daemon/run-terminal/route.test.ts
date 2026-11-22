@@ -744,7 +744,8 @@ describe("POST /api/daemon/run-terminal — timeout continuation (#743 phase 10)
     await vi.waitFor(async () =>
       expect(await countContinuations({ db, threadId })).toBe(1),
     );
-    expect(await queuedCount()).toBe(1);
+    // The claim lands before the queue write; wait for the message itself.
+    await vi.waitFor(async () => expect(await queuedCount()).toBe(1));
 
     // A further redelivery claims nothing more.
     expect(await (await timeout()).json()).toEqual({ applied: false });
@@ -754,6 +755,32 @@ describe("POST /api/daemon/run-terminal — timeout continuation (#743 phase 10)
     // No reply from the early branch.
     expect(posted).toHaveLength(1);
     expect(getOctokitForApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("already-claimed means continued: a reply:true first write posts no reply", async () => {
+    await seed({ checkpoint: true });
+    vi.mocked(maybeContinueAfterTimeout).mockResolvedValueOnce({
+      action: "none",
+      reason: "already-claimed",
+    });
+    expect(await (await timeout()).json()).toEqual({ applied: true });
+    await settle();
+    expect(posted).toHaveLength(0);
+    expect(getOctokitForApp).not.toHaveBeenCalled();
+  });
+
+  it("400 when detail.startedFresh is not a short slug", async () => {
+    await seed({ checkpoint: true });
+    const res = await POST(
+      req({
+        threadId,
+        threadChatId,
+        runExternalId: RUN,
+        cause: "timeout",
+        detail: { startedFresh: "free form text\nwith a newline" },
+      }),
+    );
+    expect(res.status).toBe(400);
   });
 
   it("a spent budget puts the limit in the reply (AC-3)", async () => {

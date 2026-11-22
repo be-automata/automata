@@ -30,6 +30,7 @@ export type ContinuationNoneReason =
   | "lane"
   | "budget-spent"
   | "no-checkpoint"
+  | "shadow"
   | "already-claimed"
   | "superseded"
   | "error";
@@ -109,6 +110,32 @@ export function renderContinuationMessage({
   );
 }
 
+/**
+ * `updateThreadChat` commits the row and THEN awaits a broadcast. A throw after
+ * the commit means the message exists, so it must count as written (the claim
+ * stays; a release would let a retry queue a second copy). Only a write that
+ * did not land rethrows. The read-back is the arbiter; if it fails too, the
+ * original error propagates (release is then the safe side of an unknown).
+ */
+export async function appendQueuedMessageOnce({
+  write,
+  isCommitted,
+  log,
+}: {
+  write: () => Promise<unknown>;
+  isCommitted: () => Promise<boolean>;
+  log: (message: string) => void;
+}): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    if (!(await isCommitted())) throw error;
+    log(
+      `continuation: queued message committed, post-write step failed (${error instanceof Error ? error.name : "unknown"})`,
+    );
+  }
+}
+
 function defaultDeps(): ContinuationDeps {
   const db = defaultDb;
   return {
@@ -157,12 +184,27 @@ function defaultDeps(): ContinuationDeps {
         threadChatId,
       });
       if (!threadChat) throw new Error("Thread chat not found");
-      await updateThreadChat({
-        db,
-        userId,
-        threadId,
-        threadChatId,
-        updates: { appendQueuedMessages: [message] },
+      await appendQueuedMessageOnce({
+        write: () =>
+          updateThreadChat({
+            db,
+            userId,
+            threadId,
+            threadChatId,
+            updates: { appendQueuedMessages: [message] },
+          }),
+        isCommitted: async () => {
+          const after = await getThreadChat({
+            db,
+            threadId,
+            userId,
+            threadChatId,
+          });
+          return (after?.queuedMessages ?? []).some(
+            (m) => m.timestamp === message.timestamp,
+          );
+        },
+        log: (m) => console.log(m),
       });
       return !isAgentWorking(threadChat.status);
     },
@@ -247,6 +289,8 @@ export async function maybeContinueAfterTimeout(
     ) {
       return none("superseded");
     }
+    // A shadow thread is never drained, so a claimed message would sit unread.
+    if (thread.shadow) return none("shadow");
     const claim = await claimContinuation({
       db,
       threadId: input.threadId,
@@ -288,7 +332,7 @@ export async function maybeContinueAfterTimeout(
     // The message exists from here on: the claim is never released (F7).
     try {
       await markContinuationDispatched({ db, id: claim.id });
-      if (idle && !thread.shadow) await deps.drain(target);
+      if (idle) await deps.drain(target);
       deps.log(
         `continuation: dispatched (ordinal ${claim.ordinal}) thread=${input.threadId}`,
       );

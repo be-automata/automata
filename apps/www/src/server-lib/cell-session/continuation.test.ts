@@ -20,6 +20,7 @@ import {
   createTestUser,
 } from "@terragon/shared/model/test-helpers";
 import {
+  appendQueuedMessageOnce,
   maybeContinueAfterTimeout,
   renderContinuationMessage,
   type ContinuationDeps,
@@ -329,19 +330,48 @@ describe("maybeContinueAfterTimeout (#743 phase 9)", () => {
     expect(drain).not.toHaveBeenCalled();
   });
 
-  it("a shadow thread is claimed and queued but not drained", async () => {
+  it("a shadow thread is refused before the claim", async () => {
     const drain = vi.fn();
+    const queueWrite = vi.fn();
     const base = f.deps.readThread;
     const res = await maybeContinueAfterTimeout(f.input, {
       ...f.deps,
       drain,
+      queueWrite,
       readThread: async (a) => {
         const t = await base(a);
         return t && { ...t, shadow: true };
       },
     });
-    expect(res.action).toBe("continue");
+    expect(res).toEqual({ action: "none", reason: "shadow" });
+    expect(queueWrite).not.toHaveBeenCalled();
     expect(drain).not.toHaveBeenCalled();
+    expect(await countContinuations({ db, threadId: f.input.threadId })).toBe(
+      0,
+    );
+  });
+
+  it("appendQueuedMessageOnce: a throw after a committed write is written, not rethrown", async () => {
+    const log = vi.fn();
+    await expect(
+      appendQueuedMessageOnce({
+        write: async () => {
+          throw new Error("broadcast down");
+        },
+        isCommitted: async () => true,
+        log,
+      }),
+    ).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    await expect(
+      appendQueuedMessageOnce({
+        write: async () => {
+          throw new Error("db down");
+        },
+        isCommitted: async () => false,
+        log,
+      }),
+    ).rejects.toThrow("db down");
   });
 
   it("the default dependencies resolve the flag per user: off by default, on with an override", async () => {

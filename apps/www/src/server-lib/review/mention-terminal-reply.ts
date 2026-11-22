@@ -95,6 +95,9 @@ export async function continueOrReplyAtTerminal(
         lane: "task",
       });
       if (decision.action === "continue") return;
+      // Another delivery already claimed (or is continuing) this run: the
+      // continuation is running, so a "couldn't finish" reply would be false.
+      if (decision.reason === "already-claimed") return;
       limitReached = decision.reason === "budget-spent";
     } catch (error) {
       console.error(
