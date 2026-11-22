@@ -44,8 +44,45 @@ describe("mentionWorkBranchName", () => {
   });
 
   it("falls back to the body for the key and the title for the slug", () => {
-    expect(name("fix: Add request logging", "Tracked in ACME-77.")).toBe(
+    expect(name("fix: Add request logging", "Tracked in Jira: ACME-77.")).toBe(
       "fix/ACME-77-add-request-logging",
+    );
+  });
+
+  it("takes a body key only with an explicit marker", () => {
+    expect(name("Add logging", "Jira: ACME-123")).toBe(
+      "feat/ACME-123-add-logging",
+    );
+    expect(name("Add logging", "ticket : acme-5")).toBe(
+      "feat/ACME-5-add-logging",
+    );
+    expect(
+      name("Add logging", "https://acme.atlassian.net/browse/ACME-123"),
+    ).toBe("feat/ACME-123-add-logging");
+    expect(name("Add logging", "see [ACME-9]")).toBe("feat/ACME-9-add-logging");
+  });
+
+  it("never takes a bare key from the body", () => {
+    expect(name("Add logging", "Tracked in ACME-77.")).toBeNull();
+  });
+
+  it.each([
+    "AC-1",
+    "OD-3",
+    "RF-1",
+    "OQ-4",
+    "G-12",
+    "GPT-4",
+    "ES-2022",
+    "COVID-19",
+  ])("falls back for the spec label or version %s", (label) => {
+    expect(name("Add logging", `Covers ${label} and [${label}]`)).toBeNull();
+    expect(name(`Add ${label} logging`)).toBeNull();
+  });
+
+  it("a title key wins over a marked body key", () => {
+    expect(name("ACME-45 Add logging", "Jira: ACME-1")).toBe(
+      "feat/ACME-45-add-logging",
     );
   });
 
@@ -81,7 +118,7 @@ describe("mentionWorkBranchName", () => {
       expect(name("Support UTF-8 names", "see RFC-7231")).toBeNull();
     });
     it("a denylisted key in the title falls through to the body", () => {
-      expect(name("Support UTF-8 names", "ACME-3")).toBe(
+      expect(name("Support UTF-8 names", "[ACME-3]")).toBe(
         "feat/ACME-3-support-utf-8-names",
       );
     });

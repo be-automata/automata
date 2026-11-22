@@ -433,6 +433,10 @@ export type ThreadMinimal = NonNullable<
  * True when any thread of the repo already carries a mention stamp with this
  * convention branch (#752 RF-1): a second mention on the same issue must not
  * reuse a name a run that has not pushed yet will push.
+ *
+ * Deliberately no status filter: an archived or terminal thread keeps its bare
+ * name, so later mentions of that issue get the `-<id8>` suffix. This fails
+ * closed and never reuses a branch that may still have a PR.
  */
 export async function isMentionWorkBranchClaimed(
   db: DB,

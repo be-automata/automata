@@ -24,8 +24,26 @@ const DEFAULT_TYPE: CommitType = "feat";
 const SLUG_MAX = 40;
 const BRANCH_MAX = 128;
 
-/** Project parts that look like a ticket key but name a standard (`UTF-8`). */
-const MENTION_KEY_DENYLIST: readonly string[] = ["UTF", "SHA", "ISO", "RFC"];
+/**
+ * Prefixes that look like a ticket key but name a standard, a spec label or a
+ * version (`UTF-8`, `AC-1`, `GPT-4`, `COVID-19`).
+ */
+const MENTION_KEY_DENYLIST: readonly string[] = [
+  "UTF",
+  "SHA",
+  "ISO",
+  "RFC",
+  "CVE",
+  "GHSA",
+  "AC",
+  "OD",
+  "OQ",
+  "RF",
+  "G",
+  "ES",
+  "GPT",
+  "COVID",
+];
 
 const TYPE_PREFIX = new RegExp(
   `^\\s*(${COMMIT_TYPES.join("|")})(?:\\([^)]*\\))?!?:\\s*`,
@@ -33,6 +51,16 @@ const TYPE_PREFIX = new RegExp(
 );
 const TICKET_KEY =
   /(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,31})-(\d{1,12})(?![A-Za-z0-9])/g;
+const KEY_SOURCE = "([A-Za-z][A-Za-z0-9]{1,31})-(\\d{1,12})";
+/** The only forms a key may take in an issue body: a bare key never counts. */
+const BODY_KEY_MARKERS: readonly RegExp[] = [
+  new RegExp(`\\[${KEY_SOURCE}\\]`, "gi"),
+  new RegExp(
+    `(?<![A-Za-z0-9])(?:jira|ticket)\\s*:\\s*${KEY_SOURCE}(?![A-Za-z0-9])`,
+    "gi",
+  ),
+  new RegExp(`/browse/${KEY_SOURCE}(?![A-Za-z0-9])`, "gi"),
+];
 const BRANCH_SHAPE = new RegExp(
   `^(?:${COMMIT_TYPES.join("|")})/[A-Z][A-Z0-9]{1,31}-\\d{1,12}(?:-[a-z0-9]+)*$`,
 );
@@ -56,6 +84,27 @@ function findKey(text: string): KeyMatch | null {
     };
   }
   return null;
+}
+
+function findBodyKey(body: string): KeyMatch | null {
+  let best: KeyMatch | null = null;
+  for (const marker of BODY_KEY_MARKERS) {
+    for (const match of body.matchAll(marker)) {
+      const [whole, project, digits] = match;
+      if (project === undefined || digits === undefined) continue;
+      const upper = project.toUpperCase();
+      if (MENTION_KEY_DENYLIST.includes(upper)) continue;
+      if (best === null || match.index < best.start) {
+        best = {
+          key: `${upper}-${digits}`,
+          start: match.index,
+          end: match.index + whole.length,
+        };
+      }
+      break;
+    }
+  }
+  return best;
 }
 
 function slugify(text: string): string {
@@ -85,8 +134,9 @@ export function isMentionWorkBranch(name: string): boolean {
 }
 
 /**
- * The convention branch for an issue (title, then body, for the first ticket
- * key), without the taken-suffix. Null when no key is found or the result
+ * The convention branch for an issue (the first ticket key in the title, then
+ * the first explicitly marked one in the body: `[KEY-1]`, `Jira: KEY-1`,
+ * `Ticket: KEY-1` or a `/browse/KEY-1` URL), without the taken-suffix. Null when no key is found or the result
  * would fail `isMentionWorkBranch`.
  */
 export function mentionWorkBranchName({
@@ -113,7 +163,7 @@ export function mentionWorkBranchName({
       slug = slugify(title.slice(prefixLength, inTitle.start));
     }
   } else {
-    const inBody = findKey(body ?? "");
+    const inBody = findBodyKey(body ?? "");
     if (!inBody) return null;
     key = inBody.key;
     slug = slugify(titleWithoutPrefix);
