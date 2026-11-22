@@ -47,6 +47,7 @@ import {
   CELL_RESTORE_FETCH_CONCURRENCY,
   fetchSessionCheckpoint,
   prepareCheckpoint,
+  type PrepareCheckpointResult,
   type RestoreResult,
   type TurnState,
 } from "./cell-session-checkpoint";
@@ -1015,6 +1016,11 @@ interface ChainStart {
   parent: string | null;
   known: boolean;
 }
+/** What a sent commit would make the chain's tip (no closure over the pull's bytes). */
+type PendingCommit = Pick<
+  Extract<PrepareCheckpointResult, { kind: "write" }>,
+  "manifest" | "native" | "nativeHash" | "consumedRawBytes" | "turnState"
+>;
 const UNKNOWN_CHAIN_START: ChainStart = {
   version: 0,
   parent: null,
@@ -1242,10 +1248,11 @@ function openSessionCapture(
   let version = restored?.version ?? start.version;
   const resumed = restored !== null;
   let versionKnown = resumed || start.known;
-  // The id of the manifest this writer last SENT (not the last acknowledged):
-  // a commit whose answer was lost may still have been applied, and the next
-  // commit then meets `head_moved` on a head that is this writer's own.
-  let lastSentId: string | null = null;
+  // The last commit this writer SENT whose answer never came: the store may
+  // still have applied it, and the next commit then meets `head_moved` on a head
+  // that is this writer's own. Kept in full, so the worker can adopt it as if it
+  // had been acknowledged and build the next manifest on it.
+  let pending: PendingCommit | null = null;
   // A chain with no previous manifest is parented to the head it began after.
   let chainParent: string | null = start.parent;
   let turnState: TurnState | undefined;
@@ -1262,6 +1269,7 @@ function openSessionCapture(
     consumed = 0;
     lastSize = 0;
     turnState = undefined;
+    pending = null;
     sessionId = newest.sessionId;
     switched = true;
     r.step("cell: checkpoint: resume wrote a new session id; new chain");
@@ -1313,6 +1321,24 @@ function openSessionCapture(
     }
     lastPullAt = r.deps.now();
     lastSize = file.size;
+    await writeCheckpoint(file, bytes, budget);
+  };
+
+  /** Takes a written (or lost-but-applied) checkpoint as the chain's new tip. */
+  const advance = (done: PendingCommit, at: number): void => {
+    manifest = done.manifest;
+    native = done.native;
+    nativeHash = done.nativeHash;
+    version = at;
+    turnState = done.turnState;
+    consumed += done.consumedRawBytes;
+  };
+
+  const writeCheckpoint = async (
+    file: SessionFile,
+    bytes: Uint8Array,
+    budget: AbortSignal,
+  ): Promise<void> => {
     // A pull with no new bytes writes nothing (A-12).
     if (bytes.length <= consumed) return;
 
@@ -1386,8 +1412,14 @@ function openSessionCapture(
       ),
     );
     if (upload.failure !== null) return failed(upload.failure);
-    const priorSentId = lastSentId;
-    lastSentId = result.manifest.id;
+    const prior = pending;
+    pending = {
+      manifest: result.manifest,
+      native: result.native,
+      nativeHash: result.nativeHash,
+      consumedRawBytes: result.consumedRawBytes,
+      turnState: result.turnState,
+    };
     const knewVersion = versionKnown;
     let commit = await checkpoint.commit(
       r.cellOpts,
@@ -1399,25 +1431,28 @@ function openSessionCapture(
       !commit.ok &&
       commit.code === "head_moved" &&
       knewVersion &&
-      priorSentId !== null
+      prior !== null
     ) {
       // The earlier commit's answer may have been lost after the store applied
-      // it. If the head is that very manifest, it is ours: take its version as
-      // if it had been acknowledged and commit once more (no loop). Any other
-      // head is a real foreign move and stops the capture below.
+      // it. If the head is that very manifest, it is ours: adopt it in full, as
+      // if it had been acknowledged. This manifest was built on the one before
+      // it, so it does not extend the head and is never re-sent: the bytes past
+      // the adopted one are prepared again on the head and committed once (the
+      // inner call has no prior, so it cannot loop). Any other head is a real
+      // foreign move and stops the capture below.
       const read = await checkpoint.readHead(
         r.cellOpts,
         result.manifest.sessionId,
         budget,
       );
-      if (read.ok && read.head.found && read.head.manifest.id === priorSentId) {
-        version = read.head.version;
-        commit = await checkpoint.commit(
-          r.cellOpts,
-          result.manifest,
-          version,
-          budget,
-        );
+      if (
+        read.ok &&
+        read.head.found &&
+        read.head.manifest.id === prior.manifest.id
+      ) {
+        advance(prior, read.head.version);
+        pending = null;
+        return writeCheckpoint(file, bytes, budget);
       }
     } else if (
       !commit.ok &&
@@ -1438,12 +1473,8 @@ function openSessionCapture(
     versionKnown = true;
     if (!commit.ok) return failed(commit);
 
-    manifest = result.manifest;
-    native = result.native;
-    nativeHash = result.nativeHash;
-    version = commit.version;
-    turnState = result.turnState;
-    consumed += result.consumedRawBytes;
+    pending = null;
+    advance(result, commit.version);
     r.step(
       `cell: checkpoint turn=${result.manifest.turn} native=${result.manifest.native.bytes} chunks=${result.manifest.native.chunks.length} hits=${result.manifest.redaction.hits} v=${commit.version} in ${r.deps.now() - started}ms`,
     );
@@ -1452,6 +1483,11 @@ function openSessionCapture(
   const failed = (f: { code: string; status: number }): void => {
     if (f.code === "head_moved") {
       r.step("cell: checkpoint skipped (head moved; capture stopped)");
+      stopped = true;
+    } else if (f.code === "not_append_only") {
+      // The worker's view of its own chain is wrong: every later manifest would
+      // be built on it and refused the same way.
+      r.step("cell: checkpoint skipped (not append-only; capture stopped)");
       stopped = true;
     } else if (
       f.code === "superseded" ||

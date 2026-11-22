@@ -14,6 +14,7 @@ import {
   CELL_SESSION_SCHEMA,
   computeManifestId,
   sha256Hex,
+  type BlobRef,
   type CellSessionManifest,
 } from "@terragon/types/cell-session-checkpoint";
 
@@ -2437,63 +2438,157 @@ describe("the per-turn session capture (#743 phase 6)", () => {
     );
   });
 
-  // card: protects=#743 R2 a commit applied by the store whose answer was lost leaves the worker at a stale version; the next commit meets head_moved on its own manifest, adopts the head's version, retries once and keeps capturing; fails_when=capture stops at head_moved, the retry repeats, or the later parent/version is wrong; no_claim=the www route
+  /** Mirrors `extendsList` in apps/www/src/server-lib/cell-session/checkpoint-store.ts (not importable from the worker). */
+  const extendsList = (previous: BlobRef[], next: BlobRef[]): boolean =>
+    next.length >= previous.length &&
+    previous.every(
+      (chunk, index) =>
+        next[index]?.sha256 === chunk.sha256 &&
+        next[index]?.bytes === chunk.bytes,
+    );
+
+  /**
+   * A fake checkpoint store with the real one's rules: a CAS on the head's
+   * version (`head_moved`), and, within a session, a manifest whose chunk lists
+   * extend the head's (`not_append_only`). Like the real store it never reads
+   * `parent`; the tests assert the parent themselves. `lost(n)` makes
+   * the n-th commit apply but lose its answer.
+   */
+  function appendOnlyStore(lost: (n: number) => boolean = () => false) {
+    const store = {
+      head: null as { manifest: CellSessionManifest; version: number } | null,
+      commits: [] as { expected: number; manifest: CellSessionManifest }[],
+    };
+    const over: Parameters<typeof setup>[0] = {
+      readHead: async () =>
+        store.head === null
+          ? { ok: true, head: { found: false, reason: "none" } }
+          : { ok: true, head: { found: true, ...store.head } },
+      commit: async (expected, raw) => {
+        const manifest = raw as CellSessionManifest;
+        store.commits.push({ expected, manifest });
+        const current = store.head;
+        if ((current?.version ?? 0) !== expected) {
+          return {
+            ok: false,
+            code: "head_moved",
+            status: 409,
+            version: current?.version ?? 0,
+          };
+        }
+        if (
+          current !== null &&
+          current.manifest.sessionId === manifest.sessionId &&
+          (!extendsList(
+            current.manifest.native.chunks,
+            manifest.native.chunks,
+          ) ||
+            !extendsList(
+              current.manifest.events.chunks,
+              manifest.events.chunks,
+            ))
+        ) {
+          return { ok: false, code: "not_append_only", status: 409 };
+        }
+        store.head = { manifest, version: expected + 1 };
+        return lost(store.commits.length)
+          ? { ok: false, code: "timeout", status: 0 }
+          : { ok: true, version: expected + 1 };
+      },
+    };
+    return { store, over };
+  }
+
+  // card: protects=#743 R2 a commit applied by the store whose answer was lost leaves the worker one manifest behind; on head_moved with the head being that manifest the worker adopts it in full (manifest, native, hash, offset, turn state), never re-sends the stale manifest, and commits the rest on the head; fails_when=the stale manifest is retried into not_append_only, capture stops, or a later commit does not extend the head; no_claim=the www route
   it("recovers when a commit's acknowledgement was lost", async () => {
-    let head: { id: string; version: number } | null = null;
-    const commits: { expected: number; id: string; parent: string | null }[] =
-      [];
-    let n = 0;
+    const { store, over } = appendOnlyStore((n) => n === 2);
+    const { s } = capturing(async (s, cell) => {
+      for (let t = 1; t <= 5; t++) {
+        cell.text += turn(t);
+        await s.captureTick();
+      }
+    }, over);
+    await s.executor.run(s.args);
+    const { commits } = store;
+    // 1 ok, 2 applied but lost, 3 built on 1 meets head_moved, then turn 3 on
+    // the adopted head, then turns 4 and 5.
+    expect(commits.map((c) => [c.manifest.turn, c.expected])).toEqual([
+      [1, 0],
+      [2, 1],
+      [3, 1],
+      [3, 2],
+      [4, 3],
+      [5, 4],
+    ]);
+    const lostOne = commits[1]?.manifest as CellSessionManifest;
+    const after = commits[3]?.manifest as CellSessionManifest;
+    expect(after.parent).toBe(lostOne.id);
+    expect(extendsList(lostOne.native.chunks, after.native.chunks)).toBe(true);
+    expect(extendsList(lostOne.events.chunks, after.events.chunks)).toBe(true);
+    expect(store.head?.version).toBe(5);
+    expect(store.head?.manifest.turn).toBe(5);
+    const logs = checkLogs(s).join("\n");
+    expect(logs).not.toContain("capture stopped");
+    expect(logs).not.toContain("not_append_only");
+  });
+
+  // card: protects=#743 R2 after a lost answer, a head that is neither this writer's pending manifest nor its last acknowledged one is a foreign move and stops the capture; fails_when=the pending manifest is adopted over a foreign head or the capture keeps writing; no_claim=the www route
+  it("stops on a foreign head even with a lost answer pending", async () => {
+    const { store, over } = appendOnlyStore((n) => n === 2);
+    const { s } = capturing(async (s, cell) => {
+      cell.text = turn(1);
+      await s.captureTick();
+      cell.text += turn(2);
+      await s.captureTick();
+      // Another writer moves the head past the lost commit.
+      const ours = store.head as { manifest: CellSessionManifest };
+      store.head = {
+        manifest: { ...ours.manifest, id: "foreign", parent: ours.manifest.id },
+        version: 9,
+      };
+      cell.text += turn(3);
+      await s.captureTick();
+      const before = probes(s);
+      cell.text += turn(4);
+      await s.captureTick();
+      expect(probes(s)).toBe(before);
+    }, over);
+    await s.executor.run(s.args);
+    expect(store.commits.map((c) => c.expected)).toEqual([0, 1, 1]);
+    expect(store.head?.manifest.id).toBe("foreign");
+    expect(checkLogs(s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
+    );
+  });
+
+  // card: protects=#743 R2 not_append_only means the worker's view of its chain is wrong; it stops the capture with one class-only line instead of rebuilding the same refused manifest every poll; fails_when=a later poll commits again or the line carries anything but the class; no_claim=the www route
+  it("stops after not_append_only", async () => {
+    const commits: number[] = [];
     const { s } = capturing(
       async (s, cell) => {
         cell.text = turn(1);
         await s.captureTick();
-        cell.text = turn(1) + turn(2);
+        cell.text += turn(2);
         await s.captureTick();
-        cell.text = turn(1) + turn(2) + turn(3);
+        const before = probes(s);
+        cell.text += turn(3);
         await s.captureTick();
-        cell.text = turn(1) + turn(2) + turn(3) + turn(4);
-        await s.captureTick();
+        expect(probes(s)).toBe(before);
       },
       {
-        readHead: async () =>
-          head === null
-            ? { ok: true, head: { found: false, reason: "none" } }
-            : {
-                ok: true,
-                head: {
-                  found: true,
-                  version: head.version,
-                  manifest: { id: head.id },
-                },
-              },
-        commit: async (expected, manifest) => {
-          n += 1;
-          const m = manifest as { id: string; parent: string | null };
-          commits.push({ expected, id: m.id, parent: m.parent });
-          if (head !== null && head.version !== expected) {
-            return {
-              ok: false,
-              code: "head_moved",
-              status: 409,
-              version: head.version,
-            };
-          }
-          head = { id: m.id, version: expected + 1 };
-          // The second call is applied, but its answer is lost.
-          return n === 2
-            ? { ok: false, code: "timeout", status: 0 }
-            : { ok: true, version: expected + 1 };
+        commit: async (expected) => {
+          commits.push(expected);
+          return expected === 0
+            ? { ok: true, version: 1 }
+            : { ok: false, code: "not_append_only", status: 409 };
         },
       },
     );
     await s.executor.run(s.args);
-    expect(commits.map((c) => c.expected)).toEqual([0, 1, 1, 2, 3]);
-    expect(checkLogs(s)).not.toContain(
-      "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
-    );
-    const last = commits[commits.length - 1];
-    const prev = commits[commits.length - 2];
-    expect(last?.parent).toBe(prev?.id);
+    expect(commits).toEqual([0, 1]);
+    expect(checkLogs(s).filter((l) => l.includes("not append-only"))).toEqual([
+      "[agent-run thr_1] cell: checkpoint skipped (not append-only; capture stopped)",
+    ]);
   });
 
   // card: protects=#743 R2 a head_moved whose head is not the manifest this writer sent is a real foreign move and still stops the capture; fails_when=the capture adopts a foreign head or loops; no_claim=the www route
@@ -2531,8 +2626,9 @@ describe("the per-turn session capture (#743 phase 6)", () => {
     );
     await s.executor.run(s.args);
     expect(expected).toEqual([0, 1]);
-    // The head was read once to judge the move, and no retry followed.
-    expect(reads).toBe(2);
+    // Every commit sent was acknowledged, so the move cannot be this writer's
+    // own: the head is not read again, and no retry follows.
+    expect(reads).toBe(1);
     expect(checkLogs(s)).toContain(
       "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
     );
