@@ -21,13 +21,11 @@ import {
   updateThreadChat,
 } from "@terragon/shared/model/threads";
 import type { TerminalCause } from "@terragon/shared/model/terminal-cause";
-import type { RunDisplayLane } from "@terragon/utils/run-lane";
 
 /** Why a timed-out run is not continued. `error` = the decision itself failed (fail closed). */
 export type ContinuationNoneReason =
   | "flag-off"
   | "not-timeout"
-  | "lane"
   | "budget-spent"
   | "no-checkpoint"
   | "shadow"
@@ -50,8 +48,6 @@ export interface ContinuationInput {
   /** The attempt: the run that ended. It is the fence and the ledger key. */
   runExternalId: string;
   cause: TerminalCause;
-  /** The run's lane. Only a plain task run is continued (OD-5). */
-  lane: RunDisplayLane;
 }
 
 /** The thread columns the decision and the message need. */
@@ -94,15 +90,13 @@ export function renderContinuationMessage({
   turn,
   branch,
   ordinal = 1,
-  budget = CELL_SESSION_CONTINUATION_BUDGET,
 }: {
   turn: number;
   branch: string;
   ordinal?: number;
-  budget?: number;
 }): string {
   return (
-    `Automatic continuation ${ordinal} of ${budget}: the previous run hit its time limit ` +
+    `Automatic continuation ${ordinal} of ${CELL_SESSION_CONTINUATION_BUDGET}: the previous run hit its time limit ` +
     `after ${turn} completed turns. This conversation was restored from its checkpoint, ` +
     `and unfinished work was saved to the work branch \`${branch}\`. ` +
     `Continue the task from where it stopped. Do not redo steps you already completed; ` +
@@ -247,7 +241,9 @@ export async function maybeContinueAfterTimeout(
   try {
     const { db } = deps;
     if (input.cause !== "timeout") return none("not-timeout");
-    if (input.lane !== "task") return none("lane");
+    // Lane safety (OD-5): there is no lane input. The checkpoint row required
+    // below is written only by a task-lane, non-self-heal cell run, so a review,
+    // PR or self-heal run never reaches a `continue`.
     // The flag is per owner, so it needs the thread; a missing thread falls
     // through to `superseded` below.
     const owner = await deps.readThread({ threadId: input.threadId });

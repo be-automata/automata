@@ -832,26 +832,10 @@ describe("POST /api/daemon/run-terminal — timeout continuation (#743 phase 10)
     errors.mockRestore();
   });
 
-  it("the add-on reconcile stub runs before the decision and does nothing", async () => {
-    await seed({ checkpoint: false });
+  it("the add-on reconcile stub does nothing while the receiver is off", async () => {
     expect(await reconcileAddonCalls({ threadId })).toEqual({
       reason: "receiver-off",
     });
-    const reconcile = vi.fn(reconcileAddonCalls);
-    await continueOrReplyAtTerminal(
-      {
-        threadId,
-        threadChatId,
-        runExternalId: RUN,
-        cause: "timeout",
-        reply: false,
-      },
-      reconcile,
-    );
-    expect(reconcile).toHaveBeenCalledWith({ threadId });
-    expect(reconcile.mock.invocationCallOrder[0]!).toBeLessThan(
-      vi.mocked(maybeContinueAfterTimeout).mock.invocationCallOrder[0]!,
-    );
   });
 
   it("a non-timeout cause never consults the decision", async () => {

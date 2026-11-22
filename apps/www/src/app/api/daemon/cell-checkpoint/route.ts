@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+import { readCapped } from "@terragon/cell-broker/common";
+
 import { getDaemonTokenContext } from "@/lib/auth-server";
 import { withDaemonAuthUnavailable } from "@/lib/daemon-auth-unavailable";
 import { db } from "@/lib/db";
@@ -19,6 +21,7 @@ import {
 import { cellStepKey } from "@terragon/types/cell";
 import {
   CELL_SESSION_CHUNK_MAX_BYTES,
+  isSha256Hex,
   type CellSessionManifest,
 } from "@terragon/types/cell-session-checkpoint";
 
@@ -46,7 +49,7 @@ const NO_STORE = { "Cache-Control": "no-store" } as const;
 /** A 4 MiB chunk inflated by base64 (4/3), plus the envelope. */
 const CELL_CHECKPOINT_MAX_BODY_BYTES = 6 * 1024 * 1024;
 
-const SHA256 = z.string().regex(/^[0-9a-f]{64}$/);
+const SHA256 = z.string().refine(isSha256Hex);
 const base = {
   threadId: z.string().min(1),
   threadChatId: z.string().min(1),
@@ -90,28 +93,6 @@ function reply(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: NO_STORE });
 }
 
-/** Reads at most `maxBytes`; null when the body is longer. Never parses. */
-async function readCapped(
-  request: Request,
-  maxBytes: number,
-): Promise<string | null> {
-  if (!request.body) return "";
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 export const POST = withDaemonAuthUnavailable(async function POST(
   request: NextRequest,
 ): Promise<NextResponse> {
@@ -133,11 +114,11 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   }
 
   // F3, step 2: the capped read, because the header can be absent or a lie.
-  const raw = await readCapped(request, CELL_CHECKPOINT_MAX_BODY_BYTES);
-  if (raw === null) return reply({ error: "body_too_large" }, 413);
+  const bytes = await readCapped(request.body, CELL_CHECKPOINT_MAX_BODY_BYTES);
+  if (bytes === null) return reply({ error: "body_too_large" }, 413);
   let json: unknown;
   try {
-    json = JSON.parse(raw);
+    json = JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     return reply({ error: "invalid_body" }, 400);
   }
@@ -149,21 +130,24 @@ export const POST = withDaemonAuthUnavailable(async function POST(
   if (ctx.threadId !== threadId || ctx.threadChatId !== threadChatId) {
     return reply({ error: "Forbidden" }, 403);
   }
-  const thread = await getThreadMinimal({ db, userId: ctx.userId, threadId });
+  // Both reads are issued together; the refusals below keep their order.
+  const [thread, open] = await Promise.all([
+    getThreadMinimal({ db, userId: ctx.userId, threadId }),
+    ctx.apiKeyId === null
+      ? Promise.resolve(false)
+      : isOpenCellAttempt({
+          db,
+          stepKey: cellStepKey(ctx.apiKeyId),
+          threadId,
+          attempt,
+        }),
+  ]);
   if (!thread) return reply({ error: "Forbidden" }, 403);
   if ((thread.organizationId ?? null) !== (ctx.organizationId ?? null)) {
     return reply({ error: "Forbidden" }, 403);
   }
 
   // F5: the cell's own live step only.
-  const open =
-    ctx.apiKeyId !== null &&
-    (await isOpenCellAttempt({
-      db,
-      stepKey: cellStepKey(ctx.apiKeyId),
-      threadId,
-      attempt,
-    }));
   if (!open) {
     console.log("[daemon cell-checkpoint] refused", {
       action: body.action,

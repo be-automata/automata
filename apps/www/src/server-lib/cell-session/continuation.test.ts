@@ -110,7 +110,6 @@ async function setup({
       threadChatId,
       runExternalId: RUN,
       cause: "timeout",
-      lane: "task",
     },
     deps,
     queued,
@@ -166,16 +165,6 @@ describe("maybeContinueAfterTimeout (#743 phase 9)", () => {
     ).toEqual({ action: "none", reason: "not-timeout" });
     expect(f.queued).toHaveLength(0);
   });
-
-  it.each(["review", "pr", "self-heal-audit", "self-heal-fix"] as const)(
-    "the %s lane is excluded",
-    async (lane) => {
-      expect(
-        await maybeContinueAfterTimeout({ ...f.input, lane }, f.deps),
-      ).toEqual({ action: "none", reason: "lane" });
-      expect(f.queued).toHaveLength(0);
-    },
-  );
 
   it("a run with no checkpoint row (not a cell run) is no-checkpoint, and nothing is queued", async () => {
     const g = await setup({ head: null });

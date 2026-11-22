@@ -57,6 +57,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const r = await parseDaemonRequest(request, bodySchema);
   if (r instanceof NextResponse) return r;
   const { threadId, threadChatId, runExternalId, cause, detail } = r.body;
+  const continueAtTerminal = (reply: boolean) =>
+    continueOrReplyAtTerminal({
+      threadId,
+      threadChatId,
+      runExternalId,
+      cause,
+      reply,
+      startedFresh: detail?.startedFresh,
+    });
 
   const generation = await checkThreadGeneration({
     db,
@@ -83,16 +92,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       // #743 F1: a redelivered `timeout` lands HERE, and a continuation lost
       // after the first write is repaired here (the ledger keeps it at most
       // once). No mention reply: the first write's path owns it.
-      waitUntil(
-        continueOrReplyAtTerminal({
-          threadId,
-          threadChatId,
-          runExternalId,
-          cause,
-          reply: false,
-          startedFresh: detail?.startedFresh,
-        }),
-      );
+      waitUntil(continueAtTerminal(false));
       return NextResponse.json({ applied: false });
     }
     console.log("[run-terminal] rejected", {
@@ -163,15 +163,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // terminal (`applied: false`) must not answer twice.
   // #743: a timed-out run may continue in a new cell; then the reply waits
   // for the final run. The decision runs whatever `applied` is.
-  waitUntil(
-    continueOrReplyAtTerminal({
-      threadId,
-      threadChatId,
-      runExternalId,
-      cause,
-      reply: applied,
-      startedFresh: detail?.startedFresh,
-    }),
-  );
+  waitUntil(continueAtTerminal(applied));
   return NextResponse.json({ applied });
 }

@@ -70,7 +70,6 @@ export interface TerminalContinuationInput {
  */
 export async function continueOrReplyAtTerminal(
   input: TerminalContinuationInput,
-  reconcile: typeof reconcileAddonCalls = reconcileAddonCalls,
 ): Promise<void> {
   const { threadId, threadChatId, runExternalId, cause } = input;
   let limitReached = false;
@@ -79,20 +78,17 @@ export async function continueOrReplyAtTerminal(
       const { maybeContinueAfterTimeout } = await import(
         "@/server-lib/cell-session/continuation"
       );
-      await reconcile({ threadId });
+      await reconcileAddonCalls({ threadId });
       if (input.startedFresh) {
         console.log(
           `continuation: source run started fresh (${input.startedFresh}) thread=${threadId}`,
         );
       }
-      // The checkpoint row the decision requires is written only by a plain
-      // cell task run (OD-5), so it is the lane proof; pass the task lane.
       const decision = await maybeContinueAfterTimeout({
         threadId,
         threadChatId,
         runExternalId,
         cause,
-        lane: "task",
       });
       if (decision.action === "continue") return;
       // Another delivery already claimed (or is continuing) this run: the
@@ -110,7 +106,7 @@ export async function continueOrReplyAtTerminal(
       {
         threadId,
         threadChatId,
-        ...(limitReached ? { continuationLimitReached: true } : {}),
+        continuationLimitReached: limitReached,
       },
     ]);
   }
