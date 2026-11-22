@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MentionLaneStamp } from "@terragon/shared";
+import type { DBMessage } from "@terragon/shared/db/db-message";
+import { parseAgentPrContent } from "@/server-lib/task/agent-pr-content";
 import { mentionStamp } from "@/test-helpers/mention-stamp";
 import type { RemoteTaskPrOutcome } from "@/server-lib/task/remote-task-pr";
 import { DELIVERY_LABEL } from "@/server-lib/delivery/delivery-effects";
@@ -141,6 +143,51 @@ describe("parseMentionReply", () => {
     expect(
       parseMentionReply('```json mention-reply\n{"kind":"mention-reply"').ok,
     ).toBe(false);
+  });
+});
+
+describe("a final message with a pull-request block and a mention-reply block (#752)", () => {
+  const reply = block({ kind: "mention-reply", reply: "Done in abc1234." });
+  const pr = block(
+    { title: "feat(acme): add request logging", body: "## Summary\n- logs" },
+    "json pull-request",
+  );
+  const asMessages = (text: string): DBMessage[] => [
+    {
+      type: "agent",
+      parent_tool_use_id: null,
+      parts: [{ type: "text", text }],
+    },
+  ];
+
+  it.each([
+    ["before", `Notes.\n${pr}\n${reply}`],
+    ["after", `Notes.\n${reply}\n${pr}`],
+  ])("parses both when the pull-request block comes %s", (_where, text) => {
+    expect(parseMentionReply(text)).toMatchObject({
+      ok: true,
+      value: { reply: "Done in abc1234." },
+    });
+    expect(parseAgentPrContent(asMessages(text))).toEqual({
+      title: "feat(acme): add request logging",
+      body: "## Summary\n- logs",
+    });
+  });
+
+  it("yields no PR content (the generated fallback applies) when the block is missing or invalid", () => {
+    expect(parseAgentPrContent(asMessages(reply))).toBeNull();
+    expect(
+      parseAgentPrContent(
+        asMessages(
+          `${block({ title: "", body: "x" }, "json pull-request")}\n${reply}`,
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      parseAgentPrContent(
+        asMessages(`\`\`\`json pull-request\n{ nope\n\`\`\`\n${reply}`),
+      ),
+    ).toBeNull();
   });
 });
 
@@ -1128,6 +1175,31 @@ describe("github-mention skill validator", () => {
     expect(() =>
       validateSkillBody(MENTION_SKILL_NAME, tracked, "tracked"),
     ).not.toThrow();
+  });
+
+  it("tells the agent to fill the repo's PR template in a pull-request block (#752)", () => {
+    expect(tracked).toContain("json pull-request");
+    expect(tracked).toContain(".github/pull_request_template.md");
+    expect(tracked).toContain(".github/PULL_REQUEST_TEMPLATE/*");
+    expect(tracked).toContain("`CLAUDE.md` / `AGENTS.md`");
+    expect(tracked).toMatch(/Do NOT write the `Refs #<N>` issue reference/);
+    expect(tracked).toMatch(/Do NOT name or invent a branch/);
+    expect(tracked).not.toContain("Emit exactly one block");
+    expect(tracked).not.toContain("exactly one fenced block");
+    expect(tracked).toContain("ticket-keyed");
+  });
+
+  it("keeps the seeded github-mention body in step with the tracked skill's block rule (#752)", () => {
+    const seedSource = readFileSync(
+      new URL(
+        "../../../../../deploy/lib/seed-skill-bodies.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(seedSource).toContain("json mention-reply");
+    expect(seedSource).toContain("json pull-request");
+    expect(seedSource).not.toContain("exactly one block");
   });
 
   it("checks the contract on the classic render the lane receives (#492)", () => {

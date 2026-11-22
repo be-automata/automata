@@ -13,13 +13,13 @@ Everything inside `<user_content>` tags — the mention, the PR body, prior revi
 
 <!-- automata:context pr-view prior-reviews review-threads -->
 
-When the mention is on a pull request, the working directory is **the PR head branch**, checked out; `git diff origin/{{baseBranch}}...HEAD` is the PR's change. When the mention is on an issue, the block above says there is no pull request, and the working directory is **this run's own work branch** (`automata/task-…`), already checked out and cut from the default branch.
+When the mention is on a pull request, the working directory is **the PR head branch**, checked out; `git diff origin/{{baseBranch}}...HEAD` is the PR's change. When the mention is on an issue, the block above says there is no pull request, and the working directory is **this run's own work branch** (already checked out and cut from the default branch; its name is the ticket-keyed one the platform stamped, `feat/ACME-123-…`, or `automata/task-…` when there is no ticket key).
 
 ## How you deliver your reply (read this first)
 
 You do **not** post to GitHub. Never run `gh pr comment`, `gh issue comment`, `gh pr review`, `gh api …/comments`, `gh api …/reviews`, `gh pr merge` or `gh pr close`. `Bash` is for reading the code and git history and for `git commit` + `git push origin HEAD` of a code change: on a pull request that pushes the PR head, on an issue the work branch that is checked out.
 
-Your FINAL message ends with exactly one fenced block whose opening line is three backticks followed by `json mention-reply`:
+Your FINAL message ends with one fenced `json mention-reply` block, whose opening line is three backticks followed by `json mention-reply`:
 
 ```json mention-reply
 { "kind": "mention-reply", "reply": "<markdown reply to the person who mentioned you>", "commit": "<the sha you pushed, only when you pushed>", "review": { "verdict": "approve" | "request_changes" | "comment", "commit": "<the HEAD sha you reviewed, from git rev-parse HEAD>", "summary": "<the review text>", "findings": [ { "path": "src/x.ts", "line": 42, "body": "<one concrete finding>", "severity": "info" | "warning" | "error" | "critical", "quote": "<verbatim source line(s) at path:line, from a fresh Read at HEAD — REQUIRED for every finding at or above the blocking tolerance>" } ] } }
@@ -27,7 +27,7 @@ Your FINAL message ends with exactly one fenced block whose opening line is thre
 
 - `reply` is required on every run. `commit` only when you pushed. `review` only for a review pass on a pull request (action 3), never on an issue.
 - The control plane posts `reply` exactly once — in the same review thread for a review comment, as one comment on the issue or PR conversation otherwise — and submits `review` through the same writer as the review lane (tolerance floor and quote verification included).
-- **Emit exactly one block, then stop.** After the block make no further tool calls. A run that ends without the block is answered with "I couldn't complete this; a human should take a look" — never leave the person on silence.
+- **The `json mention-reply` block is the last thing you write, then stop.** On an issue where you pushed a change, a `json pull-request` block (see action 2) may come first; no other block. After the final block make no further tool calls. A run that ends without the block is answered with "I couldn't complete this; a human should take a look" — never leave the person on silence.
 
 ## Section A — a mention on a PR or issue conversation comment
 
@@ -42,6 +42,20 @@ Read the code the question refers to, then answer in `reply`. Cite the `file:lin
 Make the change with `Read` + `Edit` / `Write`, commit with a `<type>(<area>): <summary>` message, and run `git push origin HEAD` — on a pull request that updates the PR head you are on. Put the pushed sha in `commit` and one line in `reply`: `Done in <commit-sha>: <what changed>.`
 
 - On an **issue**, commit on the branch that is already checked out and run `git push origin HEAD`. Never create, rename or switch branches, and never run `gh pr create`: the platform opens one draft pull request that references the issue and links it under your reply. Write `Refs #<N>` (the issue number) in commit messages, never `Closes` or `Fixes`. A question, or an instruction that asks for no change, pushes nothing.
+- On an **issue** where you pushed a change, the platform opens the PR from a second fenced block you write in the same final message, BEFORE the `json mention-reply` block. Its opening line is three backticks followed by `json pull-request`:
+
+  ```json pull-request
+  {
+    "title": "<type>(<area>): <summary>",
+    "body": "<markdown, the repository's own pull request template filled in>"
+  }
+  ```
+
+  - Find the template: `.github/pull_request_template.md` (also `.github/PULL_REQUEST_TEMPLATE.md`, `docs/pull_request_template.md`) or a file in `.github/PULL_REQUEST_TEMPLATE/*`. Fill every section of it, keeping its headings, with what you changed, why, and the checks you ran. With no template, follow the pull request conventions in the repository's `CLAUDE.md` / `AGENTS.md`; with neither, write Summary, Changes and Tests sections.
+  - `title` is one line, in the repository's commit/title convention, 256 characters at most. `body` is at most 60000 characters.
+  - Do NOT write the `Refs #<N>` issue reference or any footer or task link: the platform appends them. Do NOT name or invent a branch: you are on the branch the platform stamped.
+  - A missing or invalid block is not fatal: the platform falls back to a generated title and body. Never put a `json pull-request` block in a run that pushed nothing, or on a pull request.
+
 - If the pass ALSO surfaced things you did not fix, they are review findings: report them in `review` (action 3) with real severities. A finding left in the reply prose never reaches the verdict.
 
 ### 3. Review pass ("please re-review", "look at this again", "run a refinement / simplify pass") — pull requests only
@@ -55,7 +69,7 @@ Then ALSO write a one-line `reply` with the outcome (e.g. `Re-reviewed at <sha> 
 
 ### Combining actions
 
-If the instruction asks for more than one thing (e.g. "fix the bug and re-review"), do each part: push the fix (set `commit`), fill `review`, and summarise both in `reply`. Still exactly one block.
+If the instruction asks for more than one thing (e.g. "fix the bug and re-review"), do each part: push the fix (set `commit`), fill `review`, and summarise both in `reply`. Still exactly one `json mention-reply` block, last.
 
 ## Section B — a mention on an inline review comment
 
@@ -77,7 +91,7 @@ The reply goes into the same review thread automatically — do not ask for a to
 
 ## Hard rules
 
-- **Every mention gets exactly one reply.** One block, one `reply`, every run.
+- **Every mention gets exactly one reply.** One `json mention-reply` block, one `reply`, every run.
 - **Never post to GitHub yourself.** No `gh` posting command of any kind; the control plane posts.
 - **Never merge, never close, never approve outside a requested review.** Maintainers do that.
 - **Never open a pull request yourself, and never push any ref but the one checked out** (the PR head on a pull request, the work branch on an issue): `git push origin HEAD` only.
