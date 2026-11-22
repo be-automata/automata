@@ -11,6 +11,7 @@ import {
   bindRepoToOrg,
 } from "@terragon/shared/model/github-installation";
 import { createTestUser } from "@terragon/shared/model/test-helpers";
+import { createThread } from "@terragon/shared/model/threads";
 import type { DBUserMessage } from "@terragon/shared";
 import { renderReviewContext } from "@terragon/review/context/render";
 import { wrapUntrusted } from "@terragon/review/context/untrusted";
@@ -249,6 +250,12 @@ describe("routing: org lane vs the legacy per-user path", () => {
           get: vi.fn(async () => ({ data: issueData() })),
           listComments: vi.fn(async () => ({ data: [] })),
         },
+        git: {
+          // Default: the convention branch is free on the remote.
+          getRef: vi.fn(async () => {
+            throw Object.assign(new Error("Not Found"), { status: 404 });
+          }),
+        },
         reactions: {
           createForIssueComment: vi.fn(async () => ({ data: {} })),
           createForPullRequestReviewComment: vi.fn(async () => ({ data: {} })),
@@ -456,6 +463,94 @@ describe("routing: org lane vs the legacy per-user path", () => {
     expect(call.options?.branchName).toBe("main");
     expect(call.options?.stampExtra?.mention?.isPullRequest).toBe(false);
     expect(call.options?.stampExtra?.mention).not.toHaveProperty("isDraft");
+  });
+
+  describe("work branch at issue intake (#752)", () => {
+    const TITLE = "ACME-123: add request logging";
+    const BRANCH = "feat/ACME-123-add-request-logging";
+
+    const stampOf = () =>
+      vi.mocked(runAutomation).mock.calls[0]![0].options?.stampExtra?.mention;
+
+    it("an issue mention naming a ticket stores the convention branch", async () => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(octokit.rest.git.getRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: `heads/${BRANCH}` }),
+      );
+      expect(stampOf()?.workBranch).toBe(BRANCH);
+      expect(stampOf()).not.toHaveProperty("workBranchTaken");
+    });
+
+    it("a branch already on the remote sets workBranchTaken", async () => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      octokit.rest.git.getRef.mockResolvedValue({ data: {} } as never);
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()?.workBranch).toBe(BRANCH);
+      expect(stampOf()?.workBranchTaken).toBe(true);
+    });
+
+    it("a remote error fails open to taken", async () => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      octokit.rest.git.getRef.mockRejectedValue(
+        Object.assign(new Error("boom"), { status: 500 }),
+      );
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()?.workBranch).toBe(BRANCH);
+      expect(stampOf()?.workBranchTaken).toBe(true);
+    });
+
+    it("a thread of the repo already stamped with the name sets workBranchTaken (RF-1)", async () => {
+      const { repoFullName } = await repoWithLane();
+      await createThread({
+        db,
+        userId: ownerUserId,
+        threadValues: {
+          githubRepoFullName: repoFullName,
+          repoBaseBranchName: "main",
+          sandboxProvider: "e2b",
+          sourceType: "automation",
+          sourceMetadata: {
+            type: "automation",
+            automationId: "automation-1",
+            mention: { repoFullName, workBranch: BRANCH },
+          } as never,
+        },
+        initialChatValues: { agent: "claudeCode" },
+      });
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()?.workBranch).toBe(BRANCH);
+      expect(stampOf()?.workBranchTaken).toBe(true);
+    });
+
+    it("an issue naming no ticket stores nothing", async () => {
+      const { repoFullName } = await repoWithLane();
+      await handleIssueCommentEvent(issueComment({ repoFullName, pr: false }));
+      expect(stampOf()).not.toHaveProperty("workBranch");
+      expect(octokit.rest.git.getRef).not.toHaveBeenCalled();
+    });
+
+    it("a PR mention stores nothing", async () => {
+      const { repoFullName } = await repoWithLane();
+      octokit.rest.issues.get.mockResolvedValue({
+        data: issueData({ title: TITLE }),
+      });
+      await handleIssueCommentEvent(issueComment({ repoFullName }));
+      expect(stampOf()).not.toHaveProperty("workBranch");
+      expect(octokit.rest.git.getRef).not.toHaveBeenCalled();
+    });
   });
 
   it("an issue mention asking to implement the issue stamps asksForDelivery (OD-6)", async () => {

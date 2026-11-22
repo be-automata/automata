@@ -429,6 +429,28 @@ export type ThreadMinimal = NonNullable<
   Awaited<ReturnType<typeof getThreadMinimal>>
 >;
 
+/**
+ * True when any thread of the repo already carries a mention stamp with this
+ * convention branch (#752 RF-1): a second mention on the same issue must not
+ * reuse a name a run that has not pushed yet will push.
+ */
+export async function isMentionWorkBranchClaimed(
+  db: DB,
+  { repoFullName, workBranch }: { repoFullName: string; workBranch: string },
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.thread.id })
+    .from(schema.thread)
+    .where(
+      and(
+        eq(schema.thread.githubRepoFullName, repoFullName),
+        sql`${schema.thread.sourceMetadata} -> 'mention' ->> 'workBranch' = ${workBranch}`,
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
 export async function getThreadMinimal({
   db,
   userId,

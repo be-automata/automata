@@ -14,6 +14,7 @@ import type { Automation, DBUserMessage } from "@terragon/shared";
 import type { GitHubMentionTriggerConfig } from "@terragon/shared/automations";
 import { getGitHubMentionAutomationsForRepo } from "@terragon/shared/model/automations";
 import { getRepoOrgAndMode } from "@terragon/shared/model/github-installation";
+import { isMentionWorkBranchClaimed } from "@terragon/shared/model/threads";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { db } from "@/lib/db";
 import {
@@ -29,6 +30,7 @@ import {
   safeGitRef,
 } from "@/server-lib/review/pr-diff-context";
 import { replyToMention } from "@/server-lib/review/mention-target-reply";
+import { chooseMentionWorkBranch } from "@/server-lib/task/mention-work-branch";
 import { addEyesReactionToComment } from "./utils";
 import { requireAppAccess } from "./webhook-skip";
 
@@ -559,6 +561,12 @@ export async function handleOrgLaneMention(
   // PR mentions only: the PR the lane read, handed on so the skill's pr-view
   // block does not read it again.
   let pullRequest: RestPullRequestLike | undefined;
+  // Issue mentions only: the convention branch the run pushes (#752), absent
+  // when the issue names no ticket or could not be read.
+  let workBranchStamp: Pick<
+    MentionLaneStamp,
+    "workBranch" | "workBranchTaken"
+  > = {};
   try {
     if (input.isPullRequest) {
       const { data: pr } = await octokit.rest.pulls.get({
@@ -612,6 +620,19 @@ export async function handleOrgLaneMention(
             repo,
             issue_number: input.issueOrPrNumber,
           });
+          workBranchStamp = await chooseMentionWorkBranch({
+            octokit,
+            owner,
+            repo,
+            // GitHub can hand back a null title: the context must still render.
+            title: issue.title ?? "",
+            body: issue.body,
+            isClaimed: (workBranch) =>
+              isMentionWorkBranchClaimed(db, {
+                repoFullName: input.repoFullName,
+                workBranch,
+              }),
+          });
           return renderIssueView(issueViewFromRest(issue));
         }),
       ]);
@@ -664,7 +685,9 @@ export async function handleOrgLaneMention(
         },
         stampExtra: {
           mention:
-            prIsDraft === undefined ? stamp : { ...stamp, isDraft: prIsDraft },
+            prIsDraft === undefined
+              ? { ...stamp, ...workBranchStamp }
+              : { ...stamp, isDraft: prIsDraft },
         },
         onStartFailure: (error) => {
           startFailure = error;
