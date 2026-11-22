@@ -196,6 +196,53 @@ describe("session redactor", () => {
     expect(JSON.parse(out)).toEqual({ a: "x <redacted>-y" });
   });
 
+  // card: protects=#743 round 3 finding 2: a long env secret echoed under a structural key (`id`) is blanked; fails_when=structural strings skip exact-value blanking again; no_claim=short values under structural keys
+  it("blanks a long env value under a structural key, keeps type", () => {
+    const secret = "tok_live_abcdefgh12345678";
+    const r = createSessionRedactor({ values: [secret, "user"] });
+    const line = JSON.stringify({
+      type: "user",
+      message: {
+        content: [
+          { type: "tool_use", id: secret, input: { id: secret, q: "x" } },
+        ],
+      },
+    });
+    const out = r.redactLine(line).text;
+    expect(out).not.toContain(secret);
+    expect(JSON.parse(out).type).toBe("user");
+  });
+
+  // card: protects=#743 round 3 finding 3: pattern and exact matches are unioned on the original string, so neither hides the other's span; fails_when=one rule runs before the other and leaves a fragment; no_claim=exact values under 4 characters
+  it("leaves no fragment when a pattern and an exact span overlap", () => {
+    const sec = createSessionRedactor({ values: ["pw-bob@x.com-zzz"] });
+    const o1 = sec.redactLine(JSON.stringify({ a: "k pw-bob@x.com-zzz k" }));
+    for (const f of ["pw-", "bob", "x.com", "zzz"]) {
+      expect(o1.text).not.toContain(f);
+    }
+    const cases: Array<[string, string, string]> = [
+      ["example", "alice@example.com", "alice"],
+      ["example.com", "alice@example.com", "alice"],
+      ["Users", "/Users/alice/x", "alice"],
+    ];
+    for (const [env, text, leak] of cases) {
+      const out = createSessionRedactor({ values: [env] }).redactLine(
+        JSON.stringify({ a: text }),
+      ).text;
+      expect(out).not.toContain(leak);
+    }
+  });
+
+  it("an exact value cannot mangle a redaction marker", () => {
+    const r = createSessionRedactor({
+      values: ["REDACTED", "EMAIL", "email", "home-path"],
+    });
+    const out = JSON.parse(
+      r.redactLine(JSON.stringify({ a: "bob@corp.io /home/bob" })).text,
+    ) as { a: string };
+    expect(out.a).toBe("[REDACTED:email] [REDACTED:home-path]");
+  });
+
   it("round-trips a parsed __proto__ key", () => {
     const out = createSessionRedactor({ values: [] }).redactLine(
       '{"a":{"__proto__":{"x":1}}}',
@@ -203,10 +250,10 @@ describe("session redactor", () => {
     expect(out).toBe('{"a":{"__proto__":{"x":1}}}');
   });
 
-  // Re-pinned deliberately for #743 round 2: rules ADDED (structural keys, exact-value threshold), none removed.
+  // Re-pinned deliberately for #743 round 3: rules ADDED (span union of pattern and exact matches, long-mode structural values), none removed.
   it("pins the rules digest: rules may be added, never removed", () => {
     expect(redactor().digest).toBe(
-      "ba61d03b4e7b16c0771440204c3f853556f1d8979b1f01400e54d4f1892cc447",
+      "9f98cc3fb5771f97d95d6ab03a3b0e5bd6ec8bec79c78233d0039b2f70d95165",
     );
   });
 });

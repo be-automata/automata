@@ -1,4 +1,4 @@
-import { createValueRedactor, redactSecrets } from "@terragon/utils/redact";
+import { redactSecrets } from "@terragon/utils/redact";
 import { sha256Hex } from "@terragon/types/cell-session-checkpoint";
 
 /**
@@ -119,6 +119,7 @@ const RULES_DIGEST = sha256Hex(
     `system-prompt-keys:${[...SYSTEM_PROMPT_KEYS].join(",")}`,
     `account-keys:${[...ACCOUNT_KEYS].join(",")}`,
     "object-keys:redacted-like-values;collision-suffix:#n",
+    "span-union:original-string;merge-touching;first-pattern-marker-wins;structural-values:long",
     `structural-keys:${[...STRUCTURAL_KEYS].join(",")}`,
     `exact-values:min=${EXACT_VALUE_MIN_LENGTH};whole-token-from=${SHORT_VALUE_MIN}`,
   ].join("\n"),
@@ -138,7 +139,22 @@ export function createSessionRedactor(
     ...(input.identityIds ?? []),
     ...(input.systemPrompts ?? []),
   ];
-  const scrubLong = createValueRedactor(exact, EXACT_VALUE_MIN_LENGTH);
+  const longBlanks = [
+    ...new Set(
+      exact
+        .filter((v) => v.length >= EXACT_VALUE_MIN_LENGTH)
+        .flatMap((v) => [v, JSON.stringify(v).slice(1, -1)]),
+    ),
+  ].sort((a, b) => b.length - a.length);
+  const longRe =
+    longBlanks.length > 0
+      ? new RegExp(
+          longBlanks
+            .map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|"),
+          "g",
+        )
+      : null;
   const shortValues = [
     ...new Set(
       exact.filter(
@@ -159,30 +175,59 @@ export function createSessionRedactor(
         )
       : null;
 
+  /**
+   * Span union on the ORIGINAL string: every pattern match and every exact
+   * match is collected, overlapping or touching spans are merged, and a merged
+   * span becomes the first pattern marker it contains, else `<redacted>`. No
+   * rule can break another's match, so no fragment of either survives.
+   */
   function redactString(
     text: string,
     exactValues: "all" | "long" | "none" = "all",
   ): RedactedLine {
-    let hits = 0;
-    let out = text;
-    if (exactValues !== "none") {
-      out = scrubLong(out);
-      if (exactValues === "all" && shortRe) {
-        out = out.replace(shortRe, "<redacted>");
-      }
-      hits += countMarks(out) - countMarks(text);
-    } else {
-      // Pattern rules only: still run through the shared secret patterns.
-      out = redactSecrets(out);
-      hits += countMarks(out) - countMarks(text);
-    }
+    const spans: Array<[number, number, string | null]> = [];
     for (const [name, re] of PATTERN_RULES) {
-      out = out.replace(re, () => {
-        hits += 1;
-        return `[REDACTED:${name}]`;
-      });
+      for (const m of text.matchAll(re)) {
+        spans.push([m.index, m.index + m[0].length, `[REDACTED:${name}]`]);
+      }
     }
-    return { text: out, hits };
+    if (exactValues !== "none") {
+      if (longRe) {
+        for (const m of text.matchAll(longRe)) {
+          spans.push([m.index, m.index + m[0].length, null]);
+        }
+      }
+      if (exactValues === "all" && shortRe) {
+        for (const m of text.matchAll(shortRe)) {
+          spans.push([m.index, m.index + m[0].length, null]);
+        }
+      }
+    }
+    spans.sort((x, y) => x[0] - y[0] || y[1] - x[1]);
+    let out = "";
+    let pos = 0;
+    let hits = 0;
+    for (let i = 0; i < spans.length; ) {
+      let [start, end, marker] = spans[i] as [number, number, string | null];
+      i += 1;
+      while (
+        i < spans.length &&
+        (spans[i] as [number, number, string | null])[0] <= end
+      ) {
+        const [, e, mk] = spans[i] as [number, number, string | null];
+        end = Math.max(end, e);
+        marker ??= mk;
+        i += 1;
+      }
+      out += text.slice(pos, start) + (marker ?? "<redacted>");
+      pos = end;
+      hits += 1;
+    }
+    out += text.slice(pos);
+    // Shared secret patterns (tokens, bearer) run last on what remains.
+    const final = redactSecrets(out);
+    hits += countMarks(final) - countMarks(out);
+    return { text: final, hits };
   }
 
   function walk(
@@ -194,7 +239,7 @@ export function createSessionRedactor(
       throw new SessionRedactionError("line nests too deeply");
     }
     if (typeof value === "string") {
-      const r = redactString(value, structural ? "none" : "all");
+      const r = redactString(value, structural ? "long" : "all");
       return { value: r.text, hits: r.hits };
     }
     if (Array.isArray(value)) {
