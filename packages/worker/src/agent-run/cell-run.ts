@@ -7,6 +7,7 @@ import {
   type CellCreatePlan,
   type ICellProvider,
 } from "@terragon/types/cell";
+import type { CellSessionManifest } from "@terragon/types/cell-session-checkpoint";
 import { createValueRedactor } from "@terragon/utils/redact";
 
 import {
@@ -34,6 +35,8 @@ import {
   repoEnvDroppedNote,
   type FilteredRepoEnv,
 } from "./repo-env";
+import { prepareCheckpoint, type TurnState } from "./cell-session-checkpoint";
+import { createSessionRedactor } from "./cell-session-redact";
 import { teardownCellRun } from "./cell-teardown";
 import {
   CELL_TEST_DB_ENV,
@@ -52,6 +55,7 @@ import {
   CELL_PLAN_UNAVAILABLE_CODES,
   withTimeout,
   type CellPlanResult,
+  type CheckpointResult,
   type FailedStep,
   type TeardownCallResult,
 } from "./cell-www-client";
@@ -184,6 +188,26 @@ export interface CellExecutorDeps {
   /** Resolves early (never rejects) when `signal` aborts. */
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   now: () => number;
+  /**
+   * #743 phase 6: the per-turn session capture. Off unless BOTH `checkpoint`
+   * and `sessionContinuation` are set and the latter returns true for the run
+   * (phase 11 wires the `cellSessionContinuation` flag here; the default is off).
+   */
+  sessionContinuation?: () => boolean;
+  checkpoint?: {
+    putBlob: (
+      opts: WwwClientOpts,
+      sha256: string,
+      bytes: Uint8Array,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ created: boolean }>>;
+    commit: (
+      opts: WwwClientOpts,
+      manifest: CellSessionManifest,
+      expectedVersion: number,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ version: number }>>;
+  };
   /** A fresh 24-char base64url id (18 random bytes) for one plan fetch. */
   randomId: () => string;
   /** A fresh 48-char hex password (24 random bytes) for one cell's test database (#707). */
@@ -268,6 +292,8 @@ interface CellRunState {
   heartbeatStop: AbortController;
   /** #749: stops the memory sampler at the run's end (the heartbeat stops at the message write). */
   memorySampleStop: AbortController;
+  /** #743: stops the per-turn session capture at the run's end, before teardown. */
+  captureStop: AbortController;
   cellOpts: WwwClientOpts;
   attempt: number;
   stepKey: string;
@@ -417,6 +443,7 @@ async function runCell(
     abortedLive,
     heartbeatStop: new AbortController(),
     memorySampleStop: new AbortController(),
+    captureStop: new AbortController(),
     cellOpts: { ...wwwOpts, cellAttempt: attempt },
     attempt,
     stepKey: plan.tags.stepKey,
@@ -574,6 +601,7 @@ async function runCell(
 
       // 10. The poll loop takes over from the heartbeat.
       r.heartbeatStop.abort();
+      startSessionCapture(r, pulled);
       const poll = await deps.www.pollUntilTerminal(
         pollContext(r, provider, r.cellId),
         r.cellOpts,
@@ -592,6 +620,7 @@ async function runCell(
   } finally {
     r.heartbeatStop.abort();
     r.memorySampleStop.abort();
+    r.captureStop.abort();
   }
   // A terminal read that confirmed the retire, while the poll loop was running.
   if (st.conflict && thrown === null && st.failure !== null) {
@@ -769,6 +798,267 @@ function startCellMemorySampler(
         // Keep the last sample: never fail a run over a memory probe.
       }
       await r.deps.sleep(CELL_MEMORY_SAMPLE_MS, stop);
+    }
+  })();
+}
+
+// ---- the per-turn session capture (#743 phase 6) ------------------------------
+
+/** How often the capture loop looks at the cell's transcript. Distinct from CELL_MEMORY_SAMPLE_MS. */
+export const CELL_CAPTURE_POLL_MS = 7_000;
+/** With no sign of growth (or a failed probe), pull anyway after this long (Q-1). */
+export const CELL_CAPTURE_IDLE_PULL_MS = 60_000;
+/** One pull (the exec checks and the copyOut) is abandoned after this long. */
+export const CELL_CAPTURE_POLL_BUDGET_MS = 15_000;
+
+const CELL_PROJECTS_DIR = `${HOME_CLAUDE_DIR}/projects`;
+/** F6: every project dir at depth 2, no hard-coded name. `-type f` neither follows nor lists a symlink (F9). */
+const CAPTURE_PROBE_ARGV = [
+  "/usr/bin/find",
+  "-P",
+  CELL_PROJECTS_DIR,
+  "-mindepth",
+  "2",
+  "-maxdepth",
+  "2",
+  "-type",
+  "f",
+  "-name",
+  "*.jsonl",
+  "-printf",
+  "%s %T@ %P\\n",
+];
+const PROBE_LINE =
+  /^(\d+) (\d+(?:\.\d+)?) (-[A-Za-z0-9-]{1,200})\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+
+interface SessionFile {
+  projectDir: string;
+  sessionId: string;
+  size: number;
+}
+
+/** The session file by id (F6), else the newest UUID-named one. Names that are not UUIDs are ignored. */
+function chooseSessionFile(
+  stdout: string,
+  sessionId: string | null,
+): SessionFile | null {
+  let best: (SessionFile & { mtime: number }) | null = null;
+  for (const line of stdout.split("\n")) {
+    const m = PROBE_LINE.exec(line);
+    if (!m) continue;
+    const id = (m[4] as string).toLowerCase();
+    if (sessionId !== null && id !== sessionId.toLowerCase()) continue;
+    const mtime = Number(m[2]);
+    if (best === null || mtime > best.mtime) {
+      best = {
+        projectDir: m[3] as string,
+        sessionId: id,
+        size: Number(m[1]),
+        mtime,
+      };
+    }
+  }
+  return best;
+}
+
+function causeClass(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : "unknown";
+}
+
+/** Rejects when `signal` aborts (the pull's budget, the stop or `live`). */
+function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("aborted"));
+    signal.addEventListener("abort", () => reject(new Error("aborted")), {
+      once: true,
+    });
+    promise.then(resolve, reject);
+  });
+}
+
+/**
+ * Starts the capture loop for the agent's working life, from the message write
+ * to the run's end (stopped before teardown by `captureStop`). The worker pulls
+ * the session file with `copyOut` (Q-1: the cell's reachable surface does not
+ * change), redacts it here before anything leaves the box, and writes through
+ * the checkpoint route. Fail open: a failure is one journal line with the cause
+ * class and never fails the run; no transcript byte or token is ever logged.
+ */
+function startSessionCapture(
+  r: CellRunState,
+  pulled: PulledDaemonMessage,
+): void {
+  const { checkpoint, sessionContinuation } = r.deps;
+  if (!checkpoint || !sessionContinuation?.()) return;
+  if (pulled.agent !== "claudeCode") return;
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  const stop = r.captureStop.signal;
+
+  let redactor: ReturnType<typeof createSessionRedactor>;
+  try {
+    redactor = createSessionRedactor({
+      values: [
+        ...Object.values(r.repoEnv.env),
+        ...(r.testDb.plan === "start" ? [r.testDb.password] : []),
+      ],
+    });
+  } catch (error) {
+    r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
+    return;
+  }
+
+  let sessionId: string | null = pulled.sessionId;
+  let projectDir: string | null = null;
+  let lastSize = 0;
+  let consumed = 0;
+  let lastPullAt = r.deps.now();
+  let manifest: CellSessionManifest | null = null;
+  let native: Uint8Array = new Uint8Array(0);
+  let version = 0;
+  let turnState: TurnState | undefined;
+  let stopped = false;
+
+  const pullOnce = async (file: SessionFile): Promise<void> => {
+    const path = `${CELL_PROJECTS_DIR}/${file.projectDir}/${file.sessionId}.jsonl`;
+    const budget = withTimeout(CELL_CAPTURE_POLL_BUDGET_MS, stop, r.live);
+    // F9: re-check right before the read that it is still a regular file.
+    const check = await raceSignal(
+      provider.exec(
+        cellId,
+        [
+          "/usr/bin/find",
+          "-P",
+          path,
+          "-maxdepth",
+          "0",
+          "-type",
+          "f",
+          "-print",
+          "-quit",
+        ],
+        { timeoutMs: 5_000 },
+      ),
+      budget,
+    );
+    if (check.exitCode !== 0 || check.stdout.trim() !== path) {
+      r.step("cell: checkpoint skipped (not a regular file)");
+      return;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await raceSignal(provider.copyOut(cellId, path), budget);
+    } catch {
+      r.step("cell: checkpoint skipped (copy-out failed)");
+      return;
+    }
+    lastPullAt = r.deps.now();
+    lastSize = file.size;
+    // A pull with no new bytes writes nothing (A-12).
+    if (bytes.length <= consumed) return;
+
+    const started = r.deps.now();
+    const result = prepareCheckpoint({
+      previous: manifest,
+      previousNative: native,
+      newBytes: bytes.subarray(consumed),
+      ...(turnState ? { turnState } : {}),
+      context: {
+        threadId: r.ids.threadId,
+        threadChatId: r.ids.threadChatId,
+        sessionId: file.sessionId,
+        runExternalId: r.runId,
+        projectDir: file.projectDir,
+        git: null,
+      },
+      redactor,
+      log: r.step,
+    });
+    if (result.kind === "skipped") {
+      if (result.reason !== "redactor error") stopped = true;
+      return;
+    }
+    // Only a completed turn is a checkpoint; the bytes stay unconsumed until one is.
+    if (result.kind !== "write" || !result.turnAdvanced) return;
+
+    for (const blob of result.blobs) {
+      const put = await checkpoint.putBlob(
+        r.cellOpts,
+        blob.sha256,
+        blob.body,
+        budget,
+      );
+      if (!put.ok) return failed(put);
+    }
+    const commit = await checkpoint.commit(
+      r.cellOpts,
+      result.manifest,
+      version,
+      budget,
+    );
+    if (!commit.ok) return failed(commit);
+
+    manifest = result.manifest;
+    native = result.native;
+    version = commit.version;
+    turnState = result.turnState;
+    consumed += result.consumedRawBytes;
+    r.step(
+      `cell: checkpoint turn=${result.manifest.turn} native=${result.manifest.native.bytes} chunks=${result.manifest.native.chunks.length} hits=${result.manifest.redaction.hits} v=${commit.version} in ${r.deps.now() - started}ms`,
+    );
+  };
+
+  const failed = (f: { code: string; status: number }): void => {
+    if (f.code === "head_moved") {
+      r.step("cell: checkpoint skipped (head moved; capture stopped)");
+      stopped = true;
+    } else if (
+      f.code === "superseded" ||
+      f.status === 401 ||
+      f.status === 403
+    ) {
+      r.step("cell: checkpoint skipped (fenced; capture stopped)");
+      stopped = true;
+    } else {
+      r.step(`cell: checkpoint skipped (www ${f.code})`);
+    }
+  };
+
+  const captureOnce = async (): Promise<void> => {
+    let file: SessionFile | null = null;
+    try {
+      const out = await raceSignal(
+        provider.exec(cellId, CAPTURE_PROBE_ARGV, { timeoutMs: 5_000 }),
+        withTimeout(CELL_CAPTURE_POLL_BUDGET_MS, stop, r.live),
+      );
+      if (out.exitCode === 0) file = chooseSessionFile(out.stdout, sessionId);
+    } catch {
+      file = null;
+    }
+    const idle = r.deps.now() - lastPullAt >= CELL_CAPTURE_IDLE_PULL_MS;
+    if (file !== null) {
+      sessionId = file.sessionId;
+      projectDir = file.projectDir;
+      // The size is the turn signal the worker can observe (Q-1).
+      if (file.size <= lastSize && !idle) return;
+    } else if (projectDir !== null && sessionId !== null && idle) {
+      file = { projectDir, sessionId, size: lastSize };
+    } else {
+      return;
+    }
+    await pullOnce(file);
+  };
+
+  void (async () => {
+    while (!stop.aborted && !r.live.aborted && !stopped) {
+      try {
+        await captureOnce();
+      } catch (error) {
+        if (!stop.aborted) {
+          r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
+        }
+      }
+      await r.deps.sleep(CELL_CAPTURE_POLL_MS, stop);
     }
   })();
 }

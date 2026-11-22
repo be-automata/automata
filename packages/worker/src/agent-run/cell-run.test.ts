@@ -13,6 +13,8 @@ import { BoundedRunMap } from "./run-end-marks";
 import {
   buildCellMessage,
   createCellExecutor,
+  CELL_CAPTURE_IDLE_PULL_MS,
+  CELL_CAPTURE_POLL_MS,
   CELL_MEMORY_SAMPLE_MS,
   CELL_SETUP_STAMP_MS,
   type CellExecutorDeps,
@@ -127,6 +129,11 @@ function setup(
     execGate?: Promise<void>;
     /** The box test-services file (#707); default a path that does not exist. */
     testServicesPath?: string;
+    /** #743 phase 6: turns the per-turn session capture on (default off, like production). */
+    capture?: boolean;
+    /** What the checkpoint route's commit answers; default ok with the next version. */
+    commit?: (expectedVersion: number) => Promise<unknown>;
+    putBlob?: () => Promise<unknown>;
   } = {},
 ) {
   released.length = 0;
@@ -144,6 +151,12 @@ function setup(
   };
   let hbWaiters: (() => void)[] = [];
   const sampleWaiters: (() => void)[] = [];
+  const captureWaiters: (() => void)[] = [];
+  const checkpoint = {
+    puts: [] as { sha256: string; text: string }[],
+    commits: [] as { manifest: { turn: number }; expected: number }[],
+    probesAtRevoke: -1,
+  };
   let clock = 0;
   const marks = new BoundedRunMap(16);
   const provider = {
@@ -212,6 +225,7 @@ function setup(
       },
       revoke: async (_o, _a, signal) => {
         calls.push("www.revoke");
+        checkpoint.probesAtRevoke = execs.filter(isCaptureProbe).length;
         www.revokeSignals.push(signal.aborted);
         return { result: www.revokeResult };
       },
@@ -254,7 +268,34 @@ function setup(
       },
     },
     makeProvider,
+    ...(over.capture === true
+      ? { sessionContinuation: () => true }
+      : { sessionContinuation: () => false }),
+    checkpoint: {
+      putBlob: async (_o, sha256, bytes) => {
+        if (over.putBlob) return (await over.putBlob()) as never;
+        checkpoint.puts.push({ sha256, text: new TextDecoder().decode(bytes) });
+        return { ok: true, created: true };
+      },
+      commit: async (_o, manifest, expected) => {
+        if (over.commit) return (await over.commit(expected)) as never;
+        checkpoint.commits.push({
+          manifest: manifest as unknown as { turn: number },
+          expected,
+        });
+        return { ok: true, version: expected + 1 };
+      },
+    },
     sleep: async (ms, signal) => {
+      // #743: the capture loop has its own interval and waits like the sampler.
+      if (ms === CELL_CAPTURE_POLL_MS) {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          captureWaiters.push(resolve);
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return;
+      }
       // #749: the memory sampler's interval waits for the run to stop, like
       // the heartbeat, so its loop never spins on this instant clock.
       if (ms === CELL_MEMORY_SAMPLE_MS) {
@@ -336,6 +377,13 @@ function setup(
     await flush();
     await flush();
   };
+  /** #743: one capture-loop tick: wake its sleep and let the pull land. */
+  const captureTick = async () => {
+    await flush();
+    captureWaiters.splice(0).forEach((r) => r());
+    await flush();
+    await flush();
+  };
   /** One heartbeat tick: wake the pending sleep and let the beat finish. */
   const tick = async () => {
     const w = hbWaiters;
@@ -349,6 +397,11 @@ function setup(
     args,
     calls,
     sampleTick,
+    captureTick,
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    checkpoint,
     execs,
     files,
     logs,
@@ -362,6 +415,13 @@ function setup(
     tick,
   };
 }
+
+/** #743: the capture loop's transcript probe (F6: every project dir at depth 2). */
+const isCaptureProbe = (a: string[]) =>
+  a[0] === "/usr/bin/find" && a.includes("-printf");
+/** #743 F9: the re-check right before the read. */
+const isRegularFileCheck = (a: string[]) =>
+  a[0] === "/usr/bin/find" && a.includes("-print") && a.includes("-quit");
 
 /** The bootstrap's existence probe for the user memory file (#727 B). */
 const isMemoryProbe = (a: string[]) =>
@@ -1994,5 +2054,342 @@ describe("the cell run: the project's Flutter SDK (#742)", () => {
     expect(flutterLogs(s)).toEqual([
       "[agent-run thr_1] cell: flutter selection failed; using the image default SDK",
     ]);
+  });
+});
+
+describe("the per-turn session capture (#743 phase 6)", () => {
+  const SID = "11111111-1111-4111-8111-111111111111";
+  const NEWER = "22222222-2222-4222-8222-222222222222";
+  const enc = (t: string) => new TextEncoder().encode(t);
+  const turn = (n: number) =>
+    `${JSON.stringify({
+      type: "assistant",
+      uuid: `u${n}`,
+      message: {
+        id: `msg_${n}`,
+        content: [{ type: "text", text: `answer ${n}` }],
+      },
+    })}\n`;
+  const openToolCall = `${JSON.stringify({
+    type: "assistant",
+    uuid: "up",
+    message: {
+      id: "msg_open",
+      content: [{ type: "tool_use", id: "tu1", name: "Bash", input: {} }],
+    },
+  })}\n`;
+  const completed = { outcome: "completed", finalStatus: "complete" };
+
+  interface Cell {
+    text: string;
+    dir: string;
+    id: string;
+    /** Extra probe lines, as the agent could leave them. */
+    extra: string;
+    /** The regular-file re-check answers nothing: the path is now a symlink. */
+    swapped: boolean;
+    /** The probe lists no session file at all. */
+    unlisted: boolean;
+  }
+
+  /** A cell whose transcript lives in `cell`, answering the real probe and re-check argv shapes. */
+  function capturing(
+    scenario: (
+      s: ReturnType<typeof setup>,
+      cell: Cell,
+    ) => Promise<unknown> | unknown,
+    over: Parameters<typeof setup>[0] = {},
+    init: Partial<Cell> = {},
+  ) {
+    const cell: Cell = {
+      text: "",
+      dir: "-workspace",
+      id: SID,
+      extra: "",
+      swapped: false,
+      unlisted: false,
+      ...init,
+    };
+    const path = () =>
+      `/home/agent/.claude/projects/${cell.dir}/${cell.id}.jsonl`;
+    const s: ReturnType<typeof setup> = setup({
+      capture: true,
+      execStdout: (argv) => {
+        if (isCaptureProbe(argv)) {
+          const own = cell.unlisted
+            ? ""
+            : `${enc(cell.text).length} 1700000000.5 ${cell.dir}/${cell.id}.jsonl\n`;
+          return own + cell.extra;
+        }
+        if (isRegularFileCheck(argv)) return cell.swapped ? "" : `${path()}\n`;
+        return "";
+      },
+      pollUntilTerminal: async () => {
+        await scenario(s, cell);
+        return completed;
+      },
+      ...over,
+    });
+    s.provider.copyOut.mockImplementation(async () => enc(cell.text));
+    return { s, cell, path };
+  }
+  const probes = (s: { execs: string[][] }) =>
+    s.execs.filter(isCaptureProbe).length;
+  /** The copyOut paths under ~/.claude/projects (the bootstrap reads other files). */
+  const sessionReads = (s: ReturnType<typeof setup>) =>
+    s.provider.copyOut.mock.calls
+      .map((c) => c[1])
+      .filter((p) => p.includes("/.claude/projects/"));
+  const checkLogs = (s: { logs: string[] }) =>
+    s.logs.filter((l) => l.includes("cell: checkpoint"));
+
+  // card: protects=#743 a completed turn is redacted in the worker and written through the checkpoint route (blobs, then a commit from version 0), and the next turn appends from the new head with only its own bytes; fails_when=nothing is written, a later turn restarts from version 0, or the whole transcript is re-uploaded; no_claim=the redaction rules (phase 5) or the www route
+  it("captures a completed turn, then the next one from the new head", async () => {
+    const { s, cell } = capturing(async (s, cell) => {
+      cell.text = turn(1);
+      await s.captureTick();
+      cell.text = turn(1) + turn(2);
+      await s.captureTick();
+    });
+    const out = await s.executor.run(s.args);
+    expect(out.outcome).toBe("completed");
+    expect(
+      s.checkpoint.commits.map((c) => [c.manifest.turn, c.expected]),
+    ).toEqual([
+      [1, 0],
+      [2, 1],
+    ]);
+    const natives = s.checkpoint.puts.filter((p) => p.text.includes("answer"));
+    expect(natives.some((p) => p.text.includes("answer 2"))).toBe(true);
+    // The second pull uploads only its own turn.
+    expect(
+      s.checkpoint.puts.filter((p) => p.text.includes("answer 1")).length,
+    ).toBeGreaterThan(0);
+    expect(
+      s.checkpoint.puts.some(
+        (p) => p.text.includes("answer 2") && p.text.includes("answer 1"),
+      ),
+    ).toBe(false);
+    expect(checkLogs(s).join("\n")).toMatch(
+      /cell: checkpoint turn=2 native=\d+ chunks=2 hits=0 v=2 in \d+ms/,
+    );
+    expect(cell.text.length).toBeGreaterThan(0);
+  });
+
+  // card: protects=#743 an unchanged transcript commits nothing, an unfinished tool call is not a turn, and a pull with no new bytes (the 60 s idle pull) writes nothing (A-12); fails_when=a commit is sent for the same bytes or for a half turn; no_claim=the idle cadence on a real clock
+  it("writes nothing without a new completed turn or new bytes", async () => {
+    const { s, cell } = capturing(async (s, cell) => {
+      cell.text = openToolCall;
+      await s.captureTick(); // grew, but the turn is not complete
+      cell.text = openToolCall + turn(1);
+      await s.captureTick(); // one commit
+      await s.captureTick(); // same size: no pull
+      s.advance(CELL_CAPTURE_IDLE_PULL_MS);
+      await s.captureTick(); // idle pull: nothing new
+    });
+    await s.executor.run(s.args);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    expect(cell.text).toBe(openToolCall + turn(1));
+    // The idle tick did pull (read the file) but wrote nothing.
+    expect(sessionReads(s).length).toBeGreaterThanOrEqual(3);
+  });
+
+  // card: protects=#743 F6: the probe searches every project dir at depth 2 for regular files with no hard-coded dir, picks the file named after the pulled session over a newer one, and copies out from the dir it found; fails_when=-workspace is hard-coded, the newest file wins over the session id, or a symlink is listed; no_claim=which dir a real run uses (AC-8)
+  it("F6 finds the session by id in a dir other than -workspace", async () => {
+    const other = `/home/agent/.claude/projects/-home-agent-proj/${SID}.jsonl`;
+    const { s, cell } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+      },
+      {
+        nextMessage: async () =>
+          ({ ...pulled, sessionId: SID }) as unknown as typeof pulled,
+      },
+      {
+        dir: "-home-agent-proj",
+        extra: `1 1800000000.0 -workspace/${NEWER}.jsonl\nnot-a-session.jsonl\n9 1 -bad dir/${SID}.jsonl\n`,
+      },
+    );
+    await s.executor.run(s.args);
+    const probe = s.execs.find(isCaptureProbe) as string[];
+    expect(probe.slice(0, 3)).toEqual([
+      "/usr/bin/find",
+      "-P",
+      "/home/agent/.claude/projects",
+    ]);
+    expect(probe.join(" ")).toContain("-mindepth 2 -maxdepth 2 -type f");
+    expect(probe.join(" ")).not.toContain("-workspace");
+    expect(sessionReads(s)).toEqual([other]);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    expect(cell.dir).toBe("-home-agent-proj");
+  });
+
+  // card: protects=#743 F9: a file swapped for a symlink after the probe fails the regular-file re-check and is never copied out; a fresh run (no session id) takes the newest UUID file; fails_when=copyOut runs on a path the re-check refused; no_claim=the residual gap between the re-check and copyOut (spec 2.3)
+  it("F9 refuses a symlink: the re-check fails and copyOut is not called", async () => {
+    const { s } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+      },
+      {},
+      { swapped: true },
+    );
+    await s.executor.run(s.args);
+    expect(sessionReads(s)).toEqual([]);
+    expect(s.execs.some(isRegularFileCheck)).toBe(true);
+    expect(s.checkpoint.commits).toHaveLength(0);
+    expect(checkLogs(s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (not a regular file)",
+    );
+  });
+
+  // card: protects=#743 a symlink the probe does not list is never read; fails_when=an unlisted path is pulled anyway; no_claim=the probe's own -type f filtering (find)
+  it("pulls nothing when the probe lists no session file", async () => {
+    const { s } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+      },
+      {},
+      { unlisted: true },
+    );
+    await s.executor.run(s.args);
+    expect(sessionReads(s)).toEqual([]);
+    expect(probes(s)).toBeGreaterThan(1);
+  });
+
+  // card: protects=#743 a failed read, a failed write and a thrown error never fail the run, and each logs one line naming the cause class only (no transcript bytes, no token, no error text); fails_when=the run fails, or a canary reaches a log; no_claim=the www client's own error handling
+  it("fails open and logs the cause class only", async () => {
+    const CANARY = "TRANSCRIPT-CANARY-do-not-log";
+    const copyFail = capturing(async (s, cell) => {
+      cell.text = turn(1);
+      s.provider.copyOut.mockRejectedValue(new Error(CANARY));
+      await s.captureTick();
+    });
+    expect((await copyFail.s.executor.run(copyFail.s.args)).outcome).toBe(
+      "completed",
+    );
+    expect(checkLogs(copyFail.s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (copy-out failed)",
+    );
+
+    const putFail = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+      },
+      {
+        putBlob: async () => ({
+          ok: false,
+          code: "no_open_cell_step",
+          status: 403,
+        }),
+      },
+    );
+    expect((await putFail.s.executor.run(putFail.s.args)).outcome).toBe(
+      "completed",
+    );
+    expect(checkLogs(putFail.s).join("\n")).toContain(
+      "fenced; capture stopped",
+    );
+
+    const thrown = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+        await s.captureTick();
+      },
+      {
+        commit: async () => {
+          throw new Error(CANARY);
+        },
+      },
+    );
+    expect((await thrown.s.executor.run(thrown.s.args)).outcome).toBe(
+      "completed",
+    );
+    const lines = checkLogs(thrown.s);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.every((l) => /\(error Error\)$/.test(l))).toBe(true);
+
+    const soft = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+      },
+      { commit: async () => ({ ok: false, code: "transport", status: 0 }) },
+    );
+    await soft.s.executor.run(soft.s.args);
+    expect(checkLogs(soft.s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (www transport)",
+    );
+
+    const all = [copyFail, putFail, thrown, soft]
+      .flatMap((c) => c.s.logs)
+      .join("\n");
+    expect(all).not.toContain(CANARY);
+    expect(all).not.toContain(DAEMON);
+  });
+
+  // card: protects=#743 a lost head CAS stops the capture for the rest of the run; fails_when=the loop keeps probing after head_moved; no_claim=restoring the head (phase 8)
+  it("stops after head_moved", async () => {
+    const { s } = capturing(
+      async (s, cell) => {
+        cell.text = turn(1);
+        await s.captureTick();
+        const before = probes(s);
+        cell.text = turn(1) + turn(2);
+        await s.captureTick();
+        expect(probes(s)).toBe(before);
+      },
+      {
+        commit: async () => ({
+          ok: false,
+          code: "head_moved",
+          status: 409,
+          version: 3,
+        }),
+      },
+    );
+    await s.executor.run(s.args);
+    expect(checkLogs(s)).toContain(
+      "[agent-run thr_1] cell: checkpoint skipped (head moved; capture stopped)",
+    );
+  });
+
+  // card: protects=#743 the capture loop stops before the teardown starts, so no probe or write runs against a cell that is being revoked; fails_when=a probe runs after www.revoke, or the loop outlives the run; no_claim=an in-flight pull at the cancel (phase 7b)
+  it("stops before teardown", async () => {
+    const { s, cell } = capturing(async (s, cell) => {
+      cell.text = turn(1);
+      await s.captureTick();
+    });
+    await s.executor.run(s.args);
+    const atRevoke = s.checkpoint.probesAtRevoke;
+    expect(atRevoke).toBeGreaterThan(0);
+    await s.captureTick();
+    expect(probes(s)).toBe(atRevoke);
+    expect(cell.text).toBe(turn(1));
+  });
+
+  // card: protects=#743 the capture is off unless its gate says yes (phase 11 wires the flag): no probe, no read, no write, and a non-claude agent never captures; fails_when=a probe or a copyOut runs with the gate off; no_claim=the flag itself
+  it("is disabled by default", async () => {
+    const off = setup({
+      execStdout: (argv) =>
+        isCaptureProbe(argv) ? `5 1 -workspace/${SID}.jsonl\n` : "",
+    });
+    off.provider.copyOut.mockImplementation(async () => enc(turn(1)));
+    await off.executor.run(off.args);
+    expect(probes(off)).toBe(0);
+    expect(sessionReads(off)).toEqual([]);
+    expect(off.checkpoint.commits).toHaveLength(0);
+
+    const codex = setup({
+      capture: true,
+      nextMessage: async () =>
+        ({ ...pulled, agent: "codex" }) as unknown as typeof pulled,
+    });
+    await codex.executor.run(codex.args);
+    expect(probes(codex)).toBe(0);
   });
 });

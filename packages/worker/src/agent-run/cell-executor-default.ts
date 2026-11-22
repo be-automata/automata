@@ -11,6 +11,8 @@ import {
   fetchCellPlan,
   postCellReport,
   postCellRevoke,
+  postCheckpointBlob,
+  postCheckpointCommit,
 } from "./cell-www-client";
 import { runEndMarks } from "./run-end-marks";
 import {
@@ -58,6 +60,14 @@ export const cellExecutor = createCellExecutor({
         warn: (msg) => console.warn(`[cell] ${msg}`),
       },
     }),
+  // #743 phase 11 wires the cellSessionContinuation flag here; until then the capture is off.
+  sessionContinuation: () => false,
+  checkpoint: {
+    putBlob: (opts, sha256, bytes, signal) =>
+      postCheckpointBlob(opts, sha256, bytes, signal),
+    commit: (opts, manifest, expectedVersion, signal) =>
+      postCheckpointCommit(opts, manifest, expectedVersion, signal),
+  },
   sleep: (ms, signal) => abortableSleep(ms, signal),
   now: () => Date.now(),
   randomId: () => randomBytes(18).toString("base64url"),

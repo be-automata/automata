@@ -5,6 +5,8 @@ import {
   type CellEgressGuardReason,
 } from "@terragon/types/cell";
 
+import type { CellSessionManifest } from "@terragon/types/cell-session-checkpoint";
+
 import { abortableSleep } from "./abort-sleep";
 import {
   AUTH_ERROR_CONFIRM_ATTEMPTS,
@@ -400,4 +402,184 @@ export async function postCellReport(
     );
   }
   return "failed";
+}
+
+// ---- the session checkpoint route (#743) ---------------------------------------
+
+const CHECKPOINT_CALL_TIMEOUT_MS = 20_000;
+/** A 4 MiB chunk inflated by base64, plus the envelope: the route's own body cap. */
+const CHECKPOINT_RESPONSE_MAX_BYTES = 6 * 1024 * 1024;
+
+/** A refused or failed checkpoint call: the route's code and the status only (status 0 = transport). */
+export interface CheckpointFailure {
+  ok: false;
+  code: string;
+  status: number;
+  /** `head_moved` carries the head's current version. */
+  version?: number;
+}
+
+export type CheckpointResult<T> = ({ ok: true } & T) | CheckpointFailure;
+
+export type CheckpointHead =
+  | { found: false; reason: "none" | "other_session" }
+  | { found: true; manifest: CellSessionManifest; version: number };
+
+/**
+ * One `cell-checkpoint` call. Never throws and never logs: a body can carry a
+ * transcript chunk, so a failure is only `{code, status}`. `cellAttempt` on
+ * `opts` is the attempt the route binds to the cell's open step.
+ */
+async function checkpointCall(
+  opts: WwwClientOpts,
+  payload: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  deps: CellWwwDeps,
+): Promise<{ ok: true; body: unknown } | CheckpointFailure> {
+  const doFetch = deps.fetch ?? fetch;
+  let res: Response;
+  try {
+    res = await doFetch(
+      wwwEndpoint(opts.baseUrl, "/api/daemon/cell-checkpoint"),
+      {
+        method: "POST",
+        headers: wwwHeaders(opts),
+        body: JSON.stringify({
+          threadId: opts.threadId,
+          threadChatId: opts.threadChatId,
+          attempt: opts.cellAttempt,
+          ...(opts.runExternalId !== undefined && payload.action !== "read-blob"
+            ? { runExternalId: opts.runExternalId }
+            : {}),
+          ...payload,
+        }),
+        signal: withTimeout(CHECKPOINT_CALL_TIMEOUT_MS, signal),
+      },
+    );
+  } catch {
+    return { ok: false, code: "transport", status: 0 };
+  }
+  const body = await readCappedJson(res, CHECKPOINT_RESPONSE_MAX_BYTES);
+  if (!res.ok) {
+    const version = (body as { version?: unknown } | undefined)?.version;
+    return {
+      ok: false,
+      code: codeOf(body),
+      status: res.status,
+      ...(typeof version === "number" ? { version } : {}),
+    };
+  }
+  return { ok: true, body };
+}
+
+/** `put-blob`: a create-only, content-addressed chunk. `created` is false when it already existed. */
+export async function postCheckpointBlob(
+  opts: WwwClientOpts,
+  sha256: string,
+  bytes: Uint8Array,
+  signal?: AbortSignal,
+  deps: CellWwwDeps = {},
+): Promise<CheckpointResult<{ created: boolean }>> {
+  const out = await checkpointCall(
+    opts,
+    {
+      action: "put-blob",
+      sha256,
+      base64: Buffer.from(bytes).toString("base64"),
+    },
+    signal,
+    deps,
+  );
+  if (!out.ok) return out;
+  return {
+    ok: true,
+    created: (out.body as { created?: unknown } | undefined)?.created === true,
+  };
+}
+
+/** `commit`: moves the head from `expectedVersion`. A lost CAS is `{code: "head_moved", version}`. */
+export async function postCheckpointCommit(
+  opts: WwwClientOpts,
+  manifest: CellSessionManifest,
+  expectedVersion: number,
+  signal?: AbortSignal,
+  deps: CellWwwDeps = {},
+): Promise<CheckpointResult<{ version: number }>> {
+  const out = await checkpointCall(
+    opts,
+    { action: "commit", manifest, expectedVersion },
+    signal,
+    deps,
+  );
+  if (!out.ok) return out;
+  const version = (out.body as { version?: unknown } | undefined)?.version;
+  if (typeof version !== "number") {
+    return { ok: false, code: "bad_response", status: 200 };
+  }
+  return { ok: true, version };
+}
+
+/** `read-head` for `sessionId`. */
+export async function postCheckpointReadHead(
+  opts: WwwClientOpts,
+  sessionId: string,
+  signal?: AbortSignal,
+  deps: CellWwwDeps = {},
+): Promise<CheckpointResult<{ head: CheckpointHead }>> {
+  const out = await checkpointCall(
+    opts,
+    { action: "read-head", sessionId },
+    signal,
+    deps,
+  );
+  if (!out.ok) return out;
+  const body = out.body as
+    | {
+        found?: unknown;
+        reason?: unknown;
+        manifest?: unknown;
+        version?: unknown;
+      }
+    | undefined;
+  if (body?.found === false) {
+    const reason = body.reason === "other_session" ? "other_session" : "none";
+    return { ok: true, head: { found: false, reason } };
+  }
+  if (
+    body?.found === true &&
+    typeof body.manifest === "object" &&
+    body.manifest !== null &&
+    typeof body.version === "number"
+  ) {
+    return {
+      ok: true,
+      head: {
+        found: true,
+        manifest: body.manifest as CellSessionManifest,
+        version: body.version,
+      },
+    };
+  }
+  return { ok: false, code: "bad_response", status: 200 };
+}
+
+/** `read-blob`: one chunk by its sha256. */
+export async function postCheckpointReadBlob(
+  opts: WwwClientOpts,
+  sha256: string,
+  signal?: AbortSignal,
+  deps: CellWwwDeps = {},
+): Promise<CheckpointResult<{ bytes: Uint8Array }>> {
+  const out = await checkpointCall(
+    opts,
+    { action: "read-blob", sha256 },
+    signal,
+    deps,
+  );
+  if (!out.ok) return out;
+  const base64 = (out.body as { base64?: unknown } | undefined)?.base64;
+  if (typeof base64 !== "string") {
+    return { ok: false, code: "bad_response", status: 200 };
+  }
+  return { ok: true, bytes: new Uint8Array(Buffer.from(base64, "base64")) };
 }
