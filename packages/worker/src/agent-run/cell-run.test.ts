@@ -422,6 +422,7 @@ describe("the cell run: success, plan, create", () => {
     observed.current = null;
     let stat = "anon 1073741824\n";
     let midRun: number | null | undefined;
+    let risingOnce: number | null | undefined;
     const s = setup({
       execStdout: (argv) =>
         argv.join(" ") === "cat /sys/fs/cgroup/memory.stat" ? stat : "",
@@ -429,11 +430,15 @@ describe("the cell run: success, plan, create", () => {
         stat = "anon 5368709120\nshmem 0\n";
         await s.sampleTick();
         const getter = observed.current as (() => number | null) | null;
+        // A rise counts once seen twice (the lower of the last two samples).
+        risingOnce = getter?.();
+        await s.sampleTick();
         midRun = getter?.();
         return { outcome: "completed", finalStatus: "complete" };
       },
     });
     await s.executor.run(s.args);
+    expect(risingOnce).toBe(1073741824);
     expect(midRun).toBe(5368709120);
   });
 

@@ -720,15 +720,22 @@ async function settleTerminalError(
 
 // ---- the heartbeat -----------------------------------------------------------
 
-/** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
-/** How often a live cell's anonymous memory is re-read for the headroom reservation. */
-export const CELL_MEMORY_SAMPLE_MS = 30_000;
+/**
+ * How often a live cell's anonymous memory is re-read for the headroom
+ * reservation. Short, because a sample older than a drop in the cell's usage
+ * over-shrinks the reservation until the next read.
+ */
+export const CELL_MEMORY_SAMPLE_MS = 4_000;
 
 /**
  * #749: read the cell's own cgroup (`/sys/fs/cgroup/memory.stat`, anon + shmem,
  * the box path's measure) every CELL_MEMORY_SAMPLE_MS for the whole run, the
  * agent's work included (its own stop signal, aborted at the run's end, before
- * teardown), and hand admission a synchronous getter for the last sample. Fail
+ * teardown), and hand admission a synchronous getter. The getter returns the
+ * LOWER of the last two samples: the box path's rule is that the subtracted
+ * anon never exceeds what the kernel charges now, and a sample taken before a
+ * drop would exceed it, so a drop counts at once and a rise only once seen
+ * twice. Fail
  * open: a failed read keeps the previous sample (null until the first), which
  * only ever over-reserves.
  */
@@ -737,8 +744,11 @@ function startCellMemorySampler(
   reservation: Reservation | null,
 ): void {
   if (reservation === null) return;
-  let sampled: number | null = null;
-  reservation.observe(() => sampled);
+  let last: number | null = null;
+  let previous: number | null = null;
+  reservation.observe(() =>
+    last === null ? null : previous === null ? last : Math.min(last, previous),
+  );
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
   const stop = r.memorySampleStop.signal;
@@ -750,8 +760,11 @@ function startCellMemorySampler(
           ["cat", "/sys/fs/cgroup/memory.stat"],
           { timeoutMs: 5_000 },
         );
-        if (out.exitCode === 0)
-          sampled = parseMemoryAnon(out.stdout) ?? sampled;
+        const read = out.exitCode === 0 ? parseMemoryAnon(out.stdout) : null;
+        if (read !== null) {
+          previous = last;
+          last = read;
+        }
       } catch {
         // Keep the last sample: never fail a run over a memory probe.
       }
@@ -760,6 +773,7 @@ function startCellMemorySampler(
   })();
 }
 
+/** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
 function startHeartbeat(r: CellRunState): void {
   const { st, live } = r;
   let failures = 0;
