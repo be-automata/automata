@@ -266,6 +266,8 @@ interface CellRunState {
   /** Rejects the moment `live` aborts (see raceLive). */
   abortedLive: Promise<never>;
   heartbeatStop: AbortController;
+  /** #749: stops the memory sampler at the run's end (the heartbeat stops at the message write). */
+  memorySampleStop: AbortController;
   cellOpts: WwwClientOpts;
   attempt: number;
   stepKey: string;
@@ -414,6 +416,7 @@ async function runCell(
     live,
     abortedLive,
     heartbeatStop: new AbortController(),
+    memorySampleStop: new AbortController(),
     cellOpts: { ...wwwOpts, cellAttempt: attempt },
     attempt,
     stepKey: plan.tags.stepKey,
@@ -588,6 +591,7 @@ async function runCell(
     thrown = exit.thrown ?? null;
   } finally {
     r.heartbeatStop.abort();
+    r.memorySampleStop.abort();
   }
   // A terminal read that confirmed the retire, while the poll loop was running.
   if (st.conflict && thrown === null && st.failure !== null) {
@@ -722,8 +726,9 @@ export const CELL_MEMORY_SAMPLE_MS = 30_000;
 
 /**
  * #749: read the cell's own cgroup (`/sys/fs/cgroup/memory.stat`, anon + shmem,
- * the box path's measure) every CELL_MEMORY_SAMPLE_MS until the heartbeat
- * stops, and hand admission a synchronous getter for the last sample. Fail
+ * the box path's measure) every CELL_MEMORY_SAMPLE_MS for the whole run, the
+ * agent's work included (its own stop signal, aborted at the run's end, before
+ * teardown), and hand admission a synchronous getter for the last sample. Fail
  * open: a failed read keeps the previous sample (null until the first), which
  * only ever over-reserves.
  */
@@ -736,8 +741,9 @@ function startCellMemorySampler(
   reservation.observe(() => sampled);
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
+  const stop = r.memorySampleStop.signal;
   void (async () => {
-    while (!r.heartbeatStop.signal.aborted) {
+    while (!stop.aborted) {
       try {
         const out = await provider.exec(
           cellId,
@@ -749,7 +755,7 @@ function startCellMemorySampler(
       } catch {
         // Keep the last sample: never fail a run over a memory probe.
       }
-      await r.deps.sleep(CELL_MEMORY_SAMPLE_MS, r.heartbeatStop.signal);
+      await r.deps.sleep(CELL_MEMORY_SAMPLE_MS, stop);
     }
   })();
 }

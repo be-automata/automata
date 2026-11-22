@@ -143,6 +143,7 @@ function setup(
     reportBodies: [] as unknown[],
   };
   let hbWaiters: (() => void)[] = [];
+  const sampleWaiters: (() => void)[] = [];
   let clock = 0;
   const marks = new BoundedRunMap(16);
   const provider = {
@@ -259,6 +260,7 @@ function setup(
       if (ms === CELL_MEMORY_SAMPLE_MS) {
         await new Promise<void>((resolve) => {
           if (signal?.aborted) return resolve();
+          sampleWaiters.push(resolve);
           signal?.addEventListener("abort", () => resolve(), { once: true });
         });
         return;
@@ -328,6 +330,12 @@ function setup(
     },
   } as unknown as RunExecutorInput;
   const executor = createCellExecutor(deps);
+  /** #749: one memory-sampler tick: wake its sleep and let the read land. */
+  const sampleTick = async () => {
+    sampleWaiters.splice(0).forEach((r) => r());
+    await flush();
+    await flush();
+  };
   /** One heartbeat tick: wake the pending sleep and let the beat finish. */
   const tick = async () => {
     const w = hbWaiters;
@@ -340,6 +348,7 @@ function setup(
     executor,
     args,
     calls,
+    sampleTick,
     execs,
     files,
     logs,
@@ -406,6 +415,26 @@ describe("the cell run: success, plan, create", () => {
     ).toBe(true);
     const getter = observed.current as (() => number | null) | null;
     expect(getter?.()).toBe(3221225472 + 1048576);
+  });
+
+  // card: protects=#749 the sampler keeps reading through the agent's work (the poll loop), not only during setup, so the reservation follows a cell that grows; fails_when=it stops with the setup heartbeat at the message write; no_claim=the 30 s cadence on a real clock
+  it("#749 keeps sampling during the poll loop: a cell that grows mid-run is observed", async () => {
+    observed.current = null;
+    let stat = "anon 1073741824\n";
+    let midRun: number | null | undefined;
+    const s = setup({
+      execStdout: (argv) =>
+        argv.join(" ") === "cat /sys/fs/cgroup/memory.stat" ? stat : "",
+      pollUntilTerminal: async () => {
+        stat = "anon 5368709120\nshmem 0\n";
+        await s.sampleTick();
+        const getter = observed.current as (() => number | null) | null;
+        midRun = getter?.();
+        return { outcome: "completed", finalStatus: "complete" };
+      },
+    });
+    await s.executor.run(s.args);
+    expect(midRun).toBe(5368709120);
   });
 
   // card: protects=a clean run goes plan, create, bootstrap, message, poll and then the ordered teardown with the server's attempt everywhere; fails_when=the attempt differs between poll, revoke and readback or the order moves; no_claim=a live cell (IT-E1)
