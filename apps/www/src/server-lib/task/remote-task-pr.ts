@@ -239,9 +239,10 @@ export function withIssueReference(body: string, issueNumber: number): string {
     .filter(([, isCode]) => !isCode)
     .map(([text]) => text)
     .join("");
-  const hasRef = new RegExp(`(?<![\\w/])Refs #${issueNumber}(?!\\d)`).test(
-    prose,
-  );
+  const hasRef = new RegExp(
+    `(?<![\\w/])(?:refs|closes|fixes|resolves):?[ \\t]+#${issueNumber}(?!\\d)`,
+    "i",
+  ).test(prose);
   return hasRef ? rewritten : `${rewritten}\n\nRefs #${issueNumber}`;
 }
 

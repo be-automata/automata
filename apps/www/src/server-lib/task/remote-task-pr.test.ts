@@ -877,6 +877,19 @@ describe("withIssueReference", () => {
     expect(withIssueReference("Body.\n\nRefs #5", 5)).toBe("Body.\n\nRefs #5");
   });
 
+  it.each(["refs #12", "Refs: #12", "Closes #12", "REFS:  #12"])(
+    "does not append a second reference when %s is already there",
+    (text) => {
+      const out = withIssueReference(`Body.\n\n${text}`, 12);
+      expect(out.match(/#12\b/g)).toHaveLength(1);
+      expect(withIssueReference(out, 12)).toBe(out);
+    },
+  );
+
+  it("does not take Refs #120 for #12", () => {
+    expect(withIssueReference("Refs #120", 12)).toBe("Refs #120\n\nRefs #12");
+  });
+
   it.each([
     "Closes #5",
     "closed #5",
