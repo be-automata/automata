@@ -205,6 +205,29 @@ describe("prepareCheckpoint", () => {
     );
   });
 
+  it("the incremental digest path yields the same manifest id and native sha256", () => {
+    const first = written(run({ newBytes: bytes(LINES.slice(0, 4).join("")) }));
+    const rest = {
+      previous: first.manifest,
+      previousNative: first.native,
+      turnState: first.turnState,
+      newBytes: bytes(LINES.slice(4).join("")),
+    };
+    const classic = written(run(rest));
+    const incremental = written(
+      run({ ...rest, previousNativeSha256: first.nativeSha256 }),
+    );
+    expect(incremental.manifest.id).toBe(classic.manifest.id);
+    expect(incremental.manifest.native.sha256).toBe(
+      classic.manifest.native.sha256,
+    );
+    expect(incremental.nativeSha256).toBe(classic.nativeSha256);
+    expect(run({ ...rest, previousNativeSha256: "0".repeat(64) })).toEqual({
+      kind: "skipped",
+      reason: "prefix mismatch",
+    });
+  });
+
   it("a pull with only a summary line adds a native chunk but no events chunk", () => {
     const first = written(run({ newBytes: bytes(LINES.slice(0, 6).join("")) }));
     const second = written(

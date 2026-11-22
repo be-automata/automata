@@ -44,7 +44,6 @@ export const CELL_SESSION_NATIVE_MAX_BYTES = 12 * 1024 * 1024;
  * is about 100 KB, and restore fetches chunks with bounded concurrency.
  */
 export const CELL_SESSION_MAX_CHUNKS = 1024;
-export const CELL_SESSION_CONTINUATION_BUDGET = 1;
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 

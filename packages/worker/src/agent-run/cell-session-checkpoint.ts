@@ -1,3 +1,5 @@
+import { createHash, type Hash } from "node:crypto";
+
 import {
   CELL_SESSION_CHUNK_MAX_BYTES,
   CELL_SESSION_MAX_CHUNKS,
@@ -68,6 +70,19 @@ export interface PrepareCheckpointInput {
   parent?: string | null;
   /** The redacted transcript the previous manifest describes; verified against it. */
   previousNative?: Uint8Array;
+  /**
+   * The sha256 of `previousNative`, which the caller already committed (the
+   * `nativeSha256` of the last write). When given it is checked against the
+   * previous manifest instead of re-hashing the whole transcript.
+   */
+  previousNativeSha256?: string;
+  /**
+   * The running sha256 of `previousNative` (the `nativeHash` of the last
+   * write). It is read through a copy, never finalized or changed, and the
+   * result carries a new one: a pull hashes only its NEW bytes. Takes
+   * precedence over `previousNativeSha256`.
+   */
+  previousNativeHash?: Hash;
   /** Raw transcript bytes since the last pull. */
   newBytes: Uint8Array;
   turnState?: TurnState;
@@ -100,6 +115,10 @@ export type PrepareCheckpointResult =
       blobs: CheckpointBlob[];
       /** The full redacted transcript after this pull: the caller's next `previousNative`. */
       native: Uint8Array;
+      /** The sha256 of `native`: the caller's next `previousNativeSha256`. */
+      nativeSha256: string;
+      /** The running hash of `native` (a copy of the input's, plus the new chunks): the caller's next `previousNativeHash`. */
+      nativeHash: Hash;
       /** Raw bytes consumed (up to the last newline): advance the file offset by this. */
       consumedRawBytes: number;
       turnState: TurnState;
@@ -121,10 +140,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
+/** Join chunks with one allocation: linear in the total length. */
+function concatAll(chunks: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
   return out;
 }
 
@@ -274,7 +299,9 @@ export function prepareCheckpoint(
   if (
     previous &&
     (previousNative.length !== previous.native.bytes ||
-      sha256Hex(previousNative) !== previous.native.sha256)
+      (input.previousNativeHash?.copy().digest("hex") ??
+        input.previousNativeSha256 ??
+        sha256Hex(previousNative)) !== previous.native.sha256)
   ) {
     return skip("prefix mismatch");
   }
@@ -305,8 +332,16 @@ export function prepareCheckpoint(
   const eventChunks = splitChunks(eventLines, CELL_SESSION_CHUNK_MAX_BYTES);
   if (!nativeChunks || !eventChunks) return skip("over cap");
 
-  const native = concat(previousNative, concatAll(nativeChunks));
+  const native = concatAll([previousNative, ...nativeChunks]);
   if (native.length > CELL_SESSION_NATIVE_MAX_BYTES) return skip("over cap");
+
+  // The old bytes are hashed at most once (not at all with the caller's running
+  // hash): feed only what is not yet in the hash.
+  const nativeHash = input.previousNativeHash
+    ? input.previousNativeHash.copy()
+    : createHash("sha256").update(previousNative);
+  for (const c of nativeChunks) nativeHash.update(c);
+  const nativeSha256 = nativeHash.copy().digest("hex");
 
   const priorNativeChunks = previous?.native.chunks ?? [];
   const priorEventChunks = previous?.events.chunks ?? [];
@@ -330,7 +365,7 @@ export function prepareCheckpoint(
     projectDir: context.projectDir,
     git: context.git,
     native: {
-      sha256: sha256Hex(native),
+      sha256: nativeSha256,
       bytes: native.length,
       chunks: [...priorNativeChunks, ...nativeChunks.map(ref)],
     },
@@ -360,14 +395,12 @@ export function prepareCheckpoint(
       })),
     ],
     native,
+    nativeSha256,
+    nativeHash,
     consumedRawBytes: cut,
     turnState: normalized.turnState,
     turnAdvanced: normalized.turnState.turn > (previous?.turn ?? 0),
   };
-}
-
-function concatAll(chunks: Uint8Array[]): Uint8Array {
-  return chunks.reduce((acc, c) => concat(acc, c), new Uint8Array(0));
 }
 
 // ---- restore into a new cell (#743 phase 8) -----------------------------------
@@ -406,7 +439,6 @@ export interface RestoreInput {
     signal: AbortSignal,
   ) => Promise<CheckpointResult<{ bytes: Uint8Array }>>;
   signal: AbortSignal;
-  concurrency?: number;
 }
 
 /**
@@ -483,12 +515,11 @@ export async function fetchSessionCheckpoint(
       bodies[index] = out.bytes;
     }
   };
-  const width = Math.max(
-    1,
-    input.concurrency ?? CELL_RESTORE_FETCH_CONCURRENCY,
-  );
   await Promise.all(
-    Array.from({ length: Math.min(width, chunks.length) }, worker),
+    Array.from(
+      { length: Math.min(CELL_RESTORE_FETCH_CONCURRENCY, chunks.length) },
+      worker,
+    ),
   );
   if (state.failure !== null) return fresh(state.failure);
 
