@@ -15,6 +15,7 @@ import {
   postAbnormalEnd,
   type AbnormalEnd,
   type AbnormalEndState,
+  type SalvageResult,
 } from "./abnormal-end";
 import {
   CELL_DAEMON_BUNDLE,
@@ -35,6 +36,11 @@ import {
   repoEnvDroppedNote,
   type FilteredRepoEnv,
 } from "./repo-env";
+import {
+  CELL_FREEZE_BUDGET_MS,
+  freezeCellAgent,
+  salvageCellWorkBranch,
+} from "./cell-salvage";
 import { prepareCheckpoint, type TurnState } from "./cell-session-checkpoint";
 import { createSessionRedactor } from "./cell-session-redact";
 import { teardownCellRun } from "./cell-teardown";
@@ -292,8 +298,16 @@ interface CellRunState {
   heartbeatStop: AbortController;
   /** #749: stops the memory sampler at the run's end (the heartbeat stops at the message write). */
   memorySampleStop: AbortController;
-  /** #743: stops the per-turn session capture at the run's end, before teardown. */
+  /** #743: stops the per-turn session capture loop at the run's end, before teardown. */
   captureStop: AbortController;
+  /**
+   * #743 phase 7b: bounds the capture's pulls. Unlike the run's own signal it
+   * stays live through a timeout, so an in-flight pull can finish inside the
+   * timeout capture budget (F2); aborted at once on every other end.
+   */
+  captureAbort: AbortController;
+  /** #743: the running capture, when the gate is on. */
+  capture: CaptureHandle | null;
   cellOpts: WwwClientOpts;
   attempt: number;
   stepKey: string;
@@ -444,6 +458,8 @@ async function runCell(
     heartbeatStop: new AbortController(),
     memorySampleStop: new AbortController(),
     captureStop: new AbortController(),
+    captureAbort: new AbortController(),
+    capture: null,
     cellOpts: { ...wwwOpts, cellAttempt: attempt },
     attempt,
     stepKey: plan.tags.stepKey,
@@ -474,6 +490,8 @@ async function runCell(
 
   let result: AgentRunOutput | undefined;
   let thrown: { error: unknown } | null = null;
+  /** When the poll loop (or the throw that ended it) returned: the timeout capture's clock starts here. */
+  let pollReturnedAt: number | null = null;
   try {
     // 4. The provider, per run (the entrypoint depends on the plan's host).
     // The config selectRunExecutor read is passed through: read once per run.
@@ -614,10 +632,12 @@ async function runCell(
       result = { ...ids, outcome: poll.outcome, finalStatus: poll.finalStatus };
     }
   } catch (error) {
+    pollReturnedAt = Date.now();
     const exit = await decideExit(r, error);
     result = exit.result ?? result;
     thrown = exit.thrown ?? null;
   } finally {
+    pollReturnedAt ??= Date.now();
     r.heartbeatStop.abort();
     r.memorySampleStop.abort();
     r.captureStop.abort();
@@ -627,9 +647,23 @@ async function runCell(
     thrown = { error: st.failure };
   }
 
-  // The finally: claim the end, then R -> T -> B -> A -> P, then give the slot back.
+  // #743 phase 7b: the end is claimed BEFORE anything else, so a typed `timeout`
+  // can capture the session and salvage the work first. Any other end skips
+  // the capture and keeps today's teardown.
+  const end = claimEnd(r, thrown);
+  let salvage: SalvageResult | null = null;
   try {
-    await tearDown(r, thrown);
+    if (end?.cause === "timeout") {
+      salvage = await captureOnTimeout(r, pollReturnedAt ?? Date.now());
+    } else {
+      r.captureAbort.abort();
+    }
+  } catch {
+    // captureOnTimeout never throws; a guard so the teardown below always runs.
+  }
+  // The finally: R -> T -> B -> A -> P, then give the slot back.
+  try {
+    await tearDown(r, end, salvage);
   } finally {
     await releaseAdmission();
   }
@@ -804,12 +838,25 @@ function startCellMemorySampler(
 
 // ---- the per-turn session capture (#743 phase 6) ------------------------------
 
-/** How often the capture loop looks at the cell's transcript. Distinct from CELL_MEMORY_SAMPLE_MS. */
-export const CELL_CAPTURE_POLL_MS = 7_000;
+/**
+ * How often the capture loop looks at the cell's transcript. Distinct from
+ * CELL_MEMORY_SAMPLE_MS and from the run's poll interval (WORKER_POLL_INTERVAL_MS,
+ * default 7 s): the test harness keys its sleeps on the value (the #749 collision).
+ */
+export const CELL_CAPTURE_POLL_MS = 6_500;
 /** With no sign of growth (or a failed probe), pull anyway after this long (Q-1). */
 export const CELL_CAPTURE_IDLE_PULL_MS = 60_000;
 /** One pull (the exec checks and the copyOut) is abandoned after this long. */
 export const CELL_CAPTURE_POLL_BUDGET_MS = 15_000;
+/**
+ * #743 phase 7b (OQ-4, F2): the whole timeout capture (freeze, the wait for an
+ * in-flight pull, the final pull, the salvage), from the poll loop's return to
+ * the teardown's first step. A test pins this + the teardown's worst case + 30 s
+ * of slack under onFailure's typed-terminal wait.
+ */
+export const CELL_TIMEOUT_CAPTURE_BUDGET_MS = 40_000;
+/** The final pull's share of that budget. */
+const CELL_TIMEOUT_FINAL_FLUSH_MS = 12_000;
 
 const CELL_PROJECTS_DIR = `${HOME_CLAUDE_DIR}/projects`;
 /** F6: every project dir at depth 2, no hard-coded name. `-type f` neither follows nor lists a symlink (F9). */
@@ -830,6 +877,14 @@ const CAPTURE_PROBE_ARGV = [
 ];
 const PROBE_LINE =
   /^(\d+) (\d+(?:\.\d+)?) (-[A-Za-z0-9-]{1,200})\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+
+/** The running per-turn capture, for the timeout capture (phase 7b). */
+interface CaptureHandle {
+  /** The pull running now, if any. Never rejects. */
+  inflight(): Promise<void> | null;
+  /** One ungated pull on `signal`. Never throws; skipped while another pull runs. */
+  final(signal: AbortSignal): Promise<void>;
+}
 
 interface SessionFile {
   projectDir: string;
@@ -888,9 +943,16 @@ function startSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
 ): void {
+  r.capture = openSessionCapture(r, pulled);
+}
+
+function openSessionCapture(
+  r: CellRunState,
+  pulled: PulledDaemonMessage,
+): CaptureHandle | null {
   const { checkpoint, sessionContinuation } = r.deps;
-  if (!checkpoint || !sessionContinuation?.()) return;
-  if (pulled.agent !== "claudeCode") return;
+  if (!checkpoint || !sessionContinuation?.()) return null;
+  if (pulled.agent !== "claudeCode") return null;
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
   const stop = r.captureStop.signal;
@@ -905,7 +967,7 @@ function startSessionCapture(
     });
   } catch (error) {
     r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
-    return;
+    return null;
   }
 
   let sessionId: string | null = pulled.sessionId;
@@ -919,9 +981,20 @@ function startSessionCapture(
   let turnState: TurnState | undefined;
   let stopped = false;
 
-  const pullOnce = async (file: SessionFile): Promise<void> => {
+  // A pull ends with the run's internal aborts (fence, Stop, failure) and with
+  // captureAbort, never with the run's own cancel: a timeout keeps its pull alive.
+  const loopSignal = (): AbortSignal =>
+    withTimeout(
+      CELL_CAPTURE_POLL_BUDGET_MS,
+      r.captureAbort.signal,
+      r.inner.signal,
+    );
+
+  const pullOnce = async (
+    file: SessionFile,
+    budget: AbortSignal,
+  ): Promise<void> => {
     const path = `${CELL_PROJECTS_DIR}/${file.projectDir}/${file.sessionId}.jsonl`;
-    const budget = withTimeout(CELL_CAPTURE_POLL_BUDGET_MS, stop, r.live);
     // F9: re-check right before the read that it is still a regular file.
     const check = await raceSignal(
       provider.exec(
@@ -1024,12 +1097,15 @@ function startSessionCapture(
     }
   };
 
-  const captureOnce = async (): Promise<void> => {
+  const captureOnce = async (
+    budget: AbortSignal,
+    force: boolean,
+  ): Promise<void> => {
     let file: SessionFile | null = null;
     try {
       const out = await raceSignal(
         provider.exec(cellId, CAPTURE_PROBE_ARGV, { timeoutMs: 5_000 }),
-        withTimeout(CELL_CAPTURE_POLL_BUDGET_MS, stop, r.live),
+        budget,
       );
       if (out.exitCode === 0) file = chooseSessionFile(out.stdout, sessionId);
     } catch {
@@ -1040,19 +1116,29 @@ function startSessionCapture(
       sessionId = file.sessionId;
       projectDir = file.projectDir;
       // The size is the turn signal the worker can observe (Q-1).
-      if (file.size <= lastSize && !idle) return;
-    } else if (projectDir !== null && sessionId !== null && idle) {
+      if (file.size <= lastSize && !idle && !force) return;
+    } else if (projectDir !== null && sessionId !== null && (idle || force)) {
       file = { projectDir, sessionId, size: lastSize };
     } else {
       return;
     }
-    await pullOnce(file);
+    await pullOnce(file, budget);
+  };
+
+  /** The pull running now (the loop's or the final one); one at a time, they share state. */
+  let running: Promise<void> | null = null;
+  const track = (work: Promise<void>): Promise<void> => {
+    const tracked: Promise<void> = work.finally(() => {
+      if (running === tracked) running = null;
+    });
+    running = tracked;
+    return tracked;
   };
 
   void (async () => {
     while (!stop.aborted && !r.live.aborted && !stopped) {
       try {
-        await captureOnce();
+        await track(captureOnce(loopSignal(), false));
       } catch (error) {
         if (!stop.aborted) {
           r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
@@ -1061,6 +1147,22 @@ function startSessionCapture(
       await r.deps.sleep(CELL_CAPTURE_POLL_MS, stop);
     }
   })();
+
+  return {
+    inflight: () => (running === null ? null : running.catch(() => {})),
+    final: async (signal) => {
+      if (stopped) return;
+      if (running !== null) {
+        r.step("cell: checkpoint final skipped (a pull is still running)");
+        return;
+      }
+      try {
+        await track(captureOnce(signal, true));
+      } catch (error) {
+        r.step(`cell: checkpoint final skipped (error ${causeClass(error)})`);
+      }
+    },
+  };
 }
 
 /** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
@@ -1679,13 +1781,187 @@ const NO_PROVIDER: Pick<
   listByTags: async () => [] as never,
 };
 
-/** Claims the end, then R -> T -> B -> A -> P (cell-teardown.ts). Never throws. */
-async function tearDown(
+/**
+ * Claims the run's end (once). A fenced or conflicted run claims nothing: its
+ * token is retired or the attempt is not ours. Runs before the timeout capture
+ * so only a typed `timeout` triggers it (#743 phase 7b).
+ */
+function claimEnd(
   r: CellRunState,
   thrown: { error: unknown } | null,
+): AbnormalEnd | null {
+  const { st } = r;
+  const { ctx, abnormal } = r.args;
+  if (st.fenced || st.conflict) {
+    abnormal.claimed = true;
+    return null;
+  }
+  return claimAbnormalEnd(abnormal, {
+    thrown: thrown ?? undefined,
+    cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
+    starvation: null,
+  });
+}
+
+/** `https://<deployment>/api/cell/git/<owner>/<repo>.git`, the clone's own URL; null if it would not build. */
+function brokerGitUrl(r: CellRunState): string | null {
+  try {
+    const { input } = r.args;
+    const url = cellCloneArgv({
+      brokerHost: r.deployment,
+      repoFullName: input.repoFullName,
+      branch: input.branch,
+    })[0]?.[5];
+    return url ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #743 phase 7b: what a run that ended on `timeout` does BEFORE the teardown's
+ * first step (the bearer revoke), all inside CELL_TIMEOUT_CAPTURE_BUDGET_MS
+ * counted from `startedAt` (the poll loop's return). In order: freeze the agent;
+ * stop the capture loop and wait for an in-flight pull (F2: inside the budget);
+ * one final pull; the WIP salvage. Each step fails open with one class-only
+ * log line; whatever still runs at the deadline is abandoned. The freeze and
+ * the salvage run with the capture gate off too (the box's timeout salvage is
+ * on by default); WORKER_TIMEOUT_SALVAGE=off turns both off. Never throws.
+ */
+async function captureOnTimeout(
+  r: CellRunState,
+  startedAt: number,
+): Promise<SalvageResult | null> {
+  const { provider, cellId } = r;
+  const left = (): number =>
+    Math.max(0, CELL_TIMEOUT_CAPTURE_BUDGET_MS - (Date.now() - startedAt));
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), left());
+  const expired = new Promise<"expired">((resolve) => {
+    if (deadline.signal.aborted) resolve("expired");
+    else {
+      deadline.signal.addEventListener("abort", () => resolve("expired"), {
+        once: true,
+      });
+    }
+  });
+  const within = <T>(work: Promise<T>): Promise<T | "expired"> => {
+    work.catch(() => {});
+    return Promise.race([work, expired]);
+  };
+  /** Runs one step unless the budget is spent; abandons it when the budget runs out. */
+  const guarded = async <T>(
+    name: string,
+    work: () => Promise<T>,
+  ): Promise<T | undefined> => {
+    if (deadline.signal.aborted) {
+      r.step(`cell: timeout capture: ${name} skipped (budget spent)`);
+      return undefined;
+    }
+    try {
+      const out = await within(work());
+      if (out === "expired") {
+        r.step(`cell: timeout capture: ${name} abandoned (budget spent)`);
+        return undefined;
+      }
+      return out;
+    } catch (error) {
+      r.step(`cell: timeout capture: ${name} failed (${causeClass(error)})`);
+      return undefined;
+    }
+  };
+
+  let salvage: SalvageResult | null = null;
+  try {
+    if (provider === null || cellId === null) return null;
+    const salvageOn = r.args.config.timeoutSalvage !== "off";
+
+    // 1. Freeze: the agent stops writing before anything is read.
+    if (salvageOn) {
+      const frozen = await guarded("freeze", () =>
+        freezeCellAgent({
+          provider,
+          cellId,
+          budgetMs: Math.min(CELL_FREEZE_BUDGET_MS, left()),
+        }),
+      );
+      if (frozen !== undefined) {
+        r.step(`cell: timeout capture: freeze ${frozen ? "ok" : "failed"}`);
+      }
+    }
+
+    // 2 and 3. Stop the loop (already stopped by the finally), wait for an
+    // in-flight pull inside the budget, then one final pull.
+    const capture = r.capture;
+    if (capture !== null) {
+      await guarded("pull wait", async () => {
+        const pending = capture.inflight();
+        if (pending === null) return;
+        const bound = new Promise<"late">((resolve) => {
+          setTimeout(
+            () => resolve("late"),
+            Math.min(CELL_CAPTURE_POLL_BUDGET_MS, left()),
+          ).unref?.();
+        });
+        if ((await Promise.race([pending, bound])) === "late") {
+          r.step("cell: timeout capture: in-flight pull abandoned");
+          r.captureAbort.abort();
+          await Promise.race([
+            pending,
+            new Promise<void>((resolve) => {
+              setTimeout(resolve, 500).unref?.();
+            }),
+          ]);
+        }
+      });
+      await guarded("final pull", async () => {
+        await capture.final(
+          withTimeout(
+            Math.min(CELL_TIMEOUT_FINAL_FLUSH_MS, left()),
+            deadline.signal,
+          ),
+        );
+      });
+    }
+
+    // 4. The WIP salvage gets what is left.
+    if (salvageOn) {
+      const url = brokerGitUrl(r);
+      if (url === null) {
+        r.step("cell: timeout capture: salvage skipped (no broker url)");
+      } else {
+        const out = await guarded("salvage", () =>
+          salvageCellWorkBranch({
+            provider,
+            cellId,
+            workBranch: r.args.input.workBranch,
+            brokerGitUrl: url,
+            botLogin: r.args.config.botLogin,
+            runExecutionTimeoutMs: r.args.abnormal.runExecutionTimeoutMs,
+            log: r.step,
+            budgetMs: left(),
+          }),
+        );
+        salvage = out ?? null;
+      }
+    }
+  } catch (error) {
+    r.step(`cell: timeout capture failed (${causeClass(error)})`);
+  } finally {
+    clearTimeout(timer);
+    r.captureAbort.abort();
+  }
+  return salvage;
+}
+
+/** R -> T -> B -> A -> P (cell-teardown.ts), for an end already claimed. Never throws. */
+async function tearDown(
+  r: CellRunState,
+  end: AbnormalEnd | null,
+  salvage: SalvageResult | null,
 ): Promise<void> {
-  const { st, provider, args, deps } = r;
-  const { ctx, wwwOpts, abnormal } = args;
+  const { st, provider, deps } = r;
+  const { wwwOpts, abnormal } = r.args;
   let vaultRevoked = false;
   if (st.fenced) {
     // The fence is a database fact: the vault goes FIRST, before anything
@@ -1700,16 +1976,6 @@ async function tearDown(
       }
     }
     abnormal.claimed = true; // no end: the outer catch posts nothing
-  }
-  let end: AbnormalEnd | null = null;
-  if (!st.fenced && !st.conflict) {
-    end = claimAbnormalEnd(abnormal, {
-      thrown: thrown ?? undefined,
-      cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
-      starvation: null,
-    });
-  } else {
-    abnormal.claimed = true;
   }
   if (st.conflict) deps.marks.mark(r.runId, "tokenGone");
   const finalEnd = end;
@@ -1740,6 +2006,7 @@ async function tearDown(
           await deps.www.postAbnormal(abnormal, finalEnd, {
             wwwOpts,
             log: r.step,
+            ...(salvage ? { salvage } : {}),
           });
         }
       },

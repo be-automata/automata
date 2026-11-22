@@ -7,6 +7,7 @@ import {
   TASK_LANE_EXECUTION_TIMEOUT,
 } from "@terragon/types/cell";
 
+import { CELL_TIMEOUT_CAPTURE_BUDGET_MS } from "./cell-run";
 import { buildAgentRunDefinition } from "./definition";
 import { TASK_LANE_BUDGET, TASK_LANE_REFRESH } from "./run-budget";
 import {
@@ -80,5 +81,20 @@ describe("cell TTL pin (T-TTL, AC-16)", () => {
     expect(CELL_TEARDOWN_WORST_CASE_MS + 30_000).toBeLessThanOrEqual(
       wf.ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
     );
+  });
+
+  // card: protects=#743 OQ-4: the timeout capture (40 s), the cell teardown's worst case (80 s) and 30 s of slack fit inside onFailure's 150 s wait, so the typed timeout still wins the first-terminal race; fails_when=the capture budget, the teardown budget or the wait moves without the others; no_claim=real wall time
+  it("OQ-4: 40 s capture + 80 s teardown + 30 s slack <= the 150 s wait", async () => {
+    const wf = await import("./workflow");
+    expect(CELL_TIMEOUT_CAPTURE_BUDGET_MS).toBe(40_000);
+    expect(CELL_TEARDOWN_WORST_CASE_MS).toBe(80_000);
+    expect(wf.ON_FAILURE_TYPED_TERMINAL_WAIT_MS).toBe(150_000);
+    expect(
+      CELL_TIMEOUT_CAPTURE_BUDGET_MS + CELL_TEARDOWN_WORST_CASE_MS + 30_000,
+    ).toBeLessThanOrEqual(wf.ON_FAILURE_TYPED_TERMINAL_WAIT_MS);
+    // negative control: the old 120 s wait would not hold the sum.
+    expect(
+      CELL_TIMEOUT_CAPTURE_BUDGET_MS + CELL_TEARDOWN_WORST_CASE_MS + 30_000,
+    ).toBeGreaterThan(120_000);
   });
 });

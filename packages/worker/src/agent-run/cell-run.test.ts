@@ -17,8 +17,10 @@ import {
   CELL_CAPTURE_POLL_MS,
   CELL_MEMORY_SAMPLE_MS,
   CELL_SETUP_STAMP_MS,
+  CELL_TIMEOUT_CAPTURE_BUDGET_MS,
   type CellExecutorDeps,
 } from "./cell-run";
+import { CELL_FREEZE_ARGV } from "./cell-salvage";
 import { cellEntrypoint, cellGhSetup } from "./cell-image";
 import { flutterWrapperArgv } from "./flutter-sdk";
 import {
@@ -2391,5 +2393,218 @@ describe("the per-turn session capture (#743 phase 6)", () => {
     });
     await codex.executor.run(codex.args);
     expect(probes(codex)).toBe(0);
+  });
+});
+
+describe("the timeout capture order (#743 phase 7b)", () => {
+  const SID = "11111111-1111-4111-8111-111111111111";
+  const enc = (t: string) => new TextEncoder().encode(t);
+  const TURN = `${JSON.stringify({
+    type: "assistant",
+    uuid: "u1",
+    message: { id: "msg_1", content: [{ type: "text", text: "answer 1" }] },
+  })}\n`;
+  const isFreeze = (a: string[]) =>
+    a[0] === "/bin/sh" && a[2] === CELL_FREEZE_ARGV[2];
+  const isSalvage = (a: string[]) => a[0] === "/usr/bin/env";
+
+  /**
+   * A run whose poll ends on the run's own abort, `ago` ms after it started:
+   * past the 30 minute limit it is the typed `timeout`, inside it a plain cancel.
+   */
+  function ending(
+    over: Parameters<typeof setup>[0] = {},
+    {
+      timedOut = true,
+      onPoll,
+    }: { timedOut?: boolean; onPoll?: () => Promise<void> | void } = {},
+  ) {
+    // The transcript is listed only once the poll ends, so the loop never sees it.
+    let listed = false;
+    const s: ReturnType<typeof setup> = setup({
+      execStdout: (argv) => {
+        if (argv[0] === "/usr/bin/find" && argv.includes("-printf")) {
+          if (!listed) return "";
+          return `${enc(TURN).length} 1700000000.5 -workspace/${SID}.jsonl\n`;
+        }
+        if (argv[0] === "/usr/bin/find" && argv.includes("-quit")) {
+          return `/home/agent/.claude/projects/-workspace/${SID}.jsonl\n`;
+        }
+        return "";
+      },
+      pollUntilTerminal: async () => {
+        listed = true;
+        await onPoll?.();
+        if (!timedOut) s.abnormal.runStartedAt = Date.now();
+        s.ac.abort();
+        return { outcome: "cancelled", finalStatus: undefined };
+      },
+      ...over,
+    });
+    s.provider.copyOut.mockImplementation(async (_id, path) => {
+      if (path.includes("/.claude/projects/")) return enc(TURN);
+      throw new Error("absent");
+    });
+    // Record the steps of the timeout capture in the call order.
+    const inner = s.provider.exec.getMockImplementation() as (
+      id: string,
+      argv: string[],
+    ) => Promise<unknown>;
+    s.provider.exec.mockImplementation((async (id: string, argv: string[]) => {
+      if (isFreeze(argv)) s.calls.push("freeze");
+      else if (isSalvage(argv)) s.calls.push("salvage");
+      else if (argv[0] === "/usr/bin/find" && argv.includes("-printf")) {
+        s.calls.push("probe");
+      }
+      return inner(id, argv);
+    }) as never);
+    const withBranch = {
+      ...s.args,
+      input: { ...s.args.input, workBranch: "fix/x" },
+    } as typeof s.args;
+    return { s, args: withBranch };
+  }
+
+  // card: protects=#743 7b OQ-4/F2 order: on a typed timeout the agent is frozen, the final pull writes the transcript, the salvage runs, and only then the teardown starts with the bearer revoke; the capture loop does not probe after the stop; fails_when=any step moves after www.revoke or the order changes; no_claim=the real cell, the salvage's git steps (cell-salvage.test.ts)
+  it("freeze, then the final pull, then the salvage, all before the revoke", async () => {
+    const { s, args } = ending({ capture: true });
+    const out = await s.executor.run(args);
+    expect(out.outcome).toBe("cancelled");
+    const at = (name: string) => s.calls.lastIndexOf(name);
+    const revoke = s.calls.indexOf("www.revoke");
+    expect(s.calls.indexOf("freeze")).toBeGreaterThan(-1);
+    // The loop's last probe (if any) is before the freeze; the final pull's is after.
+    expect(at("probe")).toBeGreaterThan(s.calls.indexOf("freeze"));
+    expect(at("salvage")).toBeGreaterThan(at("probe"));
+    expect(revoke).toBeGreaterThan(at("salvage"));
+    // The final pull wrote the turn the loop never saw.
+    expect(s.checkpoint.commits.map((c) => c.manifest.turn)).toEqual([1]);
+    expect(s.logs.some((l) => l.includes("salvage:"))).toBe(true);
+    // No probe after the stop: nothing runs between the revoke and the end.
+    expect(s.calls.slice(revoke).includes("probe")).toBe(false);
+    // The worker's cause is the typed timeout.
+    expect(s.www.abnormalEnds[0]?.cause).toBe("timeout");
+  });
+
+  // card: protects=#743 7b: the freeze and the salvage run on a timeout even with the capture gate off (like the box's), but nothing is pulled or written; fails_when=a probe, a copy-out or a write happens with the gate off, or the salvage is skipped; no_claim=the flag wiring (phase 11)
+  it("with the gate off, still freezes and salvages and pulls nothing", async () => {
+    const { s, args } = ending({ capture: false });
+    await s.executor.run(args);
+    expect(s.calls).toContain("freeze");
+    expect(s.calls).toContain("salvage");
+    expect(s.calls).not.toContain("probe");
+    expect(s.checkpoint.commits).toHaveLength(0);
+    expect(s.calls.indexOf("www.revoke")).toBeGreaterThan(
+      s.calls.lastIndexOf("salvage"),
+    );
+  });
+
+  // card: protects=#743 7b: WORKER_TIMEOUT_SALVAGE=off (the box's switch) turns off the freeze and the salvage on a cell too; fails_when=either still runs; no_claim=the final pull, which the capture gate owns
+  it("honours WORKER_TIMEOUT_SALVAGE=off", async () => {
+    const { s, args } = ending({ capture: false });
+    await s.executor.run({
+      ...args,
+      config: { ...args.config, timeoutSalvage: "off" },
+    } as typeof args);
+    expect(s.calls).not.toContain("freeze");
+    expect(s.calls).not.toContain("salvage");
+    expect(s.calls).toContain("www.revoke");
+  });
+
+  // card: protects=#743 7b: only the typed timeout triggers the capture; a completed run, a cancel inside the limit and a run that threw keep today's teardown with no freeze, no extra probe and no salvage; fails_when=any of them freezes, pulls once more or salvages; no_claim=the cause classification (abnormal-end.test.ts)
+  it("a non-timeout end skips all of it", async () => {
+    const done = setup({
+      capture: true,
+      execStdout: (argv) =>
+        argv[0] === "/usr/bin/find" && argv.includes("-printf")
+          ? `${enc(TURN).length} 1700000000.5 -workspace/${SID}.jsonl\n`
+          : "",
+    });
+    await done.executor.run({
+      ...done.args,
+      input: { ...done.args.input, workBranch: "fix/x" },
+    } as typeof done.args);
+    expect(done.execs.some(isFreeze)).toBe(false);
+    expect(done.execs.some(isSalvage)).toBe(false);
+
+    const early = ending({ capture: true }, { timedOut: false });
+    const out = await early.s.executor.run(early.args);
+    expect(out.outcome).toBe("cancelled");
+    expect(early.s.calls).not.toContain("freeze");
+    expect(early.s.calls).not.toContain("salvage");
+    expect(early.s.checkpoint.commits).toHaveLength(0);
+    expect(early.s.www.abnormalEnds).toHaveLength(0);
+
+    const failed = ending({
+      capture: true,
+      pollUntilTerminal: async () => {
+        throw new Error("poll broke");
+      },
+    });
+    await expect(failed.s.executor.run(failed.args)).rejects.toThrow();
+    expect(failed.s.calls).not.toContain("freeze");
+    expect(failed.s.calls).not.toContain("salvage");
+    expect(failed.s.www.abnormalEnds[0]?.cause).not.toBe("timeout");
+  });
+
+  // card: protects=#743 7b F2/OQ-4: a per-turn pull still in flight at the timeout is waited for inside the 40 s budget and abandoned when it is spent, a hung final pull is abandoned at 40 s, the salvage is skipped, and the teardown (the revoke) still starts by 40 s; fails_when=the revoke starts after the budget or the run hangs; no_claim=real wall time (fake timers drive it)
+  it("abandons hung steps at the 40 s budget and still tears down", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const hang = new Promise<Uint8Array>(() => {});
+      const { s, args } = ending(
+        { capture: true },
+        {
+          onPoll: async () => {
+            // A turn in the file and a pull that never returns: in flight at the cancel.
+            await s.captureTick();
+          },
+        },
+      );
+      s.provider.copyOut.mockImplementation(async (_id, path) => {
+        if (path.includes("/.claude/projects/")) return hang;
+        throw new Error("absent");
+      });
+      const startedAt = Date.now();
+      let revokedAfter: number | null = null;
+      const run = s.executor.run(args);
+      let done = false;
+      void run.finally(() => {
+        done = true;
+      });
+      for (let t = 0; t <= 60_000 && !done; t += 500) {
+        await flush();
+        if (revokedAfter === null && s.calls.includes("www.revoke")) {
+          revokedAfter = Date.now() - startedAt;
+        }
+        await vi.advanceTimersByTimeAsync(500);
+        await flush();
+        if (revokedAfter === null && s.calls.includes("www.revoke")) {
+          revokedAfter = Date.now() - startedAt;
+        }
+      }
+      await run;
+      expect(revokedAfter).not.toBeNull();
+      expect(revokedAfter as number).toBeGreaterThanOrEqual(39_000);
+      expect(revokedAfter as number).toBeLessThanOrEqual(
+        CELL_TIMEOUT_CAPTURE_BUDGET_MS + 1_000,
+      );
+      const log = s.logs.join("\n");
+      expect(log).toContain("in-flight pull abandoned");
+      expect(log).toContain("final pull abandoned");
+      expect(log).toContain("salvage skipped (budget spent)");
+      expect(s.calls).not.toContain("salvage");
+      expect(s.calls).toContain("www.report");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // card: protects=#743 7b nit: the capture loop's interval is not the run's default poll interval (7 s) nor another sleep in the run, the #749 collision class; fails_when=it equals any of them; no_claim=the loop's behaviour
+  it("the capture interval is distinct from every other sleep", () => {
+    expect(CELL_CAPTURE_POLL_MS).not.toBe(7_000);
+    expect(CELL_CAPTURE_POLL_MS).not.toBe(CELL_MEMORY_SAMPLE_MS);
+    expect(CELL_CAPTURE_POLL_MS).not.toBe(CELL_SETUP_STAMP_MS);
+    expect(CELL_CAPTURE_POLL_MS).not.toBe(5_000); // CELL_TERMINAL_RETRY.delayMs
   });
 });
