@@ -105,6 +105,7 @@ import {
   CellTerminalUnconfirmedError,
   ThreadStatusHttpError,
   createTerminalReadRetry,
+  postRunTerminal,
   type CellLease,
   type EgressEventWire,
   type PollContext,
@@ -205,7 +206,7 @@ export interface CellExecutorDeps {
    * and `sessionContinuation` are set and the latter returns true for the run
    * (phase 11 wires the `cellSessionContinuation` flag here; the default is off).
    */
-  sessionContinuation?: () => boolean;
+  sessionContinuation?: (pulled: PulledDaemonMessage) => boolean;
   checkpoint?: {
     putBlob: (
       opts: WwwClientOpts,
@@ -1003,7 +1004,7 @@ async function restoreSession(
   if (
     !checkpoint?.readHead ||
     !checkpoint.readBlob ||
-    !sessionContinuation?.() ||
+    !sessionContinuation?.(pulled) ||
     pulled.agent !== "claudeCode" ||
     !sessionId
   ) {
@@ -1090,7 +1091,7 @@ function openSessionCapture(
   restored: RestoredSession | null,
 ): CaptureHandle | null {
   const { checkpoint, sessionContinuation } = r.deps;
-  if (!checkpoint || !sessionContinuation?.()) return null;
+  if (!checkpoint || !sessionContinuation?.(pulled)) return null;
   if (pulled.agent !== "claudeCode") return null;
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
@@ -2147,6 +2148,20 @@ async function tearDown(
             wwwOpts,
             log: r.step,
             ...(salvage ? { salvage } : {}),
+            // #743: a run that started without its history says why on its terminal.
+            ...(r.startedFresh
+              ? {
+                  post: (o, body, signal) =>
+                    postRunTerminal(
+                      o,
+                      {
+                        ...body,
+                        startedFresh: (r.startedFresh as string).slice(0, 64),
+                      },
+                      signal,
+                    ),
+                }
+              : {}),
           });
         }
       },

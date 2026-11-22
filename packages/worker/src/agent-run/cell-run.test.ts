@@ -158,6 +158,10 @@ function setup(
     pollOpts: [] as unknown[],
     abnormalPosts: 0,
     abnormalEnds: [] as AbnormalEnd[],
+    abnormalPost: [] as (
+      | undefined
+      | ((...args: never[]) => Promise<unknown>)
+    )[],
     revokeResult: "ok" as "ok" | "unauthorized" | "failed",
     reportBodies: [] as unknown[],
   };
@@ -272,10 +276,11 @@ function setup(
       postEgress: async () => {
         calls.push("www.egress");
       },
-      postAbnormal: async (_state, end) => {
+      postAbnormal: async (_state, end, deps) => {
         calls.push("www.abnormal");
         www.abnormalPosts += 1;
         www.abnormalEnds.push(end);
+        www.abnormalPost.push(deps?.post);
         return null;
       },
     },
@@ -2501,6 +2506,48 @@ describe("the timeout capture order (#743 phase 7b)", () => {
     expect(s.calls.slice(revoke).includes("probe")).toBe(false);
     // The worker's cause is the typed timeout.
     expect(s.www.abnormalEnds[0]?.cause).toBe("timeout");
+  });
+
+  // card: protects=#743 11b: a timeout of a run whose restore failed posts its terminal with detail.startedFresh, and one that restored (or had no session) posts none; fails_when=the class is dropped, sent on a clean run, or longer than www's 64 chars; no_claim=www's reply
+  it("posts startedFresh on the terminal only when the restore failed", async () => {
+    const wwwOpts = {
+      baseUrl: "https://www.example.com/",
+      daemonToken: "tok",
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      runExternalId: "run-1",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const failed = ending({
+        capture: true,
+        nextMessage: (async () => ({ ...pulled, sessionId: SID })) as never,
+        readHead: async () => ({ ok: false, code: "transport", status: 0 }),
+        readBlob: async () => ({ ok: false, code: "not_found", status: 404 }),
+      });
+      await failed.s.executor.run(failed.args);
+      const post = failed.s.www.abnormalPost[0] as unknown as (
+        o: typeof wwwOpts,
+        body: { runExternalId: string; cause: string },
+        signal?: AbortSignal,
+      ) => Promise<unknown>;
+      expect(post).toBeTypeOf("function");
+      await post(wwwOpts, { runExternalId: "run-1", cause: "timeout" });
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect(JSON.parse(init.body).detail.startedFresh).toBe("head-error");
+
+      const clean = ending({ capture: true });
+      await clean.s.executor.run(clean.args);
+      expect(clean.s.www.abnormalPost[0]).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   // card: protects=#743 7b: the freeze and the salvage run on a timeout even with the capture gate off (like the box's), but nothing is pulled or written; fails_when=a probe, a copy-out or a write happens with the gate off, or the salvage is skipped; no_claim=the flag wiring (phase 11)

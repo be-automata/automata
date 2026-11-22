@@ -905,6 +905,44 @@ describe("postRunTerminal — detail.info and a caller signal (#437)", () => {
   });
 });
 
+describe("postRunTerminal — detail.startedFresh (#743)", () => {
+  const opts = {
+    baseUrl: "https://www.example.com/",
+    daemonToken: "tok",
+    threadId: "thr_1",
+    threadChatId: "tc_1",
+    runExternalId: "run-1",
+  };
+
+  it("sends startedFresh under detail only when it is set", async () => {
+    // protects=the restore-failure class reaching www's detail.startedFresh; fails_when=it is dropped, sent empty, or sent when unset; no_claim=www's 64-char cap
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await postRunTerminal(opts, {
+      runExternalId: "run-1",
+      cause: "timeout",
+      startedFresh: "hash-mismatch",
+    });
+    await postRunTerminal(opts, {
+      runExternalId: "run-1",
+      cause: "timeout",
+      info: "x",
+    });
+    const [, withFresh] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(withFresh.body).detail).toEqual({
+      startedFresh: "hash-mismatch",
+    });
+    const [, without] = fetchMock.mock.calls[1]!;
+    expect(JSON.parse(without.body).detail).toEqual({ info: "x" });
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("postRunTerminal — a 4xx is final (#437)", () => {
   it("401/400 → 'refused'; 5xx, 408 and 429 stay 'error' (retryable)", async () => {
     // protects=the retry loop telling a dead token from a www blip;

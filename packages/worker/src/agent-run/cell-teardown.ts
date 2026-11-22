@@ -24,7 +24,7 @@ export const CELL_ABNORMAL_POST_MAX_MS = 30_000;
 /**
  * The longest the sequencer can run: the deadline, then A and P with only their
  * grace left. It must stay under onFailure's wait for the run's own teardown
- * (`ON_FAILURE_TYPED_TERMINAL_WAIT_MS`, 120 s): a test pins the sum.
+ * (`ON_FAILURE_TYPED_TERMINAL_WAIT_MS`, 150 s): a test pins the sum.
  */
 export const CELL_TEARDOWN_WORST_CASE_MS =
   CELL_TEARDOWN_DEADLINE_MS + 2 * EXPIRED_GRACE_MS;
