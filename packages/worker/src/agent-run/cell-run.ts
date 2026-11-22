@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { OpenSandboxCellConfig } from "@terragon/sandbox/opensandbox-cell";
 import {
@@ -42,6 +44,7 @@ import {
   salvageCellWorkBranch,
 } from "./cell-salvage";
 import {
+  CELL_RESTORE_FETCH_CONCURRENCY,
   fetchSessionCheckpoint,
   prepareCheckpoint,
   type RestoreResult,
@@ -105,7 +108,6 @@ import {
   CellTerminalUnconfirmedError,
   ThreadStatusHttpError,
   createTerminalReadRetry,
-  postRunTerminal,
   type CellLease,
   type EgressEventWire,
   type PollContext,
@@ -220,13 +222,13 @@ export interface CellExecutorDeps {
       expectedVersion: number,
       signal: AbortSignal,
     ) => Promise<CheckpointResult<{ version: number }>>;
-    /** #743 phase 8: the restore's reads. Both set (and the gate on) = restore runs. */
-    readHead?: (
+    /** #743 phase 8: the restore's reads (run whenever the gate is on). */
+    readHead: (
       opts: WwwClientOpts,
       sessionId: string,
       signal: AbortSignal,
     ) => Promise<CheckpointResult<{ head: CheckpointHead }>>;
-    readBlob?: (
+    readBlob: (
       opts: WwwClientOpts,
       sha256: string,
       signal: AbortSignal,
@@ -244,6 +246,29 @@ export interface CellExecutorDeps {
    * attempt owns the thread). The registry keeps the strongest mark per run.
    */
   marks: { mark: (runId: string, kind: RunEndMark) => void };
+}
+
+/** The checkpoint route's calls, as the executor is handed them. */
+type CheckpointDeps = NonNullable<CellExecutorDeps["checkpoint"]>;
+
+/**
+ * Whether a run restores and captures its session, decided once per message:
+ * `skip` for any agent but claudeCode, `off` when the owner's flag is off (a
+ * session id is then never sent), `on` with the wired calls (absent = none).
+ */
+type SessionGate =
+  | { mode: "skip" }
+  | { mode: "off" }
+  | { mode: "on"; checkpoint: CheckpointDeps | undefined };
+
+function sessionGate(
+  deps: CellExecutorDeps,
+  pulled: PulledDaemonMessage,
+): SessionGate {
+  if (pulled.agent !== "claudeCode") return { mode: "skip" };
+  return deps.sessionContinuation?.(pulled) === true
+    ? { mode: "on", checkpoint: deps.checkpoint }
+    : { mode: "off" };
 }
 
 /**
@@ -622,7 +647,8 @@ async function runCell(
         step(`cell: test database env not delivered (agent=${pulled.agent})`);
       }
       // #743 phase 8: restore the session before the daemon gets its message.
-      const restore = await restoreSession(r, pulled);
+      const gate = sessionGate(deps, pulled);
+      const restore = await restoreSession(r, pulled, gate);
       const outgoing = restore.message;
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
@@ -643,7 +669,13 @@ async function runCell(
 
       // 10. The poll loop takes over from the heartbeat.
       r.heartbeatStop.abort();
-      startSessionCapture(r, outgoing, restore.restored, restore.start);
+      r.capture = openSessionCapture(
+        r,
+        outgoing,
+        gate,
+        restore.restored,
+        restore.start,
+      );
       const poll = await deps.www.pollUntilTerminal(
         pollContext(r, provider, r.cellId),
         r.cellOpts,
@@ -678,22 +710,19 @@ async function runCell(
   // freeze and no salvage (spec 2.5 step 3). Both stay inside the 40 s budget.
   const end = claimEnd(r, thrown);
   let salvage: SalvageResult | null = null;
-  try {
-    if (end?.cause === "timeout") {
-      salvage = await captureOnTimeout(r, pollReturnedAt ?? Date.now(), true);
-    } else if (
-      r.capture !== null &&
-      !st.fenced &&
-      !st.conflict &&
-      !st.terminal &&
-      !st.retired
-    ) {
-      await captureOnTimeout(r, pollReturnedAt ?? Date.now(), false);
-    } else {
-      r.captureAbort.abort();
-    }
-  } catch {
-    // captureOnTimeout never throws; a guard so the teardown below always runs.
+  // finalCapture never throws, so the teardown below always runs.
+  if (end?.cause === "timeout") {
+    salvage = await finalCapture(r, pollReturnedAt, { salvage: true });
+  } else if (
+    r.capture !== null &&
+    !st.fenced &&
+    !st.conflict &&
+    !st.terminal &&
+    !st.retired
+  ) {
+    await finalCapture(r, pollReturnedAt, { salvage: false });
+  } else {
+    r.captureAbort.abort();
   }
   // The finally: R -> T -> B -> A -> P, then give the slot back.
   try {
@@ -975,23 +1004,6 @@ function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /**
- * Starts the capture loop for the agent's working life, from the message write
- * to the run's end (stopped before teardown by `captureStop`). The worker pulls
- * the session file with `copyOut` (Q-1: the cell's reachable surface does not
- * change), redacts it here before anything leaves the box, and writes through
- * the checkpoint route. Fail open: a failure is one journal line with the cause
- * class and never fails the run; no transcript byte or token is ever logged.
- */
-function startSessionCapture(
-  r: CellRunState,
-  pulled: PulledDaemonMessage,
-  restored: RestoredSession | null,
-  start: ChainStart,
-): void {
-  r.capture = openSessionCapture(r, pulled, restored, start);
-}
-
-/**
  * Where a chain with no restored manifest begins (spec 2.4 step 1): the head's
  * version for the commit's CAS, and the head's manifest id as the new chain's
  * parent. `known` is false when the head was unreadable, or belongs to another
@@ -1008,6 +1020,23 @@ const UNKNOWN_CHAIN_START: ChainStart = {
   parent: null,
   known: false,
 };
+function chainStart(head: CheckpointHead | null): ChainStart {
+  if (head === null) return UNKNOWN_CHAIN_START;
+  if (head.found) {
+    return { version: head.version, parent: head.manifest.id, known: true };
+  }
+  return head.reason === "none"
+    ? { version: 0, parent: null, known: true }
+    : UNKNOWN_CHAIN_START;
+}
+
+/** What a restore hands the run: the message to send, what landed, where the chain starts. */
+interface RestoreOutcome {
+  message: PulledDaemonMessage;
+  restored: RestoredSession | null;
+  start: ChainStart;
+}
+
 /** A session id no row holds: read-head answers `none` or `other_session` for it. */
 const NO_SESSION_PROBE_ID = "-";
 
@@ -1042,29 +1071,18 @@ function restoreNote(reason: string): string {
 async function restoreSession(
   r: CellRunState,
   pulled: PulledDaemonMessage,
-): Promise<{
-  message: PulledDaemonMessage;
-  restored: RestoredSession | null;
-  start: ChainStart;
-}> {
-  const { checkpoint, sessionContinuation } = r.deps;
+  gate: SessionGate,
+): Promise<RestoreOutcome> {
   const sessionId = pulled.sessionId;
-  if (pulled.agent !== "claudeCode") {
-    return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
-  }
-  const startedAt = r.deps.now();
-  const seen: { head: CheckpointHead | null } = { head: null };
-  const chainStart = (): ChainStart => {
-    const head = seen.head;
-    if (head === null) return UNKNOWN_CHAIN_START;
-    if (head.found) {
-      return { version: head.version, parent: head.manifest.id, known: true };
-    }
-    return head.reason === "none"
-      ? { version: 0, parent: null, known: true }
-      : UNKNOWN_CHAIN_START;
-  };
-  const failFresh = (reason: string) => {
+  const plain = (start: ChainStart): RestoreOutcome => ({
+    message: pulled,
+    restored: null,
+    start,
+  });
+  const failFresh = (
+    reason: string,
+    head: CheckpointHead | null = null,
+  ): RestoreOutcome => {
     r.startedFresh = reason;
     r.step(`cell: session restore: none (${reason}); started fresh`);
     return {
@@ -1074,63 +1092,64 @@ async function restoreSession(
         prompt: `${restoreNote(reason)}\n\n${pulled.prompt}`,
       },
       restored: null,
-      start: chainStart(),
+      start: chainStart(head),
     };
   };
 
-  const gateOn = sessionContinuation?.(pulled) === true;
-  if (!gateOn) {
+  if (gate.mode === "skip") return plain(UNKNOWN_CHAIN_START);
+  if (gate.mode === "off") {
     // Flag off (§2.9): no restore, and never the daemon's silent `--continue`
     // on an empty HOME for a session id this cell does not hold.
-    if (!sessionId) {
-      return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
-    }
-    return failFresh("flag-off");
+    return sessionId ? failFresh("flag-off") : plain(UNKNOWN_CHAIN_START);
   }
-  if (!checkpoint?.readHead || !checkpoint.readBlob) {
-    // Production wires both reads with the gate; a bare gate has nothing to read.
-    return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
-  }
-  const { readHead, readBlob } = checkpoint;
-  const budget = withTimeout(CELL_RESTORE_BUDGET_MS, r.live);
-  const readHeadSeen = async (id: string, signal: AbortSignal) => {
-    const out = await readHead(r.cellOpts, id, signal);
-    if (out.ok) seen.head = out.head;
-    return out;
-  };
+  const { checkpoint } = gate;
+  // Production wires the calls with the gate; a bare gate has nothing to read.
+  if (!checkpoint) return plain(UNKNOWN_CHAIN_START);
 
-  if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) {
-    // No session to restore (or an id that is never a path): the head is still
-    // read, so the capture starts its chain at the right version.
-    try {
-      await readHeadSeen(NO_SESSION_PROBE_ID, budget);
-    } catch {
-      // Unknown head: the first commit learns the version.
-    }
-    if (!sessionId) {
-      return { message: pulled, restored: null, start: chainStart() };
-    }
-    return failFresh("bad-session-id");
+  const startedAt = r.deps.now();
+  const budget = withTimeout(CELL_RESTORE_BUDGET_MS, r.live);
+  // The head is read once, always: a session id that is never a path reads the
+  // probe id, so the capture still starts its chain at the right version.
+  const readable =
+    sessionId && SAFE_SESSION_ID.test(sessionId) ? sessionId : null;
+  let headRead: Awaited<ReturnType<CheckpointDeps["readHead"]>> | null = null;
+  try {
+    headRead = await checkpoint.readHead(
+      r.cellOpts,
+      readable ?? NO_SESSION_PROBE_ID,
+      budget,
+    );
+  } catch {
+    // Unknown head: the first commit learns the version.
+  }
+  const head = headRead?.ok ? headRead.head : null;
+  if (readable === null) {
+    return sessionId
+      ? failFresh("bad-session-id", head)
+      : plain(chainStart(head));
   }
 
   let result: RestoreResult;
   try {
     result = await fetchSessionCheckpoint({
-      sessionId,
-      readHead: readHeadSeen,
-      readBlob: (sha, signal) => readBlob(r.cellOpts, sha, signal),
+      sessionId: readable,
+      readHead: async () => {
+        if (headRead === null) throw new Error("head unreadable");
+        return headRead;
+      },
+      readBlob: (sha, signal) => checkpoint.readBlob(r.cellOpts, sha, signal),
       signal: budget,
     });
   } catch (error) {
-    return failFresh(`error-${causeClass(error)}`.toLowerCase());
+    return failFresh(`error-${causeClass(error)}`.toLowerCase(), head);
   }
-  if (result.kind === "fresh") return failFresh(result.reason);
+  if (result.kind === "fresh") return failFresh(result.reason, head);
 
   const projectDir = SAFE_PROJECT_DIR.test(result.manifest.projectDir)
     ? result.manifest.projectDir
     : RESTORE_FALLBACK_PROJECT_DIR;
   const dir = `${CELL_PROJECTS_DIR}/${projectDir}`;
-  const path = `${dir}/${sessionId}.jsonl`;
+  const path = `${dir}/${readable}.jsonl`;
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
   try {
@@ -1141,7 +1160,7 @@ async function restoreSession(
         timeoutMs: 5_000,
       }),
     );
-    if (mk.exitCode !== 0) return failFresh("copy-in-failed");
+    if (mk.exitCode !== 0) return failFresh("copy-in-failed", head);
     await raceLive(
       r,
       provider.copyIn(cellId, path, result.native, { mode: 600, ...CELL_USER }),
@@ -1152,10 +1171,10 @@ async function restoreSession(
         timeoutMs: 5_000,
       }),
     );
-    if (check.exitCode !== 0) return failFresh("copy-in-failed");
+    if (check.exitCode !== 0) return failFresh("copy-in-failed", head);
   } catch (error) {
     if (r.live.aborted) throw error;
-    return failFresh("copy-in-failed");
+    return failFresh("copy-in-failed", head);
   }
   r.step(
     `cell: session restore: restored turn=${result.manifest.turn} native=${result.native.length} dir=${projectDir} in ${r.deps.now() - startedAt}ms`,
@@ -1168,19 +1187,28 @@ async function restoreSession(
       native: result.native,
       projectDir,
     },
-    start: chainStart(),
+    start: chainStart(head),
   };
 }
 
+/**
+ * Starts the capture loop for the agent's working life, from the message write
+ * to the run's end (stopped before teardown by `captureStop`). The worker pulls
+ * the session file with `copyOut` (Q-1: the cell's reachable surface does not
+ * change), redacts it here before anything leaves the box, and writes through
+ * the checkpoint route. Fail open: a failure is one journal line with the cause
+ * class and never fails the run; no transcript byte or token is ever logged.
+ * Null when the gate is not on for this run.
+ */
 function openSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
+  gate: SessionGate,
   restored: RestoredSession | null,
   start: ChainStart,
 ): CaptureHandle | null {
-  const { checkpoint, sessionContinuation } = r.deps;
-  if (!checkpoint || !sessionContinuation?.(pulled)) return null;
-  if (pulled.agent !== "claudeCode") return null;
+  if (gate.mode !== "on" || !gate.checkpoint) return null;
+  const { checkpoint } = gate;
   const provider = r.provider as ICellProvider;
   const cellId = r.cellId as string;
   const stop = r.captureStop.signal;
@@ -1206,17 +1234,34 @@ function openSessionCapture(
   let lastPullAt = r.deps.now();
   let manifest: CellSessionManifest | null = restored?.manifest ?? null;
   let native: Uint8Array = restored?.native ?? new Uint8Array(0);
+  // The running sha256 of `native`: a pull hashes only its new bytes.
+  let nativeHash = createHash("sha256").update(native);
   // The head's version (spec 2.4 step 1): a restore's own, else what the head
   // read found, so a fresh start continues the thread's chain and does not
   // commit from 0 into `head_moved`.
   let version = restored?.version ?? start.version;
-  let versionKnown = restored !== null || start.known;
+  const resumed = restored !== null;
+  let versionKnown = resumed || start.known;
   // A chain with no previous manifest is parented to the head it began after.
   let chainParent: string | null = start.parent;
   let turnState: TurnState | undefined;
   let stopped = false;
   let redactorErrors = 0;
   let switched = false;
+
+  /** OQ-7: the file is a new session id; a new chain parented to the restored head. */
+  const switchChain = (newest: SessionFile): void => {
+    chainParent = manifest?.id ?? chainParent;
+    manifest = null;
+    native = new Uint8Array(0);
+    nativeHash = createHash("sha256");
+    consumed = 0;
+    lastSize = 0;
+    turnState = undefined;
+    sessionId = newest.sessionId;
+    switched = true;
+    r.step("cell: checkpoint: resume wrote a new session id; new chain");
+  };
 
   // A pull ends with the run's internal aborts (fence, Stop, failure) and with
   // captureAbort, never with the run's own cancel: a timeout keeps its pull alive.
@@ -1272,6 +1317,7 @@ function openSessionCapture(
       previous: manifest,
       parent: chainParent,
       previousNative: native,
+      previousNativeHash: nativeHash,
       newBytes: bytes.subarray(consumed),
       ...(turnState ? { turnState } : {}),
       context: {
@@ -1303,15 +1349,39 @@ function openSessionCapture(
     // Only a completed turn is a checkpoint; the bytes stay unconsumed until one is.
     if (result.kind !== "write" || !result.turnAdvanced) return;
 
-    for (const blob of result.blobs) {
-      const put = await checkpoint.putBlob(
-        r.cellOpts,
-        blob.sha256,
-        blob.body,
-        budget,
-      );
-      if (!put.ok) return failed(put);
-    }
+    // Chunks go up in parallel; the commit waits for all of them.
+    const upload: {
+      next: number;
+      failure: { code: string; status: number } | null;
+    } = {
+      next: 0,
+      failure: null,
+    };
+    const uploadWorker = async (): Promise<void> => {
+      while (upload.failure === null) {
+        const blob = result.blobs[upload.next++];
+        if (blob === undefined) return;
+        const put = await checkpoint.putBlob(
+          r.cellOpts,
+          blob.sha256,
+          blob.body,
+          budget,
+        );
+        if (!put.ok) {
+          upload.failure ??= put;
+          return;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(CELL_RESTORE_FETCH_CONCURRENCY, result.blobs.length),
+        },
+        uploadWorker,
+      ),
+    );
+    if (upload.failure !== null) return failed(upload.failure);
     let commit = await checkpoint.commit(
       r.cellOpts,
       result.manifest,
@@ -1339,6 +1409,7 @@ function openSessionCapture(
 
     manifest = result.manifest;
     native = result.native;
+    nativeHash = result.nativeHash;
     version = commit.version;
     turnState = result.turnState;
     consumed += result.consumedRawBytes;
@@ -1380,28 +1451,14 @@ function openSessionCapture(
         // session id. Once the restored id stops growing (or is gone), follow
         // the newest transcript and start a chain parented to the restored head.
         // The regular-file re-check in the pull still guards the path (F9).
-        if (
-          restored !== null &&
-          !switched &&
-          (file === null || file.size <= lastSize)
-        ) {
+        if (resumed && !switched && (file === null || file.size <= lastSize)) {
           const newest = newestFile(listed, null);
           if (
             newest !== null &&
             newest.sessionId !== sessionId?.toLowerCase()
           ) {
-            chainParent = manifest?.id ?? chainParent;
-            manifest = null;
-            native = new Uint8Array(0);
-            consumed = 0;
-            lastSize = 0;
-            turnState = undefined;
-            sessionId = newest.sessionId;
-            switched = true;
+            switchChain(newest);
             file = newest;
-            r.step(
-              "cell: checkpoint: resume wrote a new session id; new chain",
-            );
           }
         }
       }
@@ -2093,11 +2150,15 @@ function claimEnd(
     abnormal.claimed = true;
     return null;
   }
-  return claimAbnormalEnd(abnormal, {
+  const end = claimAbnormalEnd(abnormal, {
     thrown: thrown ?? undefined,
     cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
     starvation: null,
   });
+  // #743: a run that started without its history says why on its terminal.
+  return end && r.startedFresh
+    ? { ...end, detail: { startedFresh: r.startedFresh.slice(0, 64) } }
+    : end;
 }
 
 /** `https://<deployment>/api/cell/git/<owner>/<repo>.git`, the clone's own URL; null if it would not build. */
@@ -2116,56 +2177,50 @@ function brokerGitUrl(r: CellRunState): string | null {
 }
 
 /**
- * #743 phase 7b: what a run that ended on `timeout` does BEFORE the teardown's
- * first step (the bearer revoke), all inside CELL_TIMEOUT_CAPTURE_BUDGET_MS
- * counted from `startedAt` (the poll loop's return). In order: freeze the agent;
- * stop the capture loop and wait for an in-flight pull (F2: inside the budget);
- * one final pull; the WIP salvage. Each step fails open with one class-only
- * log line; whatever still runs at the deadline is abandoned. The freeze and
- * the salvage run with the capture gate off too (the box's timeout salvage is
- * on by default); WORKER_TIMEOUT_SALVAGE=off turns both off. With `full` false
- * (any other unfenced end) only the pull wait and the final pull run. Never throws.
+ * #743 phase 7b: what a run does BEFORE the teardown's first step (the bearer
+ * revoke), all inside CELL_TIMEOUT_CAPTURE_BUDGET_MS counted from `startedAt`
+ * (the poll loop's return). In order: freeze the agent; stop the capture loop
+ * and wait for an in-flight pull (F2: inside the budget); one final pull; the
+ * WIP salvage. Each step fails open with one class-only log line; whatever
+ * still runs at the deadline is abandoned. The freeze and the salvage run with
+ * the capture gate off too (the box's timeout salvage is on by default);
+ * WORKER_TIMEOUT_SALVAGE=off turns both off. Without `salvage` (any other
+ * unfenced end) only the pull wait and the final pull run. Never throws.
  */
-async function captureOnTimeout(
+async function finalCapture(
   r: CellRunState,
   startedAt: number,
-  full: boolean,
+  { salvage: wantSalvage }: { salvage: boolean },
 ): Promise<SalvageResult | null> {
   const { provider, cellId } = r;
   const left = (): number =>
     Math.max(0, CELL_TIMEOUT_CAPTURE_BUDGET_MS - (Date.now() - startedAt));
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), left());
-  const expired = new Promise<"expired">((resolve) => {
-    if (deadline.signal.aborted) resolve("expired");
-    else {
-      deadline.signal.addEventListener("abort", () => resolve("expired"), {
-        once: true,
-      });
-    }
-  });
-  const within = <T>(work: Promise<T>): Promise<T | "expired"> => {
-    work.catch(() => {});
-    return Promise.race([work, expired]);
+  /** Fires after `ms` (on the clock the tests drive); never keeps the process alive. */
+  const bounded = (ms: number): { signal: AbortSignal; cancel: () => void } => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    timer.unref?.();
+    return { signal: controller.signal, cancel: () => clearTimeout(timer) };
   };
+  const budget = bounded(left());
+  const deadline = budget.signal;
   /** Runs one step unless the budget is spent; abandons it when the budget runs out. */
   const guarded = async <T>(
     name: string,
     work: () => Promise<T>,
   ): Promise<T | undefined> => {
-    if (deadline.signal.aborted) {
+    if (deadline.aborted) {
       r.step(`cell: timeout capture: ${name} skipped (budget spent)`);
       return undefined;
     }
     try {
-      const out = await within(work());
-      if (out === "expired") {
-        r.step(`cell: timeout capture: ${name} abandoned (budget spent)`);
-        return undefined;
-      }
-      return out;
+      return await raceSignal(work(), deadline);
     } catch (error) {
-      r.step(`cell: timeout capture: ${name} failed (${causeClass(error)})`);
+      r.step(
+        deadline.aborted
+          ? `cell: timeout capture: ${name} abandoned (budget spent)`
+          : `cell: timeout capture: ${name} failed (${causeClass(error)})`,
+      );
       return undefined;
     }
   };
@@ -2173,7 +2228,7 @@ async function captureOnTimeout(
   let salvage: SalvageResult | null = null;
   try {
     if (provider === null || cellId === null) return null;
-    const salvageOn = full && r.args.config.timeoutSalvage !== "off";
+    const salvageOn = wantSalvage && r.args.config.timeoutSalvage !== "off";
 
     // 1. Freeze: the agent stops writing before anything is read.
     if (salvageOn) {
@@ -2196,29 +2251,23 @@ async function captureOnTimeout(
       await guarded("pull wait", async () => {
         const pending = capture.inflight();
         if (pending === null) return;
-        const bound = new Promise<"late">((resolve) => {
-          setTimeout(
-            () => resolve("late"),
-            Math.min(CELL_CAPTURE_POLL_BUDGET_MS, left()),
-          ).unref?.();
-        });
-        if ((await Promise.race([pending, bound])) === "late") {
+        const wait = bounded(Math.min(CELL_CAPTURE_POLL_BUDGET_MS, left()));
+        try {
+          await raceSignal(pending, wait.signal);
+        } catch {
           r.step("cell: timeout capture: in-flight pull abandoned");
           r.captureAbort.abort();
-          await Promise.race([
-            pending,
-            new Promise<void>((resolve) => {
-              setTimeout(resolve, 500).unref?.();
-            }),
-          ]);
+          // A short grace for the aborted pull to settle (it never rejects).
+          const grace = bounded(500);
+          await raceSignal(pending, grace.signal).catch(() => {});
+          grace.cancel();
+        } finally {
+          wait.cancel();
         }
       });
       await guarded("final pull", async () => {
         await capture.final(
-          withTimeout(
-            Math.min(CELL_TIMEOUT_FINAL_FLUSH_MS, left()),
-            deadline.signal,
-          ),
+          withTimeout(Math.min(CELL_TIMEOUT_FINAL_FLUSH_MS, left()), deadline),
         );
       });
     }
@@ -2247,7 +2296,7 @@ async function captureOnTimeout(
   } catch (error) {
     r.step(`cell: timeout capture failed (${causeClass(error)})`);
   } finally {
-    clearTimeout(timer);
+    budget.cancel();
     r.captureAbort.abort();
   }
   return salvage;
@@ -2277,7 +2326,6 @@ async function tearDown(
     abnormal.claimed = true; // no end: the outer catch posts nothing
   }
   if (st.conflict) deps.marks.mark(r.runId, "tokenGone");
-  const finalEnd = end;
   await teardownCellRun(
     {
       stepKey: r.stepKey,
@@ -2301,25 +2349,11 @@ async function tearDown(
         }),
       provider: provider ?? NO_PROVIDER,
       postAbnormal: async () => {
-        if (finalEnd) {
-          await deps.www.postAbnormal(abnormal, finalEnd, {
+        if (end) {
+          await deps.www.postAbnormal(abnormal, end, {
             wwwOpts,
             log: r.step,
             ...(salvage ? { salvage } : {}),
-            // #743: a run that started without its history says why on its terminal.
-            ...(r.startedFresh
-              ? {
-                  post: (o, body, signal) =>
-                    postRunTerminal(
-                      o,
-                      {
-                        ...body,
-                        startedFresh: (r.startedFresh as string).slice(0, 64),
-                      },
-                      signal,
-                    ),
-                }
-              : {}),
           });
         }
       },

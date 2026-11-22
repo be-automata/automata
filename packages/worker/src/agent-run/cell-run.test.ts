@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   abnormalEndInfo,
   newAbnormalEndState,
+  postAbnormalEnd,
   type AbnormalEnd,
 } from "./abnormal-end";
 import {
@@ -17,6 +18,8 @@ import {
 } from "@terragon/types/cell-session-checkpoint";
 
 import { BoundedRunMap } from "./run-end-marks";
+import { prepareCheckpoint } from "./cell-session-checkpoint";
+import { createSessionRedactor } from "./cell-session-redact";
 import {
   buildCellMessage,
   createCellExecutor,
@@ -143,7 +146,7 @@ function setup(
     /** What the checkpoint route's commit answers; default ok with the next version. */
     commit?: (expectedVersion: number) => Promise<unknown>;
     putBlob?: () => Promise<unknown>;
-    /** #743 phase 8: the restore's reads; both unset = no restore reads wired. */
+    /** #743 phase 8: the restore's reads; default a head error (no restore). */
     readHead?: () => Promise<unknown>;
     readBlob?: (sha256: string) => Promise<unknown>;
   } = {},
@@ -158,10 +161,6 @@ function setup(
     pollOpts: [] as unknown[],
     abnormalPosts: 0,
     abnormalEnds: [] as AbnormalEnd[],
-    abnormalPost: [] as (
-      | undefined
-      | ((...args: never[]) => Promise<unknown>)
-    )[],
     revokeResult: "ok" as "ok" | "unauthorized" | "failed",
     reportBodies: [] as unknown[],
   };
@@ -276,11 +275,10 @@ function setup(
       postEgress: async () => {
         calls.push("www.egress");
       },
-      postAbnormal: async (_state, end, deps) => {
+      postAbnormal: async (_state, end) => {
         calls.push("www.abnormal");
         www.abnormalPosts += 1;
         www.abnormalEnds.push(end);
-        www.abnormalPost.push(deps?.post);
         return null;
       },
     },
@@ -302,13 +300,12 @@ function setup(
         });
         return { ok: true, version: expected + 1 };
       },
-      ...(over.readHead && over.readBlob
-        ? {
-            readHead: async () => (await over.readHead?.()) as never,
-            readBlob: async (_o: unknown, sha256: string) =>
-              (await over.readBlob?.(sha256)) as never,
-          }
-        : {}),
+      readHead: async () =>
+        (await (over.readHead?.() ??
+          ({ ok: false, code: "transport", status: 0 } as const))) as never,
+      readBlob: async (_o: unknown, sha256: string) =>
+        (await (over.readBlob?.(sha256) ??
+          ({ ok: false, code: "not_found", status: 404 } as const))) as never,
     },
     sleep: async (ms, signal) => {
       // #743: the capture loop has its own interval and waits like the sampler.
@@ -2221,6 +2218,23 @@ describe("the per-turn session capture (#743 phase 6)", () => {
   // card: protects=#743 F6: the probe searches every project dir at depth 2 for regular files with no hard-coded dir, picks the file named after the pulled session over a newer one, and copies out from the dir it found; fails_when=-workspace is hard-coded, the newest file wins over the session id, or a symlink is listed; no_claim=which dir a real run uses (AC-8)
   it("F6 finds the session by id in a dir other than -workspace", async () => {
     const other = `/home/agent/.claude/projects/-home-agent-proj/${SID}.jsonl`;
+    const emptyBody: Omit<CellSessionManifest, "id"> = {
+      schema: CELL_SESSION_SCHEMA,
+      threadId: "thr_1",
+      threadChatId: "tc_1",
+      sessionId: SID,
+      parent: null,
+      turn: 0,
+      runExternalId: "run-0",
+      createdAt: "2026-01-02T03:04:05.000Z",
+      harness: { name: "claude-code", nativeFormat: "claude-jsonl" },
+      projectDir: "-workspace",
+      git: null,
+      native: { sha256: sha256Hex(new Uint8Array(0)), bytes: 0, chunks: [] },
+      events: { count: 0, chunks: [] },
+      redaction: { rulesDigest: "d", hits: 0 },
+    };
+    const emptyHead = { ...emptyBody, id: computeManifestId(emptyBody) };
     const { s, cell } = capturing(
       async (s, cell) => {
         cell.text = turn(1);
@@ -2229,8 +2243,17 @@ describe("the per-turn session capture (#743 phase 6)", () => {
       {
         nextMessage: async () =>
           ({ ...pulled, sessionId: SID }) as unknown as typeof pulled,
+        // The session id only reaches the capture through a restore: an empty
+        // checkpointed transcript restores to nothing and keeps the id.
+        readHead: async () => ({
+          ok: true,
+          head: { found: true, manifest: emptyHead, version: 5 },
+        }),
+        readBlob: async () => ({ ok: false, code: "not_found", status: 404 }),
       },
       {
+        // The file already grows when the loop first looks: the restored id is kept.
+        text: turn(1),
         dir: "-home-agent-proj",
         extra: `1 1800000000.0 -workspace/${NEWER}.jsonl\nnot-a-session.jsonl\n9 1 -bad dir/${SID}.jsonl\n`,
       },
@@ -2551,19 +2574,24 @@ describe("the timeout capture order (#743 phase 7b)", () => {
         readBlob: async () => ({ ok: false, code: "not_found", status: 404 }),
       });
       await failed.s.executor.run(failed.args);
-      const post = failed.s.www.abnormalPost[0] as unknown as (
-        o: typeof wwwOpts,
-        body: { runExternalId: string; cause: string },
-        signal?: AbortSignal,
-      ) => Promise<unknown>;
-      expect(post).toBeTypeOf("function");
-      await post(wwwOpts, { runExternalId: "run-1", cause: "timeout" });
+      const end = failed.s.www.abnormalEnds[0]!;
+      expect(end.detail).toEqual({ startedFresh: "head-error" });
+      // The real post carries it in the run-terminal body's detail.
+      await postAbnormalEnd(
+        newAbnormalEndState({
+          owns: true,
+          runStartedAt: 0,
+          runExecutionTimeoutMs: 60_000,
+        }),
+        end,
+        { wwwOpts, log: () => {} },
+      );
       const [, init] = fetchMock.mock.calls[0]!;
       expect(JSON.parse(init.body).detail.startedFresh).toBe("head-error");
 
       const clean = ending({ capture: true });
       await clean.s.executor.run(clean.args);
-      expect(clean.s.www.abnormalPost[0]).toBeUndefined();
+      expect(clean.s.www.abnormalEnds[0]?.detail).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2927,7 +2955,7 @@ describe("the session restore (#743 phase 8)", () => {
     );
   });
 
-  // card: protects=#743 R1-3 AC-2: with the flag off a claudeCode run that was handed a session id starts fresh (sessionId null, the platform note, the journal line), so --continue on an empty HOME is impossible; with no session id, or when the gate is on but its reads are unwired, the message passes through; no read, no copy-in; fails_when=the id is sent with the flag off, or a file is written; no_claim=the flag itself (phase 11)
+  // card: protects=#743 R1-3 AC-2: with the flag off a claudeCode run that was handed a session id starts fresh (sessionId null, the platform note, the journal line), so --continue on an empty HOME is impossible; with no session id the message passes through; no read, no copy-in; fails_when=the id is sent with the flag off, or a file is written; no_claim=the flag itself (phase 11)
   it("is off by default", async () => {
     let reads = 0;
     const h = head([turn(1)]);
@@ -2952,11 +2980,6 @@ describe("the session restore (#743 phase 8)", () => {
     expect(restoreLogs(s)).toEqual([
       "[agent-run thr_1] cell: session restore: none (flag-off); started fresh",
     ]);
-
-    const unwired = setup({ capture: true, nextMessage: withSession() });
-    await unwired.executor.run(unwired.args);
-    expect(sentMessage(unwired).sessionId).toBe(SID);
-    expect(unwired.files.some((f) => f.path === PATH)).toBe(false);
 
     const noId = restoring(h, { nextMessage: withSession(null) });
     await noId.executor.run(noId.args);
@@ -3057,6 +3080,21 @@ describe("the session restore (#743 phase 8)", () => {
     expect(restoreLogs(s)).toEqual([]);
   });
 
+  // card: protects=#743 F6: a fresh first run (gate on, claudeCode, a transcript with a session id, the head read finds none) still captures, committing at version 0 with no parent; fails_when=nothing is committed, the version is not 0, or a parent is set; no_claim=a real second cell
+  it("a fresh first run with no head still captures from version 0", async () => {
+    const s = capturingRestore(
+      null,
+      [{ id: NEW, text: turn(1), mtime: "1700000100.0" }],
+      { nextMessage: withSession(null) },
+    );
+    await s.executor.run(s.args);
+    const [commit] = commitsOf(s);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    expect(commit?.expected).toBe(0);
+    expect(commit?.manifest.parent).toBeNull();
+    expect(commit?.manifest.sessionId).toBe(NEW);
+  });
+
   // card: protects=#743 R1-4 OQ-7: if --resume writes a new session id, the restored id stops growing and the newest UUID transcript is followed, as a new chain parented to the restored head at its version; fails_when=the new file is ignored, the chain restarts at 0 or without the parent; no_claim=which id a real claude writes (AC-8)
   it("follows a new session id written by --resume", async () => {
     const h = head([turn(1)]);
@@ -3083,5 +3121,69 @@ describe("the session restore (#743 phase 8)", () => {
         (a) => isRegularFileCheck(a) && a[2]?.endsWith(`${NEW}.jsonl`) === true,
       ),
     ).toBe(true);
+  });
+});
+
+describe("the capture's running hash (#743)", () => {
+  // card: protects=#743 S1-9: the native sha256 a pull derives from the running Hash (hashing only the new bytes) equals the full-hash path for 3 pulls in a row, and the input Hash is not consumed; fails_when=the digest differs, the manifest id differs, or the input Hash is finalized or mutated; no_claim=the prefix check against a wrong hash (cell-session-checkpoint.test.ts)
+  it("matches the full-hash path across 3 pulls", () => {
+    const lines = readFileSync(
+      new URL("./__fixtures__/cell-session.jsonl", import.meta.url),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => `${l}\n`);
+    const cuts = [0, 3, 6, lines.length];
+    const redactor = createSessionRedactor({ values: [] });
+    const context = {
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      runExternalId: "run-1",
+      projectDir: "-workspace",
+      git: null,
+    };
+    const now = () => new Date("2026-01-01T00:00:00.000Z");
+    type Written = Extract<
+      ReturnType<typeof prepareCheckpoint>,
+      { kind: "write" }
+    >;
+    let full: Written | null = null;
+    let running: Written | null = null;
+    for (let pull = 0; pull < 3; pull++) {
+      const newBytes = new TextEncoder().encode(
+        lines.slice(cuts[pull], cuts[pull + 1]).join(""),
+      );
+      const common = { context, redactor, now, newBytes };
+      const a = prepareCheckpoint({
+        ...common,
+        previous: full?.manifest ?? null,
+        ...(full
+          ? { previousNative: full.native, turnState: full.turnState }
+          : {}),
+      });
+      const b = prepareCheckpoint({
+        ...common,
+        previous: running?.manifest ?? null,
+        ...(running
+          ? {
+              previousNative: running.native,
+              previousNativeHash: running.nativeHash,
+              turnState: running.turnState,
+            }
+          : {}),
+      });
+      expect(a.kind).toBe("write");
+      expect(b.kind).toBe("write");
+      full = a as Written;
+      running = b as Written;
+      expect(running.nativeSha256).toBe(full.nativeSha256);
+      expect(running.nativeHash.copy().digest("hex")).toBe(
+        sha256Hex(full.native),
+      );
+      expect(running.manifest.id).toBe(full.manifest.id);
+      expect(running.manifest.native.sha256).toBe(full.manifest.native.sha256);
+    }
   });
 });

@@ -160,6 +160,7 @@ export async function postRunTerminalWithRetry({
   runExternalId,
   cause,
   info,
+  detail,
   log,
   post = postRunTerminal,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -168,6 +169,7 @@ export async function postRunTerminalWithRetry({
   runExternalId: string;
   cause: TerminalCause;
   info?: string;
+  detail?: TerminalDetail;
   log: (line: string) => void;
   post?: typeof postRunTerminal;
   sleep?: (ms: number) => Promise<void>;
@@ -177,7 +179,7 @@ export async function postRunTerminalWithRetry({
     try {
       result = await post(
         wwwOpts,
-        { runExternalId, cause, ...(info ? { info } : {}) },
+        { runExternalId, cause, ...(info ? { info } : {}), ...detail },
         AbortSignal.timeout(TERMINAL_POST_TIMEOUT_MS),
       );
     } catch {
@@ -225,9 +227,17 @@ export function newAbnormalEndState(o: {
   return { ...o, daemonStarted: false, claimed: false };
 }
 
+/** The optional fields of the run-terminal body's `detail`, beyond the cause's own info. */
+export interface TerminalDetail {
+  /** #743: why the run's session restore failed (≤ 64 chars, www-enforced). */
+  startedFresh?: string;
+}
+
 /** A claimed abnormal end: its cause, and what it was built from. */
 export interface AbnormalEnd extends RunEnd {
   cause: TerminalCause;
+  /** Extra terminal detail the post carries (#743: why a restore started fresh). */
+  detail?: TerminalDetail;
 }
 
 /**
@@ -288,6 +298,7 @@ export async function postAbnormalEnd(
       runExecutionTimeoutMs: state.runExecutionTimeoutMs,
       salvage,
     }),
+    ...(end.detail ? { detail: end.detail } : {}),
     log,
     ...(post ? { post } : {}),
     ...(sleep ? { sleep } : {}),
