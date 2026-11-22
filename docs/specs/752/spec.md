@@ -397,3 +397,45 @@ updated to match.
 | RF-5 | Rollback stated accurately: runs dispatched before a revert push the convention name, and the reverted PR open returns `no_branch`, so that work has no PR. A read-only SQL query lists the threads whose stamp has `workBranch`. | §4 Rollback |
 | RF-6 | Risks restated: the `provision.ts:198-219` `ls-remote --heads` suffix match makes the fetch, and so the run, fail; a remote branch named exactly `feat`/`fix` blocks the push. Both are follow-up tickets. | §4, OQ-7 |
 | Also | OQ-1 adds the key denylist `UTF`, `SHA`, `ISO`, `RFC` (D1 step 2, AC-2 case). `deploy/lib/seed-skill-bodies.ts:36` added to the copies (G22) and updated in P4 (wording only; P4 = 4 files). AC-4 citations fixed (`taskRunPushBranch` describe beside `:469`, `pushRef` table `:1629-1717`, the delivery stamp per `enroll.ts:54-59`). | G22, D5, §5 AC-4, §7 P4, OQ-1 |
+
+## 10. Amendments (2026-11-22, refinement, simplify and roborev round 1)
+
+These record what shipped. Where they conflict with an earlier section, they win over
+that section.
+
+- **RF-7: which message the PR content comes from (supersedes G4 and D4's "unchanged").**
+  `parseAgentPrContent` reads only the final lead message after the last `user` message,
+  which is the run being finished. When that message has no valid `json pull-request`
+  block, it returns `null`, and the platform's generated body is used. A block from an
+  earlier run is never reused (commit `cf0f7c6f`).
+- **RF-8: ticket keys (supersedes the four-entry denylist in D1 step 2 and OQ-1).**
+  - **Title:** a key counts as a standalone token, and the title is searched first.
+  - **Body:** a key counts only with a marker: `[KEY-n]`, `Jira: KEY-n`,
+    `Ticket: KEY-n`, or a tracker `/browse/KEY-n` link.
+  - **Denylisted prefixes, never keys:** `UTF`, `SHA`, `ISO`, `RFC`, `CVE`, `GHSA`,
+    `AC`, `OD`, `OQ`, `RF`, `G`, `ES`, `GPT`, `COVID`.
+  - **Effect:** a bare key in an issue body no longer names the branch; the run falls
+    back to `automata/task-<id8>` (commit `117469f3`).
+- **RF-9: intake ordering (supersedes D1's "the `safeSection` closure records the
+  title").** The branch choice is its own step in the intake `Promise.all` and shares
+  one `issues.get` with the issue-context section. Either step can fail without
+  dropping the other. The title still comes from the fetched issue, never from the
+  comment payload (commit `e86a8a09`).
+- **RF-10: the seed string is pinned (supersedes D5's "no test pins it").**
+  `mention-reply-finish.test.ts` pins the seeded body, and `deploy/skills/PROVENANCE.md`
+  records the change as M6, with M5 reworded.
+- **RF-11: issue reference.** `withIssueReference` treats any of these as already
+  present:
+  - `refs`, `closes`, `fixes` or `resolves`;
+  - in any case;
+  - with an optional colon;
+  - and `#N` on a word boundary, so `#120` does not count as `#12`.
+- **Accepted, not fixed:**
+  - Two intakes on the same issue at the same instant can both choose the bare name
+    (OQ-4(a)).
+  - The claim query has no status filter, so an archived thread keeps its bare name and
+    later mentions get the `-<id8>` suffix. This fails closed.
+  - Follow-ups, both schema changes:
+    - an expression index for the claim query;
+    - a thread-level `workBranch` column, written once the thread id exists, which
+      would retire the suffix and the stamp read in `remoteTaskBranchFor`.
