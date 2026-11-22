@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { vi } from "vitest";
 
 import { POST as agentCredentials } from "@/app/api/daemon/agent-credentials/route";
+import { POST as cellCheckpoint } from "@/app/api/daemon/cell-checkpoint/route";
 import { POST as cellPlan } from "@/app/api/daemon/cell-plan/route";
 import { POST as egressEvent } from "@/app/api/daemon/egress-event/route";
 import { POST as runCredentialSource } from "@/app/api/daemon/run-credential-source/route";
@@ -121,6 +122,11 @@ export function daemonRouteMatrix(
     ),
     daemonPost("thread-status", threadStatus, "/api/daemon/thread-status"),
     daemonPost("cell-plan", cellPlan, "/api/daemon/cell-plan"),
+    daemonPost(
+      "cell-checkpoint",
+      cellCheckpoint,
+      "/api/daemon/cell-checkpoint",
+    ),
     {
       name: "internal/broadcast",
       liveIsNot401: true,

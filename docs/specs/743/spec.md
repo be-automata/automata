@@ -1035,3 +1035,8 @@ above is updated to match them.
   chunks past 32" conflicted with the store's append-only check. Append-only keeps tampering and races
   detectable. The cap rises to 1024, an empty pull writes nothing, and restore fetches 8 chunks at a
   time.
+- **A-13 (2026-11-22, phase 4): no `blob_missing` 422 at commit.** The store has no cheap existence
+  check, and reading every chunk back costs too much. A manifest that names an unwritten chunk fails
+  the restore's hash check, so the run starts fresh and says so (AC-2's path). Only the
+  `content-length` check runs before auth; the capped read runs after it, so an unauthenticated
+  client can't make the route read a large body.
