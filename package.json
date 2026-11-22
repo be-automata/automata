@@ -19,7 +19,7 @@
   "keywords": [],
   "packageManager": "pnpm@10.14.0",
   "devDependencies": {
-    "@vitest/coverage-v8": "3.1.4",
+    "@vitest/coverage-v8": "3.2.7",
     "concurrently": "^10.0.7",
     "dotenv-cli": "^8.0.0",
     "husky": "^9.1.7",
