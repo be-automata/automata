@@ -643,7 +643,7 @@ async function runCell(
 
       // 10. The poll loop takes over from the heartbeat.
       r.heartbeatStop.abort();
-      startSessionCapture(r, outgoing, restore.restored);
+      startSessionCapture(r, outgoing, restore.restored, restore.start);
       const poll = await deps.www.pollUntilTerminal(
         pollContext(r, provider, r.cellId),
         r.cellOpts,
@@ -672,13 +672,23 @@ async function runCell(
   }
 
   // #743 phase 7b: the end is claimed BEFORE anything else, so a typed `timeout`
-  // can capture the session and salvage the work first. Any other end skips
-  // the capture and keeps today's teardown.
+  // can freeze, capture the session and salvage the work first. Every other end
+  // whose token is still live (not fenced, conflicted, or retired by a terminal
+  // read) gets the same wait for an in-flight pull and one final pull, with no
+  // freeze and no salvage (spec 2.5 step 3). Both stay inside the 40 s budget.
   const end = claimEnd(r, thrown);
   let salvage: SalvageResult | null = null;
   try {
     if (end?.cause === "timeout") {
-      salvage = await captureOnTimeout(r, pollReturnedAt ?? Date.now());
+      salvage = await captureOnTimeout(r, pollReturnedAt ?? Date.now(), true);
+    } else if (
+      r.capture !== null &&
+      !st.fenced &&
+      !st.conflict &&
+      !st.terminal &&
+      !st.retired
+    ) {
+      await captureOnTimeout(r, pollReturnedAt ?? Date.now(), false);
     } else {
       r.captureAbort.abort();
     }
@@ -870,6 +880,8 @@ function startCellMemorySampler(
 export const CELL_CAPTURE_POLL_MS = 6_500;
 /** With no sign of growth (or a failed probe), pull anyway after this long (Q-1). */
 export const CELL_CAPTURE_IDLE_PULL_MS = 60_000;
+/** A redactor that throws this many pulls in a row stops the capture. */
+const CELL_REDACTOR_ERROR_LIMIT = 3;
 /** One pull (the exec checks and the copyOut) is abandoned after this long. */
 export const CELL_CAPTURE_POLL_BUDGET_MS = 15_000;
 /**
@@ -916,26 +928,33 @@ interface SessionFile {
   size: number;
 }
 
-/** The session file by id (F6), else the newest UUID-named one. Names that are not UUIDs are ignored. */
-function chooseSessionFile(
-  stdout: string,
-  sessionId: string | null,
-): SessionFile | null {
-  let best: (SessionFile & { mtime: number }) | null = null;
+type ProbedFile = SessionFile & { mtime: number };
+
+/** Every UUID-named transcript the probe listed. Names that are not UUIDs are ignored. */
+function parseProbe(stdout: string): ProbedFile[] {
+  const files: ProbedFile[] = [];
   for (const line of stdout.split("\n")) {
     const m = PROBE_LINE.exec(line);
     if (!m) continue;
-    const id = (m[4] as string).toLowerCase();
-    if (sessionId !== null && id !== sessionId.toLowerCase()) continue;
-    const mtime = Number(m[2]);
-    if (best === null || mtime > best.mtime) {
-      best = {
-        projectDir: m[3] as string,
-        sessionId: id,
-        size: Number(m[1]),
-        mtime,
-      };
-    }
+    files.push({
+      projectDir: m[3] as string,
+      sessionId: (m[4] as string).toLowerCase(),
+      size: Number(m[1]),
+      mtime: Number(m[2]),
+    });
+  }
+  return files;
+}
+
+/** The newest of `files` (by mtime), optionally only those named `sessionId` (F6). */
+function newestFile(
+  files: ProbedFile[],
+  sessionId: string | null,
+): ProbedFile | null {
+  let best: ProbedFile | null = null;
+  for (const f of files) {
+    if (sessionId !== null && f.sessionId !== sessionId.toLowerCase()) continue;
+    if (best === null || f.mtime > best.mtime) best = f;
   }
   return best;
 }
@@ -967,9 +986,30 @@ function startSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
   restored: RestoredSession | null,
+  start: ChainStart,
 ): void {
-  r.capture = openSessionCapture(r, pulled, restored);
+  r.capture = openSessionCapture(r, pulled, restored, start);
 }
+
+/**
+ * Where a chain with no restored manifest begins (spec 2.4 step 1): the head's
+ * version for the commit's CAS, and the head's manifest id as the new chain's
+ * parent. `known` is false when the head was unreadable, or belongs to another
+ * session (read-head then carries no version): the first commit learns the
+ * version from `head_moved` and retries once.
+ */
+interface ChainStart {
+  version: number;
+  parent: string | null;
+  known: boolean;
+}
+const UNKNOWN_CHAIN_START: ChainStart = {
+  version: 0,
+  parent: null,
+  known: false,
+};
+/** A session id no row holds: read-head answers `none` or `other_session` for it. */
+const NO_SESSION_PROBE_ID = "-";
 
 /** A restore that landed: the chain the capture continues. */
 interface RestoredSession {
@@ -985,58 +1025,104 @@ const RESTORE_FALLBACK_PROJECT_DIR = "-workspace";
 const SAFE_PROJECT_DIR = /^-[A-Za-z0-9-]{1,200}$/;
 const SAFE_SESSION_ID =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const RESTORE_NOTE =
-  "[automata] The earlier conversation could not be restored; you are starting without its history. Check the work branch for earlier commits.";
+/** C6/§2.4: the note the agent reads when its history could not be restored. */
+function restoreNote(reason: string): string {
+  return `[automata] The earlier conversation could not be restored (${reason}); you are starting without its history. Check the work branch for earlier commits.`;
+}
 
 /**
  * #743 phase 8: puts the checkpointed transcript into the new cell, where the
- * daemon's `--resume <sessionId>` finds it. Gated like the capture and off by
- * default (unchanged message). On ANY failure the message carries
- * `sessionId: null`, so the daemon starts fresh and never reaches its silent
- * `--continue` fallback; the run says so in the journal and in the prompt.
+ * daemon's `--resume <sessionId>` finds it. With the gate on, the head is ALWAYS
+ * read first (spec 2.4 step 1), so the capture knows the version to continue
+ * from even when nothing is restored. On ANY failure, and with the gate off, a
+ * claudeCode message that carries a session id goes out with `sessionId: null`,
+ * so the daemon starts fresh and never reaches its silent `--continue` fallback
+ * on an empty HOME (AC-2, §2.9); the run says so in the journal and the prompt.
  */
 async function restoreSession(
   r: CellRunState,
   pulled: PulledDaemonMessage,
-): Promise<{ message: PulledDaemonMessage; restored: RestoredSession | null }> {
+): Promise<{
+  message: PulledDaemonMessage;
+  restored: RestoredSession | null;
+  start: ChainStart;
+}> {
   const { checkpoint, sessionContinuation } = r.deps;
   const sessionId = pulled.sessionId;
-  if (
-    !checkpoint?.readHead ||
-    !checkpoint.readBlob ||
-    !sessionContinuation?.(pulled) ||
-    pulled.agent !== "claudeCode" ||
-    !sessionId
-  ) {
-    return { message: pulled, restored: null };
+  if (pulled.agent !== "claudeCode") {
+    return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
   }
-  const { readHead, readBlob } = checkpoint;
   const startedAt = r.deps.now();
-  const failFresh = (cls: string) => {
-    r.startedFresh = cls;
-    r.step(`continuation: restore failed (${cls}), starting fresh`);
+  const seen: { head: CheckpointHead | null } = { head: null };
+  const chainStart = (): ChainStart => {
+    const head = seen.head;
+    if (head === null) return UNKNOWN_CHAIN_START;
+    if (head.found) {
+      return { version: head.version, parent: head.manifest.id, known: true };
+    }
+    return head.reason === "none"
+      ? { version: 0, parent: null, known: true }
+      : UNKNOWN_CHAIN_START;
+  };
+  const failFresh = (reason: string) => {
+    r.startedFresh = reason;
+    r.step(`cell: session restore: none (${reason}); started fresh`);
     return {
       message: {
         ...pulled,
         sessionId: null,
-        prompt: `${RESTORE_NOTE}\n\n${pulled.prompt}`,
+        prompt: `${restoreNote(reason)}\n\n${pulled.prompt}`,
       },
       restored: null,
+      start: chainStart(),
     };
   };
-  if (!SAFE_SESSION_ID.test(sessionId)) return failFresh("bad-session-id");
 
+  const gateOn = sessionContinuation?.(pulled) === true;
+  if (!gateOn) {
+    // Flag off (§2.9): no restore, and never the daemon's silent `--continue`
+    // on an empty HOME for a session id this cell does not hold.
+    if (!sessionId) {
+      return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
+    }
+    return failFresh("flag-off");
+  }
+  if (!checkpoint?.readHead || !checkpoint.readBlob) {
+    // Production wires both reads with the gate; a bare gate has nothing to read.
+    return { message: pulled, restored: null, start: UNKNOWN_CHAIN_START };
+  }
+  const { readHead, readBlob } = checkpoint;
   const budget = withTimeout(CELL_RESTORE_BUDGET_MS, r.live);
+  const readHeadSeen = async (id: string, signal: AbortSignal) => {
+    const out = await readHead(r.cellOpts, id, signal);
+    if (out.ok) seen.head = out.head;
+    return out;
+  };
+
+  if (!sessionId || !SAFE_SESSION_ID.test(sessionId)) {
+    // No session to restore (or an id that is never a path): the head is still
+    // read, so the capture starts its chain at the right version.
+    try {
+      await readHeadSeen(NO_SESSION_PROBE_ID, budget);
+    } catch {
+      // Unknown head: the first commit learns the version.
+    }
+    if (!sessionId) {
+      return { message: pulled, restored: null, start: chainStart() };
+    }
+    return failFresh("bad-session-id");
+  }
+
   let result: RestoreResult;
   try {
     result = await fetchSessionCheckpoint({
       sessionId,
-      readHead: (id, signal) => readHead(r.cellOpts, id, signal),
+      readHead: readHeadSeen,
       readBlob: (sha, signal) => readBlob(r.cellOpts, sha, signal),
       signal: budget,
     });
   } catch (error) {
-    return failFresh(`error-${causeClass(error)}`);
+    return failFresh(`error-${causeClass(error)}`.toLowerCase());
   }
   if (result.kind === "fresh") return failFresh(result.reason);
 
@@ -1082,6 +1168,7 @@ async function restoreSession(
       native: result.native,
       projectDir,
     },
+    start: chainStart(),
   };
 }
 
@@ -1089,6 +1176,7 @@ function openSessionCapture(
   r: CellRunState,
   pulled: PulledDaemonMessage,
   restored: RestoredSession | null,
+  start: ChainStart,
 ): CaptureHandle | null {
   const { checkpoint, sessionContinuation } = r.deps;
   if (!checkpoint || !sessionContinuation?.(pulled)) return null;
@@ -1118,9 +1206,17 @@ function openSessionCapture(
   let lastPullAt = r.deps.now();
   let manifest: CellSessionManifest | null = restored?.manifest ?? null;
   let native: Uint8Array = restored?.native ?? new Uint8Array(0);
-  let version = restored?.version ?? 0;
+  // The head's version (spec 2.4 step 1): a restore's own, else what the head
+  // read found, so a fresh start continues the thread's chain and does not
+  // commit from 0 into `head_moved`.
+  let version = restored?.version ?? start.version;
+  let versionKnown = restored !== null || start.known;
+  // A chain with no previous manifest is parented to the head it began after.
+  let chainParent: string | null = start.parent;
   let turnState: TurnState | undefined;
   let stopped = false;
+  let redactorErrors = 0;
+  let switched = false;
 
   // A pull ends with the run's internal aborts (fence, Stop, failure) and with
   // captureAbort, never with the run's own cancel: a timeout keeps its pull alive.
@@ -1174,6 +1270,7 @@ function openSessionCapture(
     const started = r.deps.now();
     const result = prepareCheckpoint({
       previous: manifest,
+      parent: chainParent,
       previousNative: native,
       newBytes: bytes.subarray(consumed),
       ...(turnState ? { turnState } : {}),
@@ -1189,9 +1286,20 @@ function openSessionCapture(
       log: r.step,
     });
     if (result.kind === "skipped") {
-      if (result.reason !== "redactor error") stopped = true;
+      if (result.reason !== "redactor error") {
+        stopped = true;
+        return;
+      }
+      // A redactor that keeps throwing would be re-run on the same bytes every
+      // poll: stop after a few in a row (class only, nothing from the pull).
+      redactorErrors += 1;
+      if (redactorErrors >= CELL_REDACTOR_ERROR_LIMIT) {
+        r.step("cell: checkpoint skipped (redactor error; capture stopped)");
+        stopped = true;
+      }
       return;
     }
+    redactorErrors = 0;
     // Only a completed turn is a checkpoint; the bytes stay unconsumed until one is.
     if (result.kind !== "write" || !result.turnAdvanced) return;
 
@@ -1204,12 +1312,29 @@ function openSessionCapture(
       );
       if (!put.ok) return failed(put);
     }
-    const commit = await checkpoint.commit(
+    let commit = await checkpoint.commit(
       r.cellOpts,
       result.manifest,
       version,
       budget,
     );
+    if (
+      !commit.ok &&
+      commit.code === "head_moved" &&
+      !versionKnown &&
+      typeof commit.version === "number"
+    ) {
+      // The head was another session's (read-head carries no version for it):
+      // adopt the version the lost CAS reported and commit once more.
+      version = commit.version;
+      commit = await checkpoint.commit(
+        r.cellOpts,
+        result.manifest,
+        version,
+        budget,
+      );
+    }
+    versionKnown = true;
     if (!commit.ok) return failed(commit);
 
     manifest = result.manifest;
@@ -1248,7 +1373,38 @@ function openSessionCapture(
         provider.exec(cellId, CAPTURE_PROBE_ARGV, { timeoutMs: 5_000 }),
         budget,
       );
-      if (out.exitCode === 0) file = chooseSessionFile(out.stdout, sessionId);
+      if (out.exitCode === 0) {
+        const listed = parseProbe(out.stdout);
+        file = newestFile(listed, sessionId);
+        // OQ-7: `--resume` may write the continued conversation under a NEW
+        // session id. Once the restored id stops growing (or is gone), follow
+        // the newest transcript and start a chain parented to the restored head.
+        // The regular-file re-check in the pull still guards the path (F9).
+        if (
+          restored !== null &&
+          !switched &&
+          (file === null || file.size <= lastSize)
+        ) {
+          const newest = newestFile(listed, null);
+          if (
+            newest !== null &&
+            newest.sessionId !== sessionId?.toLowerCase()
+          ) {
+            chainParent = manifest?.id ?? chainParent;
+            manifest = null;
+            native = new Uint8Array(0);
+            consumed = 0;
+            lastSize = 0;
+            turnState = undefined;
+            sessionId = newest.sessionId;
+            switched = true;
+            file = newest;
+            r.step(
+              "cell: checkpoint: resume wrote a new session id; new chain",
+            );
+          }
+        }
+      }
     } catch {
       file = null;
     }
@@ -1967,11 +2123,13 @@ function brokerGitUrl(r: CellRunState): string | null {
  * one final pull; the WIP salvage. Each step fails open with one class-only
  * log line; whatever still runs at the deadline is abandoned. The freeze and
  * the salvage run with the capture gate off too (the box's timeout salvage is
- * on by default); WORKER_TIMEOUT_SALVAGE=off turns both off. Never throws.
+ * on by default); WORKER_TIMEOUT_SALVAGE=off turns both off. With `full` false
+ * (any other unfenced end) only the pull wait and the final pull run. Never throws.
  */
 async function captureOnTimeout(
   r: CellRunState,
   startedAt: number,
+  full: boolean,
 ): Promise<SalvageResult | null> {
   const { provider, cellId } = r;
   const left = (): number =>
@@ -2015,7 +2173,7 @@ async function captureOnTimeout(
   let salvage: SalvageResult | null = null;
   try {
     if (provider === null || cellId === null) return null;
-    const salvageOn = r.args.config.timeoutSalvage !== "off";
+    const salvageOn = full && r.args.config.timeoutSalvage !== "off";
 
     // 1. Freeze: the agent stops writing before anything is read.
     if (salvageOn) {

@@ -1040,3 +1040,8 @@ above is updated to match them.
   the restore's hash check, so the run starts fresh and says so (AC-2's path). Only the
   `content-length` check runs before auth; the capped read runs after it, so an unauthenticated
   client can't make the route read a large body.
+- **A-14 (2026-11-22, refinement): a fresh chain under another session's head has no parent.** When
+  the thread's head belongs to a different session, `read-head` returns no version or manifest. The
+  new chain takes its version from the `head_moved` reply, so the CAS stays correct, but its
+  `parent` stays null. To link it, `read-head` would have to return those fields for any session (a
+  follow-up).

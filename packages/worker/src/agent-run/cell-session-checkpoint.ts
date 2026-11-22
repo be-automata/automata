@@ -41,6 +41,12 @@ export interface TurnState {
   pending: string[];
   /** tool_use id -> the message that issued it, until its tool_result arrives. */
   open: Record<string, string>;
+  /**
+   * Assistant message ids already counted as a turn. Claude Code writes one line
+   * per content block with the same `message.id`, so a later pull can touch a
+   * counted message again; it must not count twice.
+   */
+  counted: string[];
 }
 
 export interface CheckpointContext {
@@ -54,6 +60,12 @@ export interface CheckpointContext {
 
 export interface PrepareCheckpointInput {
   previous: CellSessionManifest | null;
+  /**
+   * The manifest id a NEW chain (`previous` null) is parented to: the head that
+   * was current when the chain began (a fresh start, or a new session id after a
+   * resume). Ignored when `previous` is set.
+   */
+  parent?: string | null;
   /** The redacted transcript the previous manifest describes; verified against it. */
   previousNative?: Uint8Array;
   /** Raw transcript bytes since the last pull. */
@@ -96,7 +108,12 @@ export type PrepareCheckpointResult =
     };
 
 const NEWLINE = 0x0a;
-const EMPTY_TURN_STATE: TurnState = { turn: 0, pending: [], open: {} };
+const EMPTY_TURN_STATE: TurnState = {
+  turn: 0,
+  pending: [],
+  open: {},
+  counted: [],
+};
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -214,13 +231,22 @@ function normalize(
 
   // A turn is one assistant response whose every tool_use has its tool_result.
   const issuing = new Set(Object.values(open));
+  const counted = new Set(state.counted);
   let turn = state.turn;
   const pending: string[] = [];
   for (const id of new Set([...state.pending, ...touched])) {
-    if (issuing.has(id)) pending.push(id);
-    else turn += 1;
+    if (counted.has(id)) continue;
+    if (issuing.has(id)) {
+      pending.push(id);
+    } else {
+      counted.add(id);
+      turn += 1;
+    }
   }
-  return { events, turnState: { turn, pending, open } };
+  return {
+    events,
+    turnState: { turn, pending, open, counted: [...counted] },
+  };
 }
 
 function ref(chunk: Uint8Array): BlobRef {
@@ -296,7 +322,7 @@ export function prepareCheckpoint(
     threadId: context.threadId,
     threadChatId: context.threadChatId,
     sessionId: context.sessionId,
-    parent: previous?.id ?? null,
+    parent: previous?.id ?? input.parent ?? null,
     turn: normalized.turnState.turn,
     runExternalId: context.runExternalId,
     createdAt: (input.now ?? (() => new Date()))().toISOString(),

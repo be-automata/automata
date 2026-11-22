@@ -232,6 +232,50 @@ describe("prepareCheckpoint", () => {
     expect(second.manifest.turn).toBe(first.manifest.turn);
   });
 
+  // card: protects=#743 R1-5: Claude Code writes one line per content block with the same message.id; a message touched again by a later pull counts once; fails_when=the second pull raises the turn count again; no_claim=the file offset (cell-run.test.ts)
+  it("counts a message once when its blocks arrive across pulls", () => {
+    const block = (uuid: string, text: string) =>
+      `${JSON.stringify({
+        type: "assistant",
+        uuid,
+        message: { id: "msg_same", content: [{ type: "text", text }] },
+      })}\n`;
+    const first = written(run({ newBytes: bytes(block("a", "one")) }));
+    expect(first.manifest.turn).toBe(1);
+    const second = written(
+      run({
+        previous: first.manifest,
+        previousNative: first.native,
+        turnState: first.turnState,
+        newBytes: bytes(block("b", "two")),
+      }),
+    );
+    expect(second.manifest.turn).toBe(1);
+    expect(second.turnAdvanced).toBe(false);
+    const third = written(
+      run({
+        previous: second.manifest,
+        previousNative: second.native,
+        turnState: second.turnState,
+        newBytes: bytes(
+          `${JSON.stringify({
+            type: "assistant",
+            uuid: "c",
+            message: { id: "msg_next", content: [{ type: "text", text: "x" }] },
+          })}\n`,
+        ),
+      }),
+    );
+    expect(third.manifest.turn).toBe(2);
+  });
+
+  // card: protects=#743 R1-1/4: a new chain (no previous manifest) is parented to the head that was current when it began; fails_when=parent is null or ignored; no_claim=the head read (cell-run.test.ts)
+  it("parents a new chain to the given head", () => {
+    const w = written(run({ parent: "head-manifest-id" }));
+    expect(w.manifest.parent).toBe("head-manifest-id");
+    expect(written(run({})).manifest.parent).toBeNull();
+  });
+
   it("fails closed on a redactor throw: nothing is written, the class is logged, not the message", () => {
     const log = vi.fn();
     const broken: SessionRedactor = {

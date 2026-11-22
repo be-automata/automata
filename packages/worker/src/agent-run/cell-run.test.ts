@@ -2249,6 +2249,25 @@ describe("the per-turn session capture (#743 phase 6)", () => {
     expect(cell.dir).toBe("-home-agent-proj");
   });
 
+  // card: protects=#743 R1-6: a redactor that throws on the transcript stops the capture after 3 pulls in a row, with one class-only line, instead of re-redacting every poll; fails_when=the loop keeps probing, the stop line is missing or repeated, or a byte is written; no_claim=the redaction rules (cell-session-redact.test.ts)
+  it("stops after 3 redactor errors in a row", async () => {
+    const { s, cell } = capturing(async (s, cell) => {
+      for (let i = 0; i < 6; i++) {
+        cell.text += "not json\n";
+        await s.captureTick();
+      }
+    });
+    await s.executor.run(s.args);
+    // The loop's first look plus the three failing pulls; none after the stop.
+    expect(probes(s)).toBe(4);
+    expect(
+      checkLogs(s).filter((l) => l.includes("capture stopped")),
+    ).toHaveLength(1);
+    expect(s.checkpoint.puts).toHaveLength(0);
+    expect(s.checkpoint.commits).toHaveLength(0);
+    expect(cell.text.length).toBeGreaterThan(0);
+  });
+
   // card: protects=#743 F9: a file swapped for a symlink after the probe fails the regular-file re-check and is never copied out; a fresh run (no session id) takes the newest UUID file; fails_when=copyOut runs on a path the re-check refused; no_claim=the residual gap between the re-check and copyOut (spec 2.3)
   it("F9 refuses a symlink: the re-check fails and copyOut is not called", async () => {
     const { s } = capturing(
@@ -2575,7 +2594,7 @@ describe("the timeout capture order (#743 phase 7b)", () => {
     expect(s.calls).toContain("www.revoke");
   });
 
-  // card: protects=#743 7b: only the typed timeout triggers the capture; a completed run, a cancel inside the limit and a run that threw keep today's teardown with no freeze, no extra probe and no salvage; fails_when=any of them freezes, pulls once more or salvages; no_claim=the cause classification (abnormal-end.test.ts)
+  // card: protects=#743 7b R1-2: only the typed timeout freezes and salvages; a completed run (token retired) and a run that threw before the agent wrote keep today's teardown, while a cancel inside the limit (token live) gets one final pull BEFORE the revoke and nothing else; fails_when=any of them freezes or salvages, the cancel writes nothing, the flush runs after the revoke, or a completed run pulls once more; no_claim=the cause classification (abnormal-end.test.ts)
   it("a non-timeout end skips all of it", async () => {
     const done = setup({
       capture: true,
@@ -2596,8 +2615,13 @@ describe("the timeout capture order (#743 phase 7b)", () => {
     expect(out.outcome).toBe("cancelled");
     expect(early.s.calls).not.toContain("freeze");
     expect(early.s.calls).not.toContain("salvage");
-    expect(early.s.checkpoint.commits).toHaveLength(0);
+    // The unfenced end's final flush wrote the turn the loop never saw, before the revoke.
+    expect(early.s.checkpoint.commits.map((c) => c.manifest.turn)).toEqual([1]);
+    expect(early.s.calls.lastIndexOf("probe")).toBeLessThan(
+      early.s.calls.indexOf("www.revoke"),
+    );
     expect(early.s.www.abnormalEnds).toHaveLength(0);
+    expect(done.checkpoint.commits).toHaveLength(0);
 
     const failed = ending({
       capture: true,
@@ -2802,10 +2826,12 @@ describe("the session restore (#743 phase 8)", () => {
     const s = restoring(h);
     await s.executor.run(s.args);
     expect(sentMessage(s).sessionId).toBeNull();
-    expect(sentMessage(s).prompt).toContain("could not be restored");
+    expect(sentMessage(s).prompt).toContain(
+      "could not be restored (hash-mismatch)",
+    );
     expect(s.files.some((f) => f.path === PATH)).toBe(false);
     expect(restoreLogs(s)).toContain(
-      "[agent-run thr_1] continuation: restore failed (hash-mismatch), starting fresh",
+      "[agent-run thr_1] cell: session restore: none (hash-mismatch); started fresh",
     );
   });
 
@@ -2835,7 +2861,10 @@ describe("the session restore (#743 phase 8)", () => {
     await s.executor.run(s.args);
     expect(sentMessage(s).sessionId).toBeNull();
     expect(restoreLogs(s)).toContain(
-      `[agent-run thr_1] continuation: restore failed (${cls}), starting fresh`,
+      `[agent-run thr_1] cell: session restore: none (${cls}); started fresh`,
+    );
+    expect(sentMessage(s).prompt).toContain(
+      `[automata] The earlier conversation could not be restored (${cls}); you are starting without its history.`,
     );
   });
 
@@ -2898,7 +2927,7 @@ describe("the session restore (#743 phase 8)", () => {
     );
   });
 
-  // card: protects=#743 the restore is off by default and when its reads are unwired: the message passes through untouched, no read, no copy-in; fails_when=a session id is dropped or a file is written with the gate off; no_claim=the flag itself (phase 11)
+  // card: protects=#743 R1-3 AC-2: with the flag off a claudeCode run that was handed a session id starts fresh (sessionId null, the platform note, the journal line), so --continue on an empty HOME is impossible; with no session id, or when the gate is on but its reads are unwired, the message passes through; no read, no copy-in; fails_when=the id is sent with the flag off, or a file is written; no_claim=the flag itself (phase 11)
   it("is off by default", async () => {
     let reads = 0;
     const h = head([turn(1)]);
@@ -2915,9 +2944,14 @@ describe("the session restore (#743 phase 8)", () => {
     });
     await s.executor.run(s.args);
     expect(reads).toBe(0);
-    expect(sentMessage(s).sessionId).toBe(SID);
+    expect(sentMessage(s).sessionId).toBeNull();
+    expect(sentMessage(s).prompt).toContain(
+      "could not be restored (flag-off); you are starting without its history.",
+    );
     expect(s.files.some((f) => f.path === PATH)).toBe(false);
-    expect(restoreLogs(s)).toEqual([]);
+    expect(restoreLogs(s)).toEqual([
+      "[agent-run thr_1] cell: session restore: none (flag-off); started fresh",
+    ]);
 
     const unwired = setup({ capture: true, nextMessage: withSession() });
     await unwired.executor.run(unwired.args);
@@ -2928,5 +2962,126 @@ describe("the session restore (#743 phase 8)", () => {
     await noId.executor.run(noId.args);
     expect(noId.files.some((f) => f.path === PATH)).toBe(false);
     expect(sentMessage(noId).sessionId).toBeNull();
+
+    const offNoId = setup({ nextMessage: withSession(null) });
+    await offNoId.executor.run(offNoId.args);
+    expect(sentMessage(offNoId).prompt).toBe(PROMPT);
+    expect(restoreLogs(offNoId)).toEqual([]);
+  });
+
+  const NEW = "22222222-2222-4222-8222-222222222222";
+  interface CellFile {
+    id: string;
+    text: string;
+    mtime: string;
+  }
+  /** A restore run whose cell holds `files`, answering the real probe and re-check shapes. */
+  function capturingRestore(
+    h: ReturnType<typeof head> | null,
+    files: CellFile[],
+    over: Parameters<typeof setup>[0] = {},
+  ) {
+    const s: ReturnType<typeof setup> = restoring(h, {
+      execStdout: (argv) => {
+        if (isCaptureProbe(argv)) {
+          return files
+            .map(
+              (f) =>
+                `${enc(f.text).length} ${f.mtime} -workspace/${f.id}.jsonl\n`,
+            )
+            .join("");
+        }
+        return isRegularFileCheck(argv) ? `${argv[2]}\n` : "";
+      },
+      pollUntilTerminal: async () => {
+        await s.captureTick();
+        return { outcome: "completed", finalStatus: "complete" };
+      },
+      ...over,
+    });
+    s.provider.copyOut.mockImplementation(async (_id, path) => {
+      if (!path.includes("/.claude/projects/")) throw new Error("absent");
+      return enc(files.find((f) => path.endsWith(`${f.id}.jsonl`))?.text ?? "");
+    });
+    return s;
+  }
+  type Commit = {
+    manifest: { turn: number; parent: string | null; sessionId: string };
+    expected: number;
+  };
+  const commitsOf = (s: ReturnType<typeof setup>) =>
+    s.checkpoint.commits as unknown as Commit[];
+
+  // card: protects=#743 R1-1 (spec 2.4 step 1): a fresh start after a failed restore still read the head, so its new chain commits at the head's version with the head as parent (not version 0 into head_moved); fails_when=expected is 0 or the parent is null; no_claim=a real second cell
+  it("a fresh start after a failed restore continues the head's chain", async () => {
+    const h = head([turn(1), turn(2)]);
+    const first = [...h.blobs.keys()][0] as string;
+    h.blobs.set(first, enc("tampered\n"));
+    const s = capturingRestore(h, [
+      { id: NEW, text: turn(5), mtime: "1700000100.0" },
+    ]);
+    await s.executor.run(s.args);
+    expect(sentMessage(s).sessionId).toBeNull();
+    const [commit] = commitsOf(s);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    expect(commit?.expected).toBe(5);
+    expect(commit?.manifest.parent).toBe(h.manifest.id);
+    expect(commit?.manifest.sessionId).toBe(NEW);
+  });
+
+  // card: protects=#743 R1-1: with no session id the head is still read; a head that is another session's carries no version, so the lost first CAS reports it and the commit is retried once at that version; fails_when=the head is not read, capture stops at head_moved, or the retry repeats; no_claim=the www route
+  it("reads the head with no session id and adopts the version a lost CAS reports", async () => {
+    let reads = 0;
+    const expected: number[] = [];
+    const s = capturingRestore(
+      null,
+      [{ id: NEW, text: turn(1), mtime: "1700000100.0" }],
+      {
+        nextMessage: withSession(null),
+        readHead: async () => {
+          reads += 1;
+          return { ok: true, head: { found: false, reason: "other_session" } };
+        },
+        commit: async (e) => {
+          expected.push(e);
+          return e === 0
+            ? { ok: false, code: "head_moved", status: 409, version: 9 }
+            : { ok: true, version: e + 1 };
+        },
+      },
+    );
+    await s.executor.run(s.args);
+    expect(reads).toBe(1);
+    expect(expected).toEqual([0, 9]);
+    expect(sentMessage(s).prompt).toBe(PROMPT);
+    expect(restoreLogs(s)).toEqual([]);
+  });
+
+  // card: protects=#743 R1-4 OQ-7: if --resume writes a new session id, the restored id stops growing and the newest UUID transcript is followed, as a new chain parented to the restored head at its version; fails_when=the new file is ignored, the chain restarts at 0 or without the parent; no_claim=which id a real claude writes (AC-8)
+  it("follows a new session id written by --resume", async () => {
+    const h = head([turn(1)]);
+    const s = capturingRestore(h, [
+      { id: SID, text: dec(h.whole), mtime: "1700000000.0" },
+      { id: NEW, text: turn(5), mtime: "1700000100.0" },
+    ]);
+    await s.executor.run(s.args);
+    expect(s.checkpoint.commits).toHaveLength(1);
+    const [commit] = commitsOf(s);
+    expect(commit?.expected).toBe(5);
+    expect(commit?.manifest.parent).toBe(h.manifest.id);
+    expect(commit?.manifest.sessionId).toBe(NEW);
+    expect(commit?.manifest.turn).toBe(1);
+    expect(s.checkpoint.puts.some((p) => p.text.includes("answer 5"))).toBe(
+      true,
+    );
+    expect(s.checkpoint.puts.some((p) => p.text.includes("answer 1"))).toBe(
+      false,
+    );
+    // F9 still applies: the new file went through the regular-file re-check.
+    expect(
+      s.execs.some(
+        (a) => isRegularFileCheck(a) && a[2]?.endsWith(`${NEW}.jsonl`) === true,
+      ),
+    ).toBe(true);
   });
 });
