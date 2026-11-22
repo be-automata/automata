@@ -41,12 +41,14 @@ const MAX_STDOUT_CHARS = 1024 * 1024;
 // this very script). Its children in a process group of their own are the
 // agent groups (the daemon spawns each agent detached); the daemon's own group
 // and execd stay running. No daemon found: exit 3, nothing is signalled.
+// POSIX sh only (the cell's /bin/sh is dash): `kill -s STOP --`, as the box's
+// freeze writes it; dash reads `kill -STOP --` as a pid and signals nothing.
 const FREEZE_SCRIPT =
   "d=$(pgrep -o -f '[/]opt/automata/daemon.js') || exit 3; " +
   'own=$(ps -o pgid= -p "$d" | tr -d " "); ' +
   'for c in $(pgrep -P "$d"); do ' +
   'g=$(ps -o pgid= -p "$c" | tr -d " "); ' +
-  '[ -n "$g" ] && [ "$g" != "$own" ] && kill -STOP -- "-$g"; ' +
+  '[ -n "$g" ] && [ "$g" != "$own" ] && kill -s STOP -- "-$g"; ' +
   "done; exit 0";
 
 /** The argv of the freeze exec: signals process groups only. */

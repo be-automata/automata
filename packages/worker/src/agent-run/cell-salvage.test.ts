@@ -298,7 +298,7 @@ describe("freezeCellAgent", () => {
       timeoutMs: 3_000,
     });
     const script = CELL_FREEZE_ARGV[2] as string;
-    expect(script).toContain('kill -STOP -- "-$g"');
+    expect(script).toContain('kill -s STOP -- "-$g"');
     expect(script).toContain("[/]opt/automata/daemon.js");
     expect(script).not.toMatch(/kill -(9|KILL|TERM)/);
   });
@@ -328,5 +328,78 @@ describe("freezeCellAgent", () => {
       }),
     ).toBe(false);
     expect(Date.now() - t0).toBeLessThan(1_000);
+  });
+});
+
+/**
+ * The freeze script through REAL shells (no mocked exec). The cell image's
+ * /bin/sh is dash, which reads `kill -STOP --` as a pid and signals nothing;
+ * `dash` is run explicitly when present so CI proves it even where /bin/sh is
+ * bash. A fake daemon (a node process whose argv carries the daemon path)
+ * parents an agent that leads a process group of its own.
+ */
+describe("CELL_FREEZE_ARGV under real shells", () => {
+  const psState = (pid: number): string =>
+    execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf8",
+    }).trim();
+
+  const dashPath = ((): string | null => {
+    try {
+      return execFileSync("sh", ["-c", "command -v dash"], {
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      return null;
+    }
+  })();
+
+  const shells: Array<[string, string]> = [["/bin/sh", "/bin/sh"]];
+  if (dashPath) shells.push(["dash", dashPath]);
+
+  it.each(shells)("stops the agent group under %s", async (_name, shell) => {
+    const daemon = spawn(
+      process.execPath,
+      [
+        "-e",
+        'const c=require("node:child_process").spawn("sleep",["60"],{detached:true,stdio:"ignore"});' +
+          "c.unref();console.log(c.pid);setInterval(()=>{},1000)",
+        "/opt/automata/daemon.js",
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let agent = 0;
+    try {
+      agent = await new Promise<number>((resolve, reject) => {
+        daemon.once("error", reject);
+        daemon.stdout.once("data", (d: Buffer) => resolve(Number(d)));
+      });
+      expect(psState(agent)).not.toMatch(/^T/);
+      const argv = [shell, ...CELL_FREEZE_ARGV.slice(1)];
+      const run = spawn(argv[0] as string, argv.slice(1), { stdio: "ignore" });
+      const code = await new Promise<number | null>((resolve) =>
+        run.once("close", resolve),
+      );
+      expect(code).toBe(0);
+      // Delivery of SIGSTOP is asynchronous: poll ps without a timer.
+      let state = psState(agent);
+      for (let i = 0; i < 2000 && !state.startsWith("T"); i++) {
+        state = psState(agent);
+      }
+      expect(state).toMatch(/^T/);
+    } finally {
+      if (agent) {
+        try {
+          process.kill(-agent, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      try {
+        process.kill(-(daemon.pid as number), "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
   });
 });

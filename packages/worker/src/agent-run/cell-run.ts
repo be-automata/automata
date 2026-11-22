@@ -2156,9 +2156,20 @@ function claimEnd(
     starvation: null,
   });
   // #743: a run that started without its history says why on its terminal.
-  return end && r.startedFresh
-    ? { ...end, detail: { startedFresh: r.startedFresh.slice(0, 64) } }
-    : end;
+  const startedFresh = r.startedFresh ? wwwStartedFresh(r.startedFresh) : null;
+  return end && startedFresh ? { ...end, detail: { startedFresh } } : end;
+}
+
+/** www accepts `^[a-z0-9-]{1,64}$`; anything else would 400 the whole terminal. */
+export function wwwStartedFresh(reason: string): string | null {
+  const slug = reason
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/, "");
+  return slug === "" ? null : slug;
 }
 
 /** `https://<deployment>/api/cell/git/<owner>/<repo>.git`, the clone's own URL; null if it would not build. */

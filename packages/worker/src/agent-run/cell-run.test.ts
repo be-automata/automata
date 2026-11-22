@@ -29,6 +29,7 @@ import {
   CELL_SETUP_STAMP_MS,
   CELL_TIMEOUT_CAPTURE_BUDGET_MS,
   type CellExecutorDeps,
+  wwwStartedFresh,
 } from "./cell-run";
 import { CELL_FREEZE_ARGV } from "./cell-salvage";
 import { cellEntrypoint, cellGhSetup } from "./cell-image";
@@ -2592,6 +2593,53 @@ describe("the timeout capture order (#743 phase 7b)", () => {
       const clean = ending({ capture: true });
       await clean.s.executor.run(clean.args);
       expect(clean.s.www.abnormalEnds[0]?.detail).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // card: protects=#743 11b: a startedFresh built from a class name outside www's `^[a-z0-9-]{1,64}$` is normalized so the run-terminal post is not a final 400; fails_when=`_` or `$` reaches the body, or an empty result is sent; no_claim=which restore errors carry such a class
+  it("normalizes startedFresh to www's slug before the terminal is posted", async () => {
+    const reason = `error-${"Foo_Bar$Err"}`.toLowerCase();
+    expect(wwwStartedFresh(reason)).toBe("error-foo-bar-err");
+    expect(wwwStartedFresh("--a__b--")).toBe("a-b");
+    expect(wwwStartedFresh("$_")).toBeNull();
+    expect(wwwStartedFresh("a".repeat(63) + "$b")).toBe("a".repeat(63));
+
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ applied: true }), { status: 200 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const startedFresh = wwwStartedFresh(reason);
+      await postAbnormalEnd(
+        newAbnormalEndState({
+          owns: true,
+          runStartedAt: 0,
+          runExecutionTimeoutMs: 60_000,
+        }),
+        {
+          cause: "timeout",
+          detail: { startedFresh: startedFresh ?? undefined },
+        } as never,
+        {
+          wwwOpts: {
+            baseUrl: "https://www.example.com/",
+            daemonToken: "tok",
+            threadId: "thr_1",
+            threadChatId: "tc_1",
+            runExternalId: "run-1",
+          },
+          log: () => {},
+        },
+      );
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect(JSON.parse(init.body).detail.startedFresh).toMatch(
+        /^[a-z0-9-]{1,64}$/,
+      );
     } finally {
       vi.unstubAllGlobals();
     }
