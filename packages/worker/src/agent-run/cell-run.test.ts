@@ -417,7 +417,7 @@ describe("the cell run: success, plan, create", () => {
     expect(getter?.()).toBe(3221225472 + 1048576);
   });
 
-  // card: protects=#749 the sampler keeps reading through the agent's work (the poll loop), not only during setup, so the reservation follows a cell that grows; fails_when=it stops with the setup heartbeat at the message write; no_claim=the 30 s cadence on a real clock
+  // card: protects=#749 the sampler keeps reading through the agent's work (the poll loop), not only during setup, so the reservation follows a cell that grows; fails_when=it stops with the setup heartbeat at the message write; no_claim=the CELL_MEMORY_SAMPLE_MS (4 s) cadence on a real clock
   it("#749 keeps sampling during the poll loop: a cell that grows mid-run is observed", async () => {
     observed.current = null;
     let stat = "anon 1073741824\n";
