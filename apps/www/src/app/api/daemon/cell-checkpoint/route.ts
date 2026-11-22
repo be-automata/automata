@@ -194,10 +194,16 @@ export const POST = withDaemonAuthUnavailable(async function POST(
         return reply({ created });
       }
       case "commit": {
+        const manifest = body.manifest as unknown as CellSessionManifest;
+        // The generation fence checked body.runExternalId; the head records the
+        // manifest's run, and the continuation decision matches on it. Bind them.
+        if (manifest.runExternalId !== body.runExternalId) {
+          return reply({ error: "bad_manifest" }, 400);
+        }
         const result = await store.commit({
           threadId,
           threadChatId,
-          manifest: body.manifest as unknown as CellSessionManifest,
+          manifest,
           expectedVersion: body.expectedVersion,
           organizationId: thread.organizationId,
         });

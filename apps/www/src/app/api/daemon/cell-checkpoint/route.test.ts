@@ -335,6 +335,34 @@ describe("POST /api/daemon/cell-checkpoint (#743 phase 4)", () => {
       expect(missing.status).toBe(404);
     });
 
+    it("400 bad_manifest when the manifest names another run than the fenced one", async () => {
+      await openStep();
+      const bytes = Buffer.from("turn one\n");
+      await POST(
+        req({
+          ...base(),
+          action: "put-blob",
+          sha256: sha256Hex(bytes),
+          base64: bytes.toString("base64"),
+        }),
+      );
+      const other = manifest({ runExternalId: "run-other" });
+      const res = await POST(
+        req({
+          ...base(),
+          action: "commit",
+          manifest: other,
+          expectedVersion: 0,
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "bad_manifest" });
+      const head = await POST(
+        req({ ...base(), action: "read-head", sessionId: SESSION }),
+      );
+      expect((await head.json()).found).toBe(false);
+    });
+
     it("409 head_moved with the current version on a lost CAS, not a store failure", async () => {
       await openStep();
       const bytes = Buffer.from("turn one\n");
