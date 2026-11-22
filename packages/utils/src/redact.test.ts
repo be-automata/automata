@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { createValueRedactor, redactSecrets } from "./redact";
 
 describe("redactSecrets", () => {
+  // card: protects=#743 the URL-credential pattern stays linear: a 1 MB `a-a-a-…` run with no `://` finishes fast, and a real connection string is still scrubbed; fails_when=the scheme is unbounded again (quadratic); no_claim=a scheme longer than 32 characters
+  it("stays linear on a long run of word boundaries, and still scrubs a connection-string password", () => {
+    const started = Date.now();
+    redactSecrets("a-".repeat(500_000) + "@");
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(
+      redactSecrets("postgres://app:s3cr3t-pw@db.example:5432/x"),
+    ).not.toContain("s3cr3t-pw");
+  });
+
   it("scrubs a git extraHeader basic credential, bearer tokens, GitHub tokens and URL-embedded tokens", () => {
     const b64 = Buffer.from(
       "x-access-token:ghs_3211193_abcdefghijklmnop",

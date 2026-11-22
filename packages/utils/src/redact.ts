@@ -16,8 +16,10 @@ const PATTERNS: RegExp[] = [
   /(x-access-token:)[^@\s]+/g,
   // `scheme://user:<password>@` in any URL (a Postgres/Redis connection
   // string in a client error). No `/` in the password, so `host:port/a@b` is
-  // left alone; a real password is percent-encoded and has none.
-  /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)[^\s@/]+(?=@)/gi,
+  // left alone; a real password is percent-encoded and has none. The scheme is
+  // bounded (#743): unbounded, every word boundary in a long `a-a-a-…` run
+  // rescanned to the end, which is quadratic.
+  /(\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s:@/]+:)[^\s@/]+(?=@)/gi,
   // A bare JWT (an engine API token in a CLI's output). Anchored on the
   // base64url JSON header, which always starts `eyJ`, so dotted names in
   // ordinary log text never match.
