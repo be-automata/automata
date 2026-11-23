@@ -1,13 +1,11 @@
 import {
   resolveRunDisplayLane,
   resolveRunLane,
-  type RunLane,
 } from "@terragon/utils/run-lane";
 
 import type { AgentRunInput } from "./types";
 
-export { resolveRunLane };
-export type { RunLane };
+export { resolveRunLane, type RunLane } from "@terragon/utils/run-lane";
 
 /**
  * #437: does this run's abnormal end get a typed terminal from the worker?

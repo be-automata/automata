@@ -1,11 +1,11 @@
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { RunSecrets } from "@terragon/utils/payload-seal";
+import { isCellEligibleLane } from "@terragon/utils/run-lane";
 
 import type { AbnormalEndState } from "./abnormal-end";
 import type { CellConfig } from "./cell-config";
 import type { loadWorkerConfig } from "./config";
 import type { TokenRevoker } from "./revoke-installation-tokens";
-import { resolveRunLane } from "./run-lane";
 import type { RunCtx } from "./run-admission";
 import type { AgentRunInput, AgentRunOutput } from "./types";
 import type { WwwClientOpts } from "./www-client";
@@ -76,11 +76,7 @@ export async function selectRunExecutor(
   deps: RunExecutorDeps,
 ): Promise<RunExecutor> {
   if (input.cell === undefined) return deps.box;
-  if (
-    resolveRunLane(input) !== "task" ||
-    input.selfHeal !== undefined ||
-    input.reviewAgent !== undefined
-  ) {
+  if (!isCellEligibleLane(input)) {
     throw new CellRunRefusedError("cell_lane_refused");
   }
   if ((await deps.loadCellConfig()).kind !== "on") {

@@ -27,6 +27,7 @@ import {
 } from "@terragon/shared/model/organizations";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { isCellEligibleLane } from "@terragon/utils/run-lane";
 import {
   createTestOrg,
   createTestThread,
@@ -43,7 +44,6 @@ import {
   routedHatchetFetch,
   triggerBody,
 } from "./__fixtures__/review-thread";
-import { resolveRunLane } from "@terragon/utils/run-lane";
 
 import { dispatchAgentRun } from "./dispatch";
 
@@ -534,11 +534,10 @@ describe("dispatchAgentRun: cell marker", () => {
     // The lane check short-circuits before the org-cells lookup.
     expect(getOrganizationCellsEnabled).not.toHaveBeenCalled();
 
-    // A plain task run is still marked, and what is marked is a task-lane run.
+    // A plain task run is still marked, and the worker's own predicate
+    // (selectRunExecutor refuses on it) accepts what was marked.
     const marked = await dispatchPlain({ organizationId: orgId });
     expect(marked.cell).toBe("opensandbox");
-    expect(resolveRunLane(marked)).toBe("task");
-    expect(marked).not.toHaveProperty("selfHeal");
-    expect(marked).not.toHaveProperty("reviewAgent");
+    expect(isCellEligibleLane(marked)).toBe(true);
   });
 });

@@ -80,8 +80,8 @@ import {
 } from "./transport";
 import { resolveHatchetConfig } from "./tenant-resolver";
 import {
+  isCellEligibleLane,
   resolveRunDisplayLane,
-  resolveRunLane,
 } from "@terragon/utils/run-lane";
 import { recordShadowCellDecision } from "@/server-lib/compute/resolve-cell-decision";
 
@@ -1250,13 +1250,21 @@ export async function dispatchAgentRun({
     // same sets as a backstop.
     // #718: and only for a cell agent, enforced evidence and a Claude OAuth
     // credential (cell-eligibility.ts).
-    // #757: and only when the run's lane is task. The worker's selectRunExecutor
-    // (packages/worker/src/agent-run/run-executor.ts) refuses any marked run
-    // whose lane is not task, so a PR-numbered thread (a merge audit, a PR
-    // mention) is never marked and stays on the box.
+    // #757: and only when the worker would run it in a cell: isCellEligibleLane
+    // is the predicate the worker's selectRunExecutor refuses on
+    // (cell_lane_refused), read off the whole unmarked input. A PR-numbered
+    // thread (a merge audit, a PR mention) is never marked and stays on the box.
+    const unmarkedInput: AgentRunInput = {
+      ...baseInput,
+      ...plan?.inputExtension,
+      ...taskPlan?.extension,
+      ...(selfHealSplit !== undefined ? { selfHeal: selfHealSplit.wire } : {}),
+      ...(workBranch !== undefined ? { workBranch } : {}),
+      ...(pushRef !== undefined ? { pushRef } : {}),
+    };
     const cellMarker =
       isPlainTaskRun &&
-      resolveRunLane({ ...baseInput, ...plan?.inputExtension }) === "task" &&
+      isCellEligibleLane(unmarkedInput) &&
       thread?.organizationId &&
       (await cellEligibilityAtDispatch({
         db,
@@ -1268,15 +1276,7 @@ export async function dispatchAgentRun({
       }))
         ? ({ cell: "opensandbox" } as const)
         : {};
-    const input: AgentRunInput = {
-      ...baseInput,
-      ...plan?.inputExtension,
-      ...taskPlan?.extension,
-      ...(selfHealSplit !== undefined ? { selfHeal: selfHealSplit.wire } : {}),
-      ...(workBranch !== undefined ? { workBranch } : {}),
-      ...(pushRef !== undefined ? { pushRef } : {}),
-      ...cellMarker,
-    };
+    const input: AgentRunInput = { ...unmarkedInput, ...cellMarker };
     // #380: everything secret goes into the envelope and never into the
     // reference-only input: the read-only task token (the plan split it out
     // at the source), the owner's repo environment (long-lived API keys) and
