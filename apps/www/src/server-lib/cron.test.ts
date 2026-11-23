@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   drain: vi.fn(),
   cellProvider: vi.fn(),
   cellReconcile: vi.fn(),
+  pruneAgentMessages: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({ db: {} }));
@@ -76,6 +77,9 @@ vi.mock("@terragon/shared/model/egress-events", () => ({
     h.order.push("prune-egress");
     return 0;
   }),
+}));
+vi.mock("@terragon/shared/model/agent-bus/retention", () => ({
+  pruneAgentMessages: h.pruneAgentMessages,
 }));
 vi.mock("@/server-lib/audit/self-heal-cron", () => ({
   runSelfHealCron: h.selfHeal,
@@ -147,6 +151,11 @@ describe("runScheduledCron self-heal bulkhead", () => {
       h.order.push("cell-evidence");
       return { status: "unconfigured" };
     });
+    h.pruneAgentMessages.mockReset();
+    h.pruneAgentMessages.mockImplementation(async () => {
+      h.order.push("prune-agent-messages");
+      return { messages: 0, applied: 0, orphans: 0 };
+    });
     h.cellProvider.mockReset();
     h.cellProvider.mockReturnValue(null);
     h.cellReconcile.mockReset();
@@ -166,6 +175,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "review-sweep",
       "prune-hatchet",
       "prune-egress",
+      "prune-agent-messages",
       "stop",
       // #668: the threads the watchdog moved, after hibernation.
       "mention-reply:t1",
@@ -183,12 +193,49 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "review-sweep",
       "prune-hatchet",
       "prune-egress",
+      "prune-agent-messages",
       "stop",
       "mention-reply:t1",
       "knowledge-purge",
       "profile-evidence",
       "cell-evidence",
     ]);
+  });
+
+  it("hourly (#759): a throwing agent_messages prune is logged and skips neither the stop, self-heal nor the purge", async () => {
+    h.pruneAgentMessages.mockRejectedValue(new Error("prune down"));
+    await expect(runScheduledCron("0 * * * *")).resolves.toBeUndefined();
+    expect(h.order).toEqual([
+      "review-sweep",
+      "prune-hatchet",
+      "prune-egress",
+      "stop",
+      "mention-reply:t1",
+      "self-heal:hourly",
+      "knowledge-purge",
+      "profile-evidence",
+      "cell-evidence",
+    ]);
+    expect(console.error).toHaveBeenCalledWith(
+      "[cron:stalled] agent_messages prune failed (non-fatal)",
+      expect.any(Error),
+    );
+  });
+
+  it("hourly (#759): the agent_messages prune logs counts only when it deleted rows", async () => {
+    await runScheduledCron("0 * * * *");
+    expect(console.log).not.toHaveBeenCalledWith(
+      expect.stringContaining("agent_messages"),
+    );
+    h.pruneAgentMessages.mockResolvedValueOnce({
+      messages: 3,
+      applied: 3,
+      orphans: 1,
+    });
+    await runScheduledCron("0 * * * *");
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining("pruned 3 consumed + 1 orphaned agent_messages"),
+    );
   });
 
   it("hourly: a throwing knowledge purge does not reject the cron", async () => {
@@ -259,6 +306,7 @@ describe("runScheduledCron self-heal bulkhead", () => {
       "review-sweep",
       "prune-hatchet",
       "prune-egress",
+      "prune-agent-messages",
       "stop",
       "mention-reply:t1",
     ]);
