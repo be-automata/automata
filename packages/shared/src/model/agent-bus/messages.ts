@@ -191,20 +191,44 @@ export async function sendMessage({
 }
 
 /**
- * Builds `last_error`: `"<name>: <message>"`, the message body redacted (and any
- * secret pattern), truncated to 500 units, then sanitized (no NUL bytes). Truncating
- * before sanitizing never leaves a lone surrogate.
+ * The error to record. drizzle wraps every driver error in a `DrizzleQueryError`
+ * named `Error` whose message is `"Failed query: <sql>\nparams: <params>"`: the
+ * real error (a Postgres SQLSTATE, a lost connection) is its `cause`, and the
+ * params can hold the body JSON-escaped, where the body redaction cannot match it.
  */
-function buildLastError(error: unknown, body: string): string {
+function recordedErrorOf(error: unknown): unknown {
+  try {
+    return error instanceof Error && error.cause instanceof Error
+      ? error.cause
+      : error;
+  } catch {
+    // A throwing `cause` getter: record the error itself.
+    return error;
+  }
+}
+
+/**
+ * Builds `last_error`: `"<name>[ <code>]: <message>"` of the recorded error (the
+ * driver error under a drizzle wrapper; `code` is its SQLSTATE or system code),
+ * the message body redacted (and any secret pattern), truncated to 500 units, then
+ * sanitized (no NUL bytes). Truncating before sanitizing never leaves a lone
+ * surrogate.
+ */
+function buildLastError(thrown: unknown, body: string): string {
+  const error = recordedErrorOf(thrown);
   let message: string;
+  let code = "";
   try {
     message = error instanceof Error ? error.message : String(error);
+    const raw: unknown =
+      error instanceof Error ? (error as { code?: unknown }).code : undefined;
+    if (typeof raw === "string" && raw.length > 0) code = ` ${raw}`;
   } catch {
     // A thrown value with a throwing getter or no toString (Object.create(null))
     // must never turn the attempt count into a second failure.
     message = "<unprintable>";
   }
-  const text = `${errorNameOf(error)}: ${message}`;
+  const text = `${errorNameOf(error)}${code}: ${message}`;
   // minLength 1: any non-empty body is redacted (the shared default skips values under 4).
   const redact = createValueRedactor(body.length > 0 ? [body] : [], 1);
   return sanitizeForJson(redact(text).slice(0, LAST_ERROR_MAX_LENGTH));

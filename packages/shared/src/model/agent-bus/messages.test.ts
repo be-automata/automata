@@ -1,4 +1,4 @@
-import { eq, inArray, or } from "drizzle-orm";
+import { eq, inArray, or, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
@@ -884,6 +884,53 @@ describe("dead-lettering (#758)", () => {
     await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
   });
 
+  it("an Error whose name getter throws still counts the attempt and the original rejects", async () => {
+    // Value: protects=attempt counted when error.name throws; fails_when=errorNameOf loses its try/catch, the count throws, the tx rolls back, poison retries forever;
+    // why_new=the unprintable test uses a non-Error, so errorNameOf never reads a throwing name; seam=none; no_claim=sweep/send log names
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const thrown = new Error("hostile name");
+    Object.defineProperty(thrown, "name", {
+      get() {
+        throw new Error("name getter");
+      },
+    });
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("<unprintable>: hostile name");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("a thrown non-Error value is stored as '<type>: <value>' with the body redacted", async () => {
+    // Value: protects=last_error for a thrown string is "string: <text>", body redacted; fails_when=the String(error) branch reads .message (stores "undefined") or skips redaction;
+    // why_new=every other failure test throws an Error or an unprintable object; seam=none; no_claim=the 500 cap or NUL handling
+    const { rootId, taskId } = await tree();
+    const body = "SECRET-BODY-STR";
+    const id = await seedOne(rootId, taskId, "string-throw", body);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (_tx, message) => {
+          throw `rejected ${message.body}`;
+        },
+      }),
+    ).rejects.toBe(`rejected ${body}`);
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe(`string: rejected ${REDACTED}`);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
   it("a multi-unit character straddling the 500 cut leaves no lone surrogate and the body stays redacted", async () => {
     const { rootId, taskId } = await tree();
     const body = "SECRET-BODY-9001";
@@ -932,6 +979,40 @@ describe("dead-lettering (#758)", () => {
     expect((await counts([taskId])).applied).toBe(0);
     expect((await messageRow(id as number)).attempts).toBe(1);
     await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("savepoint: a SQL error after a partial write rolls the write back and records the driver error, not drizzle's query text", async () => {
+    // Value: protects=a real DB failure inside apply rolls back its partial write and stores the cause; fails_when=apply leaves the savepoint or last_error keeps "Failed query: <sql> params: <body JSON>";
+    // why_new=other failure tests throw plain Errors before any write; seam=none; no_claim=neon-serverless (node-postgres only)
+    const { rootId, taskId } = await tree();
+    const body = 'quote " and\nnewline';
+    const id = await seedOne(rootId, taskId, "sql-fail", body);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (tx, message) => {
+          await queuedFollowUpApply(tx, message);
+          await tx.execute(sql`SELECT 1/0`);
+        },
+      }),
+    ).rejects.toThrow();
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toMatch(/^\S+ 22012: division by zero$/);
+    expect(row.lastError).not.toContain("Failed query");
+    const [chat] = await db
+      .select({ queued: threadChat.queuedMessages })
+      .from(threadChat)
+      .where(eq(threadChat.threadId, taskId));
+    const [legacy] = await db
+      .select({ queued: thread.queuedMessages })
+      .from(thread)
+      .where(eq(thread.id, taskId));
+    expect(chat?.queued ?? []).toEqual([]);
+    expect(legacy?.queued ?? []).toEqual([]);
+    expect((await counts([taskId])).applied).toBe(0);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
   });
 
   it("the test seam fires once per failure with the right dead-letter flag", async () => {
@@ -1060,6 +1141,8 @@ describe("sweepUnconsumed", () => {
   });
 
   it("logs one target's failure and still delivers the others", async () => {
+    // Value: protects=sweep per-target log is { toRun, errorName }, never the raw error or body; fails_when=the log passes the raw error (its message echoes the body) again;
+    // why_new=this test only checked the call count; seam=none; no_claim=the dead-letter log (AC8) or the sendMessage log
     const t = await tree();
     const [badId] = await seed(t.rootId, t.taskId, 1);
     const good = await insertMessage({
@@ -1078,11 +1161,17 @@ describe("sweepUnconsumed", () => {
       db,
       logger,
       apply: async (_tx, message) => {
-        if (message.toRun === t.taskId) throw new Error("poison");
+        if (message.toRun === t.taskId) {
+          throw new Error(`poison ${message.body}`);
+        }
         applied.push(message.id);
       },
     });
     expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      `agent-bus sweep: delivery to ${t.taskId} failed`,
+      { toRun: t.taskId, errorName: "Error" },
+    );
     expect(result.targets).toContain(t.reviewId);
     expect(result.targets).not.toContain(t.taskId);
     expect(applied).toContain(good.id);
