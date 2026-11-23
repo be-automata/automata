@@ -4,18 +4,20 @@ Branch `feat/759-agent-messages-retention`, rebased onto origin/main `ba392f84`.
 
 ## Final gates
 
-| Gate | Command | Exit | Result |
-| --- | --- | --- | --- |
-| install | `pnpm install --frozen-lockfile --prefer-offline` | 0 | lockfile in sync |
-| typecheck | `pnpm turbo tsc-check --force` | 0 | 21/21 tasks |
-| lint | `pnpm turbo lint --force` | 0 | 2/2 tasks |
-| format | `pnpm turbo format-check --force` | 0 | 18/18 tasks |
-| shared tests (full) | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism` | 0 | at HEAD `b66b2077`: 107 files, 1956 tests |
-| coverage | `pnpm --filter @terragon/shared exec vitest run --coverage --no-file-parallelism src/model/agent-bus` | 0 | 5 files, 123 tests; `retention.ts` 100% on statements, branches, functions and lines |
-| www tests (full) | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism` | 0 | at HEAD `b66b2077`: 356 files passed, 2 skipped; 5247 tests passed, 13 skipped |
-| roborev (via roborev-guard) | `roborev-guard review --branch --wait` | 0 | job 1396 at `b66b2077`: Pass, no issues |
+| Gate                        | Command                                                                                               | Exit | Result                                                                               |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------ |
+| install                     | `pnpm install --frozen-lockfile --prefer-offline`                                                     | 0    | lockfile in sync                                                                     |
+| typecheck                   | `pnpm turbo tsc-check --force`                                                                        | 0    | 21/21 tasks                                                                          |
+| lint                        | `pnpm turbo lint --force`                                                                             | 0    | 2/2 tasks                                                                            |
+| format                      | `pnpm turbo format-check --force`                                                                     | 0    | 18/18 tasks                                                                          |
+| shared tests (full)         | `pnpm --filter @terragon/shared exec vitest run --no-file-parallelism`                                | 0    | at HEAD `b66b2077`: 107 files, 1956 tests                                            |
+| coverage                    | `pnpm --filter @terragon/shared exec vitest run --coverage --no-file-parallelism src/model/agent-bus` | 0    | 5 files, 123 tests; `retention.ts` 100% on statements, branches, functions and lines |
+| www tests (full)            | `pnpm --filter @terragon/www exec vitest run --no-file-parallelism`                                   | 0    | at HEAD `b66b2077`: 356 files passed, 2 skipped; 5247 tests passed, 13 skipped       |
+| roborev (via roborev-guard) | `roborev-guard review --branch --wait`                                                                | 0    | job 1396 at `b66b2077`: Pass, no issues                                              |
 
-The tsc, lint and format results are from `debb796f`. The only commit after that, `b66b2077`, changes comments only.
+The tsc, lint and format results are from `debb796f`. The next commit, `b66b2077`, changes comments only.
+
+These runs predate `ddfb8604`, `cf0cba48` and `72568569`, which changed `retention.ts` and `retention.test.ts` (and a `messages.ts` comment). None of the results above covers those three commits.
 
 ## Validate (Opus, adversarial, graded against the repository)
 
