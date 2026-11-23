@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
@@ -23,7 +23,11 @@ import {
   sendMessage,
   type ApplyMessage,
 } from "./messages";
-import { AGENT_MESSAGE_RETENTION_MS, pruneAgentMessages } from "./retention";
+import {
+  AGENT_MESSAGE_RETENTION_MS,
+  AgentMessagePruneError,
+  pruneAgentMessages,
+} from "./retention";
 
 // Passthrough spy: AC9 checks the timeouts each batch transaction asks for.
 vi.mock("../self-heal-tx", async (importOriginal) => {
@@ -488,4 +492,116 @@ describe("pruneAgentMessages", () => {
     expect(await present([id])).toEqual([id]);
     expect(await recentlyDeliveredTargets({ db })).toContain(taskId);
   });
+
+  it("C1 skips a sender whose thread row a concurrent transaction holds (a resume in flight), prunes it once released", async () => {
+    const { rootId, taskId } = await tree();
+    const id = await sendConsumed(rootId, taskId, "c1-thread");
+    await backdateMessages([id], R + DAY);
+    await setSender(rootId, { terminal: true, lastWriteMs: R + DAY });
+
+    await whileLocked(
+      sql`select 1 from ${thread} where ${thread.id} = ${rootId} for update`,
+      async () => {
+        await pruneAgentMessages({ db, now: NOW });
+        expect(await present([id])).toEqual([id]);
+      },
+    );
+    await pruneAgentMessages({ db, now: NOW });
+    expect(await present([id])).toEqual([]);
+  });
+
+  it("C1 skips a chat-mode sender whose thread_chat row a concurrent transaction holds, prunes it once released", async () => {
+    const { taskId } = await tree();
+    const sender = await chatThread();
+    const id = await insert(sender, taskId, "c1-chat");
+    await receiveFor({ db, toRun: taskId, apply: noopApply });
+    await backdateMessages([id], R + DAY);
+    await setSender(sender, {
+      terminal: false,
+      lastWriteMs: R + DAY,
+      chatStatus: "complete",
+    });
+
+    await whileLocked(
+      sql`select 1 from ${threadChat} where ${threadChat.threadId} = ${sender} for update`,
+      async () => {
+        await pruneAgentMessages({ db, now: NOW });
+        expect(await present([id])).toEqual([id]);
+      },
+    );
+    await pruneAgentMessages({ db, now: NOW });
+    expect(await present([id])).toEqual([]);
+  });
+
+  it("C2 a failing orphan pass still lets the consumed pass delete its rows, and the call rejects with both counts", async () => {
+    await pruneAgentMessages({ db, now: NOW });
+    const { consumed, orphan } = await consumedAndOrphan("c2-orphan");
+    const spy = vi.mocked(withSelfHealTx);
+    spy.mockImplementationOnce(async () => {
+      throw new Error("injected orphan failure");
+    });
+
+    const error = await pruneAgentMessages({ db, now: NOW }).catch((e) => e);
+    expect(error).toBeInstanceOf(AgentMessagePruneError);
+    expect((error as AgentMessagePruneError).errors).toHaveLength(1);
+    expect((error as AgentMessagePruneError).counts.messages).toBe(1);
+    expect((error as AgentMessagePruneError).counts.orphans).toBe(0);
+    expect(await present([consumed])).toEqual([]);
+    expect(await present([orphan])).toEqual([orphan]);
+  });
+
+  it("C2 a failing consumed pass still lets the orphan pass delete its rows, and the call rejects", async () => {
+    await pruneAgentMessages({ db, now: NOW });
+    const { consumed, orphan } = await consumedAndOrphan("c2-consumed");
+    const spy = vi.mocked(withSelfHealTx);
+    const real = spy.getMockImplementation();
+    if (!real) throw new Error("withSelfHealTx spy has no implementation");
+    spy.mockImplementationOnce(real).mockImplementationOnce(async () => {
+      throw new Error("injected consumed failure");
+    });
+
+    const error = await pruneAgentMessages({ db, now: NOW }).catch((e) => e);
+    expect(error).toBeInstanceOf(AgentMessagePruneError);
+    expect((error as AgentMessagePruneError).errors).toHaveLength(1);
+    expect((error as AgentMessagePruneError).counts.orphans).toBe(1);
+    expect((error as AgentMessagePruneError).counts.messages).toBe(0);
+    expect(await present([orphan])).toEqual([]);
+    expect(await present([consumed])).toEqual([consumed]);
+  });
 });
+
+/**
+ * Runs `fn` while a second connection holds the row lock `lockSql` takes, as a
+ * resume's UPDATE would; the lock is released (rolled back) afterwards.
+ */
+async function whileLocked(lockSql: SQL, fn: () => Promise<void>) {
+  let locked!: () => void;
+  const taken = new Promise<void>((resolve) => (locked = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const holder = db
+    .transaction(async (tx) => {
+      await tx.execute(lockSql);
+      locked();
+      await released;
+      throw new Error("rollback");
+    })
+    .catch(() => {});
+  await taken;
+  try {
+    await fn();
+  } finally {
+    release();
+    await holder;
+  }
+}
+
+/** One prunable consumed row (terminal sender idle past R) and one prunable orphan. */
+async function consumedAndOrphan(key: string) {
+  const { rootId, taskId } = await tree();
+  const consumed = await sendConsumed(rootId, taskId, `${key}-consumed`);
+  const orphan = await insert(rootId, `deleted-${rootId}`, `${key}-orphan`);
+  await backdateMessages([consumed, orphan], R + DAY);
+  await setSender(rootId, { terminal: true, lastWriteMs: R + DAY });
+  return { consumed, orphan };
+}

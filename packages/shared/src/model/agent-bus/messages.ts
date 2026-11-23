@@ -109,7 +109,8 @@ export async function insertMessage({
  * still delivered by `receiveFor` / the sweeper).
  *
  * Authorization runs before the insert, so a terminal or deleted sender writes
- * nothing; the dedup window is in `pruneAgentMessages` (agent-bus/retention.ts).
+ * nothing. Dedup holds for the sender's active life plus at least R (30 days);
+ * a key replayed after that is a new message (`pruneAgentMessages`, retention.ts).
  */
 export async function sendMessage({
   db,
