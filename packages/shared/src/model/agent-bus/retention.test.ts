@@ -2,7 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
-import { createDb } from "../../db";
+import { createDb, rowsOf } from "../../db";
 import {
   agentApplied,
   agentMessages,
@@ -163,10 +163,14 @@ async function consumedFromGoneSender(to: string, key: string) {
 
 /** The value of `SHOW <name>` on the pooled session. */
 async function show(name: "statement_timeout" | "lock_timeout") {
-  const rows = await db.execute(sql.raw(`SHOW ${name}`));
-  return Object.values(
-    (rows as unknown as Record<string, unknown>[])[0] ?? {},
-  )[0];
+  const [row] = rowsOf<Record<string, unknown>>(
+    await db.execute(sql.raw(`SHOW ${name}`)),
+  );
+  const value = row?.[name];
+  // A broken read must fail loudly, never pass the "not 10s" check vacuously.
+  if (typeof value !== "string")
+    throw new Error(`SHOW ${name} returned no value`);
+  return value;
 }
 
 async function present(ids: number[]): Promise<number[]> {
