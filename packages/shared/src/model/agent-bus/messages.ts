@@ -43,14 +43,20 @@ const deliverable = and(
   isNull(agentMessages.deadLetteredAt),
 );
 
+/** A class-like error name: anything else may carry data (the body) into a log. */
+const ERROR_NAME_PATTERN = /^[A-Za-z_$][\w$.]{0,63}$/;
+
 /**
- * The error's name for logs, always a string: a throwing getter or a non-string
- * name (a Symbol cannot be put in a template) must not turn a log line into a failure.
+ * The error's name for logs, always a string: a name that is not class-like
+ * (a Symbol, a long or spaced string that may hold the body) is replaced by the
+ * value's type, and a throwing getter must not turn a log line into a failure.
  */
 function errorNameOf(error: unknown): string {
   try {
     const name: unknown = error instanceof Error ? error.name : undefined;
-    return typeof name === "string" ? name : typeof error;
+    return typeof name === "string" && ERROR_NAME_PATTERN.test(name)
+      ? name
+      : typeof error;
   } catch {
     return "<unprintable>";
   }

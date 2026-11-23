@@ -954,6 +954,37 @@ describe("dead-lettering (#758)", () => {
     await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
   });
 
+  it.each([
+    ["contains the body", (body: string) => `Err ${body}`],
+    ["is too long for a class name", () => `E${"x".repeat(64)}`],
+  ])(
+    "an Error whose name %s is logged and stored under its type, never the name",
+    async (_label, nameOf) => {
+      // Value: protects=a data-bearing Error.name never reaches the dead-letter log or last_error; fails_when=errorNameOf forwards any string name;
+      // why_new=other name tests use a throwing getter or a Symbol; seam=none; no_claim=names that look like class names
+      const { rootId, taskId } = await tree();
+      const body = "SECRET-BODY-NAME";
+      const id = await seedOne(rootId, taskId, "name-leak", body);
+      const name = nameOf(body);
+      const apply: ApplyMessage = async () => {
+        const thrown = new Error("named");
+        thrown.name = name;
+        throw thrown;
+      };
+      const logger = { error: vi.fn() };
+      await failUntilCap(taskId, apply, { logger });
+      await receiveFor({ db, toRun: taskId, apply, logger });
+      expect(logger.error).toHaveBeenCalledWith(
+        "agent-bus: message dead-lettered",
+        expect.objectContaining({ messageId: id, errorName: "object" }),
+      );
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain(name);
+      const row = await messageRow(id);
+      expect(row.lastError).toBe("object: named");
+      await db.delete(agentMessages).where(eq(agentMessages.id, id));
+    },
+  );
+
   it("a thrown non-Error value is stored as '<type>: <value>' with the body redacted", async () => {
     // Value: protects=last_error for a thrown string is "string: <text>", body redacted; fails_when=the String(error) branch reads .message (stores "undefined") or skips redaction;
     // why_new=every other failure test throws an Error or an unprintable object; seam=none; no_claim=the 500 cap or NUL handling
