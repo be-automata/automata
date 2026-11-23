@@ -120,6 +120,27 @@ export async function runStalledTasksCron(): Promise<void> {
     );
   }
 
+  // Bound agent_messages growth (#759): consumed rows go once their sender can no
+  // longer retry them, unconsumed rows once their target thread is gone, both
+  // after 30 days. Counts only in the log, never bodies or keys. Fail-soft: a
+  // prune error must not skip stalled recovery.
+  try {
+    const { pruneAgentMessages } = await import(
+      "@terragon/shared/model/agent-bus/retention"
+    );
+    const { messages, orphans } = await pruneAgentMessages({ db });
+    if (messages + orphans > 0) {
+      console.log(
+        `[cron:stalled] pruned ${messages} consumed + ${orphans} orphaned agent_messages rows`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      "[cron:stalled] agent_messages prune failed (non-fatal)",
+      error,
+    );
+  }
+
   const stalledThreads = await getStalledThreads({
     db,
     cutoffSecs: STALLED_CUTOFF_SECS,

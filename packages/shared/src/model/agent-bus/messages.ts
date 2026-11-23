@@ -93,6 +93,9 @@ const DEFAULT_LOGGER: BusLogger = {
  * Inserts the message under `(from, key)`. A retry with the same key returns the
  * stored id with `duplicate: true`; a retry whose `(to, body)` differ is a caller
  * bug and returns `{ conflict: true }`.
+ *
+ * Callers MUST authorize the sender first; dedup holds for the sender's active
+ * life plus at least R (see `pruneAgentMessages` in agent-bus/retention.ts).
  */
 export async function insertMessage({
   db,
@@ -142,6 +145,10 @@ export async function insertMessage({
  * authorization runs on every call, retries included: a retry after the target
  * ended is refused even though the first send committed (the committed row is
  * still delivered by `receiveFor` / the sweeper).
+ *
+ * Authorization runs before the insert, so a terminal or deleted sender writes
+ * nothing. Dedup holds for the sender's active life plus at least R (30 days);
+ * a key replayed after that is a new message (`pruneAgentMessages`, retention.ts).
  */
 export async function sendMessage({
   db,

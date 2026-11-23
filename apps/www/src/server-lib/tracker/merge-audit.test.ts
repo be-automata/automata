@@ -9,8 +9,11 @@ import {
   isBlockerNotice,
   isClearedIssue,
   isMergeRecord,
+  isReplaceableAuditNotice,
   isTerminalIssue,
   mergeAuditMarker,
+  renderNoticeComment,
+  renderNoTicketNotice,
   renderPrComment,
   renderTrackerComment,
   sanitizeInline,
@@ -743,5 +746,51 @@ describe("rendering", () => {
     expect(stageLine).toBe(
       "Stage: Done (unchanged). Merged after the ticket reached Done.",
     );
+  });
+});
+
+describe("renderNoTicketNotice", () => {
+  it("with no referenced key, keeps the original wording and the project example", () => {
+    expect(
+      renderNoTicketNotice({ referencedKeys: [], projects: ["ACME"] }),
+    ).toBe(
+      "No ticket reference was found in this PR's title, description or branch name. If a ticket exists, reference it (e.g. `ACME-123`) so future merges are audited against it.",
+    );
+  });
+
+  it("falls back to PROJ when no project is configured", () => {
+    expect(
+      renderNoTicketNotice({ referencedKeys: [], projects: [] }),
+    ).toContain("`PROJ-123`");
+  });
+
+  it("with one referenced key, keeps the original wording", () => {
+    expect(
+      renderNoTicketNotice({ referencedKeys: ["ACME-5"], projects: ["ACME"] }),
+    ).toBe(
+      "This PR mentions ACME-5 but names none as the ticket it delivers. Put the ticket key in the title or branch name, or use a closing keyword (`Closes ACME-5`), so the merge is audited against it.",
+    );
+  });
+
+  it("with several referenced keys, says there is nothing to audit and does not suggest one key", () => {
+    const notice = renderNoTicketNotice({
+      referencedKeys: ["ACME-5", "ACME-6"],
+      projects: ["ACME"],
+    });
+    expect(notice).toBe(
+      "This PR mentions ACME-5, ACME-6 and delivers none of them, so there is nothing to audit here. Each ticket is audited by the PR that delivers it. If this PR delivers one of them, name it in the title or branch, or use `Closes <KEY>`.",
+    );
+    expect(notice).not.toContain("Closes ACME-5");
+  });
+
+  it("the several-keys notice is not a replaceable run-failure notice", () => {
+    const body = renderNoticeComment(
+      7,
+      renderNoTicketNotice({
+        referencedKeys: ["ACME-5", "ACME-6"],
+        projects: ["ACME"],
+      }),
+    );
+    expect(isReplaceableAuditNotice(body)).toBe(false);
   });
 });

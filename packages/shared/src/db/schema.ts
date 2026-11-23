@@ -3496,6 +3496,9 @@ export const agentRun = pgTable(
  * `sendMessage` under `(from_run, idem_key)`; consumed exactly once by `receiveFor`
  * (`consumed_at`), which records the delivery in `agent_applied` inside the same
  * transaction as the apply.
+ *
+ * Retention: a row outlives its sender's ability to retry; see `pruneAgentMessages`
+ * in `model/agent-bus/retention.ts`.
  */
 export const agentMessages = pgTable(
   "agent_messages",

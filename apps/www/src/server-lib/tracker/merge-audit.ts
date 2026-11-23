@@ -554,6 +554,28 @@ export function renderNoticeComment(prNumber: number, notice: string): string {
   return [...commentHeader(prNumber), "", notice].join("\n");
 }
 
+/**
+ * The notice for a merged PR that delivers no ticket (#761). Shared by the
+ * post-merge finish and any caller that must word the same outcome. The
+ * one-key branch is unreachable from extractTicketKeys today (with no
+ * delivered key the body holds 0 or 2+ keys) but is kept for callers.
+ */
+export function renderNoTicketNotice({
+  referencedKeys,
+  projects,
+}: {
+  referencedKeys: readonly string[];
+  projects: readonly string[];
+}): string {
+  if (referencedKeys.length === 0) {
+    return `No ticket reference was found in this PR's title, description or branch name. If a ticket exists, reference it (e.g. \`${projects[0] ?? "PROJ"}-123\`) so future merges are audited against it.`;
+  }
+  if (referencedKeys.length === 1) {
+    return `This PR mentions ${referencedKeys[0]} but names none as the ticket it delivers. Put the ticket key in the title or branch name, or use a closing keyword (\`Closes ${referencedKeys[0]}\`), so the merge is audited against it.`;
+  }
+  return `This PR mentions ${referencedKeys.join(", ")} and delivers none of them, so there is nothing to audit here. Each ticket is audited by the PR that delivers it. If this PR delivers one of them, name it in the title or branch, or use \`Closes <KEY>\`.`;
+}
+
 /** The generic notice for a run whose output held no usable audit. */
 export function renderUnusableAuditNotice(keys: readonly string[]): string {
   return `The audit run for ${keys.join(", ")} did not produce a usable result, so no ticket was changed. Check the acceptance criteria by hand.`;

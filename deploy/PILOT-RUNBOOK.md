@@ -609,8 +609,14 @@ Nothing reads them before Phase 5 seeds them into runs, so installing them needs
 
 **Production step (after the PR merges; operator, as root on the box)**
 
-1. Preflight: confirm no run is in flight. `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l`
-   must print 0; otherwise wait. Never disturb an in-flight review: on this box,
+1. Preflight: confirm no run is in flight. Both checks must print 0; otherwise wait:
+   `ls -d /sys/fs/cgroup/system.slice/automata-worker.service/run-* 2>/dev/null | wc -l`
+   (host-uid runs) and
+   `sudo -u automata docker -H unix:///run/automata-docker/docker.sock ps -q --filter label=automata.box | wc -l`
+   (container runs). The cgroup check alone misses container runs: on
+   2026-11-10 it printed 0 while two review containers were live.
+   `automata-worker-safe-restart` still has the final say on idleness.
+   Never disturb an in-flight review: on this box,
    replacing a same-sha dir takes two renames. Note
    `systemctl show -p NRestarts --value automata-worker.service` before and after.
 2. Update the checkout as the automata user:
@@ -967,8 +973,10 @@ verify-as-agent` passes. (See "Harness batteries on the execution box".)
    `SC1 installed harness.json = checkout`). The daemon bundle the launcher
    stages must come from that same commit too: it is what puts the pack's
    `pathDirs` (gstack's bun) on the agent's PATH. Restart only with no run in flight
-   (no `run-*` dir under `/sys/fs/cgroup/system.slice/automata-worker.service/`),
-   per the deploy README's graceful-restart rules.
+   (no `run-*` dir under `/sys/fs/cgroup/system.slice/automata-worker.service/`
+   and no container labelled `automata.box` on the worker's docker socket; see
+   the preflight above), through `automata-worker-safe-restart`, per the deploy
+   README's graceful-restart rules.
 3. **Boot line.** The journal shows `[worker-boot] harness: hash=<12hex>
 node=24.… ok=gstack,gsd,ruflo` with the hash equal to the first 12 hex of
    `harness.sha256` and no `skipped=`. `harness: unavailable reason=…` stops the
