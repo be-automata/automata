@@ -27,6 +27,7 @@ import {
 } from "@terragon/shared/model/organizations";
 import type { EgressPolicyShape } from "@terragon/shared/model/egress-policy";
 import { upsertRepoReviewSetting } from "@terragon/shared/model/repo-review-settings";
+import { isCellEligibleLane } from "@terragon/utils/run-lane";
 import {
   createTestOrg,
   createTestThread,
@@ -502,5 +503,40 @@ describe("dispatchAgentRun: cell marker", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("#757: a non-review PR thread never gets the marker", async () => {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: 4344,
+      },
+    });
+    const { mock } = routedHatchetFetch("cell-marker-pr-thread");
+    vi.stubGlobal("fetch", mock);
+    try {
+      await dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature-marker",
+        agent: "claudeCode",
+      });
+      expect(triggerBody(mock).input).not.toHaveProperty("cell");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // The lane check short-circuits before the org-cells lookup.
+    expect(getOrganizationCellsEnabled).not.toHaveBeenCalled();
+
+    // A plain task run is still marked, and the worker's own predicate
+    // (selectRunExecutor refuses on it) accepts what was marked.
+    const marked = await dispatchPlain({ organizationId: orgId });
+    expect(marked.cell).toBe("opensandbox");
+    expect(isCellEligibleLane(marked)).toBe(true);
   });
 });

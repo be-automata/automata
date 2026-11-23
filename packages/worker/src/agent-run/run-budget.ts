@@ -3,8 +3,8 @@ import {
   REGISTERED_EXECUTION_TIMEOUT,
   TASK_LANE_EXECUTION_TIMEOUT,
 } from "@terragon/types/cell";
+import { isCellEligibleLane } from "@terragon/utils/run-lane";
 
-import { resolveRunLane } from "./run-lane";
 import type { AgentRunWireInput } from "./run-secrets";
 
 /**
@@ -42,11 +42,9 @@ export interface BudgetCtx {
  * marked run runs in a cell or is refused, never on the box.
  */
 export function refreshesRunBudget(wire: AgentRunWireInput): boolean {
-  return (
-    resolveRunLane(wire) === "task" &&
-    wire.selfHeal === undefined &&
-    wire.cell !== undefined
-  );
+  // isCellEligibleLane is the run shape selectRunExecutor admits to a cell
+  // (#757): one predicate, so the budget cannot disagree with the executor.
+  return wire.cell !== undefined && isCellEligibleLane(wire);
 }
 
 /** An error's class name when it is a plain identifier, else `unknown`. */
