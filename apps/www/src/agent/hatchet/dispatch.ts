@@ -79,7 +79,10 @@ import {
   type HatchetTriggerConfig,
 } from "./transport";
 import { resolveHatchetConfig } from "./tenant-resolver";
-import { resolveRunDisplayLane } from "@terragon/utils/run-lane";
+import {
+  resolveRunDisplayLane,
+  resolveRunLane,
+} from "@terragon/utils/run-lane";
 import { recordShadowCellDecision } from "@/server-lib/compute/resolve-cell-decision";
 
 /** Trigger-fetch retry policy — a transient network blip must not fail dispatch. */
@@ -1247,8 +1250,13 @@ export async function dispatchAgentRun({
     // same sets as a backstop.
     // #718: and only for a cell agent, enforced evidence and a Claude OAuth
     // credential (cell-eligibility.ts).
+    // #757: and only when the run's lane is task. The worker's selectRunExecutor
+    // (packages/worker/src/agent-run/run-executor.ts) refuses any marked run
+    // whose lane is not task, so a PR-numbered thread (a merge audit, a PR
+    // mention) is never marked and stays on the box.
     const cellMarker =
       isPlainTaskRun &&
+      resolveRunLane({ ...baseInput, ...plan?.inputExtension }) === "task" &&
       thread?.organizationId &&
       (await cellEligibilityAtDispatch({
         db,

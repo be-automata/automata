@@ -43,6 +43,8 @@ import {
   routedHatchetFetch,
   triggerBody,
 } from "./__fixtures__/review-thread";
+import { resolveRunLane } from "@terragon/utils/run-lane";
+
 import { dispatchAgentRun } from "./dispatch";
 
 vi.mock("@/agent/msg/claudeCredentials", async (importOriginal) => ({
@@ -502,5 +504,41 @@ describe("dispatchAgentRun: cell marker", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("#757: a non-review PR thread never gets the marker", async () => {
+    const t = await createTestThread({
+      db,
+      userId: user.id,
+      overrides: {
+        organizationId: orgId,
+        githubRepoFullName: "be-automata/automata",
+        githubPRNumber: 4344,
+      },
+    });
+    const { mock } = routedHatchetFetch("cell-marker-pr-thread");
+    vi.stubGlobal("fetch", mock);
+    try {
+      await dispatchAgentRun({
+        userId: user.id,
+        threadId: t.threadId,
+        threadChatId: t.threadChatId,
+        repoFullName: "be-automata/automata",
+        branch: "feature-marker",
+        agent: "claudeCode",
+      });
+      expect(triggerBody(mock).input).not.toHaveProperty("cell");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // The lane check short-circuits before the org-cells lookup.
+    expect(getOrganizationCellsEnabled).not.toHaveBeenCalled();
+
+    // A plain task run is still marked, and what is marked is a task-lane run.
+    const marked = await dispatchPlain({ organizationId: orgId });
+    expect(marked.cell).toBe("opensandbox");
+    expect(resolveRunLane(marked)).toBe("task");
+    expect(marked).not.toHaveProperty("selfHeal");
+    expect(marked).not.toHaveProperty("reviewAgent");
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveRunDisplayLane } from "./run-lane";
+import { resolveRunDisplayLane, resolveRunLane } from "./run-lane";
 
 describe("resolveRunDisplayLane", () => {
   it("a self-heal plan wins over every other signal", () => {
@@ -35,5 +35,27 @@ describe("resolveRunDisplayLane", () => {
 
   it("nothing at all is task", () => {
     expect(resolveRunDisplayLane({})).toBe("task");
+  });
+});
+
+describe("resolveRunLane", () => {
+  it("a prKey is a review", () => {
+    expect(resolveRunLane({ prKey: "o/r#1" })).toBe("review");
+  });
+
+  it("a supersedePolicy is a review", () => {
+    expect(resolveRunLane({ supersedePolicy: "newest-wins" })).toBe("review");
+  });
+
+  it("a PR number alone is a pr run", () => {
+    expect(resolveRunLane({ prNumber: 12 })).toBe("pr");
+  });
+
+  it("no PR signal is a task", () => {
+    expect(resolveRunLane({})).toBe("task");
+  });
+
+  it("a prKey beats a PR number", () => {
+    expect(resolveRunLane({ prKey: "o/r#1", prNumber: 1 })).toBe("review");
   });
 });
