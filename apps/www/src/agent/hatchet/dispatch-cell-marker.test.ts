@@ -44,7 +44,6 @@ import {
   routedHatchetFetch,
   triggerBody,
 } from "./__fixtures__/review-thread";
-
 import { dispatchAgentRun } from "./dispatch";
 
 vi.mock("@/agent/msg/claudeCredentials", async (importOriginal) => ({

@@ -44,11 +44,9 @@ export type RunLane = "review" | "pr" | "task";
  *   in a personal (no-org) scope, which dispatch keeps on the legacy plan.
  * - `task`: no PR at all.
  */
-export function resolveRunLane(input: {
-  prKey?: string;
-  supersedePolicy?: string;
-  prNumber?: number;
-}): RunLane {
+export function resolveRunLane(
+  input: Omit<RunDisplayLaneInput, "selfHeal">,
+): RunLane {
   if (input.prKey || input.supersedePolicy) return "review";
   if (input.prNumber !== undefined) return "pr";
   return "task";
@@ -60,13 +58,12 @@ export function resolveRunLane(input: {
  * that fails it (`cell_lane_refused`) and dispatch marks only runs that pass it,
  * so the two sides cannot drift apart again.
  */
-export function isCellEligibleLane(input: {
-  prKey?: string;
-  supersedePolicy?: string;
-  prNumber?: number;
-  selfHeal?: unknown;
-  reviewAgent?: unknown;
-}): boolean {
+export function isCellEligibleLane(
+  input: Omit<RunDisplayLaneInput, "selfHeal"> & {
+    selfHeal?: unknown;
+    reviewAgent?: unknown;
+  },
+): boolean {
   return (
     resolveRunLane(input) === "task" &&
     input.selfHeal === undefined &&
