@@ -69,6 +69,11 @@ async function deleteByIds(tx: SelfHealTx, ids: number[]) {
  * delete messages), each capped at the 10 s statement timeout. Throws
  * `RangeError` unless `batch` and `maxBatches` are positive integers and
  * `budgetMs` is a positive finite number. Logs nothing: the caller logs counts.
+ *
+ * Known limit: each call scans the consumed rows older than R that it keeps
+ * (live senders) from the start of the index, running the sender rule on each.
+ * That set only grows; if a batch ever exceeds the statement timeout the pass
+ * throws every hour, which the cron logs as `agent_messages prune failed`.
  */
 export async function pruneAgentMessages({
   db,
@@ -151,7 +156,8 @@ export async function pruneAgentMessages({
     ).map((r) => ({ id: r.id, cursor: null })),
   );
 
-  // Consumed: sender can no longer retry. Keyset over (consumed_at, id) so kept rows are not rescanned.
+  // Consumed: sender can no longer retry. The keyset over (consumed_at, id) moves past each
+  // deleted batch within a call; rows kept for live senders are still re-read on every call.
   const messages = await drainBatches<{ consumedAt: Date; id: number }>(
     async (tx, cursor) => {
       const rows = await tx
