@@ -16,6 +16,7 @@ import {
 } from "../test-helpers";
 import { createChildRun, ensureRootRun, markBlocked } from "./agent-run";
 import {
+  AGENT_MESSAGE_MAX_ATTEMPTS,
   insertMessage,
   queuedFollowUpApply,
   receiveFor,
@@ -438,10 +439,12 @@ describe("receiveFor", () => {
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 3,
+      deadLettered: 0,
     });
     expect(seen.map((m) => m.body)).toEqual(["body 0", "body 1", "body 2"]);
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 0,
+      deadLettered: 0,
     });
     const rows = await db
       .select({ consumedAt: agentMessages.consumedAt })
@@ -499,15 +502,20 @@ describe("receiveFor", () => {
       }),
     ).rejects.toBe(boom);
     const [row] = await db
-      .select({ consumedAt: agentMessages.consumedAt })
+      .select({
+        consumedAt: agentMessages.consumedAt,
+        attempts: agentMessages.attempts,
+      })
       .from(agentMessages)
       .where(eq(agentMessages.id, id as number));
     expect(row?.consumedAt).toBeNull();
+    expect(row?.attempts).toBe(1);
     expect((await counts([taskId])).applied).toBe(0);
     // The next receive retries it.
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 1,
+      deadLettered: 0,
     });
     expect(seen.map((m) => m.id)).toEqual([id]);
   });
@@ -519,6 +527,7 @@ describe("receiveFor", () => {
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 0,
+      deadLettered: 0,
     });
     expect(seen).toHaveLength(0);
     const [row] = await db
@@ -526,6 +535,299 @@ describe("receiveFor", () => {
       .from(agentMessages)
       .where(eq(agentMessages.id, id as number));
     expect(row?.consumedAt).not.toBeNull();
+  });
+});
+
+async function messageRow(id: number) {
+  const [row] = await db
+    .select()
+    .from(agentMessages)
+    .where(eq(agentMessages.id, id));
+  if (!row) throw new Error(`message ${id} missing`);
+  return row;
+}
+
+const failing: ApplyMessage = async () => {
+  throw new Error("poison");
+};
+
+describe("dead-lettering (#758)", () => {
+  it("AC2: one failure records the attempt, keeps the message deliverable and delivers it once later", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const boom = new Error("apply failed");
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw boom;
+        },
+      }),
+    ).rejects.toBe(boom);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("Error: apply failed");
+    expect(row.deadLetteredAt).toBeNull();
+    expect(row.consumedAt).toBeNull();
+    expect((await counts([taskId])).applied).toBe(0);
+
+    const { seen, apply } = recorder();
+    expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
+      applied: 1,
+      deadLettered: 0,
+    });
+    expect(seen.map((m) => m.id)).toEqual([id]);
+    expect((await counts([taskId])).applied).toBe(1);
+  });
+
+  it("AC3: after the cap the message is dead-lettered and never applied again", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const logger = { error: vi.fn() };
+    for (let i = 1; i < AGENT_MESSAGE_MAX_ATTEMPTS; i++) {
+      await expect(
+        receiveFor({ db, toRun: taskId, apply: failing, logger }),
+      ).rejects.toThrow("poison");
+      expect((await messageRow(id as number)).attempts).toBe(i);
+    }
+    expect(
+      await receiveFor({ db, toRun: taskId, apply: failing, logger }),
+    ).toEqual({ applied: 0, deadLettered: 1 });
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(AGENT_MESSAGE_MAX_ATTEMPTS);
+    expect(row.deadLetteredAt).not.toBeNull();
+    expect(row.consumedAt).toBeNull();
+
+    const { seen, apply } = recorder();
+    expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
+      applied: 0,
+      deadLettered: 0,
+    });
+    await db
+      .update(agentMessages)
+      .set({ createdAt: new Date(Date.now() - 60 * 60_000) })
+      .where(eq(agentMessages.id, id as number));
+    const swept = await sweepUnconsumed({ db, apply });
+    expect(swept.targets).not.toContain(taskId);
+    expect(seen).toHaveLength(0);
+    expect((await messageRow(id as number)).attempts).toBe(
+      AGENT_MESSAGE_MAX_ATTEMPTS,
+    );
+  });
+
+  it("AC4: the receive that dead-letters m1 goes on to apply m2, in FIFO order", async () => {
+    const { rootId, taskId } = await tree();
+    const [m1, m2] = await seed(rootId, taskId, 2);
+    const applied: number[] = [];
+    const apply: ApplyMessage = async (_tx, message) => {
+      if (message.id === m1) throw new Error("poison");
+      applied.push(message.id);
+    };
+    for (let i = 1; i < AGENT_MESSAGE_MAX_ATTEMPTS; i++) {
+      await expect(receiveFor({ db, toRun: taskId, apply })).rejects.toThrow(
+        "poison",
+      );
+      // m2 is never applied before m1 is dead-lettered.
+      expect(applied).toEqual([]);
+    }
+    expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
+      applied: 1,
+      deadLettered: 1,
+    });
+    expect(applied).toEqual([m2]);
+    expect((await messageRow(m1 as number)).deadLetteredAt).not.toBeNull();
+    expect((await messageRow(m2 as number)).consumedAt).not.toBeNull();
+  });
+
+  it("AC5: dead-lettered poison targets leave the sweep, so a healthy target is delivered", async () => {
+    const t = await tree();
+    const poisonA = await seed(t.rootId, t.taskId, 1);
+    const poisonB = await insertMessage({
+      db,
+      from: t.rootId,
+      to: t.reviewId,
+      key: "poison-b",
+      body: "poison b",
+    });
+    if ("conflict" in poisonB) throw new Error("unexpected conflict");
+    const healthyTarget = await orgThread(t.organizationId, {
+      parentThreadId: t.rootId,
+    });
+    const healthy = await insertMessage({
+      db,
+      from: t.rootId,
+      to: healthyTarget,
+      key: "healthy",
+      body: "healthy",
+    });
+    if ("conflict" in healthy) throw new Error("unexpected conflict");
+    // Explicit order, minutes apart, so rows left by other tests cannot take the slots:
+    // both poison targets are older than the healthy one and older than anything else.
+    const base = 24 * 60 * 60_000;
+    await backdateCreated(poisonA as number[], base + 3 * 60_000);
+    await backdateCreated([poisonB.id], base + 2 * 60_000);
+    await backdateCreated([healthy.id], base + 60_000);
+
+    const { seen, apply } = recorder();
+    const poisonIds = new Set<number>([...poisonA, poisonB.id]);
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (poisonIds.has(message.id)) throw new Error("poison");
+      await apply(tx, message);
+    };
+    const logger = { error: vi.fn() };
+    let delivered = false;
+    for (let pass = 1; pass <= AGENT_MESSAGE_MAX_ATTEMPTS + 1; pass++) {
+      const result = await sweepUnconsumed({
+        db,
+        apply: sweepApply,
+        logger,
+        limit: 2,
+      });
+      if (result.targets.includes(healthyTarget)) {
+        delivered = true;
+        break;
+      }
+    }
+    expect(delivered).toBe(true);
+    expect(seen.map((m) => m.id)).toEqual([healthy.id]);
+    for (const id of poisonIds) {
+      const row = await messageRow(id);
+      expect(row.deadLetteredAt).not.toBeNull();
+      expect(row.attempts).toBe(AGENT_MESSAGE_MAX_ATTEMPTS);
+    }
+  });
+
+  it("AC6: a target whose only unconsumed rows are dead-lettered is not swept", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    await db
+      .update(agentMessages)
+      .set({
+        createdAt: new Date(Date.now() - 60 * 60_000),
+        deadLetteredAt: new Date(),
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+      })
+      .where(eq(agentMessages.id, id as number));
+    const { seen, apply } = recorder();
+    const result = await sweepUnconsumed({ db, apply, limit: 1000 });
+    expect(result.targets).not.toContain(taskId);
+    expect(seen.map((m) => m.id)).not.toContain(id);
+  });
+
+  it("AC8: exactly one dead-letter log, no body in any log argument, bounded last_error without the body", async () => {
+    const { rootId, taskId } = await tree();
+    const body = "SECRET-BODY-4711";
+    const inserted = await insertMessage({
+      db,
+      from: rootId,
+      to: taskId,
+      key: "secret",
+      body,
+    });
+    if ("conflict" in inserted) throw new Error("unexpected conflict");
+    const echo: ApplyMessage = async (_tx, message) => {
+      throw new Error(
+        `rejected ${message.body}: ${message.body} ${"x".repeat(900)}`,
+      );
+    };
+    const logger = { error: vi.fn() };
+    for (let i = 1; i < AGENT_MESSAGE_MAX_ATTEMPTS; i++) {
+      await expect(
+        receiveFor({ db, toRun: taskId, apply: echo, logger }),
+      ).rejects.toThrow();
+    }
+    expect(logger.error).not.toHaveBeenCalled();
+    await receiveFor({ db, toRun: taskId, apply: echo, logger });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      "agent-bus: message dead-lettered",
+      {
+        messageId: inserted.id,
+        fromRun: rootId,
+        toRun: taskId,
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+        errorName: "Error",
+      },
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(body);
+    const row = await messageRow(inserted.id);
+    expect(row.lastError).not.toContain(body);
+    expect(row.lastError).toContain("[body]");
+    expect(row.lastError?.length).toBeLessThanOrEqual(500);
+  });
+
+  it("a NUL byte in the error message never reaches last_error", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw new Error("bad\u0000byte");
+        },
+      }),
+    ).rejects.toThrow();
+    expect((await messageRow(id as number)).lastError).not.toContain("\u0000");
+  });
+
+  it("savepoint: the agent_applied row inserted before the throw is gone, the attempt committed", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    let sawRowInsideApply = false;
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (tx, message) => {
+          const inside = await tx
+            .select({ id: agentApplied.msgId })
+            .from(agentApplied)
+            .where(eq(agentApplied.msgId, message.id));
+          sawRowInsideApply = inside.length === 1;
+          throw new Error("poison");
+        },
+      }),
+    ).rejects.toThrow("poison");
+    expect(sawRowInsideApply).toBe(true);
+    expect((await counts([taskId])).applied).toBe(0);
+    expect((await messageRow(id as number)).attempts).toBe(1);
+  });
+
+  it("the test seam fires once per failure with the right dead-letter flag", async () => {
+    const { rootId, taskId } = await tree();
+    await seed(rootId, taskId, 1);
+    const seam = vi.fn();
+    for (let i = 1; i < AGENT_MESSAGE_MAX_ATTEMPTS; i++) {
+      await expect(
+        receiveFor({
+          db,
+          toRun: taskId,
+          apply: failing,
+          logger: { error: vi.fn() },
+          __testOnAttemptRecorded: seam,
+        }),
+      ).rejects.toThrow();
+      expect(seam).toHaveBeenCalledTimes(i);
+      expect(seam).toHaveBeenLastCalledWith(
+        expect.objectContaining({ attempts: i, deadLettered: false }),
+      );
+    }
+    await receiveFor({
+      db,
+      toRun: taskId,
+      apply: failing,
+      logger: { error: vi.fn() },
+      __testOnAttemptRecorded: seam,
+    });
+    expect(seam).toHaveBeenCalledTimes(AGENT_MESSAGE_MAX_ATTEMPTS);
+    expect(seam).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+        deadLettered: true,
+      }),
+    );
   });
 });
 

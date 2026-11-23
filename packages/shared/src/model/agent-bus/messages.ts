@@ -22,7 +22,19 @@ import { authorizeSend, type AgentBusError } from "./capabilities";
  * `apply` and sets `consumed_at`. A crash or a throw before COMMIT rolls all of it
  * back, so a message is applied zero or one time. `sweepUnconsumed` is the safety
  * net for a message whose receive never ran.
+ *
+ * Poison messages (#758): the apply runs in a savepoint, so a throw rolls back only
+ * the apply and its `agent_applied` row. The failure is then counted on the message
+ * (`attempts`, `last_error`) and committed. A message that fails
+ * `AGENT_MESSAGE_MAX_ATTEMPTS` times is dead-lettered (`dead_lettered_at`): it stays
+ * unconsumed, is never claimed again, and no longer blocks its target.
  */
+
+/** Failed apply attempts after which a message is dead-lettered (#758). */
+export const AGENT_MESSAGE_MAX_ATTEMPTS = 5;
+
+/** Longest `last_error` stored, in UTF-16 units. */
+const LAST_ERROR_MAX_LENGTH = 500;
 
 export interface AgentMessage {
   id: number;
@@ -144,6 +156,7 @@ export async function sendMessage({
       db,
       toRun: to,
       apply,
+      logger,
       onApplied: (count) => {
         applied = count;
       },
@@ -162,65 +175,169 @@ export async function sendMessage({
 }
 
 /**
- * Delivers every unconsumed message of `toRun`, oldest first, one transaction per
- * message. `apply` that throws rolls its transaction back (the message stays
- * unconsumed for the sweeper) and the error is rethrown; `onApplied` reports the
- * running count of committed applies, so a caller still knows the partial count.
+ * Builds `last_error`: `"<name>: <message>"` with every occurrence of the message
+ * body replaced by `[body]`, truncated to 500 units, then sanitized (NUL bytes never
+ * reach the text column). Truncating before sanitizing never leaves a lone
+ * surrogate. The redaction is an exact substring match: a very short body redacts
+ * aggressively and a body echoed only in part is not redacted.
+ */
+function buildLastError(error: unknown, body: string): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const message = error instanceof Error ? error.message : String(error);
+  let text = `${name}: ${message}`;
+  if (body.length > 0) text = text.split(body).join("[body]");
+  return sanitizeForJson(text.slice(0, LAST_ERROR_MAX_LENGTH));
+}
+
+type ReceiveOutcome =
+  | { kind: "empty" }
+  | { kind: "applied" }
+  | { kind: "skipped" }
+  | {
+      kind: "failed";
+      error: unknown;
+      message: AgentMessage;
+      attempts: number;
+      deadLettered: boolean;
+    };
+
+/**
+ * Delivers every unconsumed, not dead-lettered message of `toRun`, oldest first,
+ * one transaction per message. The `agent_applied` insert and `apply` run in a
+ * savepoint. When `apply` throws, the savepoint rolls back (no `agent_applied` row,
+ * no partial effect) and, still holding the row lock, ONE update counts the attempt
+ * (`attempts`, `last_error`) and dead-letters the row once `attempts` reaches
+ * `AGENT_MESSAGE_MAX_ATTEMPTS`. That commits, then:
+ * - below the cap the original error is rethrown (strict FIFO: the failing message
+ *   still blocks later ones, and the sweeper retries it);
+ * - at the cap one `logger.error` is emitted and the loop moves on to the next
+ *   message, so the target is unblocked. Dead-lettered messages count in
+ *   `deadLettered`.
+ *
+ * A crash before that commit counts no attempt: we under-count, never over-count,
+ * and never apply twice. `onApplied` reports the running count of committed
+ * applies, so a caller still knows the partial count when the error is rethrown.
+ * `__testOnAttemptRecorded` is a test hook, called inside the transaction after the
+ * attempt update and before COMMIT; it is not part of the bus contract.
  *
  * Each transaction locks the target thread row before claiming a message, so
- * concurrent receivers serialize per target and the queue order is id order.
+ * concurrent receivers serialize per target and the queue order is id order. A
+ * missing target thread has no row to lock, so there receivers can count attempts
+ * on different messages in parallel and FIFO is not guaranteed.
  */
 export async function receiveFor({
   db,
   toRun,
   apply,
   onApplied,
+  logger = DEFAULT_LOGGER,
+  __testOnAttemptRecorded,
 }: {
   db: DB;
   toRun: string;
   apply: ApplyMessage;
   onApplied?: (applied: number) => void;
-}): Promise<{ applied: number }> {
+  logger?: BusLogger;
+  __testOnAttemptRecorded?: (info: {
+    messageId: number;
+    attempts: number;
+    deadLettered: boolean;
+  }) => void | Promise<void>;
+}): Promise<{ applied: number; deadLettered: number }> {
   let applied = 0;
+  let deadLettered = 0;
   for (;;) {
-    const outcome = await db.transaction(async (tx) => {
-      // A missing thread has no row to lock: proceed (the apply refuses it).
-      await tx
-        .select({ id: thread.id })
-        .from(thread)
-        .where(eq(thread.id, toRun))
-        // NO KEY UPDATE: serializes receivers per target without blocking inserts
-        // that reference the thread (they take KEY SHARE).
-        .for("no key update");
-      const rows = await tx
-        .select()
-        .from(agentMessages)
-        .where(
-          and(eq(agentMessages.toRun, toRun), isNull(agentMessages.consumedAt)),
-        )
-        .orderBy(asc(agentMessages.id))
-        .limit(1)
-        .for("update", { skipLocked: true });
-      const row = rows[0];
-      if (!row) return "empty" as const;
+    const outcome = await db.transaction(
+      async (tx): Promise<ReceiveOutcome> => {
+        // A missing thread has no row to lock: proceed (the apply refuses it).
+        await tx
+          .select({ id: thread.id })
+          .from(thread)
+          .where(eq(thread.id, toRun))
+          // NO KEY UPDATE: serializes receivers per target without blocking inserts
+          // that reference the thread (they take KEY SHARE).
+          .for("no key update");
+        const rows = await tx
+          .select()
+          .from(agentMessages)
+          .where(
+            and(
+              eq(agentMessages.toRun, toRun),
+              isNull(agentMessages.consumedAt),
+              isNull(agentMessages.deadLetteredAt),
+            ),
+          )
+          .orderBy(asc(agentMessages.id))
+          .limit(1)
+          .for("update", { skipLocked: true });
+        const row = rows[0];
+        if (!row) return { kind: "empty" };
 
-      const recorded = await tx
-        .insert(agentApplied)
-        .values({ msgId: row.id, run: toRun })
-        .onConflictDoNothing()
-        .returning({ msgId: agentApplied.msgId });
-      const applied = recorded.length > 0;
-      if (applied) await apply(tx, row);
-      await tx
-        .update(agentMessages)
-        .set({ consumedAt: sql`now()` })
-        .where(eq(agentMessages.id, row.id));
-      return applied ? ("applied" as const) : ("skipped" as const);
-    });
-    if (outcome === "empty") return { applied };
-    if (outcome === "applied") {
+        let wasNew: boolean;
+        try {
+          wasNew = await tx.transaction(async (savepoint) => {
+            const recorded = await savepoint
+              .insert(agentApplied)
+              .values({ msgId: row.id, run: toRun })
+              .onConflictDoNothing()
+              .returning({ msgId: agentApplied.msgId });
+            const isNew = recorded.length > 0;
+            if (isNew) await apply(savepoint, row);
+            return isNew;
+          });
+        } catch (error) {
+          const [counted] = await tx
+            .update(agentMessages)
+            .set({
+              attempts: sql`${agentMessages.attempts} + 1`,
+              lastError: buildLastError(error, row.body),
+              deadLetteredAt: sql`CASE WHEN ${agentMessages.attempts} + 1 >= ${AGENT_MESSAGE_MAX_ATTEMPTS} THEN now() END`,
+            })
+            .where(eq(agentMessages.id, row.id))
+            .returning({
+              attempts: agentMessages.attempts,
+              deadLetteredAt: agentMessages.deadLetteredAt,
+            });
+          if (!counted) throw error;
+          const isDeadLettered = counted.deadLetteredAt !== null;
+          await __testOnAttemptRecorded?.({
+            messageId: row.id,
+            attempts: counted.attempts,
+            deadLettered: isDeadLettered,
+          });
+          return {
+            kind: "failed",
+            error,
+            message: row,
+            attempts: counted.attempts,
+            deadLettered: isDeadLettered,
+          };
+        }
+        await tx
+          .update(agentMessages)
+          .set({ consumedAt: sql`now()` })
+          .where(eq(agentMessages.id, row.id));
+        return { kind: wasNew ? "applied" : "skipped" };
+      },
+    );
+    if (outcome.kind === "empty") return { applied, deadLettered };
+    if (outcome.kind === "applied") {
       applied += 1;
       onApplied?.(applied);
+    }
+    if (outcome.kind === "failed") {
+      if (!outcome.deadLettered) throw outcome.error;
+      deadLettered += 1;
+      logger.error("agent-bus: message dead-lettered", {
+        messageId: outcome.message.id,
+        fromRun: outcome.message.fromRun,
+        toRun: outcome.message.toRun,
+        attempts: outcome.attempts,
+        errorName:
+          outcome.error instanceof Error
+            ? outcome.error.name
+            : typeof outcome.error,
+      });
     }
   }
 }
@@ -252,7 +369,10 @@ export async function recentlyDeliveredTargets({
 
 /**
  * Safety net: delivers messages still unconsumed after `olderThanMs` (their
- * receive never ran). One target's failure is logged and does not stop the rest.
+ * receive never ran). Dead-lettered messages are not selected, so poison targets
+ * leave the top `limit` after at most `AGENT_MESSAGE_MAX_ATTEMPTS` ticks. One
+ * target's failure is logged (error name only) and does not stop the rest;
+ * `deadLettered` sums the messages dead-lettered during this pass.
  */
 export async function sweepUnconsumed({
   db,
@@ -266,7 +386,7 @@ export async function sweepUnconsumed({
   olderThanMs?: number;
   limit?: number;
   logger?: BusLogger;
-}): Promise<{ targets: string[]; applied: number }> {
+}): Promise<{ targets: string[]; applied: number; deadLettered: number }> {
   // Inner join: a row whose target thread is gone is inert, not a poison target.
   const rows = await db
     .select({ toRun: agentMessages.toRun })
@@ -275,6 +395,7 @@ export async function sweepUnconsumed({
     .where(
       and(
         isNull(agentMessages.consumedAt),
+        isNull(agentMessages.deadLetteredAt),
         sql`${agentMessages.createdAt} < now() - (${olderThanMs}::double precision * interval '1 millisecond')`,
       ),
     )
@@ -283,17 +404,22 @@ export async function sweepUnconsumed({
     .limit(limit);
   const targets: string[] = [];
   let applied = 0;
+  let deadLettered = 0;
   for (const { toRun } of rows) {
     try {
-      const result = await receiveFor({ db, toRun, apply });
+      const result = await receiveFor({ db, toRun, apply, logger });
       // Only targets that actually received a message (the caller broadcasts for them).
       if (result.applied > 0) targets.push(toRun);
       applied += result.applied;
+      deadLettered += result.deadLettered;
     } catch (error) {
-      logger.error(`agent-bus sweep: delivery to ${toRun} failed`, error);
+      logger.error(`agent-bus sweep: delivery to ${toRun} failed`, {
+        toRun,
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
     }
   }
-  return { targets, applied };
+  return { targets, applied, deadLettered };
 }
 
 /**
