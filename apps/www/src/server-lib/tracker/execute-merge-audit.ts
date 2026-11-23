@@ -11,6 +11,7 @@ import {
   mergeAuditMarker,
   renderBlockerNotice,
   renderNoticeComment,
+  renderNoTicketNotice,
   renderPrComment,
   renderPromotionComment,
   renderBoxAtCapacityAuditNotice,
@@ -503,9 +504,10 @@ export async function executeMergeAudit({
   });
   if (extraction.auditKeys.length === 0) {
     return await postNotice(
-      extraction.referencedKeys.length === 0
-        ? `No ticket reference was found in this PR's title, description or branch name. If a ticket exists, reference it (e.g. \`${config.projects[0] ?? "PROJ"}-123\`) so future merges are audited against it.`
-        : `This PR mentions ${extraction.referencedKeys.join(", ")} but names none as the ticket it delivers. Put the ticket key in the title or branch name, or use a closing keyword (\`Closes ${extraction.referencedKeys[0]}\`), so the merge is audited against it.`,
+      renderNoTicketNotice({
+        referencedKeys: extraction.referencedKeys,
+        projects: config.projects,
+      }),
       { outcome: "no_ticket" },
     );
   }

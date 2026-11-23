@@ -1,4 +1,5 @@
 import type { ReviewLogger } from "@terragon/review/state/review-github-client";
+import { withTimeout } from "@/lib/with-timeout";
 import type { ReviewThreadClient } from "./octokit-review-client";
 
 /**
@@ -61,18 +62,6 @@ export async function claimThreadResolution(
     { nx: true, ex: THREAD_RESOLUTION_CLAIM_TTL_SECONDS },
   );
   return taken === "OK";
-}
-
-async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
-  });
-  try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export interface ThreadResolutionTally {

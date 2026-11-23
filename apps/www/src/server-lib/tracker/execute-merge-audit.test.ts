@@ -10,6 +10,7 @@ import {
   isReplaceableAuditNotice,
   mergeAuditMarker,
   renderNoticeComment,
+  renderNoTicketNotice,
   renderProviderAuditNotice,
   renderUnusableAuditNotice,
 } from "./merge-audit";
@@ -853,10 +854,20 @@ describe("executeMergeAudit", () => {
       });
       expect(outcome).toEqual({ outcome: "no_ticket" });
       expect(tracker.client.getIssue).not.toHaveBeenCalled();
-      expect(comments.upserts[0]!.body).toContain(
-        "mentions ACME-5, ACME-6 but names none as the ticket it delivers",
+      const body = comments.upserts[0]!.body;
+      expect(body).toContain(
+        "mentions ACME-5, ACME-6 and delivers none of them",
       );
-      expect(comments.upserts[0]!.body).toContain("`Closes ACME-5`");
+      expect(body).not.toContain("Closes ACME-5");
+      expect(body).toBe(
+        renderNoticeComment(
+          7,
+          renderNoTicketNotice({
+            referencedKeys: ["ACME-5", "ACME-6"],
+            projects: ["ACME"],
+          }),
+        ),
+      );
     });
 
     it("moves a ticket named by a closing keyword", async () => {
