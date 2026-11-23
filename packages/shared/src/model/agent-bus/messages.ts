@@ -1,3 +1,4 @@
+import { createValueRedactor } from "@terragon/utils/redact";
 import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { DB } from "../../db";
@@ -35,6 +36,21 @@ export const AGENT_MESSAGE_MAX_ATTEMPTS = 5;
 
 /** Longest `last_error` stored, in UTF-16 units. */
 const LAST_ERROR_MAX_LENGTH = 500;
+
+/** A message that can still be delivered: not consumed and not dead-lettered. */
+const deliverable = and(
+  isNull(agentMessages.consumedAt),
+  isNull(agentMessages.deadLetteredAt),
+);
+
+/** The error's name for logs; a throwing getter must not turn a log line into a failure. */
+function errorNameOf(error: unknown): string {
+  try {
+    return error instanceof Error ? error.name : typeof error;
+  } catch {
+    return "<unprintable>";
+  }
+}
 
 export interface AgentMessage {
   id: number;
@@ -167,7 +183,7 @@ export async function sendMessage({
       {
         messageId: inserted.id,
         toRun: to,
-        errorName: error instanceof Error ? error.name : typeof error,
+        errorName: errorNameOf(error),
       },
     );
   }
@@ -175,18 +191,23 @@ export async function sendMessage({
 }
 
 /**
- * Builds `last_error`: `"<name>: <message>"` with every occurrence of the message
- * body replaced by `[body]`, truncated to 500 units, then sanitized (NUL bytes never
- * reach the text column). Truncating before sanitizing never leaves a lone
- * surrogate. The redaction is an exact substring match: a very short body redacts
- * aggressively and a body echoed only in part is not redacted.
+ * Builds `last_error`: `"<name>: <message>"`, the message body redacted (and any
+ * secret pattern), truncated to 500 units, then sanitized (no NUL bytes). Truncating
+ * before sanitizing never leaves a lone surrogate.
  */
 function buildLastError(error: unknown, body: string): string {
-  const name = error instanceof Error ? error.name : typeof error;
-  const message = error instanceof Error ? error.message : String(error);
-  let text = `${name}: ${message}`;
-  if (body.length > 0) text = text.split(body).join("[body]");
-  return sanitizeForJson(text.slice(0, LAST_ERROR_MAX_LENGTH));
+  let message: string;
+  try {
+    message = error instanceof Error ? error.message : String(error);
+  } catch {
+    // A thrown value with a throwing getter or no toString (Object.create(null))
+    // must never turn the attempt count into a second failure.
+    message = "<unprintable>";
+  }
+  const text = `${errorNameOf(error)}: ${message}`;
+  // minLength 1: any non-empty body is redacted (the shared default skips values under 4).
+  const redact = createValueRedactor(body.length > 0 ? [body] : [], 1);
+  return sanitizeForJson(redact(text).slice(0, LAST_ERROR_MAX_LENGTH));
 }
 
 type ReceiveOutcome =
@@ -196,7 +217,8 @@ type ReceiveOutcome =
   | {
       kind: "failed";
       error: unknown;
-      message: AgentMessage;
+      messageId: number;
+      fromRun: string;
       attempts: number;
       deadLettered: boolean;
     };
@@ -260,13 +282,7 @@ export async function receiveFor({
         const rows = await tx
           .select()
           .from(agentMessages)
-          .where(
-            and(
-              eq(agentMessages.toRun, toRun),
-              isNull(agentMessages.consumedAt),
-              isNull(agentMessages.deadLetteredAt),
-            ),
-          )
+          .where(and(eq(agentMessages.toRun, toRun), deliverable))
           .orderBy(asc(agentMessages.id))
           .limit(1)
           .for("update", { skipLocked: true });
@@ -299,19 +315,13 @@ export async function receiveFor({
               deadLetteredAt: agentMessages.deadLetteredAt,
             });
           if (!counted) throw error;
-          const isDeadLettered = counted.deadLetteredAt !== null;
-          await __testOnAttemptRecorded?.({
+          const info = {
             messageId: row.id,
             attempts: counted.attempts,
-            deadLettered: isDeadLettered,
-          });
-          return {
-            kind: "failed",
-            error,
-            message: row,
-            attempts: counted.attempts,
-            deadLettered: isDeadLettered,
+            deadLettered: counted.deadLetteredAt !== null,
           };
+          await __testOnAttemptRecorded?.(info);
+          return { kind: "failed", error, fromRun: row.fromRun, ...info };
         }
         await tx
           .update(agentMessages)
@@ -329,14 +339,11 @@ export async function receiveFor({
       if (!outcome.deadLettered) throw outcome.error;
       deadLettered += 1;
       logger.error("agent-bus: message dead-lettered", {
-        messageId: outcome.message.id,
-        fromRun: outcome.message.fromRun,
-        toRun: outcome.message.toRun,
+        messageId: outcome.messageId,
+        fromRun: outcome.fromRun,
+        toRun,
         attempts: outcome.attempts,
-        errorName:
-          outcome.error instanceof Error
-            ? outcome.error.name
-            : typeof outcome.error,
+        errorName: errorNameOf(outcome.error),
       });
     }
   }
@@ -394,8 +401,7 @@ export async function sweepUnconsumed({
     .innerJoin(thread, eq(thread.id, agentMessages.toRun))
     .where(
       and(
-        isNull(agentMessages.consumedAt),
-        isNull(agentMessages.deadLetteredAt),
+        deliverable,
         sql`${agentMessages.createdAt} < now() - (${olderThanMs}::double precision * interval '1 millisecond')`,
       ),
     )
@@ -415,7 +421,7 @@ export async function sweepUnconsumed({
     } catch (error) {
       logger.error(`agent-bus sweep: delivery to ${toRun} failed`, {
         toRun,
-        errorName: error instanceof Error ? error.name : typeof error,
+        errorName: errorNameOf(error),
       });
     }
   }
