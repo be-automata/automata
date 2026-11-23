@@ -1,4 +1,4 @@
-import { describe, it, vi, beforeEach, expect } from "vitest";
+import { describe, it, vi, beforeEach, afterEach, expect } from "vitest";
 import { createMirrorTask } from "./mirror-intake";
 import { findWebhookSkip } from "./webhook-skip";
 import { newThreadInternal } from "@/server-lib/new-thread-internal";
@@ -17,8 +17,13 @@ import { nanoid } from "nanoid";
 import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
 import { getOctokitForApp } from "@/lib/github";
+import { resolveReviewSkill } from "@/server-lib/review/resolve-review-skill";
 import { resolveBotLogin } from "@/server-lib/review/bot-login";
-import { mergeAuditMarker } from "@/server-lib/tracker/merge-audit";
+import {
+  mergeAuditMarker,
+  renderNoticeComment,
+  renderNoTicketNotice,
+} from "@/server-lib/tracker/merge-audit";
 
 vi.mock("@/server-lib/new-thread-internal", () => ({
   newThreadInternal: vi
@@ -31,6 +36,17 @@ vi.mock("@/server-lib/new-thread-internal", () => ({
 vi.mock("@terragon/shared/github-app", () => ({
   getRepoInstallationId: vi.fn(),
 }));
+// Real resolver, wrapped so a test can assert whether it was reached.
+vi.mock("@/server-lib/review/resolve-review-skill", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@/server-lib/review/resolve-review-skill")
+    >();
+  return {
+    ...actual,
+    resolveReviewSkill: vi.fn(actual.resolveReviewSkill),
+  };
+});
 vi.mock("@/server-lib/review/repo-skill-override", () => ({
   buildRepoOverrideFetcher: () => async () => null,
 }));
@@ -516,6 +532,11 @@ describe("createMirrorTask (mirror-intake)", () => {
       vi.mocked(getOctokitForApp).mockReset();
     });
 
+    afterEach(() => {
+      // Restore the module default for the describes that follow.
+      vi.mocked(resolveTrackerConfig).mockResolvedValue(null);
+    });
+
     it("AC-1: two body keys and none delivered: one multi-key notice, no thread", async () => {
       const { repo, instId } = await seedLane();
       stubTracker();
@@ -533,6 +554,15 @@ describe("createMirrorTask (mirror-intake)", () => {
       expect(body).toContain(mergeAuditMarker(31));
       expect(body).toContain("delivers none of them");
       expect(body).toContain("ACME-1, ACME-2");
+      expect(body).toBe(
+        renderNoticeComment(
+          31,
+          renderNoTicketNotice({
+            referencedKeys: ["ACME-1", "ACME-2"],
+            projects: ["ACME"],
+          }),
+        ),
+      );
     });
 
     it("AC-2: a single body key still creates the thread, no comment", async () => {
@@ -581,12 +611,36 @@ describe("createMirrorTask (mirror-intake)", () => {
 
       expect(newThreadInternal).not.toHaveBeenCalled();
       expect(createComment).toHaveBeenCalledTimes(1);
-      expect(createComment.mock.calls[0]![0].body).toContain(
-        "No ticket reference was found",
+      const body = createComment.mock.calls[0]![0].body as string;
+      expect(body).toContain("No ticket reference was found");
+      expect(body).toBe(
+        renderNoticeComment(
+          31,
+          renderNoTicketNotice({ referencedKeys: [], projects: ["ACME"] }),
+        ),
       );
     });
 
+    it("a posted notice is decided before the skill is resolved", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      fakeOctokit();
+      vi.mocked(resolveReviewSkill).mockClear();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion({ body: "No ticket here." }),
+      });
+
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(resolveReviewSkill).not.toHaveBeenCalled();
+    });
+
     describe("AC-4: fail open, no Octokit call", () => {
+      // A tracker timeout cannot happen on the no-delivered-key path: with no
+      // audit key there is no tracker call at all (the notice needs only the
+      // PR text and the configured project list).
       it("no tracker config", async () => {
         const { repo, instId } = await seedLane();
         vi.mocked(resolveTrackerConfig).mockResolvedValue(null);
@@ -633,7 +687,41 @@ describe("createMirrorTask (mirror-intake)", () => {
       });
     });
 
+    it("the resolved installation id reaches getOctokitForApp", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      fakeOctokit();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion(),
+      });
+
+      expect(getOctokitForApp).toHaveBeenCalledWith({
+        owner: repo.split("/")[0],
+        repo: repo.split("/")[1],
+        installationId: Number(instId),
+      });
+    });
+
     describe("AC-5: a failed write falls back to the thread", () => {
+      it("getOctokitForApp rejects", async () => {
+        const { repo, instId } = await seedLane();
+        stubTracker();
+        const { createComment } = fakeOctokit();
+        vi.mocked(getOctokitForApp).mockRejectedValue(new Error("no token"));
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: instId,
+          intent: promotion(),
+        });
+
+        expect(createComment).not.toHaveBeenCalled();
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      });
+
       it("createComment rejects", async () => {
         const { repo, instId } = await seedLane();
         stubTracker();
@@ -677,7 +765,7 @@ describe("createMirrorTask (mirror-intake)", () => {
     it("AC-6: a redelivery finds the bot comment: no second comment, no thread", async () => {
       const { repo, instId } = await seedLane();
       stubTracker();
-      const { createComment } = fakeOctokit([
+      const { createComment, octokit } = fakeOctokit([
         {
           id: 1,
           body: `${mergeAuditMarker(31)}\nearlier notice`,
@@ -692,6 +780,29 @@ describe("createMirrorTask (mirror-intake)", () => {
       });
 
       expect(createComment).not.toHaveBeenCalled();
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      const [, params] = vi.mocked(octokit.paginate).mock.calls[0]!;
+      expect(params).toMatchObject({ since: "2026-11-18T10:00:00Z" });
+    });
+
+    it("AC-6: a marker comment by a non-bot author does not count: comment created, no thread", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit([
+        {
+          id: 2,
+          body: `${mergeAuditMarker(31)}\nspoofed`,
+          user: { login: "someone-else" },
+        },
+      ]);
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion(),
+      });
+
+      expect(createComment).toHaveBeenCalledTimes(1);
       expect(newThreadInternal).not.toHaveBeenCalled();
     });
 
