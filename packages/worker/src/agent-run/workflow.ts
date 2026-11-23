@@ -380,10 +380,12 @@ export function createEgressEventBatcher(wwwOpts: WwwClientOpts): {
 /**
  * #437: how long onFailure waits for a task run's own teardown (and its typed
  * terminal) before posting the generic failure: AC1's 90 s plus margin.
+ * #743 OQ-4: 150 s, so a cell's 40 s timeout capture, its 80 s teardown and 30 s
+ * of slack all fit before the generic post (a test pins the sum).
  */
-export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 120_000;
-/** onFailure's engine timeout: the wait above plus the post. */
-export const ON_FAILURE_EXECUTION_TIMEOUT = "3m";
+export const ON_FAILURE_TYPED_TERMINAL_WAIT_MS = 150_000;
+/** onFailure's engine timeout: the wait above plus the post (#743: "4m"). */
+export const ON_FAILURE_EXECUTION_TIMEOUT = "4m";
 
 /**
  * Register one agent-run workflow from its pure definition with the real run

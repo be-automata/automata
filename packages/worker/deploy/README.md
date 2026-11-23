@@ -260,6 +260,43 @@ a mismatch shows up as `unseal failed (reason=unknown-kid|tag)` on the first
 run and is reconciled by the sweep (`run-failed-unreported`). Every run also
 journals `token.revoke {"kind":"installation"|"read","status":204}` at its end.
 
+## Cell session continuation (#743)
+
+The `cellSessionContinuation` feature flag (default **off**, admin page, per user) gates the whole
+feature for a cell task run: the worker copies the Claude session transcript out of the cell after
+each turn (redacted in the worker), restores it into the next cell, saves unfinished work to the
+work branch on a timeout, and www continues a timed-out run once in a new cell. The flag reaches the
+worker in the pulled message (`featureFlags`), so a change applies from the next run with no
+restart. Off: no capture, no restore, no continuation. A follow-up in a new cell then starts with
+`sessionId: null` and a note instead of the silent `--continue`.
+
+What it needs, once, before the flag goes on anywhere:
+
+1. The migration `2026-11-25-cell-session-checkpoint.sql` is applied (`migrate.yml` on green main).
+2. www and the worker are deployed with the flag off (the worker through
+   `automata-worker-safe-restart`). This release also raises onFailure's typed-terminal wait to
+   150 s and its execution timeout to `"4m"`.
+3. **R2 retention (OQ-5).** Checkpoints live in the private bucket (`automata-private`) under the
+   `cell-sessions/` prefix and nothing deletes them. Add a lifecycle rule that expires the prefix
+   after 30 days, from a machine logged in to the Cloudflare account:
+
+   ```bash
+   wrangler r2 bucket lifecycle add automata-private cell-sessions-30d cell-sessions/ --expire-days 30
+   wrangler r2 bucket lifecycle list automata-private   # confirm the rule
+   ```
+
+   A restore after expiry finds a missing blob, starts fresh and says so.
+
+4. Run `R2_CONFORMANCE=remote` once against a throwaway bucket and record the result on #743.
+
+Turn the flag on for the test org's user first, run the AC-8 UAT from the spec, then widen it.
+
+**Rollback.** Turn the flag off on the admin page: the next run does no capture, restore or
+continuation, and checkpoints left behind are inert. To go back further, redeploy the previous
+worker (onFailure returns to 120 s / `"3m"`) and the previous www; the tables stay, unused. Remove
+the lifecycle rule with `wrangler r2 bucket lifecycle remove automata-private cell-sessions-30d`
+only if the prefix should be kept.
+
 ## Install
 
 ```bash

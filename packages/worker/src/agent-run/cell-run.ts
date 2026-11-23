@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { NonRetryableError } from "@hatchet-dev/typescript-sdk";
 import type { OpenSandboxCellConfig } from "@terragon/sandbox/opensandbox-cell";
 import {
@@ -7,6 +9,7 @@ import {
   type CellCreatePlan,
   type ICellProvider,
 } from "@terragon/types/cell";
+import type { CellSessionManifest } from "@terragon/types/cell-session-checkpoint";
 import { createValueRedactor } from "@terragon/utils/redact";
 
 import {
@@ -14,6 +17,7 @@ import {
   postAbnormalEnd,
   type AbnormalEnd,
   type AbnormalEndState,
+  type SalvageResult,
 } from "./abnormal-end";
 import {
   CELL_DAEMON_BUNDLE,
@@ -34,6 +38,20 @@ import {
   repoEnvDroppedNote,
   type FilteredRepoEnv,
 } from "./repo-env";
+import {
+  CELL_FREEZE_BUDGET_MS,
+  freezeCellAgent,
+  salvageCellWorkBranch,
+} from "./cell-salvage";
+import {
+  CELL_RESTORE_FETCH_CONCURRENCY,
+  fetchSessionCheckpoint,
+  prepareCheckpoint,
+  type PrepareCheckpointResult,
+  type RestoreResult,
+  type TurnState,
+} from "./cell-session-checkpoint";
+import { createSessionRedactor } from "./cell-session-redact";
 import { teardownCellRun } from "./cell-teardown";
 import {
   CELL_TEST_DB_ENV,
@@ -52,6 +70,8 @@ import {
   CELL_PLAN_UNAVAILABLE_CODES,
   withTimeout,
   type CellPlanResult,
+  type CheckpointHead,
+  type CheckpointResult,
   type FailedStep,
   type TeardownCallResult,
 } from "./cell-www-client";
@@ -184,6 +204,37 @@ export interface CellExecutorDeps {
   /** Resolves early (never rejects) when `signal` aborts. */
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   now: () => number;
+  /**
+   * #743 phase 6: the per-turn session capture. Off unless BOTH `checkpoint`
+   * and `sessionContinuation` are set and the latter returns true for the run
+   * (phase 11 wires the `cellSessionContinuation` flag here; the default is off).
+   */
+  sessionContinuation?: (pulled: PulledDaemonMessage) => boolean;
+  checkpoint?: {
+    putBlob: (
+      opts: WwwClientOpts,
+      sha256: string,
+      bytes: Uint8Array,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ created: boolean }>>;
+    commit: (
+      opts: WwwClientOpts,
+      manifest: CellSessionManifest,
+      expectedVersion: number,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ version: number }>>;
+    /** #743 phase 8: the restore's reads (run whenever the gate is on). */
+    readHead: (
+      opts: WwwClientOpts,
+      sessionId: string,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ head: CheckpointHead }>>;
+    readBlob: (
+      opts: WwwClientOpts,
+      sha256: string,
+      signal: AbortSignal,
+    ) => Promise<CheckpointResult<{ bytes: Uint8Array }>>;
+  };
   /** A fresh 24-char base64url id (18 random bytes) for one plan fetch. */
   randomId: () => string;
   /** A fresh 48-char hex password (24 random bytes) for one cell's test database (#707). */
@@ -196,6 +247,29 @@ export interface CellExecutorDeps {
    * attempt owns the thread). The registry keeps the strongest mark per run.
    */
   marks: { mark: (runId: string, kind: RunEndMark) => void };
+}
+
+/** The checkpoint route's calls, as the executor is handed them. */
+type CheckpointDeps = NonNullable<CellExecutorDeps["checkpoint"]>;
+
+/**
+ * Whether a run restores and captures its session, decided once per message:
+ * `skip` for any agent but claudeCode, `off` when the owner's flag is off (a
+ * session id is then never sent), `on` with the wired calls (absent = none).
+ */
+type SessionGate =
+  | { mode: "skip" }
+  | { mode: "off" }
+  | { mode: "on"; checkpoint: CheckpointDeps | undefined };
+
+function sessionGate(
+  deps: CellExecutorDeps,
+  pulled: PulledDaemonMessage,
+): SessionGate {
+  if (pulled.agent !== "claudeCode") return { mode: "skip" };
+  return deps.sessionContinuation?.(pulled) === true
+    ? { mode: "on", checkpoint: deps.checkpoint }
+    : { mode: "off" };
 }
 
 /**
@@ -268,6 +342,18 @@ interface CellRunState {
   heartbeatStop: AbortController;
   /** #749: stops the memory sampler at the run's end (the heartbeat stops at the message write). */
   memorySampleStop: AbortController;
+  /** #743: stops the per-turn session capture loop at the run's end, before teardown. */
+  captureStop: AbortController;
+  /**
+   * #743 phase 7b: bounds the capture's pulls. Unlike the run's own signal it
+   * stays live through a timeout, so an in-flight pull can finish inside the
+   * timeout capture budget (F2); aborted at once on every other end.
+   */
+  captureAbort: AbortController;
+  /** #743: the running capture, when the gate is on. */
+  capture: CaptureHandle | null;
+  /** #743 phase 8: why a restore failed and the run started without its history; null otherwise. */
+  startedFresh: string | null;
   cellOpts: WwwClientOpts;
   attempt: number;
   stepKey: string;
@@ -417,6 +503,10 @@ async function runCell(
     abortedLive,
     heartbeatStop: new AbortController(),
     memorySampleStop: new AbortController(),
+    captureStop: new AbortController(),
+    captureAbort: new AbortController(),
+    capture: null,
+    startedFresh: null,
     cellOpts: { ...wwwOpts, cellAttempt: attempt },
     attempt,
     stepKey: plan.tags.stepKey,
@@ -447,6 +537,8 @@ async function runCell(
 
   let result: AgentRunOutput | undefined;
   let thrown: { error: unknown } | null = null;
+  /** When the poll loop (or the throw that ended it) returned: the timeout capture's clock starts here. */
+  let pollReturnedAt: number | null = null;
   try {
     // 4. The provider, per run (the entrypoint depends on the plan's host).
     // The config selectRunExecutor read is passed through: read once per run.
@@ -555,12 +647,16 @@ async function runCell(
       if (pulled.agent !== "claudeCode" && r.testDbDelivered) {
         step(`cell: test database env not delivered (agent=${pulled.agent})`);
       }
+      // #743 phase 8: restore the session before the daemon gets its message.
+      const gate = sessionGate(deps, pulled);
+      const restore = await restoreSession(r, pulled, gate);
+      const outgoing = restore.message;
       // 9. The prompt rides in a file, never in argv (execd logs argv).
       const messagePath = `${CELL_MESSAGE_DIR}/msg-${deps.randomId()}.json`;
       await putFile(
         r,
         messagePath,
-        JSON.stringify(buildCellMessage(pulled, ids)),
+        JSON.stringify(buildCellMessage(outgoing, ids)),
         600,
       );
       await execOk(
@@ -574,6 +670,13 @@ async function runCell(
 
       // 10. The poll loop takes over from the heartbeat.
       r.heartbeatStop.abort();
+      r.capture = openSessionCapture(
+        r,
+        outgoing,
+        gate,
+        restore.restored,
+        restore.start,
+      );
       const poll = await deps.www.pollUntilTerminal(
         pollContext(r, provider, r.cellId),
         r.cellOpts,
@@ -586,21 +689,45 @@ async function runCell(
       result = { ...ids, outcome: poll.outcome, finalStatus: poll.finalStatus };
     }
   } catch (error) {
+    pollReturnedAt = Date.now();
     const exit = await decideExit(r, error);
     result = exit.result ?? result;
     thrown = exit.thrown ?? null;
   } finally {
+    pollReturnedAt ??= Date.now();
     r.heartbeatStop.abort();
     r.memorySampleStop.abort();
+    r.captureStop.abort();
   }
   // A terminal read that confirmed the retire, while the poll loop was running.
   if (st.conflict && thrown === null && st.failure !== null) {
     thrown = { error: st.failure };
   }
 
-  // The finally: claim the end, then R -> T -> B -> A -> P, then give the slot back.
+  // #743 phase 7b: the end is claimed BEFORE anything else, so a typed `timeout`
+  // can freeze, capture the session and salvage the work first. Every other end
+  // whose token is still live (not fenced, conflicted, or retired by a terminal
+  // read) gets the same wait for an in-flight pull and one final pull, with no
+  // freeze and no salvage (spec 2.5 step 3). Both stay inside the 40 s budget.
+  const end = claimEnd(r, thrown);
+  let salvage: SalvageResult | null = null;
+  // finalCapture never throws, so the teardown below always runs.
+  if (end?.cause === "timeout") {
+    salvage = await finalCapture(r, pollReturnedAt, { salvage: true });
+  } else if (
+    r.capture !== null &&
+    !st.fenced &&
+    !st.conflict &&
+    !st.terminal &&
+    !st.retired
+  ) {
+    await finalCapture(r, pollReturnedAt, { salvage: false });
+  } else {
+    r.captureAbort.abort();
+  }
+  // The finally: R -> T -> B -> A -> P, then give the slot back.
   try {
-    await tearDown(r, thrown);
+    await tearDown(r, end, salvage);
   } finally {
     await releaseAdmission();
   }
@@ -771,6 +898,692 @@ function startCellMemorySampler(
       await r.deps.sleep(CELL_MEMORY_SAMPLE_MS, stop);
     }
   })();
+}
+
+// ---- the per-turn session capture (#743 phase 6) ------------------------------
+
+/**
+ * How often the capture loop looks at the cell's transcript. Distinct from
+ * CELL_MEMORY_SAMPLE_MS and from the run's poll interval (WORKER_POLL_INTERVAL_MS,
+ * default 7 s): the test harness keys its sleeps on the value (the #749 collision).
+ */
+export const CELL_CAPTURE_POLL_MS = 6_500;
+/** With no sign of growth (or a failed probe), pull anyway after this long (Q-1). */
+export const CELL_CAPTURE_IDLE_PULL_MS = 60_000;
+/** A redactor that throws this many pulls in a row stops the capture. */
+const CELL_REDACTOR_ERROR_LIMIT = 3;
+/** One pull (the exec checks and the copyOut) is abandoned after this long. */
+export const CELL_CAPTURE_POLL_BUDGET_MS = 15_000;
+/**
+ * #743 phase 7b (OQ-4, F2): the whole timeout capture (freeze, the wait for an
+ * in-flight pull, the final pull, the salvage), from the poll loop's return to
+ * the teardown's first step. A test pins this + the teardown's worst case + 30 s
+ * of slack under onFailure's typed-terminal wait.
+ */
+export const CELL_TIMEOUT_CAPTURE_BUDGET_MS = 40_000;
+/** The final pull's share of that budget. */
+const CELL_TIMEOUT_FINAL_FLUSH_MS = 12_000;
+
+const CELL_PROJECTS_DIR = `${HOME_CLAUDE_DIR}/projects`;
+/** F6: every project dir at depth 2, no hard-coded name. `-type f` neither follows nor lists a symlink (F9). */
+const CAPTURE_PROBE_ARGV = [
+  "/usr/bin/find",
+  "-P",
+  CELL_PROJECTS_DIR,
+  "-mindepth",
+  "2",
+  "-maxdepth",
+  "2",
+  "-type",
+  "f",
+  "-name",
+  "*.jsonl",
+  "-printf",
+  "%s %T@ %P\\n",
+];
+const PROBE_LINE =
+  /^(\d+) (\d+(?:\.\d+)?) (-[A-Za-z0-9-]{1,200})\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
+
+/** The running per-turn capture, for the timeout capture (phase 7b). */
+interface CaptureHandle {
+  /** The pull running now, if any. Never rejects. */
+  inflight(): Promise<void> | null;
+  /** One ungated pull on `signal`. Never throws; skipped while another pull runs. */
+  final(signal: AbortSignal): Promise<void>;
+}
+
+interface SessionFile {
+  projectDir: string;
+  sessionId: string;
+  size: number;
+}
+
+type ProbedFile = SessionFile & { mtime: number };
+
+/** Every UUID-named transcript the probe listed. Names that are not UUIDs are ignored. */
+function parseProbe(stdout: string): ProbedFile[] {
+  const files: ProbedFile[] = [];
+  for (const line of stdout.split("\n")) {
+    const m = PROBE_LINE.exec(line);
+    if (!m) continue;
+    files.push({
+      projectDir: m[3] as string,
+      sessionId: (m[4] as string).toLowerCase(),
+      size: Number(m[1]),
+      mtime: Number(m[2]),
+    });
+  }
+  return files;
+}
+
+/** The newest of `files` (by mtime), optionally only those named `sessionId` (F6). */
+function newestFile(
+  files: ProbedFile[],
+  sessionId: string | null,
+): ProbedFile | null {
+  let best: ProbedFile | null = null;
+  for (const f of files) {
+    if (sessionId !== null && f.sessionId !== sessionId.toLowerCase()) continue;
+    if (best === null || f.mtime > best.mtime) best = f;
+  }
+  return best;
+}
+
+function causeClass(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : "unknown";
+}
+
+/** Rejects when `signal` aborts (the pull's budget, the stop or `live`). */
+function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("aborted"));
+    signal.addEventListener("abort", () => reject(new Error("aborted")), {
+      once: true,
+    });
+    promise.then(resolve, reject);
+  });
+}
+
+/**
+ * Where a chain with no restored manifest begins (spec 2.4 step 1): the head's
+ * version for the commit's CAS, and the head's manifest id as the new chain's
+ * parent. `known` is false when the head was unreadable, or belongs to another
+ * session (read-head then carries no version): the first commit learns the
+ * version from `head_moved` and retries once.
+ */
+interface ChainStart {
+  version: number;
+  parent: string | null;
+  known: boolean;
+}
+/** What a sent commit would make the chain's tip (no closure over the pull's bytes). */
+type PendingCommit = Pick<
+  Extract<PrepareCheckpointResult, { kind: "write" }>,
+  "manifest" | "native" | "nativeHash" | "consumedRawBytes" | "turnState"
+>;
+const UNKNOWN_CHAIN_START: ChainStart = {
+  version: 0,
+  parent: null,
+  known: false,
+};
+function chainStart(head: CheckpointHead | null): ChainStart {
+  if (head === null) return UNKNOWN_CHAIN_START;
+  if (head.found) {
+    return { version: head.version, parent: head.manifest.id, known: true };
+  }
+  return head.reason === "none"
+    ? { version: 0, parent: null, known: true }
+    : UNKNOWN_CHAIN_START;
+}
+
+/** What a restore hands the run: the message to send, what landed, where the chain starts. */
+interface RestoreOutcome {
+  message: PulledDaemonMessage;
+  restored: RestoredSession | null;
+  start: ChainStart;
+}
+
+/** A session id no row holds: read-head answers `none` or `other_session` for it. */
+const NO_SESSION_PROBE_ID = "-";
+
+/** A restore that landed: the chain the capture continues. */
+interface RestoredSession {
+  manifest: CellSessionManifest;
+  version: number;
+  native: Uint8Array;
+  projectDir: string;
+}
+
+/** The whole restore (reads, verification, copy-in) is abandoned after this long. */
+export const CELL_RESTORE_BUDGET_MS = 90_000;
+const RESTORE_FALLBACK_PROJECT_DIR = "-workspace";
+const SAFE_PROJECT_DIR = /^-[A-Za-z0-9-]{1,200}$/;
+const SAFE_SESSION_ID =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** C6/§2.4: the note the agent reads when its history could not be restored. */
+function restoreNote(reason: string): string {
+  return `[automata] The earlier conversation could not be restored (${reason}); you are starting without its history. Check the work branch for earlier commits.`;
+}
+
+/**
+ * #743 phase 8: puts the checkpointed transcript into the new cell, where the
+ * daemon's `--resume <sessionId>` finds it. With the gate on, the head is ALWAYS
+ * read first (spec 2.4 step 1), so the capture knows the version to continue
+ * from even when nothing is restored. On ANY failure, and with the gate off, a
+ * claudeCode message that carries a session id goes out with `sessionId: null`,
+ * so the daemon starts fresh and never reaches its silent `--continue` fallback
+ * on an empty HOME (AC-2, §2.9); the run says so in the journal and the prompt.
+ */
+async function restoreSession(
+  r: CellRunState,
+  pulled: PulledDaemonMessage,
+  gate: SessionGate,
+): Promise<RestoreOutcome> {
+  const sessionId = pulled.sessionId;
+  const plain = (start: ChainStart): RestoreOutcome => ({
+    message: pulled,
+    restored: null,
+    start,
+  });
+  const failFresh = (
+    reason: string,
+    head: CheckpointHead | null = null,
+  ): RestoreOutcome => {
+    r.startedFresh = reason;
+    r.step(`cell: session restore: none (${reason}); started fresh`);
+    return {
+      message: {
+        ...pulled,
+        sessionId: null,
+        prompt: `${restoreNote(reason)}\n\n${pulled.prompt}`,
+      },
+      restored: null,
+      start: chainStart(head),
+    };
+  };
+
+  if (gate.mode === "skip") return plain(UNKNOWN_CHAIN_START);
+  if (gate.mode === "off") {
+    // Flag off (§2.9): no restore, and never the daemon's silent `--continue`
+    // on an empty HOME for a session id this cell does not hold.
+    return sessionId ? failFresh("flag-off") : plain(UNKNOWN_CHAIN_START);
+  }
+  const { checkpoint } = gate;
+  // Production wires the calls with the gate; a bare gate has nothing to read.
+  if (!checkpoint) return plain(UNKNOWN_CHAIN_START);
+
+  const startedAt = r.deps.now();
+  const budget = withTimeout(CELL_RESTORE_BUDGET_MS, r.live);
+  // The head is read once, always: a session id that is never a path reads the
+  // probe id, so the capture still starts its chain at the right version.
+  const readable =
+    sessionId && SAFE_SESSION_ID.test(sessionId) ? sessionId : null;
+  let headRead: Awaited<ReturnType<CheckpointDeps["readHead"]>> | null = null;
+  try {
+    headRead = await checkpoint.readHead(
+      r.cellOpts,
+      readable ?? NO_SESSION_PROBE_ID,
+      budget,
+    );
+  } catch {
+    // Unknown head: the first commit learns the version.
+  }
+  const head = headRead?.ok ? headRead.head : null;
+  if (readable === null) {
+    return sessionId
+      ? failFresh("bad-session-id", head)
+      : plain(chainStart(head));
+  }
+
+  let result: RestoreResult;
+  try {
+    result = await fetchSessionCheckpoint({
+      sessionId: readable,
+      readHead: async () => {
+        if (headRead === null) throw new Error("head unreadable");
+        return headRead;
+      },
+      readBlob: (sha, signal) => checkpoint.readBlob(r.cellOpts, sha, signal),
+      signal: budget,
+    });
+  } catch (error) {
+    return failFresh(`error-${causeClass(error)}`.toLowerCase(), head);
+  }
+  if (result.kind === "fresh") return failFresh(result.reason, head);
+
+  const projectDir = SAFE_PROJECT_DIR.test(result.manifest.projectDir)
+    ? result.manifest.projectDir
+    : RESTORE_FALLBACK_PROJECT_DIR;
+  const dir = `${CELL_PROJECTS_DIR}/${projectDir}`;
+  const path = `${dir}/${readable}.jsonl`;
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  try {
+    ensureLive(r);
+    const mk = await raceLive(
+      r,
+      provider.exec(cellId, ["/bin/mkdir", "-p", "-m", "700", dir], {
+        timeoutMs: 5_000,
+      }),
+    );
+    if (mk.exitCode !== 0) return failFresh("copy-in-failed", head);
+    await raceLive(
+      r,
+      provider.copyIn(cellId, path, result.native, { mode: 600, ...CELL_USER }),
+    );
+    const check = await raceLive(
+      r,
+      provider.exec(cellId, ["/usr/bin/test", "-s", path], {
+        timeoutMs: 5_000,
+      }),
+    );
+    if (check.exitCode !== 0) return failFresh("copy-in-failed", head);
+  } catch (error) {
+    if (r.live.aborted) throw error;
+    return failFresh("copy-in-failed", head);
+  }
+  r.step(
+    `cell: session restore: restored turn=${result.manifest.turn} native=${result.native.length} dir=${projectDir} in ${r.deps.now() - startedAt}ms`,
+  );
+  return {
+    message: pulled,
+    restored: {
+      manifest: result.manifest,
+      version: result.version,
+      native: result.native,
+      projectDir,
+    },
+    start: chainStart(head),
+  };
+}
+
+/**
+ * Starts the capture loop for the agent's working life, from the message write
+ * to the run's end (stopped before teardown by `captureStop`). The worker pulls
+ * the session file with `copyOut` (Q-1: the cell's reachable surface does not
+ * change), redacts it here before anything leaves the box, and writes through
+ * the checkpoint route. Fail open: a failure is one journal line with the cause
+ * class and never fails the run; no transcript byte or token is ever logged.
+ * Null when the gate is not on for this run.
+ */
+function openSessionCapture(
+  r: CellRunState,
+  pulled: PulledDaemonMessage,
+  gate: SessionGate,
+  restored: RestoredSession | null,
+  start: ChainStart,
+): CaptureHandle | null {
+  if (gate.mode !== "on" || !gate.checkpoint) return null;
+  const { checkpoint } = gate;
+  const provider = r.provider as ICellProvider;
+  const cellId = r.cellId as string;
+  const stop = r.captureStop.signal;
+
+  let redactor: ReturnType<typeof createSessionRedactor>;
+  try {
+    redactor = createSessionRedactor({
+      values: [
+        ...Object.values(r.repoEnv.env),
+        ...(r.testDb.plan === "start" ? [r.testDb.password] : []),
+      ],
+    });
+  } catch (error) {
+    r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
+    return null;
+  }
+
+  let sessionId: string | null = pulled.sessionId;
+  // A restore continues its chain: the file in the cell starts with the restored bytes.
+  let projectDir: string | null = restored?.projectDir ?? null;
+  let lastSize = restored?.native.length ?? 0;
+  let consumed = restored?.native.length ?? 0;
+  let lastPullAt = r.deps.now();
+  let manifest: CellSessionManifest | null = restored?.manifest ?? null;
+  let native: Uint8Array = restored?.native ?? new Uint8Array(0);
+  // The running sha256 of `native`: a pull hashes only its new bytes.
+  let nativeHash = createHash("sha256").update(native);
+  // The head's version (spec 2.4 step 1): a restore's own, else what the head
+  // read found, so a fresh start continues the thread's chain and does not
+  // commit from 0 into `head_moved`.
+  let version = restored?.version ?? start.version;
+  const resumed = restored !== null;
+  let versionKnown = resumed || start.known;
+  // The last commit this writer SENT whose answer never came: the store may
+  // still have applied it, and the next commit then meets `head_moved` on a head
+  // that is this writer's own. Kept in full, so the worker can adopt it as if it
+  // had been acknowledged and build the next manifest on it.
+  let pending: PendingCommit | null = null;
+  // A chain with no previous manifest is parented to the head it began after.
+  let chainParent: string | null = start.parent;
+  let turnState: TurnState | undefined;
+  let stopped = false;
+  let redactorErrors = 0;
+  let switched = false;
+
+  /** OQ-7: the file is a new session id; a new chain parented to the restored head. */
+  const switchChain = (newest: SessionFile): void => {
+    chainParent = manifest?.id ?? chainParent;
+    manifest = null;
+    native = new Uint8Array(0);
+    nativeHash = createHash("sha256");
+    consumed = 0;
+    lastSize = 0;
+    turnState = undefined;
+    pending = null;
+    sessionId = newest.sessionId;
+    switched = true;
+    r.step("cell: checkpoint: resume wrote a new session id; new chain");
+  };
+
+  // A pull ends with the run's internal aborts (fence, Stop, failure) and with
+  // captureAbort, never with the run's own cancel: a timeout keeps its pull alive.
+  const loopSignal = (): AbortSignal =>
+    withTimeout(
+      CELL_CAPTURE_POLL_BUDGET_MS,
+      r.captureAbort.signal,
+      r.inner.signal,
+    );
+
+  const pullOnce = async (
+    file: SessionFile,
+    budget: AbortSignal,
+  ): Promise<void> => {
+    const path = `${CELL_PROJECTS_DIR}/${file.projectDir}/${file.sessionId}.jsonl`;
+    // F9: re-check right before the read that it is still a regular file.
+    const check = await raceSignal(
+      provider.exec(
+        cellId,
+        [
+          "/usr/bin/find",
+          "-P",
+          path,
+          "-maxdepth",
+          "0",
+          "-type",
+          "f",
+          "-print",
+          "-quit",
+        ],
+        { timeoutMs: 5_000 },
+      ),
+      budget,
+    );
+    if (check.exitCode !== 0 || check.stdout.trim() !== path) {
+      r.step("cell: checkpoint skipped (not a regular file)");
+      return;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await raceSignal(provider.copyOut(cellId, path), budget);
+    } catch {
+      r.step("cell: checkpoint skipped (copy-out failed)");
+      return;
+    }
+    lastPullAt = r.deps.now();
+    lastSize = file.size;
+    await writeCheckpoint(file, bytes, budget);
+  };
+
+  /** Takes a written (or lost-but-applied) checkpoint as the chain's new tip. */
+  const advance = (done: PendingCommit, at: number): void => {
+    manifest = done.manifest;
+    native = done.native;
+    nativeHash = done.nativeHash;
+    version = at;
+    turnState = done.turnState;
+    consumed += done.consumedRawBytes;
+  };
+
+  const writeCheckpoint = async (
+    file: SessionFile,
+    bytes: Uint8Array,
+    budget: AbortSignal,
+  ): Promise<void> => {
+    // A pull with no new bytes writes nothing (A-12).
+    if (bytes.length <= consumed) return;
+
+    const started = r.deps.now();
+    const result = prepareCheckpoint({
+      previous: manifest,
+      parent: chainParent,
+      previousNative: native,
+      previousNativeHash: nativeHash,
+      newBytes: bytes.subarray(consumed),
+      ...(turnState ? { turnState } : {}),
+      context: {
+        threadId: r.ids.threadId,
+        threadChatId: r.ids.threadChatId,
+        sessionId: file.sessionId,
+        runExternalId: r.runId,
+        projectDir: file.projectDir,
+        git: null,
+      },
+      redactor,
+      log: r.step,
+    });
+    if (result.kind === "skipped") {
+      if (result.reason !== "redactor error") {
+        stopped = true;
+        return;
+      }
+      // A redactor that keeps throwing would be re-run on the same bytes every
+      // poll: stop after a few in a row (class only, nothing from the pull).
+      redactorErrors += 1;
+      if (redactorErrors >= CELL_REDACTOR_ERROR_LIMIT) {
+        r.step("cell: checkpoint skipped (redactor error; capture stopped)");
+        stopped = true;
+      }
+      return;
+    }
+    redactorErrors = 0;
+    // Only a completed turn is a checkpoint; the bytes stay unconsumed until one is.
+    if (result.kind !== "write" || !result.turnAdvanced) return;
+
+    // Chunks go up in parallel; the commit waits for all of them.
+    const upload: {
+      next: number;
+      failure: { code: string; status: number } | null;
+    } = {
+      next: 0,
+      failure: null,
+    };
+    const uploadWorker = async (): Promise<void> => {
+      while (upload.failure === null) {
+        const blob = result.blobs[upload.next++];
+        if (blob === undefined) return;
+        const put = await checkpoint.putBlob(
+          r.cellOpts,
+          blob.sha256,
+          blob.body,
+          budget,
+        );
+        if (!put.ok) {
+          upload.failure ??= put;
+          return;
+        }
+      }
+    };
+    await Promise.all(
+      Array.from(
+        {
+          length: Math.min(CELL_RESTORE_FETCH_CONCURRENCY, result.blobs.length),
+        },
+        uploadWorker,
+      ),
+    );
+    if (upload.failure !== null) return failed(upload.failure);
+    const prior = pending;
+    pending = {
+      manifest: result.manifest,
+      native: result.native,
+      nativeHash: result.nativeHash,
+      consumedRawBytes: result.consumedRawBytes,
+      turnState: result.turnState,
+    };
+    const knewVersion = versionKnown;
+    let commit = await checkpoint.commit(
+      r.cellOpts,
+      result.manifest,
+      version,
+      budget,
+    );
+    if (
+      !commit.ok &&
+      commit.code === "head_moved" &&
+      knewVersion &&
+      prior !== null
+    ) {
+      // The earlier commit's answer may have been lost after the store applied
+      // it. If the head is that very manifest, it is ours: adopt it in full, as
+      // if it had been acknowledged. This manifest was built on the one before
+      // it, so it does not extend the head and is never re-sent: the bytes past
+      // the adopted one are prepared again on the head and committed once (the
+      // inner call has no prior, so it cannot loop). Any other head is a real
+      // foreign move and stops the capture below.
+      const read = await checkpoint.readHead(
+        r.cellOpts,
+        result.manifest.sessionId,
+        budget,
+      );
+      if (
+        read.ok &&
+        read.head.found &&
+        read.head.manifest.id === prior.manifest.id
+      ) {
+        advance(prior, read.head.version);
+        pending = null;
+        return writeCheckpoint(file, bytes, budget);
+      }
+    } else if (
+      !commit.ok &&
+      commit.code === "head_moved" &&
+      !versionKnown &&
+      typeof commit.version === "number"
+    ) {
+      // The head was another session's (read-head carries no version for it):
+      // adopt the version the lost CAS reported and commit once more.
+      version = commit.version;
+      commit = await checkpoint.commit(
+        r.cellOpts,
+        result.manifest,
+        version,
+        budget,
+      );
+    }
+    versionKnown = true;
+    if (!commit.ok) return failed(commit);
+
+    pending = null;
+    advance(result, commit.version);
+    r.step(
+      `cell: checkpoint turn=${result.manifest.turn} native=${result.manifest.native.bytes} chunks=${result.manifest.native.chunks.length} hits=${result.manifest.redaction.hits} v=${commit.version} in ${r.deps.now() - started}ms`,
+    );
+  };
+
+  const failed = (f: { code: string; status: number }): void => {
+    if (f.code === "head_moved") {
+      r.step("cell: checkpoint skipped (head moved; capture stopped)");
+      stopped = true;
+    } else if (f.code === "not_append_only") {
+      // The worker's view of its own chain is wrong: every later manifest would
+      // be built on it and refused the same way.
+      r.step("cell: checkpoint skipped (not append-only; capture stopped)");
+      stopped = true;
+    } else if (
+      f.code === "superseded" ||
+      f.status === 401 ||
+      f.status === 403
+    ) {
+      r.step("cell: checkpoint skipped (fenced; capture stopped)");
+      stopped = true;
+    } else {
+      r.step(`cell: checkpoint skipped (www ${f.code})`);
+    }
+  };
+
+  const captureOnce = async (
+    budget: AbortSignal,
+    force: boolean,
+  ): Promise<void> => {
+    let file: SessionFile | null = null;
+    try {
+      const out = await raceSignal(
+        provider.exec(cellId, CAPTURE_PROBE_ARGV, { timeoutMs: 5_000 }),
+        budget,
+      );
+      if (out.exitCode === 0) {
+        const listed = parseProbe(out.stdout);
+        file = newestFile(listed, sessionId);
+        // OQ-7: `--resume` may write the continued conversation under a NEW
+        // session id. Once the restored id stops growing (or is gone), follow
+        // the newest transcript and start a chain parented to the restored head.
+        // The regular-file re-check in the pull still guards the path (F9).
+        if (resumed && !switched && (file === null || file.size <= lastSize)) {
+          const newest = newestFile(listed, null);
+          if (
+            newest !== null &&
+            newest.sessionId !== sessionId?.toLowerCase()
+          ) {
+            switchChain(newest);
+            file = newest;
+          }
+        }
+      }
+    } catch {
+      file = null;
+    }
+    const idle = r.deps.now() - lastPullAt >= CELL_CAPTURE_IDLE_PULL_MS;
+    if (file !== null) {
+      sessionId = file.sessionId;
+      projectDir = file.projectDir;
+      // The size is the turn signal the worker can observe (Q-1).
+      if (file.size <= lastSize && !idle && !force) return;
+    } else if (projectDir !== null && sessionId !== null && (idle || force)) {
+      file = { projectDir, sessionId, size: lastSize };
+    } else {
+      return;
+    }
+    await pullOnce(file, budget);
+  };
+
+  /** The pull running now (the loop's or the final one); one at a time, they share state. */
+  let running: Promise<void> | null = null;
+  const track = (work: Promise<void>): Promise<void> => {
+    const tracked: Promise<void> = work.finally(() => {
+      if (running === tracked) running = null;
+    });
+    running = tracked;
+    return tracked;
+  };
+
+  void (async () => {
+    while (!stop.aborted && !r.live.aborted && !stopped) {
+      try {
+        await track(captureOnce(loopSignal(), false));
+      } catch (error) {
+        if (!stop.aborted) {
+          r.step(`cell: checkpoint skipped (error ${causeClass(error)})`);
+        }
+      }
+      await r.deps.sleep(CELL_CAPTURE_POLL_MS, stop);
+    }
+  })();
+
+  return {
+    inflight: () => (running === null ? null : running.catch(() => {})),
+    final: async (signal) => {
+      if (stopped) return;
+      if (running !== null) {
+        r.step("cell: checkpoint final skipped (a pull is still running)");
+        return;
+      }
+      try {
+        await track(captureOnce(signal, true));
+      } catch (error) {
+        r.step(`cell: checkpoint final skipped (error ${causeClass(error)})`);
+      }
+    },
+  };
 }
 
 /** One lease stamp every CELL_SETUP_STAMP_MS until the poll loop takes over (or the run ends). */
@@ -1389,13 +2202,192 @@ const NO_PROVIDER: Pick<
   listByTags: async () => [] as never,
 };
 
-/** Claims the end, then R -> T -> B -> A -> P (cell-teardown.ts). Never throws. */
-async function tearDown(
+/**
+ * Claims the run's end (once). A fenced or conflicted run claims nothing: its
+ * token is retired or the attempt is not ours. Runs before the timeout capture
+ * so only a typed `timeout` triggers it (#743 phase 7b).
+ */
+function claimEnd(
   r: CellRunState,
   thrown: { error: unknown } | null,
+): AbnormalEnd | null {
+  const { st } = r;
+  const { ctx, abnormal } = r.args;
+  if (st.fenced || st.conflict) {
+    abnormal.claimed = true;
+    return null;
+  }
+  const end = claimAbnormalEnd(abnormal, {
+    thrown: thrown ?? undefined,
+    cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
+    starvation: null,
+  });
+  // #743: a run that started without its history says why on its terminal.
+  const startedFresh = r.startedFresh ? wwwStartedFresh(r.startedFresh) : null;
+  return end && startedFresh ? { ...end, detail: { startedFresh } } : end;
+}
+
+/** www accepts `^[a-z0-9-]{1,64}$`; anything else would 400 the whole terminal. */
+export function wwwStartedFresh(reason: string): string | null {
+  const slug = reason
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/, "");
+  return slug === "" ? null : slug;
+}
+
+/** `https://<deployment>/api/cell/git/<owner>/<repo>.git`, the clone's own URL; null if it would not build. */
+function brokerGitUrl(r: CellRunState): string | null {
+  try {
+    const { input } = r.args;
+    const url = cellCloneArgv({
+      brokerHost: r.deployment,
+      repoFullName: input.repoFullName,
+      branch: input.branch,
+    })[0]?.[5];
+    return url ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #743 phase 7b: what a run does BEFORE the teardown's first step (the bearer
+ * revoke), all inside CELL_TIMEOUT_CAPTURE_BUDGET_MS counted from `startedAt`
+ * (the poll loop's return). In order: freeze the agent; stop the capture loop
+ * and wait for an in-flight pull (F2: inside the budget); one final pull; the
+ * WIP salvage. Each step fails open with one class-only log line; whatever
+ * still runs at the deadline is abandoned. The freeze and the salvage run with
+ * the capture gate off too (the box's timeout salvage is on by default);
+ * WORKER_TIMEOUT_SALVAGE=off turns both off. Without `salvage` (any other
+ * unfenced end) only the pull wait and the final pull run. Never throws.
+ */
+async function finalCapture(
+  r: CellRunState,
+  startedAt: number,
+  { salvage: wantSalvage }: { salvage: boolean },
+): Promise<SalvageResult | null> {
+  const { provider, cellId } = r;
+  const left = (): number =>
+    Math.max(0, CELL_TIMEOUT_CAPTURE_BUDGET_MS - (Date.now() - startedAt));
+  /** Fires after `ms` (on the clock the tests drive); never keeps the process alive. */
+  const bounded = (ms: number): { signal: AbortSignal; cancel: () => void } => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    timer.unref?.();
+    return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+  };
+  const budget = bounded(left());
+  const deadline = budget.signal;
+  /** Runs one step unless the budget is spent; abandons it when the budget runs out. */
+  const guarded = async <T>(
+    name: string,
+    work: () => Promise<T>,
+  ): Promise<T | undefined> => {
+    if (deadline.aborted) {
+      r.step(`cell: timeout capture: ${name} skipped (budget spent)`);
+      return undefined;
+    }
+    try {
+      return await raceSignal(work(), deadline);
+    } catch (error) {
+      r.step(
+        deadline.aborted
+          ? `cell: timeout capture: ${name} abandoned (budget spent)`
+          : `cell: timeout capture: ${name} failed (${causeClass(error)})`,
+      );
+      return undefined;
+    }
+  };
+
+  let salvage: SalvageResult | null = null;
+  try {
+    if (provider === null || cellId === null) return null;
+    const salvageOn = wantSalvage && r.args.config.timeoutSalvage !== "off";
+
+    // 1. Freeze: the agent stops writing before anything is read.
+    if (salvageOn) {
+      const frozen = await guarded("freeze", () =>
+        freezeCellAgent({
+          provider,
+          cellId,
+          budgetMs: Math.min(CELL_FREEZE_BUDGET_MS, left()),
+        }),
+      );
+      if (frozen !== undefined) {
+        r.step(`cell: timeout capture: freeze ${frozen ? "ok" : "failed"}`);
+      }
+    }
+
+    // 2 and 3. Stop the loop (already stopped by the finally), wait for an
+    // in-flight pull inside the budget, then one final pull.
+    const capture = r.capture;
+    if (capture !== null) {
+      await guarded("pull wait", async () => {
+        const pending = capture.inflight();
+        if (pending === null) return;
+        const wait = bounded(Math.min(CELL_CAPTURE_POLL_BUDGET_MS, left()));
+        try {
+          await raceSignal(pending, wait.signal);
+        } catch {
+          r.step("cell: timeout capture: in-flight pull abandoned");
+          r.captureAbort.abort();
+          // A short grace for the aborted pull to settle (it never rejects).
+          const grace = bounded(500);
+          await raceSignal(pending, grace.signal).catch(() => {});
+          grace.cancel();
+        } finally {
+          wait.cancel();
+        }
+      });
+      await guarded("final pull", async () => {
+        await capture.final(
+          withTimeout(Math.min(CELL_TIMEOUT_FINAL_FLUSH_MS, left()), deadline),
+        );
+      });
+    }
+
+    // 4. The WIP salvage gets what is left.
+    if (salvageOn) {
+      const url = brokerGitUrl(r);
+      if (url === null) {
+        r.step("cell: timeout capture: salvage skipped (no broker url)");
+      } else {
+        const out = await guarded("salvage", () =>
+          salvageCellWorkBranch({
+            provider,
+            cellId,
+            workBranch: r.args.input.workBranch,
+            brokerGitUrl: url,
+            botLogin: r.args.config.botLogin,
+            runExecutionTimeoutMs: r.args.abnormal.runExecutionTimeoutMs,
+            log: r.step,
+            budgetMs: left(),
+          }),
+        );
+        salvage = out ?? null;
+      }
+    }
+  } catch (error) {
+    r.step(`cell: timeout capture failed (${causeClass(error)})`);
+  } finally {
+    budget.cancel();
+    r.captureAbort.abort();
+  }
+  return salvage;
+}
+
+/** R -> T -> B -> A -> P (cell-teardown.ts), for an end already claimed. Never throws. */
+async function tearDown(
+  r: CellRunState,
+  end: AbnormalEnd | null,
+  salvage: SalvageResult | null,
 ): Promise<void> {
-  const { st, provider, args, deps } = r;
-  const { ctx, wwwOpts, abnormal } = args;
+  const { st, provider, deps } = r;
+  const { wwwOpts, abnormal } = r.args;
   let vaultRevoked = false;
   if (st.fenced) {
     // The fence is a database fact: the vault goes FIRST, before anything
@@ -1411,18 +2403,7 @@ async function tearDown(
     }
     abnormal.claimed = true; // no end: the outer catch posts nothing
   }
-  let end: AbnormalEnd | null = null;
-  if (!st.fenced && !st.conflict) {
-    end = claimAbnormalEnd(abnormal, {
-      thrown: thrown ?? undefined,
-      cancelled: ctx.cancelled || ctx.abortController?.signal.aborted === true,
-      starvation: null,
-    });
-  } else {
-    abnormal.claimed = true;
-  }
   if (st.conflict) deps.marks.mark(r.runId, "tokenGone");
-  const finalEnd = end;
   await teardownCellRun(
     {
       stepKey: r.stepKey,
@@ -1446,10 +2427,11 @@ async function tearDown(
         }),
       provider: provider ?? NO_PROVIDER,
       postAbnormal: async () => {
-        if (finalEnd) {
-          await deps.www.postAbnormal(abnormal, finalEnd, {
+        if (end) {
+          await deps.www.postAbnormal(abnormal, end, {
             wwwOpts,
             log: r.step,
+            ...(salvage ? { salvage } : {}),
           });
         }
       },

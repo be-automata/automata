@@ -7,6 +7,7 @@ import {
   newAbnormalEndState,
   postAbnormalEnd,
   postRunTerminalWithRetry,
+  runSalvageSteps,
   TERMINAL_INFO_MAX_CHARS,
   TERMINAL_POST_TIMEOUT_MS,
   type AbnormalEndInput,
@@ -358,5 +359,45 @@ describe("claimAbnormalEnd / postAbnormalEnd (#437)", () => {
     expect(log).toHaveBeenCalledWith(
       "abnormal end → run-failed-unreported: terminal not posted (no workflowRunId)",
     );
+  });
+});
+
+describe("runSalvageSteps (shared by the box and the cell salvage)", () => {
+  const SHA = "a".repeat(40);
+
+  it("runs the steps in order and pushes one HEAD:<work branch> refspec", async () => {
+    const calls: Array<{ script: string; args: string[] }> = [];
+    const git = vi.fn(async (script: string, args: string[] = []) => {
+      calls.push({ script, args });
+      const staged = script.includes("diff --cached");
+      const revList = script.includes("rev-list");
+      return {
+        exitCode: staged ? 1 : 0,
+        stdout: revList ? `${SHA}\n` : "",
+        timedOut: false,
+        truncated: false,
+      };
+    });
+    const out = await runSalvageSteps({
+      git,
+      workBranch: "automata/task-1",
+      runExecutionTimeoutMs: LIMIT_MS,
+      pushUrl: "https://broker.example/api/cell/git/o/r.git",
+    });
+    expect(out).toEqual({ kind: "pushed", sha: SHA });
+    const verbs = calls.map((c) => c.script);
+    const at = (needle: string) => verbs.findIndex((s) => s.includes(needle));
+    expect(at("check-ref-format")).toBeLessThan(at("symbolic-ref"));
+    expect(at("add -A")).toBeLessThan(at("diff --cached"));
+    expect(at("diff --cached")).toBeLessThan(at("commit"));
+    expect(at("commit")).toBeLessThan(at("rev-list"));
+    expect(at("rev-list")).toBeLessThan(at("git push"));
+    expect(calls[calls.length - 1]).toEqual({
+      script: expect.stringContaining("HEAD:refs/heads/$2"),
+      args: ["https://broker.example/api/cell/git/o/r.git", "automata/task-1"],
+    });
+    expect(calls.find((c) => c.script.includes("commit"))?.args).toEqual([
+      "wip: run timed out at 30m (automata salvage)",
+    ]);
   });
 });

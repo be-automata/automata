@@ -3608,3 +3608,90 @@ export const controlEffects = pgTable(
     index("control_effects_organization_id_index").on(table.organizationId),
   ],
 );
+
+/**
+ * #743: the head pointer of a cell session checkpoint, one row per thread chat.
+ * Blobs live in R2, content-addressed and immutable; only this row moves. The head
+ * (`head_manifest_id`, `head_turn`) and the call index move together in one
+ * conditional UPDATE: a compare-and-set on `version` (model/cell-session-checkpoint.ts).
+ * `thread_chat_id` alone is not unique (the legacy sentinel is shared across threads).
+ */
+export const cellSessionCheckpoint = pgTable(
+  "cell_session_checkpoint",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    threadChatId: text("thread_chat_id").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "cascade",
+    }),
+    sessionId: text("session_id").notNull(),
+    /** sha256 hex of the head manifest. */
+    headManifestId: text("head_manifest_id").notNull(),
+    headTurn: integer("head_turn").notNull(),
+    nativeBytes: integer("native_bytes").notNull(),
+    callIndexSha256: text("call_index_sha256"),
+    /** CAS counter: 1 on insert, +1 on every accepted head move. */
+    version: integer("version").notNull().default(1),
+    lastRunExternalId: text("last_run_external_id").notNull(),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("cell_session_checkpoint_thread_chat_unique").on(
+      table.threadId,
+      table.threadChatId,
+    ),
+  ],
+);
+
+/**
+ * #743: the continuation ledger. Two bounds: UNIQUE(thread_id, ordinal) caps the
+ * hand-offs per thread, UNIQUE(source_run_external_id) makes one timed-out run
+ * hand off at most once however often its terminal is redelivered.
+ */
+export const cellSessionContinuation = pgTable(
+  "cell_session_continuation",
+  {
+    id: text("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => thread.id, { onDelete: "cascade" }),
+    threadChatId: text("thread_chat_id").notNull(),
+    /** 1-based. */
+    ordinal: integer("ordinal").notNull(),
+    sourceRunExternalId: text("source_run_external_id").notNull(),
+    checkpointManifestId: text("checkpoint_manifest_id").notNull(),
+    checkpointTurn: integer("checkpoint_turn").notNull(),
+    /** `dispatched` = the continuation message is queued. */
+    state: text("state")
+      .$type<"claimed" | "dispatched">()
+      .notNull()
+      .default("claimed"),
+    createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { mode: "date", precision: 3 })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("cell_session_continuation_thread_ordinal_unique").on(
+      table.threadId,
+      table.ordinal,
+    ),
+    uniqueIndex("cell_session_continuation_source_run_unique").on(
+      table.sourceRunExternalId,
+    ),
+  ],
+);

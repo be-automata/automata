@@ -203,6 +203,10 @@ describe("agentRunWorkflow registration shape", () => {
   it("registers an onFailure handler (no name — SDK amendment 3)", () => {
     expect(typeof workflowDef.onFailure?.fn).toBe("function");
     expect(workflowDef.onFailure?.name).toBeUndefined();
+    // #743 OQ-4: registered with the 4 minute engine timeout.
+    expect(
+      (workflowDef.onFailure as { executionTimeout?: string }).executionTimeout,
+    ).toBe("4m");
   });
 });
 
@@ -412,10 +416,15 @@ describe("agentRunWorkflow onFailure (#2)", () => {
     // executionTimeout (onFailure is scheduled while the teardown still
     // runs); fails_when=onFailure posts before the live run ends, or a run
     // that never ran here / a review run is delayed; no_claim=the engine's
-    // scheduling itself (simulated with a held run fn), and the 120 s bound.
-    const { _trackLiveRunForTests, ON_FAILURE_EXECUTION_TIMEOUT } =
-      await import("./workflow");
-    expect(ON_FAILURE_EXECUTION_TIMEOUT).toBe("3m");
+    // scheduling itself (simulated with a held run fn), and the real wait.
+    const {
+      _trackLiveRunForTests,
+      ON_FAILURE_EXECUTION_TIMEOUT,
+      ON_FAILURE_TYPED_TERMINAL_WAIT_MS,
+    } = await import("./workflow");
+    // #743 OQ-4: the wait is 150 s and the engine timeout "4m" covers it plus the post.
+    expect(ON_FAILURE_TYPED_TERMINAL_WAIT_MS).toBe(150_000);
+    expect(ON_FAILURE_EXECUTION_TIMEOUT).toBe("4m");
     const order: string[] = [];
     const fetchMock = vi.fn(async () => {
       order.push("post");

@@ -348,12 +348,15 @@ export async function postRunTerminal(
     cause,
     policy,
     info,
+    startedFresh,
   }: {
     runExternalId: string;
     cause: TerminalCause;
     policy?: string;
     /** #437: worker-authored text shown under the error (≤ 300 chars, www-enforced). */
     info?: string;
+    /** #743: why the run's session restore failed and it started without history (≤ 64 chars, www-enforced). */
+    startedFresh?: string;
   },
   /** #437: a FRESH signal for teardown posts — the run's own is already aborted there. */
   signal?: AbortSignal,
@@ -361,6 +364,7 @@ export async function postRunTerminal(
   const detail = {
     ...(policy ? { policy } : {}),
     ...(info ? { info } : {}),
+    ...(startedFresh ? { startedFresh } : {}),
   };
   let res: Response;
   try {

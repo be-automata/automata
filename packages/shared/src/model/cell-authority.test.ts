@@ -12,6 +12,7 @@ import {
   completeEffect,
   deadCellAttempts,
   finishStep,
+  isOpenCellAttempt,
   leaseRefusal,
   markStepDone,
   mintBearer,
@@ -1334,5 +1335,42 @@ describe("#656 PR-E leaseRefusal", () => {
     expect(
       await leaseRefusal({ db, stepKey: `nope-${randomUUID()}`, attempt: 1 }),
     ).toBe("refused");
+  });
+});
+
+describe("#743 F5 isOpenCellAttempt", () => {
+  // card: protects=only the live, unrevoked, unfinished attempt of the step's own thread is open; fails_when=an older, revoked, done, foreign-thread or missing step reads as open; no_claim=the route's other checks
+  it("is true only for the current, unrevoked attempt of an unfinished step on this thread", async () => {
+    const s = await newStep(null, null);
+    const probe = (attempt: number, threadId = s.threadId, key = s.stepKey) =>
+      isOpenCellAttempt({ db, stepKey: key, threadId, attempt });
+
+    expect(await probe(1)).toBe(false);
+    await s.next();
+    expect(await probe(1)).toBe(true);
+    expect(await probe(2)).toBe(false);
+    expect(await probe(1, "another-thread")).toBe(false);
+    expect(await probe(1, s.threadId, `nope-${randomUUID()}`)).toBe(false);
+
+    await s.next();
+    expect(await probe(1)).toBe(false);
+    expect(await probe(2)).toBe(true);
+
+    await revokeAttempt({ db, stepKey: s.stepKey, attempt: 2 });
+    expect(await probe(2)).toBe(false);
+    await s.next();
+    expect(await probe(3)).toBe(true);
+
+    const d = await newStep(null, null);
+    await d.next();
+    await finishStep({ db, ...d.owner });
+    expect(
+      await isOpenCellAttempt({
+        db,
+        stepKey: d.stepKey,
+        threadId: d.threadId,
+        attempt: 1,
+      }),
+    ).toBe(false);
   });
 });

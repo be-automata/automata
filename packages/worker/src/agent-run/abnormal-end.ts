@@ -160,6 +160,7 @@ export async function postRunTerminalWithRetry({
   runExternalId,
   cause,
   info,
+  detail,
   log,
   post = postRunTerminal,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -168,6 +169,7 @@ export async function postRunTerminalWithRetry({
   runExternalId: string;
   cause: TerminalCause;
   info?: string;
+  detail?: TerminalDetail;
   log: (line: string) => void;
   post?: typeof postRunTerminal;
   sleep?: (ms: number) => Promise<void>;
@@ -177,7 +179,7 @@ export async function postRunTerminalWithRetry({
     try {
       result = await post(
         wwwOpts,
-        { runExternalId, cause, ...(info ? { info } : {}) },
+        { runExternalId, cause, ...(info ? { info } : {}), ...detail },
         AbortSignal.timeout(TERMINAL_POST_TIMEOUT_MS),
       );
     } catch {
@@ -225,9 +227,17 @@ export function newAbnormalEndState(o: {
   return { ...o, daemonStarted: false, claimed: false };
 }
 
+/** The optional fields of the run-terminal body's `detail`, beyond the cause's own info. */
+export interface TerminalDetail {
+  /** #743: why the run's session restore failed (≤ 64 chars, www-enforced). */
+  startedFresh?: string;
+}
+
 /** A claimed abnormal end: its cause, and what it was built from. */
 export interface AbnormalEnd extends RunEnd {
   cause: TerminalCause;
+  /** Extra terminal detail the post carries (#743: why a restore started fresh). */
+  detail?: TerminalDetail;
 }
 
 /**
@@ -288,6 +298,7 @@ export async function postAbnormalEnd(
       runExecutionTimeoutMs: state.runExecutionTimeoutMs,
       salvage,
     }),
+    ...(end.detail ? { detail: end.detail } : {}),
     log,
     ...(post ? { post } : {}),
     ...(sleep ? { sleep } : {}),
@@ -412,7 +423,105 @@ export function isPossibleSecretFile(filePath: string): boolean {
 }
 
 /** A salvage step that did not succeed; its message is constant text. */
-class SalvageStepFailed extends Error {}
+export class SalvageStepFailed extends Error {}
+
+/** What the shared salvage steps ended in; a step that failed throws SalvageStepFailed. */
+export type SalvageStepsOutcome =
+  | { kind: "pushed"; sha: string }
+  | { kind: "nothing" }
+  | { kind: "skipped"; reason: string };
+
+export interface SalvageStepsArgs {
+  /**
+   * One git script in the run's checkout, as the run's user. It must throw
+   * SalvageStepFailed when the salvage's clock ran out.
+   */
+  git: (script: string, scriptArgs?: string[]) => Promise<AgentCommandResult>;
+  workBranch: string;
+  runExecutionTimeoutMs: number;
+  /** Where HEAD is pushed: the box's github.com URL (insteadOf) or the cell's broker URL. */
+  pushUrl: string;
+}
+
+/**
+ * The step sequence both the box and the cell salvage run: config guard, ref
+ * format, HEAD on the work branch, no merge/rebase, no submodules, stale
+ * locks, `add -A`, commit, unpushed check, no secret file names, then ONE
+ * refspec, `HEAD:refs/heads/<workBranch>`, never forced.
+ */
+export async function runSalvageSteps({
+  git,
+  workBranch,
+  runExecutionTimeoutMs,
+  pushUrl,
+}: SalvageStepsArgs): Promise<SalvageStepsOutcome> {
+  const ok = async (verb: string, script: string, scriptArgs?: string[]) => {
+    const r = await git(script, scriptArgs);
+    if (r.exitCode !== 0) {
+      throw new SalvageStepFailed(
+        `${verb} failed (exit ${r.exitCode ?? "killed"})`,
+      );
+    }
+    return r;
+  };
+
+  const guard = await checkLocalGitConfig((script) => git(script));
+  if (guard === "unsafe")
+    return { kind: "skipped", reason: "unsafe local git config" };
+  if (guard === "error") throw new SalvageStepFailed("config guard failed");
+  await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
+  const headState = await git(HEAD_STATE_SCRIPT, [workBranch]);
+  if (headState.exitCode === EXIT_HEAD_ELSEWHERE) {
+    return { kind: "skipped", reason: "HEAD not on work branch" };
+  }
+  if (headState.exitCode === EXIT_OPERATION_IN_PROGRESS) {
+    return { kind: "skipped", reason: "merge or rebase in progress" };
+  }
+  if (headState.exitCode !== 0) {
+    throw new SalvageStepFailed(
+      `head check failed (exit ${headState.exitCode ?? "killed"})`,
+    );
+  }
+  const submodules = await git(SUBMODULE_SCRIPT);
+  // Its own reason: a repo that legitimately uses submodules is not one
+  // whose config was tampered with.
+  if (submodules.exitCode === EXIT_SUBMODULES)
+    return { kind: "skipped", reason: "submodules" };
+  if (submodules.exitCode !== 0) {
+    throw new SalvageStepFailed(
+      `submodule check failed (exit ${submodules.exitCode ?? "killed"})`,
+    );
+  }
+  await ok("stale lock cleanup", STALE_LOCKS_SCRIPT, [workBranch]);
+  await ok("add", ADD_SCRIPT);
+  const staged = await git(STAGED_SCRIPT);
+  if (staged.exitCode === 1) {
+    await ok("commit", COMMIT_SCRIPT, [
+      salvageCommitMessage(runExecutionTimeoutMs),
+    ]);
+  } else if (staged.exitCode !== 0) {
+    throw new SalvageStepFailed(
+      `staged check failed (exit ${staged.exitCode ?? "killed"})`,
+    );
+  }
+  const sha = (await ok("rev-list", UNPUSHED_HEAD_SCRIPT)).stdout.trim();
+  if (sha === "") return { kind: "nothing" };
+  if (!SHA1_HEX.test(sha)) {
+    throw new SalvageStepFailed("rev-list output unreadable");
+  }
+  // The whole range the push would send, after the salvage's own commit: a
+  // refused salvage leaves that commit local, and the workdir is wiped.
+  // Never logs the path.
+  const names = await ok("unpushed list", UNPUSHED_ADDED_SCRIPT);
+  if (names.truncated) {
+    throw new SalvageStepFailed("unpushed list unreadable");
+  }
+  if (names.stdout.split("\0").some(isPossibleSecretFile)) {
+    return { kind: "skipped", reason: "possible secret file" };
+  }
+  await ok("push", PUSH_SCRIPT, [pushUrl, workBranch]);
+  return { kind: "pushed", sha };
+}
 
 export interface SalvageWorkBranchArgs {
   /** The claimed cause: only `timeout` is salvaged; any other is silent. */
@@ -591,78 +700,20 @@ export async function salvageWorkBranch(
       }
       return r;
     };
-    const ok = async (verb: string, script: string, scriptArgs?: string[]) => {
-      const r = await git(script, scriptArgs);
-      if (r.exitCode !== 0) {
-        throw new SalvageStepFailed(
-          `${verb} failed (exit ${r.exitCode ?? "killed"})`,
-        );
-      }
-      return r;
-    };
-
-    const guard = await checkLocalGitConfig((script) => git(script));
-    if (guard === "unsafe") return skipped("unsafe local git config");
-    if (guard === "error") throw new SalvageStepFailed("config guard failed");
-    await ok("work branch check", REF_FORMAT_SCRIPT, [workBranch]);
-    const headState = await git(HEAD_STATE_SCRIPT, [workBranch]);
-    if (headState.exitCode === EXIT_HEAD_ELSEWHERE) {
-      return skipped("HEAD not on work branch");
-    }
-    if (headState.exitCode === EXIT_OPERATION_IN_PROGRESS) {
-      return skipped("merge or rebase in progress");
-    }
-    if (headState.exitCode !== 0) {
-      throw new SalvageStepFailed(
-        `head check failed (exit ${headState.exitCode ?? "killed"})`,
-      );
-    }
-    const submodules = await git(SUBMODULE_SCRIPT);
-    // Its own reason: a repo that legitimately uses submodules is not one
-    // whose config was tampered with.
-    if (submodules.exitCode === EXIT_SUBMODULES) return skipped("submodules");
-    if (submodules.exitCode !== 0) {
-      throw new SalvageStepFailed(
-        `submodule check failed (exit ${submodules.exitCode ?? "killed"})`,
-      );
-    }
-    await ok("stale lock cleanup", STALE_LOCKS_SCRIPT, [workBranch]);
-    await ok("add", ADD_SCRIPT);
-    const staged = await git(STAGED_SCRIPT);
-    if (staged.exitCode === 1) {
-      await ok("commit", COMMIT_SCRIPT, [
-        salvageCommitMessage(args.runExecutionTimeoutMs),
-      ]);
-    } else if (staged.exitCode !== 0) {
-      throw new SalvageStepFailed(
-        `staged check failed (exit ${staged.exitCode ?? "killed"})`,
-      );
-    }
-    const sha = (await ok("rev-list", UNPUSHED_HEAD_SCRIPT)).stdout.trim();
-    if (sha === "") return done("nothing to save");
-    if (!SHA1_HEX.test(sha)) {
-      throw new SalvageStepFailed("rev-list output unreadable");
-    }
-    // The whole range the push would send, after the salvage's own commit: a
-    // refused salvage leaves that commit local, and the workdir is wiped.
-    // Never logs the path.
-    const names = await ok("unpushed list", UNPUSHED_ADDED_SCRIPT);
-    if (names.truncated) {
-      throw new SalvageStepFailed("unpushed list unreadable");
-    }
-    if (names.stdout.split("\0").some(isPossibleSecretFile)) {
-      return skipped("possible secret file");
-    }
-    // The run's own repository, by URL: the broker's insteadOf rewrite
-    // carries it to GitHub, so whatever the agent set remote.origin.url to
-    // decides nothing.
-    await ok("push", PUSH_SCRIPT, [
-      `https://github.com/${args.repoFullName}.git`,
+    const outcome = await runSalvageSteps({
+      git,
       workBranch,
-    ]);
-    return done(`pushed ${sha.slice(0, 8)} to ${workBranch}`, {
+      runExecutionTimeoutMs: args.runExecutionTimeoutMs,
+      // The run's own repository, by URL: the broker's insteadOf rewrite
+      // carries it to GitHub, so whatever the agent set remote.origin.url to
+      // decides nothing.
+      pushUrl: `https://github.com/${args.repoFullName}.git`,
+    });
+    if (outcome.kind === "skipped") return skipped(outcome.reason);
+    if (outcome.kind === "nothing") return done("nothing to save");
+    return done(`pushed ${outcome.sha.slice(0, 8)} to ${workBranch}`, {
       branch: workBranch,
-      sha,
+      sha: outcome.sha,
     });
   } catch (err) {
     const reason =

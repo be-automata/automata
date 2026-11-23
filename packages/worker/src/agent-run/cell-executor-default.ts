@@ -11,6 +11,10 @@ import {
   fetchCellPlan,
   postCellReport,
   postCellRevoke,
+  postCheckpointBlob,
+  postCheckpointCommit,
+  postCheckpointReadBlob,
+  postCheckpointReadHead,
 } from "./cell-www-client";
 import { runEndMarks } from "./run-end-marks";
 import {
@@ -58,6 +62,20 @@ export const cellExecutor = createCellExecutor({
         warn: (msg) => console.warn(`[cell] ${msg}`),
       },
     }),
+  // #743: the owner's cellSessionContinuation flag rides in the pulled message
+  // (www resolves it per user). Off (or absent) = no capture, no restore.
+  sessionContinuation: (pulled) =>
+    pulled.featureFlags?.cellSessionContinuation === true,
+  checkpoint: {
+    putBlob: (opts, sha256, bytes, signal) =>
+      postCheckpointBlob(opts, sha256, bytes, signal),
+    commit: (opts, manifest, expectedVersion, signal) =>
+      postCheckpointCommit(opts, manifest, expectedVersion, signal),
+    readHead: (opts, sessionId, signal) =>
+      postCheckpointReadHead(opts, sessionId, signal),
+    readBlob: (opts, sha256, signal) =>
+      postCheckpointReadBlob(opts, sha256, signal),
+  },
   sleep: (ms, signal) => abortableSleep(ms, signal),
   now: () => Date.now(),
   randomId: () => randomBytes(18).toString("base64url"),

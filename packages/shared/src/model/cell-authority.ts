@@ -403,6 +403,43 @@ export async function leaseRefusal({
     : "refused";
 }
 
+/**
+ * Whether `attempt` is the live attempt of this thread's cell step (#743 F5): the
+ * row exists, belongs to `threadId`, is not done, `attempt` is its current
+ * attempt, and that attempt is not revoked. A box run's key has no row, so it is
+ * never open. One read of `cell_step` by key.
+ */
+export async function isOpenCellAttempt({
+  db,
+  stepKey,
+  threadId,
+  attempt,
+}: {
+  db: DB;
+  stepKey: string;
+  threadId: string;
+  attempt: number;
+}): Promise<boolean> {
+  assertPositiveInt("attempt", attempt);
+  const [row] = await db
+    .select({
+      threadId: cellStep.threadId,
+      currentAttempt: cellStep.currentAttempt,
+      revokedThrough: cellStep.revokedThrough,
+      doneAt: cellStep.doneAt,
+    })
+    .from(cellStep)
+    .where(eq(cellStep.stepKey, stepKey))
+    .limit(1);
+  return (
+    row !== undefined &&
+    row.threadId === threadId &&
+    row.doneAt === null &&
+    row.currentAttempt === attempt &&
+    (row.revokedThrough === null || row.revokedThrough < attempt)
+  );
+}
+
 /** Placeholder timeout of a done tombstone: it is never minted against. */
 const TOMBSTONE_TIMEOUT_MS = 1;
 

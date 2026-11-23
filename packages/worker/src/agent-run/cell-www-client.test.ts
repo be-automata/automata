@@ -8,6 +8,10 @@ import {
   fetchCellPlan,
   postCellReport,
   postCellRevoke,
+  postCheckpointBlob,
+  postCheckpointCommit,
+  postCheckpointReadBlob,
+  postCheckpointReadHead,
   type CellPlanResult,
 } from "./cell-www-client";
 import type { WwwClientOpts } from "./www-client";
@@ -480,3 +484,134 @@ describe("postCellRevoke / postCellReport", () => {
 // A type-level check that the result union is exhaustive for callers.
 export const _exhaustive = (r: CellPlanResult): string =>
   r.ok ? "ok" : r.code;
+
+describe("the checkpoint route calls (#743)", () => {
+  const cellOpts: WwwClientOpts = {
+    ...opts,
+    runExternalId: "run-1",
+    cellAttempt: 3,
+  };
+  const SHA = "ab".repeat(32);
+
+  // card: protects=#743 a chunk upload names the thread, the cell attempt and the run, and carries the bytes as base64; fails_when=the attempt or run id is dropped (the route refuses it) or the body is not base64; no_claim=the route's own checks
+  it("put-blob sends the attempt, the run id and base64 bytes", async () => {
+    const s = server([res(200, { created: true })]);
+    const out = await postCheckpointBlob(
+      cellOpts,
+      SHA,
+      new TextEncoder().encode("hi"),
+      undefined,
+      { fetch: s.fetchImpl as never },
+    );
+    expect(out).toEqual({ ok: true, created: true });
+    expect(s.calls[0]?.url).toBe(
+      "https://www.example.com/api/daemon/cell-checkpoint",
+    );
+    expect(s.calls[0]?.body).toMatchObject({
+      action: "put-blob",
+      threadId: "thread-1",
+      threadChatId: "chat-1",
+      attempt: 3,
+      runExternalId: "run-1",
+      sha256: SHA,
+      base64: Buffer.from("hi").toString("base64"),
+    });
+  });
+
+  // card: protects=#743 a lost head CAS is a typed answer with the head's version, apart from a store failure; fails_when=head_moved is reported as a generic failure; no_claim=a retry after it
+  it("commit returns the version, and head_moved with the current one", async () => {
+    const ok = server([res(200, { version: 4 })]);
+    expect(
+      await postCheckpointCommit(cellOpts, { id: "m" } as never, 3, undefined, {
+        fetch: ok.fetchImpl as never,
+      }),
+    ).toEqual({ ok: true, version: 4 });
+    expect(ok.calls[0]?.body).toMatchObject({
+      action: "commit",
+      expectedVersion: 3,
+    });
+    const moved = server([res(409, { error: "head_moved", version: 9 })]);
+    expect(
+      await postCheckpointCommit(cellOpts, { id: "m" } as never, 3, undefined, {
+        fetch: moved.fetchImpl as never,
+      }),
+    ).toEqual({ ok: false, code: "head_moved", status: 409, version: 9 });
+    const bad = server([res(200, {})]);
+    expect(
+      await postCheckpointCommit(cellOpts, { id: "m" } as never, 3, undefined, {
+        fetch: bad.fetchImpl as never,
+      }),
+    ).toMatchObject({ ok: false, code: "bad_response" });
+  });
+
+  // card: protects=#743 a transport error or a 5xx never throws into the capture loop and carries no body text; fails_when=a call throws or echoes the response; no_claim=retries
+  it("never throws: a dropped connection is transport, a 403 is its code", async () => {
+    const down = server([new Error("ECONNRESET secret-text")]);
+    expect(
+      await postCheckpointBlob(cellOpts, SHA, new Uint8Array(1), undefined, {
+        fetch: down.fetchImpl as never,
+      }),
+    ).toEqual({ ok: false, code: "transport", status: 0 });
+    const forbidden = server([res(403, { error: "no_open_cell_step" })]);
+    expect(
+      await postCheckpointReadHead(cellOpts, "sid", undefined, {
+        fetch: forbidden.fetchImpl as never,
+      }),
+    ).toEqual({ ok: false, code: "no_open_cell_step", status: 403 });
+  });
+
+  // card: protects=#743 read-head answers are typed and a malformed one is bad_response; fails_when=a found head without a manifest is trusted; no_claim=manifest re-verification (the route does it)
+  it("read-head parses found, none and other_session", async () => {
+    const found = server([
+      res(200, { found: true, manifest: { id: "m" }, version: 2 }),
+    ]);
+    expect(
+      await postCheckpointReadHead(cellOpts, "sid", undefined, {
+        fetch: found.fetchImpl as never,
+      }),
+    ).toEqual({
+      ok: true,
+      head: { found: true, manifest: { id: "m" }, version: 2 },
+    });
+    expect(found.calls[0]?.body).toMatchObject({
+      action: "read-head",
+      sessionId: "sid",
+    });
+    const other = server([res(200, { found: false, reason: "other_session" })]);
+    expect(
+      await postCheckpointReadHead(cellOpts, "sid", undefined, {
+        fetch: other.fetchImpl as never,
+      }),
+    ).toEqual({ ok: true, head: { found: false, reason: "other_session" } });
+    const none = server([res(200, { found: false })]);
+    expect(
+      await postCheckpointReadHead(cellOpts, "sid", undefined, {
+        fetch: none.fetchImpl as never,
+      }),
+    ).toEqual({ ok: true, head: { found: false, reason: "none" } });
+    const bad = server([res(200, { found: true })]);
+    expect(
+      await postCheckpointReadHead(cellOpts, "sid", undefined, {
+        fetch: bad.fetchImpl as never,
+      }),
+    ).toMatchObject({ ok: false, code: "bad_response" });
+  });
+
+  // card: protects=#743 read-blob returns the decoded bytes and sends no run id; fails_when=the base64 is returned as text or a run id is sent; no_claim=hash verification (the restore does it)
+  it("read-blob decodes the bytes and carries no run id", async () => {
+    const s = server([
+      res(200, { base64: Buffer.from("abc").toString("base64") }),
+    ]);
+    const out = await postCheckpointReadBlob(cellOpts, SHA, undefined, {
+      fetch: s.fetchImpl as never,
+    });
+    expect(out.ok && new TextDecoder().decode(out.bytes)).toBe("abc");
+    expect(s.calls[0]?.body).not.toHaveProperty("runExternalId");
+    const bad = server([res(200, {})]);
+    expect(
+      await postCheckpointReadBlob(cellOpts, SHA, undefined, {
+        fetch: bad.fetchImpl as never,
+      }),
+    ).toMatchObject({ ok: false, code: "bad_response" });
+  });
+});
