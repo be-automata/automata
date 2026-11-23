@@ -14,6 +14,7 @@ import {
   createTestThread,
   createTestUser,
 } from "../test-helpers";
+import { withSelfHealTx } from "../self-heal-tx";
 import { createChildRun, ensureRootRun } from "./agent-run";
 import {
   insertMessage,
@@ -23,6 +24,12 @@ import {
   type ApplyMessage,
 } from "./messages";
 import { AGENT_MESSAGE_RETENTION_MS, pruneAgentMessages } from "./retention";
+
+// Passthrough spy: AC9 checks the timeouts each batch transaction asks for.
+vi.mock("../self-heal-tx", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../self-heal-tx")>();
+  return { ...actual, withSelfHealTx: vi.fn(actual.withSelfHealTx) };
+});
 
 const db = createDb(env.DATABASE_URL!);
 
@@ -286,6 +293,9 @@ describe("pruneAgentMessages", () => {
   });
 
   it("AC8 deletes at most batch x maxBatches per pass, each batch commits, a second call continues", async () => {
+    // The prune is table-wide: drain rows other tests left prunable so they
+    // cannot take this test's batch slots.
+    await pruneAgentMessages({ db, now: NOW });
     const organizationId = await createTestOrg({ db });
     const senderGone = await orgThread(organizationId);
     const target = await orgThread(organizationId);
@@ -417,10 +427,20 @@ describe("pruneAgentMessages", () => {
     expect(await present([id])).toEqual([]);
   });
 
-  it("AC9 sets its timeouts per transaction (SET LOCAL): the pooled session is unchanged afterwards", async () => {
-    // The in-transaction values are pinned by self-heal-tx.test.ts:24-35
-    // ("sets statement and lock timeouts inside, not outside").
+  it("AC9 asks every batch transaction for 10 s / 1 s (SET LOCAL): the pooled session is unchanged afterwards", async () => {
+    // That withSelfHealTx applies them inside the transaction only is pinned by
+    // self-heal-tx.test.ts:24-35 ("sets statement and lock timeouts inside, not outside").
+    const spy = vi.mocked(withSelfHealTx);
+    spy.mockClear();
     await pruneAgentMessages({ db, now: NOW });
+    // At least one batch per pass, even when nothing is prunable.
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of spy.mock.calls) {
+      expect(call[2]).toEqual({
+        statementTimeoutMs: 10_000,
+        lockTimeoutMs: 1_000,
+      });
+    }
     expect(await show("statement_timeout")).not.toBe("10s");
     expect(await show("lock_timeout")).not.toBe("1s");
   });
