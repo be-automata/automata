@@ -910,6 +910,50 @@ describe("dead-lettering (#758)", () => {
     await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
   });
 
+  it("a body too large for the redactor still counts the attempt, rejects with the original and stores no body", async () => {
+    // Value: protects=a >40K body that fails apply is counted (it can still be dead-lettered); fails_when=the redactor's RegExp throws "too large" and rolls the count back;
+    // why_new=every other body is short; seam=none; no_claim=bodies over the database's own limits
+    const { rootId, taskId } = await tree();
+    const body = "B".repeat(40_000);
+    const id = await seedOne(rootId, taskId, "huge-body", body);
+    const thrown = new Error(`rejected ${body}`);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("Error: <unrecordable>");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
+  it("an Error with a non-string name is recorded under its type, and the attempt counts", async () => {
+    // Value: protects=a Symbol (non-string) error.name never throws while building last_error; fails_when=errorNameOf returns the raw name and the template literal throws;
+    // why_new=the getter test throws inside the getter, not on coercion; seam=none; no_claim=log line contents
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const thrown = new Error("odd name");
+    Object.defineProperty(thrown, "name", { value: Symbol("odd") });
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("object: odd name");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
   it("a thrown non-Error value is stored as '<type>: <value>' with the body redacted", async () => {
     // Value: protects=last_error for a thrown string is "string: <text>", body redacted; fails_when=the String(error) branch reads .message (stores "undefined") or skips redaction;
     // why_new=every other failure test throws an Error or an unprintable object; seam=none; no_claim=the 500 cap or NUL handling

@@ -43,10 +43,14 @@ const deliverable = and(
   isNull(agentMessages.deadLetteredAt),
 );
 
-/** The error's name for logs; a throwing getter must not turn a log line into a failure. */
+/**
+ * The error's name for logs, always a string: a throwing getter or a non-string
+ * name (a Symbol cannot be put in a template) must not turn a log line into a failure.
+ */
 function errorNameOf(error: unknown): string {
   try {
-    return error instanceof Error ? error.name : typeof error;
+    const name: unknown = error instanceof Error ? error.name : undefined;
+    return typeof name === "string" ? name : typeof error;
   } catch {
     return "<unprintable>";
   }
@@ -212,7 +216,7 @@ function recordedErrorOf(error: unknown): unknown {
  * driver error under a drizzle wrapper; `code` is its SQLSTATE or system code),
  * the message body redacted (and any secret pattern), truncated to 500 units, then
  * sanitized (no NUL bytes). Truncating before sanitizing never leaves a lone
- * surrogate.
+ * surrogate. A body too large to redact stores `"<name>: <unrecordable>"`.
  */
 function buildLastError(thrown: unknown, body: string): string {
   const error = recordedErrorOf(thrown);
@@ -228,10 +232,19 @@ function buildLastError(thrown: unknown, body: string): string {
     // must never turn the attempt count into a second failure.
     message = "<unprintable>";
   }
-  const text = `${errorNameOf(error)}${code}: ${message}`;
-  // minLength 1: any non-empty body is redacted (the shared default skips values under 4).
-  const redact = createValueRedactor(body.length > 0 ? [body] : [], 1);
-  return sanitizeForJson(redact(text).slice(0, LAST_ERROR_MAX_LENGTH));
+  const head = `${errorNameOf(error)}${code}`;
+  let redacted: string;
+  try {
+    // minLength 1: any non-empty body is redacted (the shared default skips values under 4).
+    const redact = createValueRedactor(body.length > 0 ? [body] : [], 1);
+    redacted = redact(`${head}: ${message}`);
+  } catch {
+    // The redactor builds one RegExp from the body, which V8 refuses for a body of
+    // about 32K characters: store the name only, never the unredacted message, so
+    // the attempt is still counted.
+    redacted = `${head}: <unrecordable>`;
+  }
+  return sanitizeForJson(redacted.slice(0, LAST_ERROR_MAX_LENGTH));
 }
 
 type ReceiveOutcome =
