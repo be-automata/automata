@@ -56,11 +56,8 @@ const DEFAULT_LOGGER: BusLogger = {
  * stored id with `duplicate: true`; a retry whose `(to, body)` differ is a caller
  * bug and returns `{ conflict: true }`.
  *
- * Callers MUST authorize the sender (`authorizeSend`) before calling this: the
- * retention rule in `retention.ts` assumes a terminal or deleted sender can never
- * insert. Dedup holds for the sender's active life plus at least
- * `AGENT_MESSAGE_RETENTION_MS` (R) after it last ended; prune lag only makes the
- * window longer. A key replayed after a resume past R counts as a new message.
+ * Callers MUST authorize the sender first; dedup holds for the sender's active
+ * life plus at least R (see `pruneAgentMessages` in agent-bus/retention.ts).
  */
 export async function insertMessage({
   db,
@@ -111,11 +108,8 @@ export async function insertMessage({
  * ended is refused even though the first send committed (the committed row is
  * still delivered by `receiveFor` / the sweeper).
  *
- * Idempotency window: the authorization runs before `insertMessage`, so a
- * terminal or deleted sender writes nothing, which is the premise of the
- * retention rule in `retention.ts`. A key is deduplicated for the sender's active
- * life plus at least `AGENT_MESSAGE_RETENTION_MS` (R) after it last ended; prune
- * lag only makes the window longer.
+ * Authorization runs before the insert, so a terminal or deleted sender writes
+ * nothing; the dedup window is in `pruneAgentMessages` (agent-bus/retention.ts).
  */
 export async function sendMessage({
   db,

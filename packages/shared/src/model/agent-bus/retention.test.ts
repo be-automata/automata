@@ -1,5 +1,5 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
 import { createDb } from "../../db";
@@ -33,6 +33,9 @@ const NOW = new Date();
 const ago = (ms: number) => new Date(NOW.getTime() - ms);
 
 const noopApply: ApplyMessage = async () => {};
+
+/** Small batches, so a pass needs several to drain. */
+const SMALL = { batch: 2, maxBatches: 2 };
 
 async function orgThread(
   organizationId: string,
@@ -110,7 +113,14 @@ async function backdateMessages(ids: number[], ms: number): Promise<void> {
  */
 async function setSender(
   threadId: string,
-  state: { terminal: boolean; lastWriteMs: number },
+  state: {
+    terminal: boolean;
+    lastWriteMs: number;
+    /** `thread_chat.updated_at` offset (default: `lastWriteMs`). */
+    chatWriteMs?: number;
+    /** A terminal status held only on the chat row. */
+    chatStatus?: "complete";
+  },
 ): Promise<void> {
   await db
     .update(thread)
@@ -121,8 +131,42 @@ async function setSender(
     .where(eq(thread.id, threadId));
   await db
     .update(threadChat)
-    .set({ updatedAt: ago(state.lastWriteMs) })
+    .set({
+      updatedAt: ago(state.chatWriteMs ?? state.lastWriteMs),
+      ...(state.chatStatus ? { status: state.chatStatus } : {}),
+    })
     .where(eq(threadChat.threadId, threadId));
+}
+
+/** A thread with `thread_chat` rows, in its own org. */
+async function chatThread(): Promise<string> {
+  const organizationId = await createTestOrg({ db });
+  const { user } = await createTestUser({ db });
+  const { threadId } = await createTestThread({
+    db,
+    userId: user.id,
+    enableThreadChatCreation: true,
+    overrides: { organizationId },
+  });
+  return threadId;
+}
+
+/** A consumed message to `to` from a sender whose thread is then deleted, backdated past R. */
+async function consumedFromGoneSender(to: string, key: string) {
+  const gone = await orgThread(await createTestOrg({ db }));
+  const id = await insert(gone, to, key);
+  await receiveFor({ db, toRun: to, apply: noopApply });
+  await backdateMessages([id], R + DAY);
+  await db.delete(thread).where(eq(thread.id, gone));
+  return id;
+}
+
+/** The value of `SHOW <name>` on the pooled session. */
+async function show(name: "statement_timeout" | "lock_timeout") {
+  const rows = await db.execute(sql.raw(`SHOW ${name}`));
+  return Object.values(
+    (rows as unknown as Record<string, unknown>[])[0] ?? {},
+  )[0];
 }
 
 async function present(ids: number[]): Promise<number[]> {
@@ -200,15 +244,9 @@ describe("pruneAgentMessages", () => {
   });
 
   it("AC6 deletes a consumed row older than R whose sender thread no longer exists", async () => {
-    const { rootId, taskId } = await tree();
-    const gone = await orgThread(await createTestOrg({ db }));
-    const id = await insert(gone, taskId, "ac6");
-    await receiveFor({ db, toRun: taskId, apply: noopApply });
-    await backdateMessages([id], R + DAY);
+    const { taskId } = await tree();
+    const id = await consumedFromGoneSender(taskId, "ac6");
     expect(await appliedPresent([id])).toBe(1);
-    await db.delete(thread).where(eq(thread.id, gone));
-    // The live parent is irrelevant: only the sender decides.
-    await setSender(rootId, { terminal: false, lastWriteMs: 0 });
 
     await pruneAgentMessages({ db, now: NOW });
     expect(await present([id])).toEqual([]);
@@ -221,8 +259,6 @@ describe("pruneAgentMessages", () => {
     const id = await insert(rootId, gone, "ac7");
     await db.insert(agentApplied).values({ msgId: id, run: gone });
     await backdateMessages([id], R + DAY);
-    // A sender that is live must not matter for an orphan.
-    await setSender(rootId, { terminal: false, lastWriteMs: 0 });
 
     const res = await pruneAgentMessages({ db, now: NOW });
     expect(res.orphans).toBeGreaterThanOrEqual(1);
@@ -235,7 +271,6 @@ describe("pruneAgentMessages", () => {
     const target = await orgThread(await createTestOrg({ db }));
     const id = await insert(rootId, target, "ac7-f2");
     await backdateMessages([id], R + DAY);
-    await setSender(rootId, { terminal: false, lastWriteMs: 0 });
 
     await pruneAgentMessages({ db, now: NOW });
     expect(await present([id])).toEqual([id]);
@@ -261,39 +296,118 @@ describe("pruneAgentMessages", () => {
     await backdateMessages([...consumed, ...orphans], R + DAY);
     await db.delete(thread).where(eq(thread.id, senderGone));
 
-    const first = await pruneAgentMessages({
-      db,
-      now: NOW,
-      batch: 2,
-      maxBatches: 2,
-    });
-    expect(first).toEqual({ messages: 4, applied: 4, orphans: 4 });
-    expect(await present([...consumed, ...orphans])).toHaveLength(2);
+    const first = await pruneAgentMessages({ db, now: NOW, ...SMALL });
+    expect(first.messages).toBeLessThanOrEqual(2 * 2);
+    expect(first.orphans).toBeLessThanOrEqual(2 * 2);
+    expect(first.applied).toBeLessThanOrEqual(2 * 2 * 2);
+    // Own ids only: the table may hold other tests' rows.
+    expect(await present(consumed)).toHaveLength(1);
+    expect(await present(orphans)).toHaveLength(1);
 
-    const second = await pruneAgentMessages({
-      db,
-      now: NOW,
-      batch: 2,
-      maxBatches: 2,
-    });
-    expect(second).toEqual({ messages: 1, applied: 1, orphans: 1 });
+    const second = await pruneAgentMessages({ db, now: NOW, ...SMALL });
+    expect(second.messages).toBeLessThanOrEqual(2 * 2);
+    expect(second.orphans).toBeLessThanOrEqual(2 * 2);
     expect(await present([...consumed, ...orphans])).toEqual([]);
   });
 
-  it("AC8 starts no batch once the wall-clock budget is spent", async () => {
-    const { rootId, taskId } = await tree();
-    const gone = await orgThread(await createTestOrg({ db }));
-    const id = await insert(gone, taskId, "budget");
+  it("orphan pass keeps an unconsumed row whose target is gone but created_at is within R", async () => {
+    const { rootId } = await tree();
+    const id = await insert(rootId, `deleted-${rootId}`, "orphan-young");
+    await backdateMessages([id], R - DAY);
+
+    await pruneAgentMessages({ db, now: NOW });
+    expect(await present([id])).toEqual([id]);
+  });
+
+  it("chat mode: keeps a terminal sender whose thread row is idle past R but a thread_chat row was written within R", async () => {
+    const { taskId } = await tree();
+    const sender = await chatThread();
+    const id = await insert(sender, taskId, "chat-recent");
     await receiveFor({ db, toRun: taskId, apply: noopApply });
     await backdateMessages([id], R + DAY);
-    await db.delete(thread).where(eq(thread.id, gone));
-    await setSender(rootId, { terminal: false, lastWriteMs: 0 });
-
-    expect(await pruneAgentMessages({ db, now: NOW, budgetMs: 0 })).toEqual({
-      messages: 0,
-      applied: 0,
-      orphans: 0,
+    await setSender(sender, {
+      terminal: true,
+      lastWriteMs: R + DAY,
+      chatWriteMs: R - DAY,
     });
+
+    await pruneAgentMessages({ db, now: NOW });
+    expect(await present([id])).toEqual([id]);
+  });
+
+  it("chat mode: a terminal status only on the chat row, everything idle past R, is pruned", async () => {
+    const { taskId } = await tree();
+    const sender = await chatThread();
+    const id = await insert(sender, taskId, "chat-terminal");
+    await receiveFor({ db, toRun: taskId, apply: noopApply });
+    await backdateMessages([id], R + DAY);
+    await setSender(sender, {
+      terminal: false,
+      lastWriteMs: R + DAY,
+      chatStatus: "complete",
+    });
+
+    await pruneAgentMessages({ db, now: NOW });
+    expect(await present([id])).toEqual([]);
+  });
+
+  it("a kept row with the earliest consumed_at does not block pruning the rows behind it", async () => {
+    // Not observable directly: the sender rule is in the WHERE, so a kept row
+    // is never selected. This proves the call terminates and, with batch 2 and
+    // maxBatches 2, the kept head does not eat a batch slot: all 4 are deleted.
+    const organizationId = await createTestOrg({ db });
+    const live = await orgThread(organizationId);
+    const gone = await orgThread(organizationId);
+    const target = await orgThread(organizationId);
+    const kept = await insert(live, target, "head");
+    const prunable: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      prunable.push(await insert(gone, target, `p${i}`));
+    }
+    await receiveFor({ db, toRun: target, apply: noopApply });
+    await backdateMessages([kept], R + 3 * DAY);
+    await backdateMessages(prunable, R + DAY);
+    await db.delete(thread).where(eq(thread.id, gone));
+
+    await pruneAgentMessages({ db, now: NOW, ...SMALL });
+    expect(await present(prunable)).toEqual([]);
+    expect(await present([kept])).toEqual([kept]);
+  });
+
+  it("rejects non-positive or non-integer batch, maxBatches and budgetMs with a RangeError", async () => {
+    for (const bad of [
+      { batch: 0 },
+      { batch: 1.5 },
+      { maxBatches: 0 },
+      { maxBatches: -1 },
+      { budgetMs: 0 },
+      { budgetMs: Number.NaN },
+      { budgetMs: Number.POSITIVE_INFINITY },
+    ]) {
+      await expect(
+        pruneAgentMessages({ db, now: NOW, ...bad }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+  });
+
+  it("AC8 starts no batch once the wall-clock budget is spent", async () => {
+    const { taskId } = await tree();
+    const id = await consumedFromGoneSender(taskId, "budget");
+
+    // budgetMs must be > 0, so spend it before the call starts.
+    const spy = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(1_000_000);
+    try {
+      expect(await pruneAgentMessages({ db, now: NOW, budgetMs: 1 })).toEqual({
+        messages: 0,
+        applied: 0,
+        orphans: 0,
+      });
+    } finally {
+      spy.mockRestore();
+    }
     expect(await present([id])).toEqual([id]);
     await pruneAgentMessages({ db, now: NOW });
     expect(await present([id])).toEqual([]);
@@ -303,15 +417,8 @@ describe("pruneAgentMessages", () => {
     // The in-transaction values are pinned by self-heal-tx.test.ts:24-35
     // ("sets statement and lock timeouts inside, not outside").
     await pruneAgentMessages({ db, now: NOW });
-    const rows = await db.execute(sql`SHOW statement_timeout`);
-    const value = Object.values(
-      (rows as unknown as Record<string, unknown>[])[0] ?? {},
-    )[0];
-    expect(value).not.toBe("10s");
-    const lock = await db.execute(sql`SHOW lock_timeout`);
-    expect(
-      Object.values((lock as unknown as Record<string, unknown>[])[0] ?? {})[0],
-    ).not.toBe("1s");
+    expect(await show("statement_timeout")).not.toBe("10s");
+    expect(await show("lock_timeout")).not.toBe("1s");
   });
 
   it("AC11 a retry of a pruned key from the still-terminal sender is sender_not_running and writes no row", async () => {

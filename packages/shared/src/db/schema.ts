@@ -3497,9 +3497,8 @@ export const agentRun = pgTable(
  * (`consumed_at`), which records the delivery in `agent_applied` inside the same
  * transaction as the apply.
  *
- * Retention (`pruneAgentMessages`, `model/agent-bus/retention.ts`): a row is
- * deleted only after its sender can no longer retry it, so a key is deduplicated
- * for the sender's active life plus at least R (30 days) after it last ended.
+ * Retention: a row outlives its sender's ability to retry; see `pruneAgentMessages`
+ * in `model/agent-bus/retention.ts`.
  */
 export const agentMessages = pgTable(
   "agent_messages",
