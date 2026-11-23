@@ -38,6 +38,18 @@ Owner decisions are in its "Decisions (owner, 2026-11-23)" section.
   - **Redaction is an exact substring match.** A very short body redacts aggressively, and a body echoed only in part is not redacted. Both are accepted and stated in the PR.
 - **Migration header:** cites `#758`, not a placeholder. File: `deploy/migrations/2026-11-26-agent-messages-dead-letter.sql`.
 - **AC 5 test isolation:** the sweep is global across the shared test database. Backdate the poison and healthy rows by minutes and order them explicitly, so leftover rows from other tests can't take the `limit: 2` slots.
+- **As shipped (owner-accepted deviations from F2 and the review fixes).** These override F2 and the `last_error`
+  row of the design table below:
+  - **Redaction marker is `<redacted>`, not `[body]`.** `last_error` goes through the shared
+    `createValueRedactor([body], 1)` (`packages/utils/src/redact.ts`), which also blanks the JSON-escaped body
+    and any secret pattern. AC 8's test asserts `<redacted>`.
+  - **`last_error` is `"<name>[ <code>]: <message>"` of the recorded error.** When drizzle wraps a driver error
+    (`"Failed query: <sql>\nparams: <params>"`), the wrapped `cause` is recorded instead, with its SQLSTATE or
+    system `code`.
+  - **A body too large to redact** (V8 refuses the redactor's RegExp at about 32K characters) stores
+    `"<name>: <unrecordable>"`, so the attempt is still counted and the message is never stored unredacted.
+  - **`errorName`, in logs and `last_error`, is class-like only** (`/^[A-Za-z_$][\w$.]{0,63}$/`); any other
+    name is replaced by the value's type.
 
 ---
 

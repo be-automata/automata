@@ -39,7 +39,7 @@ Other defaults (not owner questions; listed as assumptions in the PR):
 - **A6** Lost kick: the kick runs after commit and can fail or die with the request. The sweeper
   therefore also re-kicks targets that had a message consumed in the last 2 minutes
   (`recentlyDeliveredTargets`); the kick is idempotent (`maybeProcessFollowUpQueue` returns on an
-  empty queue). Poison messages (A3) remain a known gap → dead-letter follow-up issue.
+  empty queue). Poison messages (A3) remain a known gap → dead-letter follow-up #758.
 - **A7** Bodies are stored normalized (`sanitizeForJson`): two raw bodies that differ only in stripped
   characters are the same message under one key (duplicate, not conflict).
 - **A8** The kick never resumes a terminal target; the message stays queued (A2).
