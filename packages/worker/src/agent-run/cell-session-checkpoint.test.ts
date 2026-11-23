@@ -382,7 +382,9 @@ describe("prepareCheckpoint", () => {
       kind: "skipped",
       reason: "over cap",
     });
-  });
+    // It redacts ~16 MiB of real lines (the caps are 4 and 12 MiB): 6.7 s on a
+    // loaded CI runner, past vitest's 5 s default.
+  }, 60_000);
 
   it("skips when the chunk list would pass the cap", () => {
     const first = written(run({ newBytes: bytes(LINES.slice(0, 2).join("")) }));
