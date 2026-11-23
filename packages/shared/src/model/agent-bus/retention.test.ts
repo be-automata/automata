@@ -408,9 +408,11 @@ describe("pruneAgentMessages", () => {
     }
   });
 
-  it("AC8 starts no batch once the wall-clock budget is spent", async () => {
-    const { taskId } = await tree();
-    const id = await consumedFromGoneSender(taskId, "budget");
+  it("AC8 once the wall-clock budget is spent, the orphan pass starts no batch and the consumed pass at most one", async () => {
+    await pruneAgentMessages({ db, now: NOW });
+    const { consumed, orphan } = await consumedAndOrphan("budget");
+    const tx = vi.mocked(withSelfHealTx);
+    tx.mockClear();
 
     // budgetMs must be > 0, so spend it before the call starts.
     const spy = vi
@@ -419,16 +421,44 @@ describe("pruneAgentMessages", () => {
       .mockReturnValue(1_000_000);
     try {
       expect(await pruneAgentMessages({ db, now: NOW, budgetMs: 1 })).toEqual({
-        messages: 0,
-        applied: 0,
+        messages: 1,
+        applied: 1,
         orphans: 0,
       });
     } finally {
       spy.mockRestore();
     }
-    expect(await present([id])).toEqual([id]);
+    expect(tx).toHaveBeenCalledTimes(1);
+    expect(await present([orphan])).toEqual([orphan]);
+    expect(await present([consumed])).toEqual([]);
     await pruneAgentMessages({ db, now: NOW });
-    expect(await present([id])).toEqual([]);
+    expect(await present([orphan])).toEqual([]);
+  });
+
+  it("AC8 an orphan pass that spends the whole budget still leaves the consumed pass one batch", async () => {
+    await pruneAgentMessages({ db, now: NOW });
+    const a = await consumedAndOrphan("starve-a");
+    const b = await consumedAndOrphan("starve-b");
+    // The clock jumps past the budget while the orphan pass's first batch runs.
+    let clock = 1_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const tx = vi.mocked(withSelfHealTx);
+    const real = tx.getMockImplementation();
+    if (!real) throw new Error("withSelfHealTx spy has no implementation");
+    tx.mockImplementationOnce(async (...args) => {
+      const result = await real(...args);
+      clock += 60_000;
+      return result;
+    });
+    try {
+      expect(
+        await pruneAgentMessages({ db, now: NOW, batch: 1, budgetMs: 20_000 }),
+      ).toMatchObject({ messages: 1, orphans: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await present([a.orphan, b.orphan])).toHaveLength(1);
+    expect(await present([a.consumed, b.consumed])).toHaveLength(1);
   });
 
   it("AC9 asks every batch transaction for 10 s / 1 s (SET LOCAL): the pooled session is unchanged afterwards", async () => {

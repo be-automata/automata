@@ -149,12 +149,14 @@ async function deleteByIds(tx: SelfHealTx, ids: number[]) {
  * resume racing the prune either waits for it or keeps its rows.
  *
  * The orphan pass runs first, then the consumed pass. Each runs in its own
- * try: a failure or timeout in one never prevents the other. If either threw,
- * the call rejects with `AgentMessagePruneError` once both have run, carrying
- * every error and the counts that committed (the cron logs it).
+ * try: a failure in one never prevents the other. If either threw, the call
+ * rejects with `AgentMessagePruneError` once both have run, carrying every
+ * error and the counts that committed (the cron logs it).
  * `maxBatches` applies per pass and `budgetMs` is shared: once it is spent, no
- * new batch starts. The real upper bound on wall clock is `budgetMs` plus one
- * in-flight batch, each statement capped at the 10 s statement timeout. Throws
+ * new batch starts, except that the consumed pass always gets its first batch,
+ * so an orphan pass that spent the budget (slow, or timing out) cannot starve
+ * it. The real upper bound on wall clock is `budgetMs` plus two in-flight
+ * batches, each statement capped at the 10 s statement timeout. Throws
  * `RangeError` unless `batch` and `maxBatches` are positive integers and
  * `budgetMs` is a positive finite number. Logs nothing: the caller logs counts.
  *
@@ -194,12 +196,14 @@ export async function pruneAgentMessages({
    * Runs one pass: each batch is its own transaction. `select(tx, cursor)` locks
    * up to `batch` candidate rows and returns them with the ids to delete (a
    * subset when a re-check keeps some) and the cursor of the last candidate.
-   * Stops on a short or empty batch, `maxBatches`, or the shared budget. Adds
+   * Stops on a short or empty batch, `maxBatches`, or the shared budget, which
+   * `firstBatchAlways` exempts the first batch from. Adds
    * each committed batch to `counts[key]` as it goes, so a pass that throws
    * still reports what it deleted; its error is collected, never rethrown here.
    */
   async function drainBatches<C>(
     key: "messages" | "orphans",
+    firstBatchAlways: boolean,
     select: (
       tx: SelfHealTx,
       cursor: C | null,
@@ -209,7 +213,8 @@ export async function pruneAgentMessages({
     try {
       for (
         let i = 0;
-        i < maxBatches && Date.now() - startedAt < budgetMs;
+        i < maxBatches &&
+        ((firstBatchAlways && i === 0) || Date.now() - startedAt < budgetMs);
         i++
       ) {
         const prev = cursor;
@@ -234,7 +239,7 @@ export async function pruneAgentMessages({
   }
 
   // Orphans: never delivered, target thread gone.
-  await drainBatches<null>("orphans", async (tx) => {
+  await drainBatches<null>("orphans", false, async (tx) => {
     const rows = await tx
       .select({ id: agentMessages.id })
       .from(agentMessages)
@@ -256,6 +261,7 @@ export async function pruneAgentMessages({
   // batch within a call; rows kept for live senders are still re-read on every call.
   await drainBatches<{ consumedAt: Date; id: number }>(
     "messages",
+    true,
     async (tx, cursor) => {
       const rows = await tx
         .select({
