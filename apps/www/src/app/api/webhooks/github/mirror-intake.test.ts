@@ -16,6 +16,9 @@ import { createRepoSkillVersion } from "@terragon/shared/model/repo-skills";
 import { nanoid } from "nanoid";
 import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 import { getRepoInstallationId } from "@terragon/shared/github-app";
+import { getOctokitForApp } from "@/lib/github";
+import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import { mergeAuditMarker } from "@/server-lib/tracker/merge-audit";
 
 vi.mock("@/server-lib/new-thread-internal", () => ({
   newThreadInternal: vi
@@ -34,6 +37,18 @@ vi.mock("@/server-lib/review/repo-skill-override", () => ({
 
 vi.mock("@/server-lib/tracker/tracker-config", () => ({
   resolveTrackerConfig: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("@/lib/github", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/github")>()),
+  getOctokitForApp: vi.fn(),
+}));
+
+// AC-2 threads fetch ticket context; the tracker is never really contacted.
+vi.mock("@/server-lib/tracker/tracker-client", () => ({
+  createTrackerClient: () => ({
+    getIssue: vi.fn().mockRejectedValue(new Error("tracker stubbed")),
+  }),
 }));
 
 const repoFullName = "be-automata/automata";
@@ -433,6 +448,269 @@ describe("createMirrorTask (mirror-intake)", () => {
       expect(args.sourceMetadata).toBeUndefined();
       const text = args.message.parts.map((p: any) => p.text ?? "").join("");
       expect(text).toContain("Review requested on PR #7");
+    });
+  });
+  describe("pr-merged that delivers no ticket (#761)", () => {
+    interface FakeComment {
+      id: number;
+      body: string;
+      user: { login: string };
+    }
+
+    function fakeOctokit(comments: FakeComment[] = []) {
+      const createComment = vi.fn().mockResolvedValue({});
+      const listComments = vi.fn();
+      const octokit = {
+        paginate: vi.fn().mockResolvedValue(comments),
+        rest: {
+          issues: {
+            listComments,
+            createComment,
+            updateComment: vi.fn().mockResolvedValue({}),
+          },
+        },
+      };
+      vi.mocked(getOctokitForApp).mockResolvedValue(octokit as never);
+      return { octokit, createComment };
+    }
+
+    async function seedLane(mode: "active" | "shadow" = "active") {
+      const seeded = await seedBoundOrg(mode);
+      const repo = `acme-inc/core-${nanoid(6).toLowerCase()}`;
+      await createRepoSkillVersion({
+        db,
+        organizationId: seeded.org.id,
+        repoFullName: repo,
+        skillName: "github-pr-merged",
+        body: MERGE_SKILL_BODY,
+        source: "api",
+        createdByUserId: seeded.user.id,
+      });
+      return { ...seeded, repo };
+    }
+
+    function stubTracker() {
+      vi.mocked(resolveTrackerConfig).mockResolvedValue({
+        kind: "youtrack",
+        baseUrl: "https://tracker.example.com",
+        token: "t",
+        projects: ["ACME"],
+        writes: "off",
+      });
+    }
+
+    function promotion(overrides: { title?: string; body?: string } = {}) {
+      return {
+        kind: "pr-merged" as const,
+        prNumber: 31,
+        baseBranch: "staging",
+        headBranch: "release/promote-develop-to-staging",
+        title: overrides.title ?? "chore(release): promote develop to staging",
+        body: overrides.body ?? "Carries ACME-1 and ACME-2.",
+        mergedAt: "2026-11-18T10:00:00Z",
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(resolveTrackerConfig).mockReset();
+      vi.mocked(getOctokitForApp).mockReset();
+    });
+
+    it("AC-1: two body keys and none delivered: one multi-key notice, no thread", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion(),
+      });
+
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(createComment).toHaveBeenCalledTimes(1);
+      const body = createComment.mock.calls[0]![0].body as string;
+      expect(body).toContain(mergeAuditMarker(31));
+      expect(body).toContain("delivers none of them");
+      expect(body).toContain("ACME-1, ACME-2");
+    });
+
+    it("AC-2: a single body key still creates the thread, no comment", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion({ body: "Implements ACME-1." }),
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      expect(createComment).not.toHaveBeenCalled();
+    });
+
+    it("AC-2: a closing keyword delivers a ticket, so the thread is created", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion({
+          title: "x",
+          body: "Closes ACME-1 and mentions ACME-2.",
+        }),
+      });
+
+      expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      expect(createComment).not.toHaveBeenCalled();
+    });
+
+    it("AC-3: no key at all: the zero-key notice, no thread", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit();
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion({ body: "Routine promotion." }),
+      });
+
+      expect(newThreadInternal).not.toHaveBeenCalled();
+      expect(createComment).toHaveBeenCalledTimes(1);
+      expect(createComment.mock.calls[0]![0].body).toContain(
+        "No ticket reference was found",
+      );
+    });
+
+    describe("AC-4: fail open, no Octokit call", () => {
+      it("no tracker config", async () => {
+        const { repo, instId } = await seedLane();
+        vi.mocked(resolveTrackerConfig).mockResolvedValue(null);
+        fakeOctokit();
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: instId,
+          intent: promotion(),
+        });
+
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+        expect(getOctokitForApp).not.toHaveBeenCalled();
+      });
+
+      it("the config lookup throws", async () => {
+        const { repo, instId } = await seedLane();
+        vi.mocked(resolveTrackerConfig).mockRejectedValue(new Error("boom"));
+        fakeOctokit();
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: instId,
+          intent: promotion(),
+        });
+
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+        expect(getOctokitForApp).not.toHaveBeenCalled();
+      });
+
+      it("shadow installation", async () => {
+        const { repo, instId } = await seedLane("shadow");
+        stubTracker();
+        fakeOctokit();
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: instId,
+          intent: promotion(),
+        });
+
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+        expect(getOctokitForApp).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("AC-5: a failed write falls back to the thread", () => {
+      it("createComment rejects", async () => {
+        const { repo, instId } = await seedLane();
+        stubTracker();
+        const { createComment } = fakeOctokit();
+        createComment.mockRejectedValue(new Error("GitHub 502"));
+
+        await createMirrorTask({
+          repoFullName: repo,
+          installationId: instId,
+          intent: promotion(),
+        });
+
+        expect(createComment).toHaveBeenCalledTimes(1);
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      });
+
+      it("a write that never resolves times out", async () => {
+        const { repo, instId } = await seedLane();
+        stubTracker();
+        const { createComment } = fakeOctokit();
+        createComment.mockReturnValue(new Promise(() => undefined));
+
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          const run = createMirrorTask({
+            repoFullName: repo,
+            installationId: instId,
+            intent: promotion(),
+          });
+          await vi.waitFor(() => expect(createComment).toHaveBeenCalled());
+          await vi.advanceTimersByTimeAsync(4_000);
+          await run;
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(newThreadInternal).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("AC-6: a redelivery finds the bot comment: no second comment, no thread", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit([
+        {
+          id: 1,
+          body: `${mergeAuditMarker(31)}\nearlier notice`,
+          user: { login: resolveBotLogin() },
+        },
+      ]);
+
+      await createMirrorTask({
+        repoFullName: repo,
+        installationId: instId,
+        intent: promotion(),
+      });
+
+      expect(createComment).not.toHaveBeenCalled();
+      expect(newThreadInternal).not.toHaveBeenCalled();
+    });
+
+    it("a repo-level delivery: comment, no thread, no WebhookSkip", async () => {
+      const { repo, instId } = await seedLane();
+      stubTracker();
+      const { createComment } = fakeOctokit();
+      vi.mocked(getRepoInstallationId).mockResolvedValueOnce(instId);
+
+      await expect(
+        createMirrorTask({
+          repoFullName: repo,
+          installationId: undefined,
+          intent: promotion(),
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(createComment).toHaveBeenCalledTimes(1);
+      expect(newThreadInternal).not.toHaveBeenCalled();
     });
   });
 });

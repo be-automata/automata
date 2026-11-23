@@ -39,6 +39,8 @@ export interface MergedPrTrigger {
   htmlUrl?: string | null;
   mergedBy?: string | null;
   mergeCommitSha?: string | null;
+  /** ISO time of the merge; bounds the audit-comment lookup. */
+  mergedAt?: string | null;
 }
 
 /** Header fields sit outside the fence, so they must stay on one line. */

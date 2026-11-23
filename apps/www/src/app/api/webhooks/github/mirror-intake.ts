@@ -6,6 +6,7 @@ import { getOrganizationOwnerUserId } from "@terragon/shared/model/organizations
 import { DBUserMessage } from "@terragon/shared/db/db-message";
 import { getRepoSkill } from "@terragon/shared/model/repo-skills";
 import type { ThreadSourceMetadata } from "@terragon/shared";
+import { getOctokitForApp, parseRepoFullName } from "@/lib/github";
 import { effectiveShadow } from "@/lib/github-side-effects";
 import { TRACKER_SETUP_KEYS_TEXT } from "@/lib/tracker-env-keys";
 import { buildRepoOverrideFetcher } from "@/server-lib/review/repo-skill-override";
@@ -14,7 +15,17 @@ import {
   resolveReviewSkill,
 } from "@/server-lib/review/resolve-review-skill";
 import { PR_MERGED_SKILL_NAME } from "@/server-lib/review/review-skill";
-import { extractTicketKeys } from "@/server-lib/tracker/extract-ticket-keys";
+import { resolveBotLogin } from "@/server-lib/review/bot-login";
+import {
+  extractTicketKeys,
+  type TicketKeyExtraction,
+} from "@/server-lib/tracker/extract-ticket-keys";
+import {
+  mergeAuditMarker,
+  renderNoTicketNotice,
+  renderNoticeComment,
+} from "@/server-lib/tracker/merge-audit";
+import { createAuditCommentClient } from "@/server-lib/tracker/merge-audit-finish";
 import { createTrackerClient } from "@/server-lib/tracker/tracker-client";
 import { resolveTrackerConfig } from "@/server-lib/tracker/tracker-config";
 import {
@@ -128,6 +139,15 @@ function describeIntent(
 
 type MergedPrIntent = Extract<MirrorIntent, { kind: "pr-merged" }>;
 
+type MergedPrSkillResult =
+  | {
+      kind: "message";
+      text: string;
+      sourceMetadata: ThreadSourceMetadata;
+    }
+  // The PR delivers no ticket: the notice is on the PR, no thread is needed (#761).
+  | { kind: "no_ticket"; referencedCount: number };
+
 /**
  * The post-merge audit message for a repo that has the `github-pr-merged`
  * skill, or null to fall back to the fixed prompt.
@@ -150,7 +170,7 @@ async function buildMergedPrSkillMessage({
   repoFullName: string;
   intent: MergedPrIntent;
   shadow: boolean;
-}): Promise<{ text: string; sourceMetadata: ThreadSourceMetadata } | null> {
+}): Promise<MergedPrSkillResult | null> {
   const configured = await getRepoSkill({
     db,
     organizationId,
@@ -174,16 +194,39 @@ async function buildMergedPrSkillMessage({
   // Every version failed validation: the resolver already logged it loudly.
   if (!resolved) return null;
 
-  const trackerBlock = shadow
-    ? trackerContextNotice("Omitted: this installation is in shadow mode.")
-    : await buildTrackerBlockSafely({
-        organizationId,
-        ownerUserId,
+  let trackerBlock: string;
+  if (shadow) {
+    trackerBlock = trackerContextNotice(
+      "Omitted: this installation is in shadow mode.",
+    );
+  } else {
+    const built = await buildTrackerBlockSafely({
+      organizationId,
+      ownerUserId,
+      repoFullName,
+      intent,
+    });
+    trackerBlock = built.block;
+    // Decided from the PR's own fields and the project list, so no agent run
+    // is needed. Only a resolved config and a completed extraction decide it.
+    if (built.decision && built.decision.extraction.auditKeys.length === 0) {
+      const posted = await postNoTicketNoticeSafely({
         repoFullName,
         intent,
+        referencedKeys: built.decision.extraction.referencedKeys,
+        projects: built.decision.projects,
       });
+      if (posted) {
+        return {
+          kind: "no_ticket",
+          referencedCount: built.decision.extraction.referencedKeys.length,
+        };
+      }
+    }
+  }
 
   return {
+    kind: "message",
     text: [
       renderSkillPlaceholders(resolved.body, {
         repoFullName,
@@ -210,6 +253,75 @@ async function buildMergedPrSkillMessage({
 const INTAKE_TRACKER_TIMEOUT_MS = 4_000;
 
 /**
+ * Posts the "no delivered ticket" notice on the PR, bounded by the intake
+ * timeout. Returns true when the notice is on the PR (written now, or already
+ * there from a redelivery); false on a failure or timeout, so the caller
+ * creates the thread and the finish posts the notice instead.
+ */
+async function postNoTicketNoticeSafely({
+  repoFullName,
+  intent,
+  referencedKeys,
+  projects,
+}: {
+  repoFullName: string;
+  intent: MergedPrIntent;
+  referencedKeys: readonly string[];
+  projects: readonly string[];
+}): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const write = (async () => {
+      const [owner, repo] = parseRepoFullName(repoFullName);
+      const octokit = await getOctokitForApp({ owner, repo });
+      return await createAuditCommentClient({
+        octokit,
+        owner,
+        repo,
+        prNumber: intent.prNumber,
+        botLogin: resolveBotLogin(),
+        since: intent.mergedAt ?? undefined,
+      }).upsertMarkerComment(
+        mergeAuditMarker(intent.prNumber),
+        renderNoticeComment(
+          intent.prNumber,
+          renderNoTicketNotice({ referencedKeys, projects }),
+        ),
+        "create-only",
+      );
+    })();
+    // A write that loses the race may still reject later; never unhandled.
+    write.catch(() => undefined);
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("no-ticket notice timed out")),
+        INTAKE_TRACKER_TIMEOUT_MS,
+      );
+    });
+    const result = await Promise.race([write, timeout]);
+    return result === "created" || result === "kept_existing";
+  } catch (error) {
+    console.warn("[mirror-intake] no-ticket notice not posted", {
+      repoFullName,
+      prNumber: intent.prNumber,
+      error: describeTrackerError(error),
+    });
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+interface TrackerBlockResult {
+  block: string;
+  /** Non-null only when the config resolved and the extraction ran. */
+  decision: {
+    extraction: TicketKeyExtraction;
+    projects: readonly string[];
+  } | null;
+}
+
+/**
  * A misconfigured or unreachable tracker must not lose the task: the thread is
  * still created and the finish executor reports the problem on the PR.
  */
@@ -223,7 +335,7 @@ async function buildTrackerBlockSafely({
   ownerUserId: string;
   repoFullName: string;
   intent: MergedPrIntent;
-}): Promise<string> {
+}): Promise<TrackerBlockResult> {
   try {
     const config = await resolveTrackerConfig({
       db,
@@ -232,27 +344,37 @@ async function buildTrackerBlockSafely({
       repoFullName,
     });
     if (!config) {
-      return trackerContextNotice(
-        `No tracker is configured for this repository. Set ${TRACKER_SETUP_KEYS_TEXT} on the organization environment or on this repository's environment.`,
-      );
+      return {
+        block: trackerContextNotice(
+          `No tracker is configured for this repository. Set ${TRACKER_SETUP_KEYS_TEXT} on the organization environment or on this repository's environment.`,
+        ),
+        decision: null,
+      };
     }
-    return await buildTrackerContextBlock({
-      tracker: createTrackerClient(config, {
-        timeoutMs: INTAKE_TRACKER_TIMEOUT_MS,
-      }),
-      extraction: extractTicketKeys({
-        title: intent.title,
-        body: intent.body,
-        headBranch: intent.headBranch,
-        projects: config.projects,
-      }),
+    const extraction = extractTicketKeys({
+      title: intent.title,
+      body: intent.body,
+      headBranch: intent.headBranch,
+      projects: config.projects,
     });
+    return {
+      block: await buildTrackerContextBlock({
+        tracker: createTrackerClient(config, {
+          timeoutMs: INTAKE_TRACKER_TIMEOUT_MS,
+        }),
+        extraction,
+      }),
+      decision: { extraction, projects: config.projects },
+    };
   } catch (error) {
     console.error("[mirror-intake] tracker context unavailable", {
       repoFullName,
       error: describeTrackerError(error),
     });
-    return trackerContextNotice("Tracker unavailable.");
+    return {
+      block: trackerContextNotice("Tracker unavailable."),
+      decision: null,
+    };
   }
 }
 
@@ -325,6 +447,18 @@ export async function createMirrorTask({
           shadow,
         })
       : null;
+  if (skillMessage?.kind === "no_ticket") {
+    console.log(
+      "[mirror-intake] no delivered ticket; notice posted, no thread",
+      {
+        repoFullName,
+        prNumber: githubPRNumber,
+        outcome: "no_ticket",
+        referencedCount: skillMessage.referencedCount,
+      },
+    );
+    return;
+  }
   if (viaRepoLookup && !skillMessage) {
     throw new WebhookSkip(
       "unconfigured_repo",
@@ -336,7 +470,7 @@ export async function createMirrorTask({
   const message: DBUserMessage = {
     type: "user",
     model: null,
-    parts: [{ type: "text", text: skillMessage?.text ?? prompt }],
+    parts: [{ type: "text", text: skillMessage ? skillMessage.text : prompt }],
     timestamp: new Date().toISOString(),
   };
   console.log("[mirror-intake] creating task", {

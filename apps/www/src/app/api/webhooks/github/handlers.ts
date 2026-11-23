@@ -1156,6 +1156,7 @@ export async function handlePullRequestMirror(
         htmlUrl: pr.html_url,
         mergedBy: pr.merged_by?.login,
         mergeCommitSha: pr.merge_commit_sha,
+        mergedAt: pr.merged_at,
       },
     });
   }
