@@ -237,8 +237,9 @@ type ReceiveOutcome =
  *   `deadLettered`.
  *
  * A crash before that commit counts no attempt: we under-count, never over-count,
- * and never apply twice. `onApplied` reports the running count of committed
- * applies, so a caller still knows the partial count when the error is rethrown.
+ * and never apply twice. `onApplied` and `onDeadLettered` report the running
+ * counts as they change, so a caller still knows the partial counts when a later
+ * message's error is rethrown.
  * `__testOnAttemptRecorded` is a test hook, called inside the transaction after the
  * attempt update and before COMMIT; it is not part of the bus contract.
  *
@@ -252,6 +253,7 @@ export async function receiveFor({
   toRun,
   apply,
   onApplied,
+  onDeadLettered,
   logger = DEFAULT_LOGGER,
   __testOnAttemptRecorded,
 }: {
@@ -259,6 +261,7 @@ export async function receiveFor({
   toRun: string;
   apply: ApplyMessage;
   onApplied?: (applied: number) => void;
+  onDeadLettered?: (deadLettered: number) => void;
   logger?: BusLogger;
   __testOnAttemptRecorded?: (info: {
     messageId: number;
@@ -338,6 +341,7 @@ export async function receiveFor({
     if (outcome.kind === "failed") {
       if (!outcome.deadLettered) throw outcome.error;
       deadLettered += 1;
+      onDeadLettered?.(deadLettered);
       logger.error("agent-bus: message dead-lettered", {
         messageId: outcome.messageId,
         fromRun: outcome.fromRun,
@@ -379,7 +383,9 @@ export async function recentlyDeliveredTargets({
  * receive never ran). Dead-lettered messages are not selected, so poison targets
  * leave the top `limit` after at most `AGENT_MESSAGE_MAX_ATTEMPTS` ticks. One
  * target's failure is logged (error name only) and does not stop the rest;
- * `deadLettered` sums the messages dead-lettered during this pass.
+ * `deadLettered` sums the messages dead-lettered during this pass. A target whose
+ * receive applied a message and then failed on a later one still counts, and is
+ * still returned in `targets`.
  */
 export async function sweepUnconsumed({
   db,
@@ -412,18 +418,33 @@ export async function sweepUnconsumed({
   let applied = 0;
   let deadLettered = 0;
   for (const { toRun } of rows) {
+    // Counted through the callbacks, so a receive that applies or dead-letters
+    // some messages and then fails on a later one still reports them.
+    let targetApplied = 0;
+    let targetDeadLettered = 0;
     try {
-      const result = await receiveFor({ db, toRun, apply, logger });
-      // Only targets that actually received a message (the caller broadcasts for them).
-      if (result.applied > 0) targets.push(toRun);
-      applied += result.applied;
-      deadLettered += result.deadLettered;
+      await receiveFor({
+        db,
+        toRun,
+        apply,
+        logger,
+        onApplied: (count) => {
+          targetApplied = count;
+        },
+        onDeadLettered: (count) => {
+          targetDeadLettered = count;
+        },
+      });
     } catch (error) {
       logger.error(`agent-bus sweep: delivery to ${toRun} failed`, {
         toRun,
         errorName: errorNameOf(error),
       });
     }
+    // Only targets that actually received a message (the caller broadcasts for them).
+    if (targetApplied > 0) targets.push(toRun);
+    applied += targetApplied;
+    deadLettered += targetDeadLettered;
   }
   return { targets, applied, deadLettered };
 }

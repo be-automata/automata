@@ -669,6 +669,52 @@ describe("dead-lettering (#758)", () => {
     expect((await messageRow(m2 as number)).consumedAt).not.toBeNull();
   });
 
+  it("the sweep returns a target that applied a message before a later one failed", async () => {
+    const t = await tree();
+    const [m1, m2] = (await seed(t.rootId, t.taskId, 2)) as [number, number];
+    await backdateCreated([m1, m2], 24 * 60 * 60_000);
+    const { apply } = recorder();
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (message.id === m2) throw new Error("poison");
+      await apply(tx, message);
+    };
+    const result = await sweepUnconsumed({
+      db,
+      apply: sweepApply,
+      logger: { error: vi.fn() },
+    });
+    expect(result.targets).toContain(t.taskId);
+    expect(result.applied).toBeGreaterThanOrEqual(1);
+    expect((await messageRow(m1)).consumedAt).not.toBeNull();
+    expect((await messageRow(m2)).attempts).toBe(1);
+    await db.delete(agentMessages).where(eq(agentMessages.id, m2));
+  });
+
+  it("the sweep counts a dead-letter even when the same receive then fails on the next message", async () => {
+    const t = await tree();
+    const [m1, m2] = (await seed(t.rootId, t.taskId, 2)) as [number, number];
+    await backdateCreated([m1, m2], 24 * 60 * 60_000);
+    const { apply } = recorder();
+    const poison = new Set([m1, m2]);
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (poison.has(message.id)) throw new Error("poison");
+      await apply(tx, message);
+    };
+    const logger = { error: vi.fn() };
+    let countedOnDeadLetter = -1;
+    for (let pass = 1; pass <= AGENT_MESSAGE_MAX_ATTEMPTS; pass++) {
+      const result = await sweepUnconsumed({ db, apply: sweepApply, logger });
+      if ((await messageRow(m1)).deadLetteredAt !== null) {
+        countedOnDeadLetter = result.deadLettered;
+        break;
+      }
+    }
+    // m1 is dead-lettered on its 5th failure; the same receive then fails on m2's first.
+    expect((await messageRow(m2)).attempts).toBe(1);
+    expect(countedOnDeadLetter).toBe(1);
+    await db.delete(agentMessages).where(inArray(agentMessages.id, [m1, m2]));
+  });
+
   it("AC5: dead-lettered poison targets leave the sweep, so a healthy target is delivered", async () => {
     const t = await tree();
     const poisonA = await seed(t.rootId, t.taskId, 1);
