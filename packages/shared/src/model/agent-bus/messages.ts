@@ -1,3 +1,4 @@
+import { createValueRedactor } from "@terragon/utils/redact";
 import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { DB } from "../../db";
@@ -22,7 +23,44 @@ import { authorizeSend, type AgentBusError } from "./capabilities";
  * `apply` and sets `consumed_at`. A crash or a throw before COMMIT rolls all of it
  * back, so a message is applied zero or one time. `sweepUnconsumed` is the safety
  * net for a message whose receive never ran.
+ *
+ * Poison messages (#758): the apply runs in a savepoint, so a throw rolls back only
+ * the apply and its `agent_applied` row. The failure is then counted on the message
+ * (`attempts`, `last_error`) and committed. A message that fails
+ * `AGENT_MESSAGE_MAX_ATTEMPTS` times is dead-lettered (`dead_lettered_at`): it stays
+ * unconsumed, is never claimed again, and no longer blocks its target.
  */
+
+/** Failed apply attempts after which a message is dead-lettered (#758). */
+export const AGENT_MESSAGE_MAX_ATTEMPTS = 5;
+
+/** Longest `last_error` stored, in UTF-16 units. */
+const LAST_ERROR_MAX_LENGTH = 500;
+
+/** A message that can still be delivered: not consumed and not dead-lettered. */
+const deliverable = and(
+  isNull(agentMessages.consumedAt),
+  isNull(agentMessages.deadLetteredAt),
+);
+
+/** A class-like error name: anything else may carry data (the body) into a log. */
+const ERROR_NAME_PATTERN = /^[A-Za-z_$][\w$.]{0,63}$/;
+
+/**
+ * The error's name for logs, always a string: a name that is not class-like
+ * (a Symbol, a long or spaced string that may hold the body) is replaced by the
+ * value's type, and a throwing getter must not turn a log line into a failure.
+ */
+function errorNameOf(error: unknown): string {
+  try {
+    const name: unknown = error instanceof Error ? error.name : undefined;
+    return typeof name === "string" && ERROR_NAME_PATTERN.test(name)
+      ? name
+      : typeof error;
+  } catch {
+    return "<unprintable>";
+  }
+}
 
 export interface AgentMessage {
   id: number;
@@ -151,6 +189,7 @@ export async function sendMessage({
       db,
       toRun: to,
       apply,
+      logger,
       onApplied: (count) => {
         applied = count;
       },
@@ -161,7 +200,7 @@ export async function sendMessage({
       {
         messageId: inserted.id,
         toRun: to,
-        errorName: error instanceof Error ? error.name : typeof error,
+        errorName: errorNameOf(error),
       },
     );
   }
@@ -169,65 +208,197 @@ export async function sendMessage({
 }
 
 /**
- * Delivers every unconsumed message of `toRun`, oldest first, one transaction per
- * message. `apply` that throws rolls its transaction back (the message stays
- * unconsumed for the sweeper) and the error is rethrown; `onApplied` reports the
- * running count of committed applies, so a caller still knows the partial count.
+ * The error to record. drizzle wraps every driver error in a `DrizzleQueryError`
+ * named `Error` whose message is `"Failed query: <sql>\nparams: <params>"`: the
+ * real error (a Postgres SQLSTATE, a lost connection) is its `cause`, and the
+ * params can hold the body JSON-escaped, where the body redaction cannot match it.
+ */
+function recordedErrorOf(error: unknown): unknown {
+  try {
+    return error instanceof Error && error.cause instanceof Error
+      ? error.cause
+      : error;
+  } catch {
+    // A throwing `cause` getter: record the error itself.
+    return error;
+  }
+}
+
+/**
+ * Builds `last_error`: `"<name>[ <code>]: <message>"` of the recorded error (the
+ * driver error under a drizzle wrapper; `code` is its SQLSTATE or system code),
+ * the message body redacted (and any secret pattern), truncated to 500 units, then
+ * sanitized (no NUL bytes). Truncating before sanitizing never leaves a lone
+ * surrogate. A body too large to redact stores `"<name>: <unrecordable>"`.
+ */
+function buildLastError(thrown: unknown, body: string): string {
+  const error = recordedErrorOf(thrown);
+  let message: string;
+  let code = "";
+  try {
+    message = error instanceof Error ? error.message : String(error);
+    const raw: unknown =
+      error instanceof Error ? (error as { code?: unknown }).code : undefined;
+    if (typeof raw === "string" && raw.length > 0) code = ` ${raw}`;
+  } catch {
+    // A thrown value with a throwing getter or no toString (Object.create(null))
+    // must never turn the attempt count into a second failure.
+    message = "<unprintable>";
+  }
+  const head = `${errorNameOf(error)}${code}`;
+  let redacted: string;
+  try {
+    // minLength 1: any non-empty body is redacted (the shared default skips values under 4).
+    const redact = createValueRedactor(body.length > 0 ? [body] : [], 1);
+    redacted = redact(`${head}: ${message}`);
+  } catch {
+    // The redactor builds one RegExp from the body, which V8 refuses for a body of
+    // about 32K characters: store the name only, never the unredacted message, so
+    // the attempt is still counted.
+    redacted = `${head}: <unrecordable>`;
+  }
+  return sanitizeForJson(redacted.slice(0, LAST_ERROR_MAX_LENGTH));
+}
+
+type ReceiveOutcome =
+  | { kind: "empty" }
+  | { kind: "applied" }
+  | { kind: "skipped" }
+  | {
+      kind: "failed";
+      error: unknown;
+      messageId: number;
+      fromRun: string;
+      attempts: number;
+      deadLettered: boolean;
+    };
+
+/**
+ * Delivers every unconsumed, not dead-lettered message of `toRun`, oldest first,
+ * one transaction per message. The `agent_applied` insert and `apply` run in a
+ * savepoint. When `apply` throws, the savepoint rolls back (no `agent_applied` row,
+ * no partial effect) and, still holding the row lock, ONE update counts the attempt
+ * (`attempts`, `last_error`) and dead-letters the row once `attempts` reaches
+ * `AGENT_MESSAGE_MAX_ATTEMPTS`. That commits, then:
+ * - below the cap the original error is rethrown (strict FIFO: the failing message
+ *   still blocks later ones, and the sweeper retries it);
+ * - at the cap one `logger.error` is emitted and the loop moves on to the next
+ *   message, so the target is unblocked. Dead-lettered messages count in
+ *   `deadLettered`.
+ *
+ * A crash before that commit counts no attempt: we under-count, never over-count,
+ * and never apply twice. `onApplied` and `onDeadLettered` report the running
+ * counts as they change, so a caller still knows the partial counts when a later
+ * message's error is rethrown.
+ * `__testOnAttemptRecorded` is a test hook, called inside the transaction after the
+ * attempt update and before COMMIT; it is not part of the bus contract.
  *
  * Each transaction locks the target thread row before claiming a message, so
- * concurrent receivers serialize per target and the queue order is id order.
+ * concurrent receivers serialize per target and the queue order is id order. A
+ * missing target thread has no row to lock, so there receivers can count attempts
+ * on different messages in parallel and FIFO is not guaranteed.
  */
 export async function receiveFor({
   db,
   toRun,
   apply,
   onApplied,
+  onDeadLettered,
+  logger = DEFAULT_LOGGER,
+  __testOnAttemptRecorded,
 }: {
   db: DB;
   toRun: string;
   apply: ApplyMessage;
   onApplied?: (applied: number) => void;
-}): Promise<{ applied: number }> {
+  onDeadLettered?: (deadLettered: number) => void;
+  logger?: BusLogger;
+  __testOnAttemptRecorded?: (info: {
+    messageId: number;
+    attempts: number;
+    deadLettered: boolean;
+  }) => void | Promise<void>;
+}): Promise<{ applied: number; deadLettered: number }> {
   let applied = 0;
+  let deadLettered = 0;
   for (;;) {
-    const outcome = await db.transaction(async (tx) => {
-      // A missing thread has no row to lock: proceed (the apply refuses it).
-      await tx
-        .select({ id: thread.id })
-        .from(thread)
-        .where(eq(thread.id, toRun))
-        // NO KEY UPDATE: serializes receivers per target without blocking inserts
-        // that reference the thread (they take KEY SHARE).
-        .for("no key update");
-      const rows = await tx
-        .select()
-        .from(agentMessages)
-        .where(
-          and(eq(agentMessages.toRun, toRun), isNull(agentMessages.consumedAt)),
-        )
-        .orderBy(asc(agentMessages.id))
-        .limit(1)
-        .for("update", { skipLocked: true });
-      const row = rows[0];
-      if (!row) return "empty" as const;
+    const outcome = await db.transaction(
+      async (tx): Promise<ReceiveOutcome> => {
+        // A missing thread has no row to lock: proceed (the apply refuses it).
+        await tx
+          .select({ id: thread.id })
+          .from(thread)
+          .where(eq(thread.id, toRun))
+          // NO KEY UPDATE: serializes receivers per target without blocking inserts
+          // that reference the thread (they take KEY SHARE).
+          .for("no key update");
+        const rows = await tx
+          .select()
+          .from(agentMessages)
+          .where(and(eq(agentMessages.toRun, toRun), deliverable))
+          .orderBy(asc(agentMessages.id))
+          .limit(1)
+          .for("update", { skipLocked: true });
+        const row = rows[0];
+        if (!row) return { kind: "empty" };
 
-      const recorded = await tx
-        .insert(agentApplied)
-        .values({ msgId: row.id, run: toRun })
-        .onConflictDoNothing()
-        .returning({ msgId: agentApplied.msgId });
-      const applied = recorded.length > 0;
-      if (applied) await apply(tx, row);
-      await tx
-        .update(agentMessages)
-        .set({ consumedAt: sql`now()` })
-        .where(eq(agentMessages.id, row.id));
-      return applied ? ("applied" as const) : ("skipped" as const);
-    });
-    if (outcome === "empty") return { applied };
-    if (outcome === "applied") {
+        let wasNew: boolean;
+        try {
+          wasNew = await tx.transaction(async (savepoint) => {
+            const recorded = await savepoint
+              .insert(agentApplied)
+              .values({ msgId: row.id, run: toRun })
+              .onConflictDoNothing()
+              .returning({ msgId: agentApplied.msgId });
+            const isNew = recorded.length > 0;
+            if (isNew) await apply(savepoint, row);
+            return isNew;
+          });
+        } catch (error) {
+          const [counted] = await tx
+            .update(agentMessages)
+            .set({
+              attempts: sql`${agentMessages.attempts} + 1`,
+              lastError: buildLastError(error, row.body),
+              deadLetteredAt: sql`CASE WHEN ${agentMessages.attempts} + 1 >= ${AGENT_MESSAGE_MAX_ATTEMPTS} THEN now() END`,
+            })
+            .where(eq(agentMessages.id, row.id))
+            .returning({
+              attempts: agentMessages.attempts,
+              deadLetteredAt: agentMessages.deadLetteredAt,
+            });
+          if (!counted) throw error;
+          const info = {
+            messageId: row.id,
+            attempts: counted.attempts,
+            deadLettered: counted.deadLetteredAt !== null,
+          };
+          await __testOnAttemptRecorded?.(info);
+          return { kind: "failed", error, fromRun: row.fromRun, ...info };
+        }
+        await tx
+          .update(agentMessages)
+          .set({ consumedAt: sql`now()` })
+          .where(eq(agentMessages.id, row.id));
+        return { kind: wasNew ? "applied" : "skipped" };
+      },
+    );
+    if (outcome.kind === "empty") return { applied, deadLettered };
+    if (outcome.kind === "applied") {
       applied += 1;
       onApplied?.(applied);
+    }
+    if (outcome.kind === "failed") {
+      if (!outcome.deadLettered) throw outcome.error;
+      deadLettered += 1;
+      onDeadLettered?.(deadLettered);
+      logger.error("agent-bus: message dead-lettered", {
+        messageId: outcome.messageId,
+        fromRun: outcome.fromRun,
+        toRun,
+        attempts: outcome.attempts,
+        errorName: errorNameOf(outcome.error),
+      });
     }
   }
 }
@@ -259,7 +430,12 @@ export async function recentlyDeliveredTargets({
 
 /**
  * Safety net: delivers messages still unconsumed after `olderThanMs` (their
- * receive never ran). One target's failure is logged and does not stop the rest.
+ * receive never ran). Dead-lettered messages are not selected, so poison targets
+ * leave the top `limit` after at most `AGENT_MESSAGE_MAX_ATTEMPTS` ticks. One
+ * target's failure is logged (error name only) and does not stop the rest;
+ * `deadLettered` sums the messages dead-lettered during this pass. A target whose
+ * receive applied a message and then failed on a later one still counts, and is
+ * still returned in `targets`.
  */
 export async function sweepUnconsumed({
   db,
@@ -273,7 +449,7 @@ export async function sweepUnconsumed({
   olderThanMs?: number;
   limit?: number;
   logger?: BusLogger;
-}): Promise<{ targets: string[]; applied: number }> {
+}): Promise<{ targets: string[]; applied: number; deadLettered: number }> {
   // Inner join: a row whose target thread is gone is inert, not a poison target.
   const rows = await db
     .select({ toRun: agentMessages.toRun })
@@ -281,7 +457,7 @@ export async function sweepUnconsumed({
     .innerJoin(thread, eq(thread.id, agentMessages.toRun))
     .where(
       and(
-        isNull(agentMessages.consumedAt),
+        deliverable,
         sql`${agentMessages.createdAt} < now() - (${olderThanMs}::double precision * interval '1 millisecond')`,
       ),
     )
@@ -290,17 +466,37 @@ export async function sweepUnconsumed({
     .limit(limit);
   const targets: string[] = [];
   let applied = 0;
+  let deadLettered = 0;
   for (const { toRun } of rows) {
+    // Counted through the callbacks, so a receive that applies or dead-letters
+    // some messages and then fails on a later one still reports them.
+    let targetApplied = 0;
+    let targetDeadLettered = 0;
     try {
-      const result = await receiveFor({ db, toRun, apply });
-      // Only targets that actually received a message (the caller broadcasts for them).
-      if (result.applied > 0) targets.push(toRun);
-      applied += result.applied;
+      await receiveFor({
+        db,
+        toRun,
+        apply,
+        logger,
+        onApplied: (count) => {
+          targetApplied = count;
+        },
+        onDeadLettered: (count) => {
+          targetDeadLettered = count;
+        },
+      });
     } catch (error) {
-      logger.error(`agent-bus sweep: delivery to ${toRun} failed`, error);
+      logger.error(`agent-bus sweep: delivery to ${toRun} failed`, {
+        toRun,
+        errorName: errorNameOf(error),
+      });
     }
+    // Only targets that actually received a message (the caller broadcasts for them).
+    if (targetApplied > 0) targets.push(toRun);
+    applied += targetApplied;
+    deadLettered += targetDeadLettered;
   }
-  return { targets, applied };
+  return { targets, applied, deadLettered };
 }
 
 /**

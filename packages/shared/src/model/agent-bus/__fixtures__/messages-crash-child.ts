@@ -16,9 +16,15 @@ import {
  *
  * Env: DATABASE_URL, MODE = receive | send (required);
  * receive: TO_RUN; send: ORG_ID, FROM, TO, KEY, BODY;
- * KILL_POINT = after-apply (optional), KILL_AT_APPLY = N (default 1);
+ * KILL_POINT = after-apply | after-apply-failure (optional), KILL_AT_APPLY = N (default 1);
+ * after-apply-failure (#758): the apply always throws, and the process is SIGKILLed
+ * after the failure was counted and before the receive transaction commits;
  * UNSAFE = 1 (receive only: negative control, apply outside the transaction).
  */
+
+const KILL_POINT = process.env.KILL_POINT;
+/** after-apply-failure (#758): the apply always throws and the kill follows the counted failure. */
+const FAILURE_DRILL = KILL_POINT === "after-apply-failure";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -31,6 +37,17 @@ function killSelf(point: string): never {
   process.stderr.write(`killing at ${point}\n`);
   process.kill(process.pid, "SIGKILL");
   throw new Error("unreachable: SIGKILL did not end the process");
+}
+
+/** Drill apply for KILL_POINT=after-apply-failure: always fails, writes nothing. */
+const failingApply: ApplyMessage = async () => {
+  throw new Error("drill: apply always fails");
+};
+
+/** Kills the process from inside the receive transaction, after the attempt update. */
+function killAfterAttemptRecorded(): (() => void) | undefined {
+  if (!FAILURE_DRILL) return undefined;
+  return () => killSelf("after-apply-failure");
 }
 
 /** The production apply, killing the process after the Nth call when asked. */
@@ -46,15 +63,20 @@ function killingApply(db: DB): ApplyMessage {
       message,
     );
     calls += 1;
-    if (process.env.KILL_POINT === "after-apply" && calls === killAt) {
+    if (KILL_POINT === "after-apply" && calls === killAt) {
       killSelf("after-apply");
     }
   };
 }
 
 async function main(): Promise<void> {
+  if (FAILURE_DRILL && process.env.MODE === "send") {
+    throw new Error(
+      "KILL_POINT=after-apply-failure is not supported with MODE=send",
+    );
+  }
   const db = createDb(requireEnv("DATABASE_URL"));
-  const apply = killingApply(db);
+  const apply = FAILURE_DRILL ? failingApply : killingApply(db);
   const mode = requireEnv("MODE");
   let result: unknown;
   if (mode === "receive") {
@@ -62,6 +84,7 @@ async function main(): Promise<void> {
       db,
       toRun: requireEnv("TO_RUN"),
       apply,
+      __testOnAttemptRecorded: killAfterAttemptRecorded(),
     });
   } else if (mode === "send") {
     result = await sendMessage({

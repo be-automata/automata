@@ -1,4 +1,4 @@
-import { eq, inArray, or } from "drizzle-orm";
+import { eq, inArray, or, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
@@ -16,6 +16,7 @@ import {
 } from "../test-helpers";
 import { createChildRun, ensureRootRun, markBlocked } from "./agent-run";
 import {
+  AGENT_MESSAGE_MAX_ATTEMPTS,
   insertMessage,
   queuedFollowUpApply,
   receiveFor,
@@ -126,6 +127,18 @@ async function seed(from: string, to: string, n: number) {
     ids.push(res.id);
   }
   return ids;
+}
+
+/** Inserts one message and returns its id; a key conflict is a test bug. */
+async function seedOne(
+  from: string,
+  to: string,
+  key: string,
+  body: string,
+): Promise<number> {
+  const res = await insertMessage({ db, from, to, key, body });
+  if ("conflict" in res) throw new Error("unexpected conflict");
+  return res.id;
 }
 
 describe("sendMessage", () => {
@@ -438,10 +451,12 @@ describe("receiveFor", () => {
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 3,
+      deadLettered: 0,
     });
     expect(seen.map((m) => m.body)).toEqual(["body 0", "body 1", "body 2"]);
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 0,
+      deadLettered: 0,
     });
     const rows = await db
       .select({ consumedAt: agentMessages.consumedAt })
@@ -498,16 +513,15 @@ describe("receiveFor", () => {
         },
       }),
     ).rejects.toBe(boom);
-    const [row] = await db
-      .select({ consumedAt: agentMessages.consumedAt })
-      .from(agentMessages)
-      .where(eq(agentMessages.id, id as number));
-    expect(row?.consumedAt).toBeNull();
+    const row = await messageRow(id as number);
+    expect(row.consumedAt).toBeNull();
+    expect(row.attempts).toBe(1);
     expect((await counts([taskId])).applied).toBe(0);
     // The next receive retries it.
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 1,
+      deadLettered: 0,
     });
     expect(seen.map((m) => m.id)).toEqual([id]);
   });
@@ -519,6 +533,7 @@ describe("receiveFor", () => {
     const { seen, apply } = recorder();
     expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
       applied: 0,
+      deadLettered: 0,
     });
     expect(seen).toHaveLength(0);
     const [row] = await db
@@ -526,6 +541,583 @@ describe("receiveFor", () => {
       .from(agentMessages)
       .where(eq(agentMessages.id, id as number));
     expect(row?.consumedAt).not.toBeNull();
+  });
+});
+
+async function messageRow(id: number) {
+  const [row] = await db
+    .select()
+    .from(agentMessages)
+    .where(eq(agentMessages.id, id));
+  if (!row) throw new Error(`message ${id} missing`);
+  return row;
+}
+
+/** The redactor's marker (`@terragon/utils/redact`). */
+const REDACTED = "<redacted>";
+
+const failing: ApplyMessage = async () => {
+  throw new Error("poison");
+};
+
+/**
+ * Runs the `AGENT_MESSAGE_MAX_ATTEMPTS - 1` failing receives that stay below the
+ * cap (each must reject), calling `afterEach(attempt)` after every one.
+ */
+async function failUntilCap(
+  toRun: string,
+  apply: ApplyMessage,
+  {
+    logger,
+    seam,
+    expected,
+    afterEach,
+  }: {
+    logger?: { error: ReturnType<typeof vi.fn> };
+    seam?: ReturnType<typeof vi.fn>;
+    expected?: string;
+    afterEach?: (attempt: number) => void | Promise<void>;
+  } = {},
+): Promise<void> {
+  for (let attempt = 1; attempt < AGENT_MESSAGE_MAX_ATTEMPTS; attempt++) {
+    await expect(
+      receiveFor({
+        db,
+        toRun,
+        apply,
+        logger,
+        __testOnAttemptRecorded: seam,
+      }),
+    ).rejects.toThrow(expected);
+    await afterEach?.(attempt);
+  }
+}
+
+describe("dead-lettering (#758)", () => {
+  it("AC2: one failure records the error and leaves the message deliverable", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw new Error("apply failed");
+        },
+      }),
+    ).rejects.toThrow("apply failed");
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("Error: apply failed");
+    expect(row.deadLetteredAt).toBeNull();
+    expect(row.consumedAt).toBeNull();
+    // Delivery once later: covered by the rollback test in receiveFor.
+  });
+
+  it("AC3: after the cap the message is dead-lettered and never applied again", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const logger = { error: vi.fn() };
+    await failUntilCap(taskId, failing, {
+      logger,
+      expected: "poison",
+      afterEach: async (attempt) => {
+        expect((await messageRow(id as number)).attempts).toBe(attempt);
+      },
+    });
+    expect(
+      await receiveFor({ db, toRun: taskId, apply: failing, logger }),
+    ).toEqual({ applied: 0, deadLettered: 1 });
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(AGENT_MESSAGE_MAX_ATTEMPTS);
+    expect(row.deadLetteredAt).not.toBeNull();
+    expect(row.consumedAt).toBeNull();
+
+    const { seen, apply } = recorder();
+    expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
+      applied: 0,
+      deadLettered: 0,
+    });
+    await backdateCreated([id as number], 60 * 60_000);
+    const swept = await sweepUnconsumed({ db, apply });
+    expect(swept.targets).not.toContain(taskId);
+    expect(seen.map((m) => m.id)).not.toContain(id);
+    expect((await messageRow(id as number)).attempts).toBe(
+      AGENT_MESSAGE_MAX_ATTEMPTS,
+    );
+  });
+
+  it("AC4: the receive that dead-letters m1 goes on to apply m2, in FIFO order", async () => {
+    const { rootId, taskId } = await tree();
+    const [m1, m2] = await seed(rootId, taskId, 2);
+    const applied: number[] = [];
+    const apply: ApplyMessage = async (_tx, message) => {
+      if (message.id === m1) throw new Error("poison");
+      applied.push(message.id);
+    };
+    await failUntilCap(taskId, apply, {
+      expected: "poison",
+      // m2 is never applied before m1 is dead-lettered.
+      afterEach: () => expect(applied).toEqual([]),
+    });
+    expect(await receiveFor({ db, toRun: taskId, apply })).toEqual({
+      applied: 1,
+      deadLettered: 1,
+    });
+    expect(applied).toEqual([m2]);
+    expect((await messageRow(m1 as number)).deadLetteredAt).not.toBeNull();
+    expect((await messageRow(m2 as number)).consumedAt).not.toBeNull();
+  });
+
+  it("the sweep returns a target that applied a message before a later one failed", async () => {
+    const t = await tree();
+    const [m1, m2] = (await seed(t.rootId, t.taskId, 2)) as [number, number];
+    await backdateCreated([m1, m2], 24 * 60 * 60_000);
+    const { apply } = recorder();
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (message.id === m2) throw new Error("poison");
+      await apply(tx, message);
+    };
+    const result = await sweepUnconsumed({
+      db,
+      apply: sweepApply,
+      logger: { error: vi.fn() },
+    });
+    expect(result.targets).toContain(t.taskId);
+    expect(result.applied).toBeGreaterThanOrEqual(1);
+    expect((await messageRow(m1)).consumedAt).not.toBeNull();
+    expect((await messageRow(m2)).attempts).toBe(1);
+    await db.delete(agentMessages).where(eq(agentMessages.id, m2));
+  });
+
+  it("the sweep counts a dead-letter even when the same receive then fails on the next message", async () => {
+    const t = await tree();
+    const [m1, m2] = (await seed(t.rootId, t.taskId, 2)) as [number, number];
+    await backdateCreated([m1, m2], 24 * 60 * 60_000);
+    const { apply } = recorder();
+    const poison = new Set([m1, m2]);
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (poison.has(message.id)) throw new Error("poison");
+      await apply(tx, message);
+    };
+    const logger = { error: vi.fn() };
+    let countedOnDeadLetter = -1;
+    for (let pass = 1; pass <= AGENT_MESSAGE_MAX_ATTEMPTS; pass++) {
+      const result = await sweepUnconsumed({ db, apply: sweepApply, logger });
+      if ((await messageRow(m1)).deadLetteredAt !== null) {
+        countedOnDeadLetter = result.deadLettered;
+        break;
+      }
+    }
+    // m1 is dead-lettered on its 5th failure; the same receive then fails on m2's first.
+    expect((await messageRow(m2)).attempts).toBe(1);
+    expect(countedOnDeadLetter).toBe(1);
+    await db.delete(agentMessages).where(inArray(agentMessages.id, [m1, m2]));
+  });
+
+  it("AC5: dead-lettered poison targets leave the sweep, so a healthy target is delivered", async () => {
+    const t = await tree();
+    const poisonA = await seed(t.rootId, t.taskId, 1);
+    const poisonB = await seedOne(t.rootId, t.reviewId, "poison-b", "poison b");
+    const healthyTarget = await orgThread(t.organizationId, {
+      parentThreadId: t.rootId,
+    });
+    const healthy = await seedOne(
+      t.rootId,
+      healthyTarget,
+      "healthy",
+      "healthy",
+    );
+    // Explicit order, minutes apart, so rows left by other tests cannot take the slots:
+    // both poison targets are older than the healthy one and older than anything else.
+    const base = 24 * 60 * 60_000;
+    await backdateCreated(poisonA as number[], base + 3 * 60_000);
+    await backdateCreated([poisonB], base + 2 * 60_000);
+    await backdateCreated([healthy], base + 60_000);
+
+    const { seen, apply } = recorder();
+    const poisonIds = new Set<number>([...poisonA, poisonB]);
+    const poisonCalls = new Map<number, number>();
+    const sweepApply: ApplyMessage = async (tx, message) => {
+      if (poisonIds.has(message.id)) {
+        poisonCalls.set(message.id, (poisonCalls.get(message.id) ?? 0) + 1);
+        throw new Error("poison");
+      }
+      await apply(tx, message);
+    };
+    const logger = { error: vi.fn() };
+    let delivered = false;
+    for (let pass = 1; pass <= AGENT_MESSAGE_MAX_ATTEMPTS + 1; pass++) {
+      const result = await sweepUnconsumed({
+        db,
+        apply: sweepApply,
+        logger,
+        limit: 2,
+      });
+      if (result.targets.includes(healthyTarget)) {
+        delivered = true;
+        break;
+      }
+    }
+    expect(delivered).toBe(true);
+    expect(
+      seen.filter((m) => m.toRun === healthyTarget).map((m) => m.id),
+    ).toEqual([healthy]);
+    for (const id of poisonIds) {
+      expect(poisonCalls.get(id)).toBe(AGENT_MESSAGE_MAX_ATTEMPTS);
+      const row = await messageRow(id);
+      expect(row.deadLetteredAt).not.toBeNull();
+      expect(row.attempts).toBe(AGENT_MESSAGE_MAX_ATTEMPTS);
+    }
+  });
+
+  it("AC6: a target whose only unconsumed rows are dead-lettered is not swept", async () => {
+    const t = await tree();
+    const [deadId] = await seed(t.rootId, t.taskId, 1);
+    const healthy = await seedOne(
+      t.rootId,
+      t.reviewId,
+      "ac6-healthy",
+      "healthy",
+    );
+    // The dead-lettered row is the oldest unconsumed row in the DB (30 days), the
+    // healthy one a minute younger: with limit 1 the sweep can only pick the healthy
+    // target when its query skips dead-lettered rows.
+    const oldest = 30 * 24 * 60 * 60_000;
+    await db
+      .update(agentMessages)
+      .set({
+        createdAt: new Date(Date.now() - oldest),
+        deadLetteredAt: new Date(),
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+      })
+      .where(eq(agentMessages.id, deadId as number));
+    await backdateCreated([healthy], oldest - 60_000);
+    const { seen, apply } = recorder();
+    const result = await sweepUnconsumed({ db, apply, limit: 1 });
+    expect(result.targets).toContain(t.reviewId);
+    expect(result.targets).not.toContain(t.taskId);
+    expect(seen.map((m) => m.id)).toContain(healthy);
+    expect(seen.map((m) => m.id)).not.toContain(deadId);
+  });
+
+  it("AC8: exactly one dead-letter log, no body in any log argument, bounded last_error without the body", async () => {
+    const { rootId, taskId } = await tree();
+    const body = "SECRET-BODY-4711";
+    const insertedId = await seedOne(rootId, taskId, "secret", body);
+    const echo: ApplyMessage = async (_tx, message) => {
+      throw new Error(
+        `rejected ${message.body}: ${message.body} ${"x".repeat(900)}`,
+      );
+    };
+    const logger = { error: vi.fn() };
+    await failUntilCap(taskId, echo, { logger });
+    expect(logger.error).not.toHaveBeenCalled();
+    await receiveFor({ db, toRun: taskId, apply: echo, logger });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      "agent-bus: message dead-lettered",
+      {
+        messageId: insertedId,
+        fromRun: rootId,
+        toRun: taskId,
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+        errorName: "Error",
+      },
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(body);
+    const row = await messageRow(insertedId);
+    expect(row.lastError).not.toContain(body);
+    expect(row.lastError).toContain(REDACTED);
+    expect(row.lastError?.length).toBeLessThanOrEqual(500);
+  });
+
+  it("a body shorter than 4 characters is still redacted from last_error", async () => {
+    const { rootId, taskId } = await tree();
+    const id = await seedOne(rootId, taskId, "short-body", "Q7");
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (_tx, message) => {
+          throw new Error(`rejected ${message.body}`);
+        },
+      }),
+    ).rejects.toThrow();
+    const row = await messageRow(id);
+    expect(row.lastError).toBe(`Error: rejected ${REDACTED}`);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
+  it("a NUL byte in the error message never reaches last_error", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw new Error("bad\u0000byte");
+        },
+      }),
+    ).rejects.toThrow();
+    expect((await messageRow(id as number)).lastError).not.toContain("\u0000");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("a thrown value that cannot be printed still counts the attempt and the original rejects", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const thrown = Object.create(null);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toContain("<unprintable>");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("an Error whose name getter throws still counts the attempt and the original rejects", async () => {
+    // Value: protects=attempt counted when error.name throws; fails_when=errorNameOf loses its try/catch, the count throws, the tx rolls back, poison retries forever;
+    // why_new=the unprintable test uses a non-Error, so errorNameOf never reads a throwing name; seam=none; no_claim=sweep/send log names
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const thrown = new Error("hostile name");
+    Object.defineProperty(thrown, "name", {
+      get() {
+        throw new Error("name getter");
+      },
+    });
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("<unprintable>: hostile name");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("a body too large for the redactor still counts the attempt, rejects with the original and stores no body", async () => {
+    // Value: protects=a >40K body that fails apply is counted (it can still be dead-lettered); fails_when=the redactor's RegExp throws "too large" and rolls the count back;
+    // why_new=every other body is short; seam=none; no_claim=bodies over the database's own limits
+    const { rootId, taskId } = await tree();
+    const body = "B".repeat(40_000);
+    const id = await seedOne(rootId, taskId, "huge-body", body);
+    const thrown = new Error(`rejected ${body}`);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("Error: <unrecordable>");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
+  it("an Error with a non-string name is recorded under its type, and the attempt counts", async () => {
+    // Value: protects=a Symbol (non-string) error.name never throws while building last_error; fails_when=errorNameOf returns the raw name and the template literal throws;
+    // why_new=the getter test throws inside the getter, not on coercion; seam=none; no_claim=log line contents
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    const thrown = new Error("odd name");
+    Object.defineProperty(thrown, "name", { value: Symbol("odd") });
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async () => {
+          throw thrown;
+        },
+      }),
+    ).rejects.toBe(thrown);
+    const row = await messageRow(id as number);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe("object: odd name");
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it.each([
+    ["contains the body", (body: string) => `Err ${body}`],
+    ["is too long for a class name", () => `E${"x".repeat(64)}`],
+  ])(
+    "an Error whose name %s is logged and stored under its type, never the name",
+    async (_label, nameOf) => {
+      // Value: protects=a data-bearing Error.name never reaches the dead-letter log or last_error; fails_when=errorNameOf forwards any string name;
+      // why_new=other name tests use a throwing getter or a Symbol; seam=none; no_claim=names that look like class names
+      const { rootId, taskId } = await tree();
+      const body = "SECRET-BODY-NAME";
+      const id = await seedOne(rootId, taskId, "name-leak", body);
+      const name = nameOf(body);
+      const apply: ApplyMessage = async () => {
+        const thrown = new Error("named");
+        thrown.name = name;
+        throw thrown;
+      };
+      const logger = { error: vi.fn() };
+      await failUntilCap(taskId, apply, { logger });
+      await receiveFor({ db, toRun: taskId, apply, logger });
+      expect(logger.error).toHaveBeenCalledWith(
+        "agent-bus: message dead-lettered",
+        expect.objectContaining({ messageId: id, errorName: "object" }),
+      );
+      expect(JSON.stringify(logger.error.mock.calls)).not.toContain(name);
+      const row = await messageRow(id);
+      expect(row.lastError).toBe("object: named");
+      await db.delete(agentMessages).where(eq(agentMessages.id, id));
+    },
+  );
+
+  it("a thrown non-Error value is stored as '<type>: <value>' with the body redacted", async () => {
+    // Value: protects=last_error for a thrown string is "string: <text>", body redacted; fails_when=the String(error) branch reads .message (stores "undefined") or skips redaction;
+    // why_new=every other failure test throws an Error or an unprintable object; seam=none; no_claim=the 500 cap or NUL handling
+    const { rootId, taskId } = await tree();
+    const body = "SECRET-BODY-STR";
+    const id = await seedOne(rootId, taskId, "string-throw", body);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (_tx, message) => {
+          throw `rejected ${message.body}`;
+        },
+      }),
+    ).rejects.toBe(`rejected ${body}`);
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toBe(`string: rejected ${REDACTED}`);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
+  it("a multi-unit character straddling the 500 cut leaves no lone surrogate and the body stays redacted", async () => {
+    const { rootId, taskId } = await tree();
+    const body = "SECRET-BODY-9001";
+    const insertedId = await seedOne(rootId, taskId, "surrogate", body);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (_tx, message) => {
+          // "Error: " is 7 units; pad so the emoji's two units sit at 499 and 500.
+          throw new Error(
+            `${message.body} ${"x".repeat(500 - 7 - `${REDACTED} `.length - 1)}\u{1F642} tail ${message.body}`,
+          );
+        },
+      }),
+    ).rejects.toThrow();
+    const lastError = (await messageRow(insertedId)).lastError ?? "";
+    expect(lastError.length).toBeLessThanOrEqual(500);
+    expect(lastError).not.toContain(body);
+    expect(lastError).toContain(REDACTED);
+    expect(lastError).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+    await db.delete(agentMessages).where(eq(agentMessages.id, insertedId));
+  });
+
+  it("savepoint: the agent_applied row inserted before the throw is gone, the attempt committed", async () => {
+    const { rootId, taskId } = await tree();
+    const [id] = await seed(rootId, taskId, 1);
+    let sawRowInsideApply = false;
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (tx, message) => {
+          const inside = await tx
+            .select({ id: agentApplied.msgId })
+            .from(agentApplied)
+            .where(eq(agentApplied.msgId, message.id));
+          sawRowInsideApply = inside.length === 1;
+          throw new Error("poison");
+        },
+      }),
+    ).rejects.toThrow("poison");
+    expect(sawRowInsideApply).toBe(true);
+    expect((await counts([taskId])).applied).toBe(0);
+    expect((await messageRow(id as number)).attempts).toBe(1);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id as number));
+  });
+
+  it("savepoint: a SQL error after a partial write rolls the write back and records the driver error, not drizzle's query text", async () => {
+    // Value: protects=a real DB failure inside apply rolls back its partial write and stores the cause; fails_when=apply leaves the savepoint or last_error keeps "Failed query: <sql> params: <body JSON>";
+    // why_new=other failure tests throw plain Errors before any write; seam=none; no_claim=neon-serverless (node-postgres only)
+    const { rootId, taskId } = await tree();
+    const body = 'quote " and\nnewline';
+    const id = await seedOne(rootId, taskId, "sql-fail", body);
+    await expect(
+      receiveFor({
+        db,
+        toRun: taskId,
+        apply: async (tx, message) => {
+          await queuedFollowUpApply(tx, message);
+          await tx.execute(sql`SELECT 1/0`);
+        },
+      }),
+    ).rejects.toThrow();
+    const row = await messageRow(id);
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toMatch(/^\S+ 22012: division by zero$/);
+    expect(row.lastError).not.toContain("Failed query");
+    const [chat] = await db
+      .select({ queued: threadChat.queuedMessages })
+      .from(threadChat)
+      .where(eq(threadChat.threadId, taskId));
+    const [legacy] = await db
+      .select({ queued: thread.queuedMessages })
+      .from(thread)
+      .where(eq(thread.id, taskId));
+    expect(chat?.queued ?? []).toEqual([]);
+    expect(legacy?.queued ?? []).toEqual([]);
+    expect((await counts([taskId])).applied).toBe(0);
+    await db.delete(agentMessages).where(eq(agentMessages.id, id));
+  });
+
+  it("the test seam fires once per failure with the right dead-letter flag", async () => {
+    const { rootId, taskId } = await tree();
+    await seed(rootId, taskId, 1);
+    const seam = vi.fn();
+    await failUntilCap(taskId, failing, {
+      logger: { error: vi.fn() },
+      seam,
+      afterEach: (attempt) => {
+        expect(seam).toHaveBeenCalledTimes(attempt);
+        expect(seam).toHaveBeenLastCalledWith(
+          expect.objectContaining({ attempts: attempt, deadLettered: false }),
+        );
+      },
+    });
+    await receiveFor({
+      db,
+      toRun: taskId,
+      apply: failing,
+      logger: { error: vi.fn() },
+      __testOnAttemptRecorded: seam,
+    });
+    expect(seam).toHaveBeenCalledTimes(AGENT_MESSAGE_MAX_ATTEMPTS);
+    expect(seam).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        attempts: AGENT_MESSAGE_MAX_ATTEMPTS,
+        deadLettered: true,
+      }),
+    );
   });
 });
 
@@ -624,6 +1216,8 @@ describe("sweepUnconsumed", () => {
   });
 
   it("logs one target's failure and still delivers the others", async () => {
+    // Value: protects=sweep per-target log is { toRun, errorName }, never the raw error or body; fails_when=the log passes the raw error (its message echoes the body) again;
+    // why_new=this test only checked the call count; seam=none; no_claim=the dead-letter log (AC8) or the sendMessage log
     const t = await tree();
     const [badId] = await seed(t.rootId, t.taskId, 1);
     const good = await insertMessage({
@@ -642,11 +1236,17 @@ describe("sweepUnconsumed", () => {
       db,
       logger,
       apply: async (_tx, message) => {
-        if (message.toRun === t.taskId) throw new Error("poison");
+        if (message.toRun === t.taskId) {
+          throw new Error(`poison ${message.body}`);
+        }
         applied.push(message.id);
       },
     });
     expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      `agent-bus sweep: delivery to ${t.taskId} failed`,
+      { toRun: t.taskId, errorName: "Error" },
+    );
     expect(result.targets).toContain(t.reviewId);
     expect(result.targets).not.toContain(t.taskId);
     expect(applied).toContain(good.id);

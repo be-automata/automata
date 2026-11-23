@@ -3512,6 +3512,18 @@ export const agentMessages = pgTable(
       .defaultNow()
       .notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "date" }),
+    /** Failed apply attempts (#758). Counted only when the failure committed. */
+    attempts: integer("attempts").default(0).notNull(),
+    /** `"<error name>: <message>"`, body redacted, at most 500 chars. Never the body. */
+    lastError: text("last_error"),
+    /**
+     * Set when `attempts` reaches the cap (#758). A dead-lettered row has
+     * `consumed_at IS NULL AND dead_lettered_at IS NOT NULL`: it is out of delivery.
+     */
+    deadLetteredAt: timestamp("dead_lettered_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
   },
   (table) => [
     uniqueIndex("agent_messages_idem").on(table.fromRun, table.idemKey),

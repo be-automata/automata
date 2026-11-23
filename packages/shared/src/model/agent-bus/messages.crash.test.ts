@@ -276,3 +276,51 @@ describe("agent bus crash drills (#660)", () => {
     TEST_TIMEOUT_MS,
   );
 });
+
+describe("agent bus crash drill (#758)", () => {
+  it(
+    "AC7: a receiver killed after a failed apply, before COMMIT, counts no attempt and redelivers once",
+    async () => {
+      const s = await scenario();
+      await seed(s.rootId, s.targetId, 1);
+      const base = { MODE: "receive", TO_RUN: s.targetId };
+
+      const killed = await runChild({
+        ...base,
+        KILL_POINT: "after-apply-failure",
+      });
+      expect(killed.killed).toBe(true);
+      // The full sentinel: "killing at after-apply" alone would also match the old drills.
+      expect(killed.stderr).toContain("killing at after-apply-failure");
+      const [row] = await db
+        .select({
+          attempts: agentMessages.attempts,
+          consumedAt: agentMessages.consumedAt,
+          deadLetteredAt: agentMessages.deadLetteredAt,
+        })
+        .from(agentMessages)
+        .where(eq(agentMessages.toRun, s.targetId));
+      expect(row).toEqual({
+        attempts: 0,
+        consumedAt: null,
+        deadLetteredAt: null,
+      });
+      expect(await state(s.targetId, s.chatId)).toEqual({
+        messages: 1,
+        consumed: 0,
+        applied: 0,
+        queued: 0,
+      });
+
+      const rerun = await runChild(base);
+      expect(resultOf(rerun)).toEqual({ applied: 1, deadLettered: 0 });
+      expect(await state(s.targetId, s.chatId)).toEqual({
+        messages: 1,
+        consumed: 1,
+        applied: 1,
+        queued: 1,
+      });
+    },
+    TEST_TIMEOUT_MS,
+  );
+});

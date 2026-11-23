@@ -30,7 +30,8 @@ Other defaults (not owner questions; listed as assumptions in the PR):
   delivered by receive/sweeper. Documented, not "fixed".
 - **A3** Apply failure (throws): that message's transaction rolls back, `receiveFor` stops for
   that target and rethrows; the message stays unconsumed and the sweeper retries it. No
-  dead-letter in S2 (out of scope; follow-up named in the PR).
+  dead-letter in S2; poison messages are dead-lettered after a capped number of failed
+  attempts by #758 (the failure is counted, and the row stops blocking its target).
 - **A5** Kick gating follows `queueFollowUpInternal`'s three checks, with one deliberate difference (it THROWS on tier `none`, follow-up.ts:130-133; we only skip the kick) — plus a fourth, bus-specific one: skip when the target user's access tier is
   `none` (`getAccessInfoForUser`, `follow-up.ts:130`), when the thread is `shadow`, or when the chat
   `isAgentWorking`, or when the target's `agent_run.blocked_at` is set (a run blocked after the send must not be
@@ -38,7 +39,7 @@ Other defaults (not owner questions; listed as assumptions in the PR):
 - **A6** Lost kick: the kick runs after commit and can fail or die with the request. The sweeper
   therefore also re-kicks targets that had a message consumed in the last 2 minutes
   (`recentlyDeliveredTargets`); the kick is idempotent (`maybeProcessFollowUpQueue` returns on an
-  empty queue). Poison messages (A3) remain a known gap → dead-letter follow-up issue.
+  empty queue). Poison messages (A3) remain a known gap → dead-letter follow-up #758.
 - **A7** Bodies are stored normalized (`sanitizeForJson`): two raw bodies that differ only in stripped
   characters are the same message under one key (duplicate, not conflict).
 - **A8** The kick never resumes a terminal target; the message stays queued (A2).
@@ -200,7 +201,7 @@ coverage on touched packages: `pnpm --filter @terragon/shared exec vitest run --
 
 ## Out of scope
 
-Spawning (S3), artifacts (S4), MCP tools (S5), `LISTEN`/durable waits, dead-letter for poison messages, any
+Spawning (S3), artifacts (S4), MCP tools (S5), `LISTEN`/durable waits, dead-letter for poison messages (#758), any
 caller of `sendAgentMessage`.
 
 ## Risks / rollback
