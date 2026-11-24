@@ -292,7 +292,7 @@ function explainErrorType(error: ThreadErrorType): NeedsYouExplanation {
       return {
         title: "Box at capacity",
         reason:
-          "The execution box had no memory headroom for this run, so the agent never started. Retry once the box is less busy.",
+          "The execution box had no memory or disk headroom for this run, so the agent never started. Retry once the box is less busy.",
         action: "open-task",
       };
     case "out-of-memory":

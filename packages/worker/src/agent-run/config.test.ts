@@ -617,6 +617,19 @@ describe("#371: memory-headroom admission knobs are validated at boot", () => {
     ).toBe(2 * 1024 ** 3);
   });
 
+  it("the disk floor defaults to 5G, takes a suffix, and 0 turns it off", () => {
+    expect(loadWorkerConfig({ ...REQ }).diskFloorBytes).toBe(5 * 1024 ** 3);
+    expect(
+      loadWorkerConfig({ ...REQ, WORKER_DISK_FLOOR: "10G" }).diskFloorBytes,
+    ).toBe(10 * 1024 ** 3);
+    expect(
+      loadWorkerConfig({ ...REQ, WORKER_DISK_FLOOR: "0" }).diskFloorBytes,
+    ).toBe(0);
+    expect(() =>
+      loadWorkerConfig({ ...REQ, WORKER_DISK_FLOOR: "5 gigs" }),
+    ).toThrow(/WORKER_DISK_FLOOR/);
+  });
+
   it("the documented rollback values (floor 0, fraction 1.0) load and make the check inert", () => {
     const cfg = loadWorkerConfig({
       ...REQ,

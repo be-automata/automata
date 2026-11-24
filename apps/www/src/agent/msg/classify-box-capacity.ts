@@ -36,4 +36,4 @@ export function boxAtCapacityOfChat(
  * box memory figures that mean nothing to a PR author.
  */
 export const BOX_AT_CAPACITY_SENTENCE =
-  "The execution box was at capacity (no memory headroom for another run), so the agent never started; nothing about this change caused it.";
+  "The execution box was at capacity (no memory or disk headroom for another run), so the agent never started; nothing about this change caused it.";
