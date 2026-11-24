@@ -108,6 +108,26 @@ describe("disk-alert.sh (2026-11-24: the disk hit 100% and nobody was told)", ()
     expect(tick(95).posts).toHaveLength(1);
   });
 
+  // card: protects=the script's df flags work with the real GNU coreutils df the box runs (a fake df hid `-P` + `--output` being refused); fails_when=the real df rejects the flags or its output does not parse; no_claim=macOS (BSD df has no --output: skipped there, runs on Linux CI)
+  it.skipIf(process.platform !== "linux")("reads the real GNU df", () => {
+    fs.writeFileSync(path.join(dir, "url"), `${URL}\n`);
+    const r = spawnSync("bash", [SCRIPT], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        DISK_ALERT_CURL: path.join(dir, "curl"),
+        DISK_ALERT_URL_FILE: path.join(dir, "url"),
+        DISK_ALERT_STATE_DIR: path.join(dir, "state"),
+        DISK_ALERT_MOUNT: dir,
+        DISK_ALERT_BOX: "ci",
+        DISK_ALERT_SKIP_ROOT_CHECK: "1",
+      },
+    });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/disk \d+% used, \d+G free on /);
+  });
+
   it("refuses a URL that is not a Slack webhook", () => {
     const r = tick(95, { url: "https://example.com/x" });
     expect(r.status).toBe(1);

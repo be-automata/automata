@@ -42,12 +42,13 @@ fi
 target="$MOUNT"
 while [ ! -e "$target" ] && [ "$target" != "/" ]; do target="$(dirname "$target")"; done
 
-read -r used avail <<<"$("$DF" -P -B1G --output=pcent,avail "$target" | tail -n 1 | tr -d '%')"
+# No -P: GNU df refuses it together with --output.
+read -r used avail <<<"$("$DF" -B1G --output=pcent,avail "$target" | tail -n 1 | tr -d '%')"
 # GNU df prints `-BG` sizes with or without a G suffix depending on the form.
 avail="${avail//[!0-9]/}"
 [[ "$used" =~ ^[0-9]+$ ]] && [ -n "$avail" ] || fail "could not read disk usage for $target"
 
-install -d -m 0700 "$STATE_DIR"
+install -d -m 0700 "$STATE_DIR" || fail "cannot create $STATE_DIR"
 prev="$(cat "$STATE_DIR/state" 2>/dev/null || echo ok)"
 now="$prev"
 if [ "$used" -ge "$ALERT_PCT" ]; then
@@ -74,7 +75,7 @@ url="$(head -n 1 "$URL_FILE" | tr -d '[:space:]')"
 body="$(printf '{"text":"%s"}' "$(printf '%s' "$text" | sed 's/\\/\\\\/g; s/"/\\"/g')")"
 if printf 'url = "%s"\n' "$url" | "$CURL" -sS -f -m 20 -K - \
   -H 'Content-Type: application/json' --data-binary "$body" >/dev/null; then
-  echo "$now" >"$STATE_DIR/state"
+  echo "$now" >"$STATE_DIR/state" || fail "posted ${now}, but cannot write $STATE_DIR/state"
   log "posted: ${now}"
 else
   # State unchanged, so the next tick retries the post.
