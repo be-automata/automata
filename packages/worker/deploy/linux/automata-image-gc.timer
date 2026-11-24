@@ -1,0 +1,15 @@
+# Daily, and 10 minutes after boot: a new image pin lands with a deploy, so the
+# old image is gone within a day of it.
+
+[Unit]
+Description=Remove unpinned batteries and cell images daily
+
+[Timer]
+OnBootSec=10min
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=automata-image-gc.service
+
+[Install]
+WantedBy=timers.target
