@@ -92,6 +92,9 @@ export async function provisionWorkdir({
   workdirRoot,
   runId,
   runGit = gitExec,
+  minFreeBytes = 0,
+  statfs = fs.statfs,
+  log,
 }: {
   repoFullName: string;
   branch: string;
@@ -114,6 +117,15 @@ export async function provisionWorkdir({
   runId: string;
   /** Injectable git runner (tests only) — defaults to the real gitExec. */
   runGit?: typeof gitExec;
+  /**
+   * The disk floor (`WORKER_DISK_FLOOR`): below this many free bytes on the
+   * workdir root the run is refused BEFORE it clones. 0 turns the check off.
+   */
+  minFreeBytes?: number;
+  /** Injectable statfs (tests only) — defaults to fs.statfs. */
+  statfs?: StatFs;
+  /** Where a failed run-dir cleanup is logged (cleanupWorkdir's default otherwise). */
+  log?: (line: string) => void;
 }): Promise<RunPaths> {
   const paths = runPaths(path.join(workdirRoot, runId));
   const { runDir } = paths;
@@ -157,6 +169,51 @@ export async function provisionWorkdir({
   }
   await sweepTombstones(workdirRoot);
 
+  await assertDiskFloor(workdirRoot, minFreeBytes, statfs);
+
+  // A provisioning failure removes what it wrote. The clone is the biggest
+  // thing a run puts on disk (up to ~2G), and a clone that dies halfway still
+  // leaves most of it: without this, every failed clone stayed under the
+  // workdir root until the 24h stale sweep — and on a box whose disk was
+  // already filling, every retry added another partial clone (2026-11-24: the
+  // box reached 100% and every run failed `No space left on device`).
+  // The dir is this attempt's alone: residue of an earlier attempt was renamed
+  // to a tombstone above, so removing it cannot touch a live escapee.
+  try {
+    return await populateRunDir({
+      paths,
+      repoFullName,
+      branch,
+      baseBranch,
+      workBranch,
+      installationToken,
+      runGit,
+    });
+  } catch (err) {
+    await cleanupWorkdir(runDir, log ? { log } : {});
+    throw err;
+  }
+}
+
+/** The run dir's contents: the private dir itself, then the clone and branches. */
+async function populateRunDir({
+  paths,
+  repoFullName,
+  branch,
+  baseBranch,
+  workBranch,
+  installationToken,
+  runGit,
+}: {
+  paths: RunPaths;
+  repoFullName: string;
+  branch: string;
+  baseBranch?: string;
+  workBranch?: string;
+  installationToken: string;
+  runGit: typeof gitExec;
+}): Promise<RunPaths> {
+  const { runDir } = paths;
   // #205: the run dir is PRIVATE (0700); chmod as well, for a dir that already
   // existed. A run container reaches only the dirs handOverRunDir opens to the
   // rootless daemon's group (ADR-013 "Daemon socket"), by search, never read.
@@ -242,6 +299,48 @@ export async function provisionWorkdir({
   }
 
   return paths;
+}
+
+/** The slice of `fs.statfs` the disk floor reads. */
+export type StatFs = (p: string) => Promise<{ bavail: number; bsize: number }>;
+
+/**
+ * Refuse a run before it clones when the workdir root's filesystem has less
+ * than `minFreeBytes` free (to unprivileged users: `bavail`). A clone into a
+ * full disk fails late and leaves a partial clone; failing here is cheap and
+ * names the cause, where `git clone … No space left on device` read to users
+ * as "The agent stopped with an error." 0 turns the check off. A statfs that
+ * fails (no root yet on a fresh box) is not a refusal.
+ */
+export async function assertDiskFloor(
+  workdirRoot: string,
+  minFreeBytes: number,
+  statfs: StatFs = fs.statfs,
+): Promise<void> {
+  if (minFreeBytes <= 0) return;
+  const st = await statfs(workdirRoot).catch(() => null);
+  if (!st) return;
+  const free = Number(st.bavail) * Number(st.bsize);
+  if (free >= minFreeBytes) return;
+  throw new DiskFloorError(workdirRoot, free, minFreeBytes);
+}
+
+/** The execution box is below its disk floor; the run never cloned. */
+export class DiskFloorError extends Error {
+  constructor(
+    readonly workdirRoot: string,
+    readonly freeBytes: number,
+    readonly floorBytes: number,
+  ) {
+    super(
+      `box_disk_low: the execution box has ${formatGiB(freeBytes)} free under ${workdirRoot}, below its ${formatGiB(floorBytes)} floor (WORKER_DISK_FLOOR); the run was refused before cloning`,
+    );
+    this.name = "DiskFloorError";
+  }
+}
+
+function formatGiB(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
 /**
@@ -380,6 +479,8 @@ export const STALE_RUN_DIR_AGE_MS = 24 * 60 * 60 * 1000;
  * removed, the rest wait for the next boot.
  */
 export const SWEEP_BUDGET_MS = 60_000;
+/** How often a running worker repeats the boot sweep. */
+export const STALE_RUN_DIR_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 export interface SweepStaleRunDirsResult {
   removed: number;

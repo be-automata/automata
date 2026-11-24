@@ -20,7 +20,10 @@ import {
   assertSlotsFitCommitLimit,
   warnIfSlotsExceedMemory,
 } from "../agent-run/box-slots-boot";
-import { sweepStaleRunDirs } from "../agent-run/provision";
+import {
+  STALE_RUN_DIR_SWEEP_INTERVAL_MS,
+  sweepStaleRunDirs,
+} from "../agent-run/provision";
 import { reclaimDeadWorkerRuns } from "../agent-run/reclaim";
 import { runTerminalRootBootLines } from "../agent-run/run-terminal-ledger";
 import {
@@ -190,6 +193,18 @@ async function main() {
   } catch (err) {
     console.error("[worker-boot] stale run dirs sweep failed", err);
   }
+  // The same sweep every hour while the worker runs, not only at boot: a
+  // worker that stays up for weeks never re-ran the boot sweep, so residue
+  // only grew (2026-11-24: the box disk reached 100%). Same 24h age rule, so
+  // it can never reach a live run's dir. unref: it never holds the process up.
+  setInterval(() => {
+    sweepStaleRunDirs({
+      workdirRoot: bootCfg.workdirRoot,
+      log: (m) => console.log(`[worker] ${m}`),
+    }).catch((err: unknown) => {
+      console.error("[worker] stale run dirs sweep failed", err);
+    });
+  }, STALE_RUN_DIR_SWEEP_INTERVAL_MS).unref();
 
   // #69 §3.2.4 item 2 — boot-time (secondary) engine-DB slot reclaim, BEFORE
   // registration so this registration's own fresh strategy rows are never

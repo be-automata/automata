@@ -148,6 +148,12 @@ export interface WorkerConfig {
   boxId: string;
   /** Root under which each run gets an isolated clone directory. */
   workdirRoot: string;
+  /**
+   * Disk floor (`WORKER_DISK_FLOOR`, default 5G): a run is refused before it
+   * clones when the workdir root's filesystem has less free. `0` turns the
+   * check off (the rollback without a deploy).
+   */
+  diskFloorBytes: number;
   /** thread-status poll interval, ms (5-10s; runs are minutes-long — ADR-003). */
   pollIntervalMs: number;
   /** GitHub App bot login the run's git commits are authored as (never the operator). */
@@ -619,6 +625,12 @@ export function loadWorkerConfig(
         "misconfiguration — set WORKER_PER_ORG_MAX_RUNS at or below the global cap.",
     );
   }
+  // Parsed here so a typo is refused at boot, not at the first run.
+  const diskFloorBytes = parseBytesEnv(
+    "WORKER_DISK_FLOOR",
+    env.WORKER_DISK_FLOOR,
+    5 * 1024 ** 3,
+  );
   // #371. Parsed here so a typo is refused at boot, not at the first admission.
   const headroomFloorBytes = parseBytesEnv(
     "WORKER_HEADROOM_FLOOR",
@@ -658,6 +670,7 @@ export function loadWorkerConfig(
     globalMaxRuns,
     perOrgMaxRuns,
     headroomFloorBytes,
+    diskFloorBytes,
     headroomCommitFraction,
     headroomRunCommitBytes,
     admissionMaxDeferrals,

@@ -1311,6 +1311,8 @@ async function runAgentInner(
       installationToken: secrets.installationToken,
       workdirRoot: config.workdirRoot,
       runId: input.threadId,
+      minFreeBytes: config.diskFloorBytes,
+      log: admissionLog,
     });
   } catch (err) {
     reservation?.release();

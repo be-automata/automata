@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ensureBaseDiffable, gitExec, provisionWorkdir } from "./provision";
+import {
+  assertDiskFloor,
+  DiskFloorError,
+  ensureBaseDiffable,
+  gitExec,
+  provisionWorkdir,
+} from "./provision";
 
 const execFileAsync = promisify(execFile);
 
@@ -175,6 +181,84 @@ describe("provisionWorkdir — the run dir", () => {
     expect(calls).toEqual(["git:clone"]);
     expect((await fs.stat(path.join(root, "thr_1"))).mode & 0o777).toBe(0o700);
     await expect(fs.stat(path.join(root, "thr_1", "tmp"))).rejects.toThrow();
+  });
+
+  // card: protects=a clone that fails removes its partial clone, so failed runs never accumulate on the box disk (2026-11-24: 100% full); fails_when=the run dir survives a failed clone, or the clone's error is replaced; no_claim=a cleanup that itself fails (cleanupWorkdir tests)
+  it("a failed clone removes the run dir and rethrows the clone's error", async () => {
+    const logs: string[] = [];
+    await expect(
+      provisionWorkdir({
+        repoFullName: "o/r",
+        branch: "main",
+        installationToken: "ghs_x",
+        workdirRoot: root,
+        runId: "thr_1",
+        log: (l) => logs.push(l),
+        runGit: async (args: string[]) => {
+          const dest = args[args.length - 1] ?? "";
+          await fs.writeFile(path.join(dest, "half.pack"), "x".repeat(4096));
+          throw new Error(
+            "git clone failed (exit 128): No space left on device",
+          );
+        },
+      }),
+    ).rejects.toThrow(/No space left on device/);
+    await expect(fs.stat(path.join(root, "thr_1"))).rejects.toThrow(/ENOENT/);
+    expect(logs).toEqual([]);
+  });
+
+  // card: protects=below the disk floor the run is refused before anything is written or cloned, with a reason that names the disk; fails_when=git runs, the run dir is created, or the error does not say box_disk_low; no_claim=the user-facing notice wording (www)
+  it("below the disk floor refuses before cloning, naming the disk", async () => {
+    const calls: string[][] = [];
+    const err = await provisionWorkdir({
+      repoFullName: "o/r",
+      branch: "main",
+      installationToken: "ghs_x",
+      workdirRoot: root,
+      runId: "thr_1",
+      minFreeBytes: 5 * 1024 ** 3,
+      statfs: async () => ({ bavail: 1024, bsize: 4096 }),
+      runGit: async (args: string[]) => {
+        calls.push(args);
+        return { stdout: "", stderr: "" };
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiskFloorError);
+    expect((err as Error).message).toMatch(
+      /^box_disk_low: .* below its 5\.0 GiB floor/,
+    );
+    expect(calls).toEqual([]);
+    await expect(fs.stat(path.join(root, "thr_1"))).rejects.toThrow(/ENOENT/);
+  });
+});
+
+describe("assertDiskFloor", () => {
+  const plenty = async () => ({ bavail: 10 * 1024 ** 2, bsize: 4096 }); // 40 GiB
+
+  it("passes at or above the floor", async () => {
+    await expect(
+      assertDiskFloor("/r", 40 * 1024 ** 3, plenty),
+    ).resolves.toBeUndefined();
+  });
+
+  it("is off at 0, whatever the disk says", async () => {
+    await expect(
+      assertDiskFloor("/r", 0, async () => ({ bavail: 0, bsize: 4096 })),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not refuse when statfs itself fails (no root yet)", async () => {
+    await expect(
+      assertDiskFloor("/r", 1, async () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses just under the floor", async () => {
+    await expect(
+      assertDiskFloor("/r", 40 * 1024 ** 3 + 1, plenty),
+    ).rejects.toBeInstanceOf(DiskFloorError);
   });
 });
 
