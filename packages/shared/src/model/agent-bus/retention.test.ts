@@ -1,10 +1,11 @@
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { env } from "@terragon/env/pkg-shared";
 import { createDb, rowsOf } from "../../db";
 import {
   agentApplied,
+  agentMessagePruneCursor,
   agentMessages,
   thread,
   threadChat,
@@ -200,7 +201,25 @@ async function appliedPresent(ids: number[]): Promise<number> {
   return rows.length;
 }
 
+/** The stored consumed-pass cursor, or null when there is no row. */
+async function storedCursor() {
+  const [row] = await db
+    .select({
+      consumedAt: agentMessagePruneCursor.consumedAt,
+      id: agentMessagePruneCursor.msgId,
+    })
+    .from(agentMessagePruneCursor);
+  return row ?? null;
+}
+
+async function clearCursor() {
+  await db.delete(agentMessagePruneCursor);
+}
+
 describe("pruneAgentMessages", () => {
+  // The cursor persists across calls (#769): each test starts from the beginning.
+  beforeEach(clearCursor);
+
   it("AC1 deletes a consumed row and its agent_applied row when the sender is terminal and idle past R", async () => {
     const { rootId, taskId } = await tree();
     const id = await sendConsumed(rootId, taskId, "ac1");
@@ -597,6 +616,175 @@ describe("pruneAgentMessages", () => {
     expect((error as AgentMessagePruneError).counts.messages).toBe(0);
     expect(await present([orphan])).toEqual([]);
     expect(await present([consumed])).toEqual([consumed]);
+  });
+
+  describe("persisted cursor (#769)", () => {
+    /**
+     * 3 x batch consumed rows the pass selects but keeps (their sender's thread
+     * row is held, so `fenceSenders` skips it), older than 2 deletable rows.
+     */
+    async function fencedHeadThenDeletable() {
+      await pruneAgentMessages({ db, now: NOW });
+      await clearCursor();
+      const { rootId, taskId } = await tree();
+      const fenced: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        fenced.push(await insert(rootId, taskId, `fenced-${i}`));
+      }
+      await receiveFor({ db, toRun: taskId, apply: noopApply });
+      await backdateMessages(fenced, R + 3 * DAY);
+      await setSender(rootId, { terminal: true, lastWriteMs: R + 3 * DAY });
+      const deletable = [
+        await consumedFromGoneSender(taskId, "behind-0"),
+        await consumedFromGoneSender(taskId, "behind-1"),
+      ];
+      const lockFenced = sql`select 1 from ${thread} where ${thread.id} = ${rootId} for update`;
+      return { fenced, deletable, lockFenced };
+    }
+
+    const ONE = { batch: 2, maxBatches: 1 };
+
+    it("AC1 kept rows filling the batch budget no longer starve the deletable rows behind them", async () => {
+      const { fenced, deletable, lockFenced } = await fencedHeadThenDeletable();
+      await whileLocked(lockFenced, async () => {
+        // Contrast: without the cursor (as before #769) every call re-reads the head.
+        for (let call = 0; call < 4; call++) {
+          await clearCursor();
+          await pruneAgentMessages({ db, now: NOW, ...ONE });
+        }
+        expect(await present(deletable)).toEqual(deletable);
+
+        await clearCursor();
+        for (let call = 0; call < 4; call++) {
+          await pruneAgentMessages({ db, now: NOW, ...ONE });
+        }
+        expect(await present(deletable)).toEqual([]);
+        expect(await present(fenced)).toEqual(fenced);
+      });
+    });
+
+    it("AC1 live senders (filtered by the sender rule) never took batch slots and still do not", async () => {
+      await pruneAgentMessages({ db, now: NOW });
+      const { rootId, taskId } = await tree();
+      const kept: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        kept.push(await insert(rootId, taskId, `live-${i}`));
+      }
+      await receiveFor({ db, toRun: taskId, apply: noopApply });
+      await backdateMessages(kept, R + 3 * DAY);
+      await setSender(rootId, { terminal: false, lastWriteMs: R + 3 * DAY });
+      const deletable = await consumedFromGoneSender(taskId, "live-behind");
+
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await present([deletable])).toEqual([]);
+      expect(await present(kept)).toEqual(kept);
+    });
+
+    it("AC1 a full batch stores the cursor of its last selected row", async () => {
+      const { fenced, lockFenced } = await fencedHeadThenDeletable();
+      await whileLocked(lockFenced, async () => {
+        await pruneAgentMessages({ db, now: NOW, ...ONE });
+      });
+      expect((await storedCursor())?.id).toBe(fenced[1]);
+    });
+
+    it("AC2 a batch that fails after its delete rolls the delete and the cursor back", async () => {
+      await pruneAgentMessages({ db, now: NOW });
+      const { taskId } = await tree();
+      const ids = [
+        await consumedFromGoneSender(taskId, "ac2-tx-0"),
+        await consumedFromGoneSender(taskId, "ac2-tx-1"),
+        await consumedFromGoneSender(taskId, "ac2-tx-2"),
+      ];
+      // A first call leaves the cursor at ids[1] (a full batch of 2).
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await present(ids)).toEqual([ids[2]]);
+      const before = await storedCursor();
+      expect(before?.id).toBe(ids[1]);
+
+      const spy = vi.mocked(withSelfHealTx);
+      const real = spy.getMockImplementation();
+      if (!real) throw new Error("withSelfHealTx spy has no implementation");
+      let deletedInTx: number[] | null = null;
+      spy.mockImplementationOnce(real).mockImplementationOnce(
+        async (txDb, fn, opts) =>
+          real(
+            txDb,
+            async (tx) => {
+              await fn(tx);
+              // The delete and the cursor write happened, uncommitted.
+              const rows = await tx
+                .select({ id: agentMessages.id })
+                .from(agentMessages)
+                .where(inArray(agentMessages.id, ids));
+              deletedInTx = rows.map((r) => r.id);
+              throw new Error("injected failure before commit");
+            },
+            opts,
+          ) as never,
+      );
+
+      const error = await pruneAgentMessages({ db, now: NOW, ...ONE }).catch(
+        (e) => e,
+      );
+      expect(error).toBeInstanceOf(AgentMessagePruneError);
+      expect(deletedInTx).toEqual([]);
+      expect(await present(ids)).toEqual([ids[2]]);
+      expect(await storedCursor()).toEqual(before);
+    });
+
+    it("AC3 a short batch clears the cursor and the next call starts from the beginning", async () => {
+      await pruneAgentMessages({ db, now: NOW });
+      const { taskId } = await tree();
+      const ids = [
+        await consumedFromGoneSender(taskId, "ac3-wrap-0"),
+        await consumedFromGoneSender(taskId, "ac3-wrap-1"),
+      ];
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await storedCursor()).not.toBeNull();
+
+      // A row behind the cursor: only a pass from the beginning reaches it.
+      const behind = await consumedFromGoneSender(taskId, "ac3-behind");
+      await backdateMessages([behind], R + 5 * DAY);
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await storedCursor()).toBeNull();
+      expect(await present([behind])).toEqual([behind]);
+
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await present([...ids, behind])).toEqual([]);
+      expect(await storedCursor()).toBeNull();
+    });
+
+    it("AC4 two concurrent calls delete each row once, both resolve, and leave nothing deletable behind", async () => {
+      await pruneAgentMessages({ db, now: NOW });
+      const { taskId } = await tree();
+      const ids: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        ids.push(await consumedFromGoneSender(taskId, `ac4-${i}`));
+      }
+      const results = await Promise.all([
+        pruneAgentMessages({ db, now: NOW, batch: 2, maxBatches: 3 }),
+        pruneAgentMessages({ db, now: NOW, batch: 2, maxBatches: 3 }),
+      ]);
+      const deletedNow = ids.length - (await present(ids)).length;
+      // Each deleted id is counted by exactly one call.
+      expect(results[0]!.messages + results[1]!.messages).toBe(deletedNow);
+      // Whatever cursor won, calls until a wrap reach every row.
+      for (let call = 0; call < 10 && (await present(ids)).length > 0; call++) {
+        await pruneAgentMessages({ db, now: NOW, batch: 2, maxBatches: 3 });
+      }
+      expect(await present(ids)).toEqual([]);
+    });
+
+    it("AC5 with no cursor row the pass starts from the beginning", async () => {
+      await pruneAgentMessages({ db, now: NOW });
+      const { taskId } = await tree();
+      const id = await consumedFromGoneSender(taskId, "ac5-empty");
+      await backdateMessages([id], R + 10 * DAY);
+      expect(await storedCursor()).toBeNull();
+      await pruneAgentMessages({ db, now: NOW, ...ONE });
+      expect(await present([id])).toEqual([]);
+    });
   });
 });
 

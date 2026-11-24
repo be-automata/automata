@@ -3550,6 +3550,24 @@ export const agentApplied = pgTable("agent_applied", {
 });
 
 /**
+ * Where the consumed pass of `pruneAgentMessages` stopped (#769): the keyset
+ * `(consumed_at, msg_id)` of the last row its last committed batch selected.
+ * At most one row (`id` = `'consumed'`); no row means "start from the beginning".
+ * Written in the same transaction as that batch's deletes.
+ */
+export const agentMessagePruneCursor = pgTable("agent_message_prune_cursor", {
+  id: text("id").primaryKey().default("consumed"),
+  consumedAt: timestamp("consumed_at", {
+    withTimezone: true,
+    mode: "date",
+  }).notNull(),
+  msgId: bigint("msg_id", { mode: "number" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+    .defaultNow()
+    .notNull(),
+});
+
+/**
  * A bearer the broker minted for one attempt of one step. Only the sha256 of the
  * token is stored. Its TTL is bounded by the step timeout at mint. Revocation is
  * recorded on the step (`cell_step.revoked_through`), so it also covers bearers
