@@ -40,4 +40,5 @@ export const EXPECTED_MIGRATION_IDS = [
   "2026-11-26-agent-messages-dead-letter",
   "2026-11-27-agent-messages-inbox-deliverable",
   "2026-11-28-agent-messages-drop-inbox",
+  "2026-11-30-agent-message-prune-cursor",
 ] as const;

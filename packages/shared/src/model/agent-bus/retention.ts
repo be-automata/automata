@@ -13,6 +13,7 @@ import {
 import type { DB } from "../../db";
 import {
   agentApplied,
+  agentMessagePruneCursor,
   agentMessages,
   thread,
   threadChat,
@@ -120,6 +121,48 @@ async function fenceSenders(tx: SelfHealTx, senders: string[]) {
   );
 }
 
+interface ConsumedCursor {
+  consumedAt: Date;
+  id: number;
+}
+
+const CONSUMED_CURSOR_ID = "consumed";
+
+/**
+ * The persisted cursor of the consumed pass (#769). `null` is "start from the
+ * beginning" and is stored as no row, so a deployment whose table is empty
+ * behaves as before the cursor existed.
+ */
+const consumedCursorStore = {
+  async load(tx: SelfHealTx): Promise<ConsumedCursor | null> {
+    const [row] = await tx
+      .select({
+        consumedAt: agentMessagePruneCursor.consumedAt,
+        id: agentMessagePruneCursor.msgId,
+      })
+      .from(agentMessagePruneCursor)
+      .where(eq(agentMessagePruneCursor.id, CONSUMED_CURSOR_ID));
+    return row ?? null;
+  },
+  async save(tx: SelfHealTx, cursor: ConsumedCursor | null): Promise<void> {
+    if (!cursor) {
+      await tx
+        .delete(agentMessagePruneCursor)
+        .where(eq(agentMessagePruneCursor.id, CONSUMED_CURSOR_ID));
+      return;
+    }
+    const value = {
+      consumedAt: cursor.consumedAt,
+      msgId: cursor.id,
+      updatedAt: sql`now()`,
+    };
+    await tx
+      .insert(agentMessagePruneCursor)
+      .values({ id: CONSUMED_CURSOR_ID, ...value })
+      .onConflictDoUpdate({ target: agentMessagePruneCursor.id, set: value });
+  },
+};
+
 /** Deletes the messages and their `agent_applied` rows; returns how many applied rows went. */
 async function deleteByIds(tx: SelfHealTx, ids: number[]) {
   const idList = sql`${sql.param(ids)}::bigint[]`;
@@ -160,10 +203,18 @@ async function deleteByIds(tx: SelfHealTx, ids: number[]) {
  * `RangeError` unless `batch` and `maxBatches` are positive integers and
  * `budgetMs` is a positive finite number. Logs nothing: the caller logs counts.
  *
- * Known limit: each call scans the consumed rows older than R that it keeps
- * (live senders) from the start of the index, running the sender rule on each.
- * That set only grows; if a batch ever exceeds the statement timeout the pass
- * throws every hour, which the cron logs as `agent_messages prune failed`.
+ * The consumed pass resumes where the previous call stopped (#769): its first
+ * batch starts from the cursor stored in `agent_message_prune_cursor`, and each
+ * batch writes its last row's `(consumed_at, id)` there inside its own
+ * transaction, so the cursor moves only with committed deletes. A short or
+ * empty batch means the end of the range: it clears the cursor, and the next
+ * call starts from the beginning again. So the kept rows (live or fenced
+ * senders) are re-read once per full pass, not once per call, and kept rows at
+ * the head of the index can no longer hold the pass back from the deletable
+ * rows behind them. A row that becomes deletable behind the cursor waits for
+ * the wrap, at most one full pass. Concurrent calls never delete a row twice
+ * (FOR UPDATE SKIP LOCKED); the last batch to commit wins the cursor. The
+ * orphan pass has no cursor.
  */
 export async function pruneAgentMessages({
   db,
@@ -196,6 +247,8 @@ export async function pruneAgentMessages({
    * Runs one pass: each batch is its own transaction. `select(tx, cursor)` locks
    * up to `batch` candidate rows and returns them with the ids to delete (a
    * subset when a re-check keeps some) and the cursor of the last candidate.
+   * With a `store`, the first batch loads its cursor from it, and every batch
+   * saves its cursor (null on a short batch) in its own transaction.
    * Stops on a short or empty batch, `maxBatches`, or the shared budget, which
    * `firstBatchAlways` exempts the first batch from. Adds
    * each committed batch to `counts[key]` as it goes, so a pass that throws
@@ -208,6 +261,10 @@ export async function pruneAgentMessages({
       tx: SelfHealTx,
       cursor: C | null,
     ) => Promise<{ selected: number; ids: number[]; cursor: C | null }>,
+    store?: {
+      load: (tx: SelfHealTx) => Promise<C | null>;
+      save: (tx: SelfHealTx, cursor: C | null) => Promise<void>;
+    },
   ): Promise<void> {
     let cursor: C | null = null;
     try {
@@ -218,12 +275,18 @@ export async function pruneAgentMessages({
         i++
       ) {
         const prev = cursor;
+        const first = i === 0;
         const done = await withSelfHealTx(
           db,
           async (tx) => {
-            const picked = await select(tx, prev);
+            const from = first && store ? await store.load(tx) : prev;
+            const picked = await select(tx, from);
             const deleted =
               picked.ids.length > 0 ? await deleteByIds(tx, picked.ids) : 0;
+            await store?.save(
+              tx,
+              picked.selected < batch ? null : picked.cursor,
+            );
             return { ...picked, deleted };
           },
           PRUNE_TX_TIMEOUTS,
@@ -258,8 +321,8 @@ export async function pruneAgentMessages({
   });
 
   // Consumed: sender can no longer retry. The keyset over (consumed_at, id) moves past each
-  // batch within a call; rows kept for live senders are still re-read on every call.
-  await drainBatches<{ consumedAt: Date; id: number }>(
+  // batch and is persisted across calls (#769), wrapping to the start at the end of the range.
+  await drainBatches<ConsumedCursor>(
     "messages",
     true,
     async (tx, cursor) => {
@@ -317,6 +380,7 @@ export async function pruneAgentMessages({
         cursor: { consumedAt: last.consumedAt as Date, id: last.id },
       };
     },
+    consumedCursorStore,
   );
 
   if (errors.length > 0) throw new AgentMessagePruneError(errors, counts);
