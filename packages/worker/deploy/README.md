@@ -726,6 +726,31 @@ Run it when the box is idle (no `automata.box` containers): the two probe contai
 2 x 1500 MB and 2 CPUs while they run. Rotation: write the new value to the box file first, then
 `wrangler secret put`. A run that lands in the gap fails loudly, and the evidence lasts 30 days.
 
+## Image cleanup (automata-image-gc.timer)
+
+Each new image pin leaves the previous image on disk: 12.6 GB per batteries
+image, 13-17 GB per cell image. On 2026-11-24 old images, leaked run dirs and
+battery backups filled the box disk to 100%, and every run failed with
+`No space left on device`. `image-gc.sh` runs daily as root and removes, on
+each daemon, only the images of one repository that nothing pins:
+
+| Daemon                                         | Repository           | Kept                                                                                                           |
+| ---------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `/run/automata-docker/docker.sock` (runner)    | `automata-batteries` | `CURRENT` and `PREVIOUS` from `/etc/automata/batteries-image.state`, and the worker's `WORKER_BATTERIES_IMAGE` |
+| `/run/automata-opensandbox-docker/docker.sock` | `automata-cell`      | the worker's `WORKER_OPENSANDBOX_GUEST_IMAGE`                                                                  |
+
+With no pin found for a daemon, that daemon is skipped. `docker rmi` runs
+without `--force`, so Docker refuses to remove an image that a container
+still uses. Install, or update after a pull:
+
+```bash
+sudo install -m 0755 packages/worker/deploy/linux/image-gc.sh /usr/local/sbin/automata-image-gc.sh
+sudo install -m 0644 packages/worker/deploy/linux/automata-image-gc.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now automata-image-gc.timer
+sudo /usr/local/sbin/automata-image-gc.sh --dry-run   # what it would remove now
+journalctl -u automata-image-gc                        # what it removed
+```
+
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
 The worker consumes the compiled daemon (`packages/daemon/dist/`), not its source.

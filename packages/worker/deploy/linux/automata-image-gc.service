@@ -1,0 +1,22 @@
+# Remove the run images nothing pins (image-gc.sh): automata-batteries images
+# other than CURRENT/PREVIOUS/the worker's pin, automata-cell images other than
+# the worker's cell pin.
+#
+# Oneshot, driven by automata-image-gc.timer. Root, because it reaches both
+# rootless daemons' sockets (0600, owned by their own accounts).
+#
+# No Restart=: a failed run stays `failed` where `systemctl --failed` sees it;
+# the next tick runs it again anyway.
+
+[Unit]
+Description=Remove unpinned batteries and cell images
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/image-gc.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/automata-image-gc.sh
+# Bounded: removing a 17 GB image takes seconds, not minutes.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-image-gc
