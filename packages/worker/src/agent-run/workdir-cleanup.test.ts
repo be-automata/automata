@@ -1,11 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   cleanupWorkdir,
   STALE_RUN_DIR_AGE_MS,
+  STALE_RUN_DIR_SWEEP_INTERVAL_MS,
+  startStaleRunDirSweep,
   SWEEP_BUDGET_MS,
   sweepStaleRunDirs,
 } from "./provision";
@@ -150,5 +152,97 @@ describe("sweepStaleRunDirs", () => {
     expect(result).toEqual({ removed: 1, kept: 0, failed: 0, deferred: 1 });
     expect(await fs.stat(first).catch(() => null)).toBe(null);
     expect(await fs.stat(second)).toBeTruthy();
+  });
+});
+
+describe("startStaleRunDirSweep", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const result = { removed: 0, kept: 0, failed: 0, deferred: 0 };
+
+  // card: protects=a running worker repeats the stale sweep every hour, not only at boot, so residue cannot grow for the worker's whole uptime (2026-11-24: 100% disk); fails_when=no sweep after an interval, a sweep before it, or the wrong root; no_claim=what one sweep removes (sweepStaleRunDirs tests)
+  it("sweeps the root once per interval, never before the first one", async () => {
+    const roots: string[] = [];
+    const stop = startStaleRunDirSweep({
+      workdirRoot: "/runs",
+      log: () => {},
+      logError: () => {},
+      sweep: async (o) => {
+        roots.push(o.workdirRoot);
+        return result;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(STALE_RUN_DIR_SWEEP_INTERVAL_MS - 1);
+    expect(roots).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(roots).toEqual(["/runs"]);
+    await vi.advanceTimersByTimeAsync(STALE_RUN_DIR_SWEEP_INTERVAL_MS);
+    expect(roots).toEqual(["/runs", "/runs"]);
+    stop();
+    await vi.advanceTimersByTimeAsync(STALE_RUN_DIR_SWEEP_INTERVAL_MS * 3);
+    expect(roots).toHaveLength(2);
+  });
+
+  it("logs a failed sweep and keeps sweeping", async () => {
+    const errors: string[] = [];
+    let calls = 0;
+    const stop = startStaleRunDirSweep({
+      workdirRoot: "/runs",
+      intervalMs: 1000,
+      log: () => {},
+      logError: (m) => errors.push(m),
+      sweep: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("EIO");
+        return result;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(errors).toEqual(["stale run dirs sweep failed"]);
+    expect(calls).toBe(2);
+    stop();
+  });
+
+  it("never overlaps a sweep that is still running", async () => {
+    let calls = 0;
+    let release: () => void = () => {};
+    const stop = startStaleRunDirSweep({
+      workdirRoot: "/runs",
+      intervalMs: 1000,
+      log: () => {},
+      logError: () => {},
+      sweep: async () => {
+        calls += 1;
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return result;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(calls).toBe(1);
+    release();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toBe(2);
+    stop();
+  });
+
+  it("does not hold the process up (the timer is unref'd)", () => {
+    const unref = vi.fn();
+    const spy = vi
+      .spyOn(globalThis, "setInterval")
+      .mockReturnValue({ unref } as unknown as ReturnType<typeof setInterval>);
+    startStaleRunDirSweep({
+      workdirRoot: "/runs",
+      log: () => {},
+      logError: () => {},
+    });
+    expect(unref).toHaveBeenCalledOnce();
+    spy.mockRestore();
   });
 });

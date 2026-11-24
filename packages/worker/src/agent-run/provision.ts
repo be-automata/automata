@@ -3,6 +3,7 @@ import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { DISK_FLOOR_PREFIX } from "@terragon/utils/box-capacity";
 import { redactSecrets } from "@terragon/utils/redact";
 import { runPaths, type RunPaths } from "./run-owned-paths";
 
@@ -333,7 +334,7 @@ export class DiskFloorError extends Error {
     readonly floorBytes: number,
   ) {
     super(
-      `box_disk_low: the execution box has ${formatGiB(freeBytes)} free under ${workdirRoot}, below its ${formatGiB(floorBytes)} floor (WORKER_DISK_FLOOR); the run was refused before cloning`,
+      `${DISK_FLOOR_PREFIX} the execution box has ${formatGiB(freeBytes)} free under ${workdirRoot}, below its ${formatGiB(floorBytes)} floor (WORKER_DISK_FLOOR); the run was refused before cloning`,
     );
     this.name = "DiskFloorError";
   }
@@ -481,6 +482,38 @@ export const STALE_RUN_DIR_AGE_MS = 24 * 60 * 60 * 1000;
 export const SWEEP_BUDGET_MS = 60_000;
 /** How often a running worker repeats the boot sweep. */
 export const STALE_RUN_DIR_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Repeat the boot sweep every `intervalMs` while the worker runs: a worker up
+ * for weeks never re-ran the boot sweep, so residue only grew (2026-11-24: the
+ * box disk reached 100%). Same 24h age rule, so it never reaches a live run's
+ * dir. The timer is unref'd (it never holds the process up), a sweep never
+ * overlaps the previous one, and a rejection is logged, never thrown.
+ * Returns the stop function.
+ */
+export function startStaleRunDirSweep(opts: {
+  workdirRoot: string;
+  log: (line: string) => void;
+  logError: (line: string, err: unknown) => void;
+  intervalMs?: number;
+  sweep?: typeof sweepStaleRunDirs;
+}): () => void {
+  const sweep = opts.sweep ?? sweepStaleRunDirs;
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    sweep({ workdirRoot: opts.workdirRoot, log: opts.log })
+      .catch((err: unknown) => {
+        opts.logError("stale run dirs sweep failed", err);
+      })
+      .finally(() => {
+        running = false;
+      });
+  }, opts.intervalMs ?? STALE_RUN_DIR_SWEEP_INTERVAL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
 
 export interface SweepStaleRunDirsResult {
   removed: number;
