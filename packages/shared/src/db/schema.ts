@@ -3527,10 +3527,11 @@ export const agentMessages = pgTable(
   },
   (table) => [
     uniqueIndex("agent_messages_idem").on(table.fromRun, table.idemKey),
-    // The inbox read and the sweeper's "unconsumed" scan.
-    index("agent_messages_inbox")
+    // The inbox read and the sweeper's target scan: deliverable rows only
+    // (#767), so dead-lettered rows do not sit in the index forever.
+    index("agent_messages_inbox_deliverable")
       .on(table.toRun, table.id)
-      .where(sql`consumed_at is null`),
+      .where(sql`consumed_at is null and dead_lettered_at is null`),
     // The sweeper's re-kick query over recently delivered targets.
     index("agent_messages_consumed_at_index")
       .on(table.consumedAt)
