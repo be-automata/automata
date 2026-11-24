@@ -1,0 +1,18 @@
+# Post to Slack when the box disk crosses 85% and when it recovers
+# (disk-alert.sh). Oneshot, driven by automata-disk-alert.timer. Root, because
+# the webhook URL file is root-only (0600).
+#
+# No Restart=: a failed check stays `failed` where `systemctl --failed` sees
+# it; the next tick runs it again anyway.
+
+[Unit]
+Description=Box disk alert (Slack)
+Documentation=file:///opt/automata-platform/packages/worker/deploy/linux/disk-alert.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/automata-disk-alert.sh
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=automata-disk-alert

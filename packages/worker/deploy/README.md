@@ -751,6 +751,28 @@ sudo /usr/local/sbin/automata-image-gc.sh --dry-run   # what it would remove now
 journalctl -u automata-image-gc                        # what it removed
 ```
 
+## Disk alert (automata-disk-alert.timer)
+
+On 2026-11-24 the disk reached 100% at 15:59 UTC. Every run failed for four
+hours before anyone looked. `disk-alert.sh` checks the filesystem that holds
+the run dirs every 10 minutes. It posts one Slack message when usage crosses
+85% (`DISK_ALERT_PCT`) and one when it drops back under 80%
+(`DISK_CLEAR_PCT`), and never a message per tick in between.
+
+The Slack incoming-webhook URL for the channel is a secret. It lives in
+`/etc/automata/slack-disk-alert.url` (root, 0600) and reaches curl through a
+config on stdin, never argv. Without the file, the check still runs and logs
+`no webhook`. Install:
+
+```bash
+sudo install -m 0755 packages/worker/deploy/linux/disk-alert.sh /usr/local/sbin/automata-disk-alert.sh
+sudo install -m 0644 packages/worker/deploy/linux/automata-disk-alert.{service,timer} /etc/systemd/system/
+# the URL from your password manager, typed or pasted at the prompt, never in argv:
+sudo install -m 0600 /dev/null /etc/automata/slack-disk-alert.url && sudo sh -c 'read -r u && printf "%s\n" "$u" > /etc/automata/slack-disk-alert.url'
+sudo systemctl daemon-reload && sudo systemctl enable --now automata-disk-alert.timer
+journalctl -u automata-disk-alert -n 3   # "disk N% used ..."
+```
+
 ## Daemon rebuild (required after any daemon change, e.g. Phase 0.2a)
 
 The worker consumes the compiled daemon (`packages/daemon/dist/`), not its source.

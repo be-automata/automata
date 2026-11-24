@@ -1,0 +1,14 @@
+# Every 10 minutes: on 2026-11-24 the disk went from filling to 100% within
+# hours, and the first sign was users seeing every run fail.
+
+[Unit]
+Description=Box disk alert every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnCalendar=*:0/10
+Persistent=true
+Unit=automata-disk-alert.service
+
+[Install]
+WantedBy=timers.target
